@@ -35,7 +35,7 @@ export default function StylesLayout({
         </aside>
 
         {/* Center Content - Style Examples */}
-        <main className="flex-1 p-6 overflow-y-auto">{children}</main>
+        <main className="flex-1 overflow-y-auto">{children}</main>
       </div>
     </div>
   );
