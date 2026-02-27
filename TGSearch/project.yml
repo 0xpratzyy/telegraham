@@ -1,0 +1,35 @@
+name: TGSearch
+options:
+  bundleIdPrefix: com.tgsearch
+  deploymentTarget:
+    macOS: "13.0"
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+packages:
+  TDLibKit:
+    url: https://github.com/Swiftgram/TDLibKit
+    exactVersion: "1.5.2-tdlib-1.8.61-6d509061"
+
+targets:
+  TGSearch:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    dependencies:
+      - package: TDLibKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tgsearch.app
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+        SWIFT_VERSION: "5.10"
+        PRODUCT_NAME: TGSearch
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: 1
+        INFOPLIST_KEY_LSUIElement: true
+        INFOPLIST_KEY_CFBundleDisplayName: TGSearch
+        ENABLE_APP_SANDBOX: false
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: false
+        GENERATE_INFOPLIST_FILE: true

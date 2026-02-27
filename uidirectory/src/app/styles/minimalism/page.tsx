@@ -60,6 +60,10 @@ export default function MinimalismPage() {
   const [selectedValue, setSelectedValue] = useState("option1");
   const [alertVisible, setAlertVisible] = useState(false);
 
+  // State for generated prompt
+  const [generatedPrompt, setGeneratedPrompt] = useState("");
+  const [showPrompt, setShowPrompt] = useState(false);
+
   // Constants for customization options
   const colorOptions = [
     // Light colors
@@ -462,8 +466,46 @@ export default function MinimalismPage() {
     );
   };
 
+  // Generate a prompt based on current style selections
+  const generateStylePrompt = () => {
+    const fontNames = {
+      inter: "Inter",
+      roboto: "Roboto",
+      helvetica: "Helvetica",
+      montserrat: "Montserrat",
+      opensans: "Open Sans",
+      spacegrotesk: "Space Grotesk",
+    };
+
+    const prompt = `Create a minimalist UI design with these exact specifications:
+
+STYLE: Minimalist
+COLOR PALETTE:
+- Primary/Accent: ${accentColor} (for buttons, highlights, interactive elements)
+- Background: ${backgroundColor} (main surface color)
+- Text: ${textColor} (for typography elements)
+
+VISUAL PROPERTIES:
+- Corner Radius: ${cornerRadius} (for buttons, cards, input fields)
+- Font Family: ${fontNames[fontFamily as keyof typeof fontNames] || fontFamily}
+- Shadow: ${shadowIntensity} (determines depth and elevation)
+- Spacing: ${spacing} (controls density and whitespace)
+- Typography Scale: ${typographyScale} (text sizing relationship)
+- Contrast: ${contrast} (visual distinction between elements)
+
+DESIGN PRINCIPLES:
+- Use clean, uncluttered layouts with ample whitespace
+- Focus on essential elements only
+- Maintain consistency across all components
+- Prioritize readability and usability
+- Follow "less is more" philosophy`;
+
+    setGeneratedPrompt(prompt);
+    setShowPrompt(true);
+  };
+
   return (
-    <div className="flex flex-col md:flex-row min-h-screen w-full">
+    <div className="flex flex-col p-0 md:flex-row min-h-screen w-full">
       {/* Main content area */}
       <div className="flex-1 p-4 overflow-y-auto">
         <h1 className="text-3xl font-bold mb-2">Minimalism</h1>
@@ -824,243 +866,487 @@ export default function MinimalismPage() {
       </div>
 
       {/* Sidebar - Customize Box */}
-      <div className="md:w-80 shrink-0 h-screen bg-white border-l border-neutral-200 sticky top-0 right-0 overflow-y-auto">
+      <div className="md:w-96 shrink-0 h-screen bg-white border-l border-neutral-200 sticky overflow-y-auto">
         <div className="h-full flex flex-col">
-          <div className="flex justify-between items-center p-4 border-b border-neutral-200">
-            <h2 className="text-lg font-semibold">Customize Minimalism</h2>
+          <div className="flex justify-between items-center p-5 border-b border-neutral-200">
+            <h2 className="text-xl font-semibold">Customize Style</h2>
             <button
               onClick={handleReset}
-              className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded"
+              className="text-sm px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 rounded-md transition-colors"
             >
               Reset to Default
             </button>
           </div>
 
-          <div className="p-4 space-y-6 flex-1 overflow-y-auto">
-            {/* Colors Section */}
-            <div className="space-y-4">
-              <h3 className="text-sm font-medium text-neutral-500 uppercase tracking-wider">
-                Colors
-              </h3>
-
-              {/* Accent Color Picker */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Accent Color</h4>
-                <div className="flex items-center mb-2">
-                  <input
-                    type="color"
-                    value={accentColor}
-                    onChange={handleAccentColorChange}
-                    className="w-8 h-8 rounded border border-neutral-200 mr-2"
-                    aria-label="Pick accent color"
-                  />
-                  <span className="text-xs font-mono">{accentColor}</span>
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {colorOptions.map((color) => (
-                    <button
-                      key={color}
-                      className={`w-6 h-6 rounded-full border ${
-                        color === accentColor
-                          ? "ring-2 ring-offset-2 ring-blue-500"
-                          : "border-neutral-200"
-                      }`}
-                      style={{ backgroundColor: color }}
-                      aria-label={`Select color ${color}`}
-                      onClick={() => setAccentColor(color)}
+          <div className="flex-1 overflow-y-auto">
+            {/* Color Section */}
+            <div className="p-5 border-b border-neutral-200">
+              <details open className="group">
+                <summary className="flex items-center justify-between cursor-pointer list-none">
+                  <h3 className="text-md font-semibold mb-2">Colors</h3>
+                  <svg
+                    className="w-5 h-5 group-open:rotate-180 transition-transform"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                      clipRule="evenodd"
                     />
-                  ))}
-                </div>
-              </div>
+                  </svg>
+                </summary>
+                <div className="pt-4 space-y-6">
+                  {/* Accent Color Picker */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">
+                        Accent Color
+                      </label>
+                      <div className="flex items-center">
+                        <input
+                          type="color"
+                          value={accentColor}
+                          onChange={handleAccentColorChange}
+                          className="w-8 h-8 rounded border border-neutral-200 cursor-pointer"
+                          aria-label="Pick accent color"
+                        />
+                        <span className="ml-2 text-xs font-mono">
+                          {accentColor}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-7 gap-2">
+                      {colorOptions.map((color) => (
+                        <button
+                          key={color}
+                          className={`w-9 h-9 rounded-md transition-all hover:scale-110 ${
+                            color === accentColor
+                              ? "ring-2 ring-offset-2 ring-blue-500 scale-110"
+                              : "ring-1 ring-neutral-200"
+                          }`}
+                          style={{ backgroundColor: color }}
+                          aria-label={`Select color ${color}`}
+                          onClick={() => setAccentColor(color)}
+                          title={color}
+                        />
+                      ))}
+                    </div>
+                  </div>
 
-              {/* Background Color Picker */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Background Color</h4>
-                <div className="flex items-center mb-2">
-                  <input
-                    type="color"
-                    value={backgroundColor}
-                    onChange={handleBackgroundColorChange}
-                    className="w-8 h-8 rounded border border-neutral-200 mr-2"
-                    aria-label="Pick background color"
-                  />
-                  <span className="text-xs font-mono">{backgroundColor}</span>
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {colorOptions.map((color) => (
-                    <button
-                      key={color}
-                      className={`w-6 h-6 rounded-full border ${
-                        color === backgroundColor
-                          ? "ring-2 ring-offset-2 ring-blue-500"
-                          : "border-neutral-200"
-                      }`}
-                      style={{ backgroundColor: color }}
-                      aria-label={`Select color ${color}`}
-                      onClick={() => setBackgroundColor(color)}
-                    />
-                  ))}
-                </div>
-              </div>
+                  {/* Background Color Picker */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">
+                        Background Color
+                      </label>
+                      <div className="flex items-center">
+                        <input
+                          type="color"
+                          value={backgroundColor}
+                          onChange={handleBackgroundColorChange}
+                          className="w-8 h-8 rounded border border-neutral-200 cursor-pointer"
+                          aria-label="Pick background color"
+                        />
+                        <span className="ml-2 text-xs font-mono">
+                          {backgroundColor}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-7 gap-2">
+                      {colorOptions.map((color) => (
+                        <button
+                          key={color}
+                          className={`w-9 h-9 rounded-md transition-all hover:scale-110 ${
+                            color === backgroundColor
+                              ? "ring-2 ring-offset-2 ring-blue-500 scale-110"
+                              : "ring-1 ring-neutral-200"
+                          }`}
+                          style={{ backgroundColor: color }}
+                          aria-label={`Select color ${color}`}
+                          onClick={() => setBackgroundColor(color)}
+                          title={color}
+                        />
+                      ))}
+                    </div>
+                  </div>
 
-              {/* Text Color Picker */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Text Color</h4>
-                <div className="flex items-center mb-2">
-                  <input
-                    type="color"
-                    value={textColor}
-                    onChange={handleTextColorChange}
-                    className="w-8 h-8 rounded border border-neutral-200 mr-2"
-                    aria-label="Pick text color"
-                  />
-                  <span className="text-xs font-mono">{textColor}</span>
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {colorOptions.map((color) => (
-                    <button
-                      key={color}
-                      className={`w-6 h-6 rounded-full border ${
-                        color === textColor
-                          ? "ring-2 ring-offset-2 ring-blue-500"
-                          : "border-neutral-200"
-                      }`}
-                      style={{ backgroundColor: color }}
-                      aria-label={`Select color ${color}`}
-                      onClick={() => setTextColor(color)}
-                    />
-                  ))}
-                </div>
-              </div>
+                  {/* Text Color Picker */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">Text Color</label>
+                      <div className="flex items-center">
+                        <input
+                          type="color"
+                          value={textColor}
+                          onChange={handleTextColorChange}
+                          className="w-8 h-8 rounded border border-neutral-200 cursor-pointer"
+                          aria-label="Pick text color"
+                        />
+                        <span className="ml-2 text-xs font-mono">
+                          {textColor}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-7 gap-2">
+                      {colorOptions.map((color) => (
+                        <button
+                          key={color}
+                          className={`w-9 h-9 rounded-md transition-all hover:scale-110 ${
+                            color === textColor
+                              ? "ring-2 ring-offset-2 ring-blue-500 scale-110"
+                              : "ring-1 ring-neutral-200"
+                          }`}
+                          style={{ backgroundColor: color }}
+                          aria-label={`Select color ${color}`}
+                          onClick={() => setTextColor(color)}
+                          title={color}
+                        />
+                      ))}
+                    </div>
+                  </div>
 
-              {/* Contrast */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Contrast</h4>
-                <div className="grid grid-cols-3 gap-2">
-                  {contrastOptions.map((option) => (
-                    <button
-                      key={option}
-                      className={`px-2 py-1 text-xs rounded ${
-                        option === contrast
-                          ? "bg-blue-100 text-blue-800"
-                          : "bg-neutral-100 text-neutral-800"
-                      }`}
-                      onClick={() => setContrast(option)}
-                    >
-                      {option}
-                    </button>
-                  ))}
+                  {/* Contrast */}
+                  <div>
+                    <label className="text-sm font-medium block mb-2">
+                      Contrast
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {contrastOptions.map((option) => (
+                        <button
+                          key={option}
+                          className={`py-2 px-3 rounded-md transition-colors ${
+                            option === contrast
+                              ? "bg-blue-500 text-white"
+                              : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200"
+                          }`}
+                          onClick={() => setContrast(option)}
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              </details>
             </div>
 
             {/* Typography Section */}
-            <div className="space-y-4">
-              <h3 className="text-sm font-medium text-neutral-500 uppercase tracking-wider">
-                Typography
-              </h3>
+            <div className="p-5 border-b border-neutral-200">
+              <details className="group">
+                <summary className="flex items-center justify-between cursor-pointer list-none">
+                  <h3 className="text-md font-semibold mb-2">Typography</h3>
+                  <svg
+                    className="w-5 h-5 group-open:rotate-180 transition-transform"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </summary>
+                <div className="pt-4 space-y-6">
+                  {/* Font Family */}
+                  <div>
+                    <label className="text-sm font-medium block mb-2">
+                      Font Family
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={fontFamily}
+                        onChange={(e) => setFontFamily(e.target.value)}
+                        className="w-full px-4 py-2.5 bg-white rounded-md border border-neutral-300 shadow-sm appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      >
+                        {fontOptions.map((font) => (
+                          <option
+                            key={font.value}
+                            value={font.value}
+                            style={{ fontFamily: font.name }}
+                          >
+                            {font.name}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2">
+                        <svg
+                          className="w-5 h-5 text-gray-400"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="2"
+                            d="M19 9l-7 7-7-7"
+                          ></path>
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
 
-              {/* Font Family */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Font Family</h4>
-                <select
-                  value={fontFamily}
-                  onChange={(e) => setFontFamily(e.target.value)}
-                  className="w-full px-3 py-2 bg-neutral-100 rounded border border-neutral-200"
-                >
-                  {fontOptions.map((font) => (
-                    <option key={font.value} value={font.value}>
-                      {font.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  {/* Font Preview */}
+                  <div className="p-4 border border-neutral-200 rounded-md">
+                    <p style={{ fontFamily: getFontFamily() }}>
+                      Aa Bb Cc Dd Ee Ff Gg Hh Ii Jj Kk Ll Mm Nn Oo Pp Qq Rr Ss
+                      Tt Uu Vv Ww Xx Yy Zz
+                    </p>
+                  </div>
 
-              {/* Typography Scale */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Typography Scale</h4>
-                <div className="grid grid-cols-3 gap-2">
-                  {typographyScaleOptions.map((option) => (
-                    <button
-                      key={option}
-                      className={`px-2 py-1 text-xs rounded ${
-                        option === typographyScale
-                          ? "bg-blue-100 text-blue-800"
-                          : "bg-neutral-100 text-neutral-800"
-                      }`}
-                      onClick={() => setTypographyScale(option)}
-                    >
-                      {option}
-                    </button>
-                  ))}
+                  {/* Typography Scale */}
+                  <div>
+                    <label className="text-sm font-medium block mb-2">
+                      Typography Scale
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {typographyScaleOptions.map((option) => (
+                        <button
+                          key={option}
+                          className={`py-2 px-3 rounded-md transition-colors ${
+                            option === typographyScale
+                              ? "bg-blue-500 text-white"
+                              : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200"
+                          }`}
+                          onClick={() => setTypographyScale(option)}
+                        >
+                          <span
+                            className={
+                              option === "small"
+                                ? "text-sm"
+                                : option === "large"
+                                ? "text-lg"
+                                : "text-base"
+                            }
+                          >
+                            {option}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              </details>
             </div>
 
             {/* Layout Section */}
-            <div className="space-y-4">
-              <h3 className="text-sm font-medium text-neutral-500 uppercase tracking-wider">
-                Layout
-              </h3>
+            <div className="p-5 border-b border-neutral-200">
+              <details className="group">
+                <summary className="flex items-center justify-between cursor-pointer list-none">
+                  <h3 className="text-md font-semibold mb-2">
+                    Layout & Structure
+                  </h3>
+                  <svg
+                    className="w-5 h-5 group-open:rotate-180 transition-transform"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </summary>
+                <div className="pt-4 space-y-6">
+                  {/* Corner Radius - Visual Preview */}
+                  <div>
+                    <label className="text-sm font-medium block mb-2">
+                      Corner Radius
+                    </label>
+                    <div className="grid grid-cols-4 gap-3 mb-4">
+                      {radiusOptions.map((radius) => {
+                        const radiusValue =
+                          radius === "full" ? "9999px" : radius;
+                        return (
+                          <button
+                            key={radius}
+                            className={`rounded-md border transition-all h-14 flex items-center justify-center hover:border-blue-400 ${
+                              radius === cornerRadius
+                                ? "ring-2 ring-blue-500 border-blue-500"
+                                : "border-neutral-300"
+                            }`}
+                            style={{
+                              borderRadius: radiusValue,
+                            }}
+                            onClick={() => setCornerRadius(radius)}
+                            title={radius}
+                          >
+                            <span className="text-xs font-medium">
+                              {radius}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
 
-              {/* Corner Radius */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Corner Radius</h4>
-                <div className="grid grid-cols-4 gap-2">
-                  {radiusOptions.map((radius) => (
-                    <button
-                      key={radius}
-                      className={`px-2 py-1 text-xs rounded ${
-                        radius === cornerRadius
-                          ? "bg-blue-100 text-blue-800"
-                          : "bg-neutral-100 text-neutral-800"
-                      }`}
-                      onClick={() => setCornerRadius(radius)}
-                    >
-                      {radius}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                  {/* Spacing */}
+                  <div>
+                    <label className="text-sm font-medium block mb-2">
+                      Spacing
+                    </label>
+                    <div className="grid grid-cols-3 gap-3">
+                      {spacingOptions.map((option) => (
+                        <button
+                          key={option}
+                          className={`py-2 px-3 rounded-md transition-colors flex flex-col items-center ${
+                            option === spacing
+                              ? "bg-blue-500 text-white"
+                              : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200"
+                          }`}
+                          onClick={() => setSpacing(option)}
+                        >
+                          <div className="mb-1">
+                            {option === "compact" ? (
+                              <div className="w-8 h-2 bg-current"></div>
+                            ) : option === "comfortable" ? (
+                              <div className="w-6 h-2 bg-current"></div>
+                            ) : (
+                              <div className="w-4 h-2 bg-current"></div>
+                            )}
+                          </div>
+                          <span className="text-xs">{option}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
-              {/* Spacing */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Spacing</h4>
-                <div className="grid grid-cols-3 gap-2">
-                  {spacingOptions.map((option) => (
-                    <button
-                      key={option}
-                      className={`px-2 py-1 text-xs rounded ${
-                        option === spacing
-                          ? "bg-blue-100 text-blue-800"
-                          : "bg-neutral-100 text-neutral-800"
-                      }`}
-                      onClick={() => setSpacing(option)}
-                    >
-                      {option}
-                    </button>
-                  ))}
+                  {/* Shadow Intensity */}
+                  <div>
+                    <label className="text-sm font-medium block mb-2">
+                      Shadow Intensity
+                    </label>
+                    <div className="grid grid-cols-2 gap-3">
+                      {shadowOptions.map((shadow) => (
+                        <button
+                          key={shadow}
+                          className={`py-3 px-3 border rounded-md transition-all overflow-hidden ${
+                            shadow === shadowIntensity
+                              ? "ring-2 ring-blue-500 border-blue-500"
+                              : "border-neutral-300 hover:border-blue-400"
+                          }`}
+                          onClick={() => setShadowIntensity(shadow)}
+                          style={{
+                            boxShadow:
+                              shadow === "none"
+                                ? "none"
+                                : shadow === "subtle"
+                                ? "0 1px 2px rgba(0,0,0,0.05)"
+                                : shadow === "light"
+                                ? "0 2px 4px rgba(0,0,0,0.1)"
+                                : "0 4px 6px rgba(0,0,0,0.1)",
+                          }}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm">{shadow}</span>
+                            <div className="w-4 h-4 bg-neutral-400 rounded"></div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              </details>
+            </div>
 
-              {/* Shadow Intensity */}
-              <div>
-                <h4 className="text-sm font-medium mb-2">Shadow Intensity</h4>
-                <div className="grid grid-cols-2 gap-2">
-                  {shadowOptions.map((shadow) => (
+            {/* Save Presets Section */}
+            <div className="p-5">
+              <div className="space-y-3">
+                <h3 className="text-md font-semibold mb-2">Prompt Generator</h3>
+                <button
+                  onClick={generateStylePrompt}
+                  className="w-full px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-md transition-colors text-center font-medium flex items-center justify-center gap-2"
+                >
+                  <svg
+                    className="w-5 h-5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M12 2L20 7V17L12 22L4 17V7L12 2Z"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M12 22V12"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M20 7L12 12L4 7"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  Generate Style Prompt
+                </button>
+
+                {showPrompt && (
+                  <div className="mt-4 border border-neutral-200 rounded-md p-4 bg-neutral-50 relative">
                     <button
-                      key={shadow}
-                      className={`px-2 py-1 text-xs rounded ${
-                        shadow === shadowIntensity
-                          ? "bg-blue-100 text-blue-800"
-                          : "bg-neutral-100 text-neutral-800"
-                      }`}
-                      onClick={() => setShadowIntensity(shadow)}
+                      onClick={() => setShowPrompt(false)}
+                      className="absolute top-2 right-2 text-neutral-400 hover:text-neutral-600"
+                      aria-label="Close prompt"
                     >
-                      {shadow}
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M6 18L18 6M6 6l12 12"
+                        ></path>
+                      </svg>
                     </button>
-                  ))}
-                </div>
+                    <h4 className="font-medium mb-2 text-sm">
+                      Generated Prompt:
+                    </h4>
+                    <div className="relative">
+                      <pre className="text-xs bg-white p-3 rounded border border-neutral-200 whitespace-pre-wrap">
+                        {generatedPrompt}
+                      </pre>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(generatedPrompt);
+                          alert("Copied to clipboard!");
+                        }}
+                        className="absolute top-2 right-2 text-neutral-400 hover:text-neutral-600 bg-white rounded-md p-1"
+                        title="Copy to clipboard"
+                      >
+                        <svg
+                          className="w-4 h-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="2"
+                            d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"
+                          ></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
