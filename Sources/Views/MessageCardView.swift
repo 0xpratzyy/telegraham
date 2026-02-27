@@ -11,10 +11,10 @@ struct MessageCardView: View {
                 if let chatTitle = message.chatTitle {
                     Text(chatTitle)
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(Color(red: 0.39, green: 0.40, blue: 0.95))
+                        .foregroundStyle(Color.accentColor)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color(red: 0.39, green: 0.40, blue: 0.95).opacity(0.1))
+                        .background(Color.accentColor.opacity(0.1))
                         .cornerRadius(4)
                         .lineLimit(1)
                 }
@@ -22,7 +22,7 @@ struct MessageCardView: View {
                 if let senderName = message.senderName {
                     Text(senderName)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(white: 0.70))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
 
@@ -30,7 +30,7 @@ struct MessageCardView: View {
 
                 Text(message.relativeDate)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(Color(white: 0.35))
+                    .foregroundStyle(.tertiary)
             }
 
             // Message text
@@ -39,7 +39,7 @@ struct MessageCardView: View {
             } else {
                 Text(message.displayText)
                     .font(.system(size: 13))
-                    .foregroundColor(Color(white: 0.79))
+                    .foregroundStyle(.primary.opacity(0.85))
                     .lineLimit(3)
             }
 
@@ -55,18 +55,25 @@ struct MessageCardView: View {
                         Text("Open in Telegram")
                             .font(.system(size: 10, weight: .medium))
                     }
-                    .foregroundColor(Color(red: 0.39, green: 0.40, blue: 0.95))
+                    .foregroundStyle(Color.accentColor)
                 }
                 .buttonStyle(.plain)
                 .opacity(0.7)
             }
         }
         .padding(12)
-        .background(Color.white.opacity(0.03))
-        .cornerRadius(10)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [.white.opacity(0.15), .white.opacity(0.05)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.5
+                )
         )
     }
 
@@ -80,7 +87,7 @@ struct MessageCardView: View {
 
     private func createHighlightedString(_ text: String, query: String) -> AttributedString {
         var result = AttributedString(text)
-        result.foregroundColor = Color(white: 0.79)
+        result.foregroundColor = .primary.opacity(0.85)
 
         // Simple approach: find ranges in the original string and map to AttributedString
         let lowercasedText = text.lowercased()
@@ -91,7 +98,7 @@ struct MessageCardView: View {
             // Convert String.Index to AttributedString range
             if let lowerAttr = AttributedString.Index(range.lowerBound, within: result),
                let upperAttr = AttributedString.Index(range.upperBound, within: result) {
-                result[lowerAttr..<upperAttr].foregroundColor = Color(red: 0.39, green: 0.40, blue: 0.95)
+                result[lowerAttr..<upperAttr].foregroundColor = .accentColor
                 result[lowerAttr..<upperAttr].font = .system(size: 13, weight: .semibold)
             }
             searchStart = range.upperBound

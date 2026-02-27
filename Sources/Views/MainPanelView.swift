@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MainPanelView: View {
     @EnvironmentObject var telegramService: TelegramService
+    @EnvironmentObject var aiService: AIService
     @State private var selectedChat: TGChat?
     @State private var selectedTab: Tab = .search
 
@@ -26,40 +27,21 @@ struct MainPanelView: View {
                         if let user = telegramService.currentUser {
                             Text(user.firstName)
                                 .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(Color(white: 0.45))
+                                .foregroundStyle(.tertiary)
                         }
                     }
                     .padding(.trailing, 14)
                 }
-                .background(Color.white.opacity(0.02))
+                .background(.ultraThinMaterial)
 
                 Divider()
-                    .background(Color.white.opacity(0.06))
 
                 // Content
                 switch selectedTab {
                 case .search:
                     if let chat = selectedChat {
                         VStack(spacing: 0) {
-                            // Back button
-                            HStack {
-                                Button {
-                                    selectedChat = nil
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "chevron.left")
-                                            .font(.system(size: 12))
-                                        Text("Back")
-                                            .font(.system(size: 12))
-                                    }
-                                    .foregroundColor(Color(red: 0.39, green: 0.40, blue: 0.95))
-                                }
-                                .buttonStyle(.plain)
-                                .padding(8)
-
-                                Spacer()
-                            }
-
+                            backButton
                             ChatHistoryView(chat: chat)
                         }
                     } else {
@@ -69,24 +51,7 @@ struct MainPanelView: View {
                 case .chats:
                     if let chat = selectedChat {
                         VStack(spacing: 0) {
-                            HStack {
-                                Button {
-                                    selectedChat = nil
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "chevron.left")
-                                            .font(.system(size: 12))
-                                        Text("Back")
-                                            .font(.system(size: 12))
-                                    }
-                                    .foregroundColor(Color(red: 0.39, green: 0.40, blue: 0.95))
-                                }
-                                .buttonStyle(.plain)
-                                .padding(8)
-
-                                Spacer()
-                            }
-
+                            backButton
                             ChatHistoryView(chat: chat)
                         }
                     } else {
@@ -98,8 +63,26 @@ struct MainPanelView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(red: 0.04, green: 0.04, blue: 0.06))
-        .preferredColorScheme(.dark)
+    }
+
+    private var backButton: some View {
+        HStack {
+            Button {
+                selectedChat = nil
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12))
+                    Text("Back")
+                        .font(.system(size: 12))
+                }
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+
+            Spacer()
+        }
     }
 
     private func tabButton(title: String, icon: String, tab: Tab) -> some View {
@@ -113,10 +96,10 @@ struct MainPanelView: View {
                 Text(title)
                     .font(.system(size: 12, weight: .medium))
             }
-            .foregroundColor(selectedTab == tab ? Color(red: 0.39, green: 0.40, blue: 0.95) : Color(white: 0.45))
+            .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(selectedTab == tab ? Color(red: 0.39, green: 0.40, blue: 0.95).opacity(0.1) : Color.clear)
+            .background(selectedTab == tab ? Color.accentColor.opacity(0.1) : Color.clear)
         }
         .buttonStyle(.plain)
     }

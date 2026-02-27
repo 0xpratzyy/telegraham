@@ -1,10 +1,15 @@
 import Foundation
-import Security
 
+/// File-based credential storage in ~/Library/Application Support/TGSearch/
+/// Uses POSIX 0600 permissions (user-only read/write). Avoids macOS Keychain
+/// password prompts that occur with ad-hoc signed development builds.
 enum KeychainManager {
     enum Key: String {
         case apiId = "com.tgsearch.apiId"
         case apiHash = "com.tgsearch.apiHash"
+        case aiProviderType = "com.tgsearch.aiProviderType"
+        case aiApiKey = "com.tgsearch.aiApiKey"
+        case aiModel = "com.tgsearch.aiModel"
     }
 
     enum KeychainError: Error, LocalizedError {
@@ -15,77 +20,51 @@ enum KeychainManager {
 
         var errorDescription: String? {
             switch self {
-            case .saveFailed(let status): return "Keychain save failed: \(status)"
-            case .readFailed(let status): return "Keychain read failed: \(status)"
-            case .deleteFailed(let status): return "Keychain delete failed: \(status)"
-            case .unexpectedData: return "Unexpected keychain data format"
+            case .saveFailed: return "Failed to save credential"
+            case .readFailed: return "Failed to read credential"
+            case .deleteFailed: return "Failed to delete credential"
+            case .unexpectedData: return "Unexpected data format"
             }
         }
     }
 
+    private static let storageDir: URL = {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("TGSearch", isDirectory: true).appendingPathComponent("credentials", isDirectory: true)
+    }()
+
+    private static func ensureDirectory() throws {
+        try FileManager.default.createDirectory(at: storageDir, withIntermediateDirectories: true)
+        // Set directory to user-only access
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storageDir.path)
+    }
+
+    private static func fileURL(for key: Key) -> URL {
+        storageDir.appendingPathComponent(key.rawValue)
+    }
+
     static func save(_ value: String, for key: Key) throws {
+        try ensureDirectory()
         guard let data = value.data(using: .utf8) else { return }
-
-        // Delete existing item first
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.tgsearch.app",
-            kSecAttrAccount as String: key.rawValue,
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.tgsearch.app",
-            kSecAttrAccount as String: key.rawValue,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
-        ]
-
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw KeychainError.saveFailed(status)
-        }
+        let url = fileURL(for: key)
+        try data.write(to: url, options: [.atomic])
+        // Set file to user-only read/write
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     static func retrieve(for key: Key) throws -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.tgsearch.app",
-            kSecAttrAccount as String: key.rawValue,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        if status == errSecItemNotFound {
+        let url = fileURL(for: key)
+        guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
         }
-
-        guard status == errSecSuccess else {
-            throw KeychainError.readFailed(status)
-        }
-
-        guard let data = result as? Data,
-              let string = String(data: data, encoding: .utf8) else {
-            throw KeychainError.unexpectedData
-        }
-
-        return string
+        let data = try Data(contentsOf: url)
+        return String(data: data, encoding: .utf8)
     }
 
     static func delete(for key: Key) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.tgsearch.app",
-            kSecAttrAccount as String: key.rawValue,
-        ]
-
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainError.deleteFailed(status)
+        let url = fileURL(for: key)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
         }
     }
 

@@ -17,16 +17,10 @@ struct AuthView: View {
             VStack(spacing: 8) {
                 Image(systemName: "bolt.circle.fill")
                     .font(.system(size: 48))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color(red: 0.39, green: 0.40, blue: 0.95), Color(red: 0.55, green: 0.36, blue: 0.95)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                    .foregroundStyle(Color.accentColor)
                 Text("TGSearch")
                     .font(.system(size: 24, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.89))
+                    .foregroundStyle(.primary)
             }
             .padding(.top, 32)
             .padding(.bottom, 24)
@@ -46,13 +40,12 @@ struct AuthView: View {
                     readyView
                 case .loggingOut, .closing:
                     ProgressView("Disconnecting...")
-                        .foregroundColor(Color(white: 0.89))
                 case .closed:
                     Text("Session closed")
-                        .foregroundColor(Color(white: 0.59))
+                        .foregroundStyle(.secondary)
                 case .waitingForRegistration:
                     Text("Registration required. Please register in the Telegram app first.")
-                        .foregroundColor(Color(white: 0.59))
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 32)
@@ -60,7 +53,7 @@ struct AuthView: View {
             if let error = errorMessage {
                 Text(error)
                     .font(.system(size: 12))
-                    .foregroundColor(Color(red: 0.94, green: 0.27, blue: 0.27))
+                    .foregroundStyle(.red)
                     .padding(.top, 12)
                     .padding(.horizontal, 32)
             }
@@ -70,7 +63,7 @@ struct AuthView: View {
             // Safety notice
             Text("TGSearch is read-only. It can never send messages or modify your account.")
                 .font(.system(size: 11))
-                .foregroundColor(Color(white: 0.35))
+                .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
                 .padding(.bottom, 20)
@@ -88,7 +81,7 @@ struct AuthView: View {
         VStack(spacing: 16) {
             Text("Enter your Telegram API credentials")
                 .font(.system(size: 14))
-                .foregroundColor(Color(white: 0.59))
+                .foregroundStyle(.secondary)
 
             VStack(spacing: 12) {
                 inputField(title: "API ID", text: $apiId, placeholder: "e.g., 12345678")
@@ -97,7 +90,7 @@ struct AuthView: View {
 
             Link("Get credentials from my.telegram.org", destination: URL(string: "https://my.telegram.org")!)
                 .font(.system(size: 12))
-                .foregroundColor(Color(red: 0.39, green: 0.40, blue: 0.95))
+                .foregroundStyle(Color.accentColor)
 
             actionButton(title: "Connect") {
                 guard !apiId.isEmpty, !apiHash.isEmpty else {
@@ -126,7 +119,7 @@ struct AuthView: View {
         VStack(spacing: 16) {
             Text("Enter your phone number")
                 .font(.system(size: 14))
-                .foregroundColor(Color(white: 0.59))
+                .foregroundStyle(.secondary)
 
             inputField(title: "Phone Number", text: $phoneNumber, placeholder: "+1 234 567 8900")
 
@@ -147,12 +140,12 @@ struct AuthView: View {
         VStack(spacing: 16) {
             Text("Enter the verification code")
                 .font(.system(size: 14))
-                .foregroundColor(Color(white: 0.59))
+                .foregroundStyle(.secondary)
 
             if let info = codeInfo, !info.phoneNumber.isEmpty {
                 Text("Sent to \(info.phoneNumber)")
                     .font(.system(size: 12))
-                    .foregroundColor(Color(white: 0.45))
+                    .foregroundStyle(.tertiary)
             }
 
             inputField(title: "Code", text: $verificationCode, placeholder: "12345")
@@ -174,12 +167,12 @@ struct AuthView: View {
         VStack(spacing: 16) {
             Text("Enter your two-factor authentication password")
                 .font(.system(size: 14))
-                .foregroundColor(Color(white: 0.59))
+                .foregroundStyle(.secondary)
 
             if let hint, !hint.isEmpty {
                 Text("Hint: \(hint)")
                     .font(.system(size: 12))
-                    .foregroundColor(Color(white: 0.45))
+                    .foregroundStyle(.tertiary)
             }
 
             inputField(title: "Password", text: $password, placeholder: "Your 2FA password", isSecure: true)
@@ -201,16 +194,16 @@ struct AuthView: View {
         VStack(spacing: 12) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 36))
-                .foregroundColor(.green)
+                .foregroundStyle(.green)
 
             Text("Connected to Telegram")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(Color(white: 0.89))
+                .foregroundStyle(.primary)
 
             if let user = telegramService.currentUser {
                 Text(user.displayName)
                     .font(.system(size: 13))
-                    .foregroundColor(Color(white: 0.59))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -221,7 +214,7 @@ struct AuthView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundColor(Color(white: 0.45))
+                .foregroundStyle(.tertiary)
                 .textCase(.uppercase)
 
             Group {
@@ -233,13 +226,19 @@ struct AuthView: View {
             }
             .textFieldStyle(.plain)
             .font(.system(size: 14))
-            .foregroundColor(Color(white: 0.89))
             .padding(10)
-            .background(Color.white.opacity(0.03))
+            .background(.ultraThinMaterial)
             .cornerRadius(8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [.white.opacity(0.15), .white.opacity(0.05)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.5
+                    )
             )
         }
     }
@@ -263,13 +262,7 @@ struct AuthView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
-            .background(
-                LinearGradient(
-                    colors: [Color(red: 0.39, green: 0.40, blue: 0.95), Color(red: 0.55, green: 0.36, blue: 0.95)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
+            .background(Color.accentColor)
             .foregroundColor(.white)
             .cornerRadius(8)
         }

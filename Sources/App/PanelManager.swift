@@ -23,7 +23,7 @@ final class FloatingPanel: NSPanel {
         isMovableByWindowBackground = true
         hidesOnDeactivate = false
         animationBehavior = .utilityWindow
-        backgroundColor = NSColor(white: 0.04, alpha: 0.97)
+        backgroundColor = .clear
 
         // Hide traffic light buttons
         standardWindowButton(.closeButton)?.isHidden = true
@@ -51,9 +51,11 @@ final class FloatingPanel: NSPanel {
 final class PanelManager {
     private var panel: FloatingPanel?
     private let telegramService: TelegramService
+    private let aiService: AIService
 
-    init(telegramService: TelegramService) {
+    init(telegramService: TelegramService, aiService: AIService) {
         self.telegramService = telegramService
+        self.aiService = aiService
     }
 
     func toggle() {
@@ -86,11 +88,6 @@ final class PanelManager {
     }
 
     private func createPanel() {
-        let hostingView = NSHostingView(
-            rootView: MainPanelView()
-                .environmentObject(telegramService)
-        )
-
         let panel = FloatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
             styleMask: [],
@@ -98,7 +95,28 @@ final class PanelManager {
             defer: false
         )
 
-        panel.contentView = hostingView
+        // NSVisualEffectView for translucent glass background
+        let visualEffectView = NSVisualEffectView()
+        visualEffectView.material = .hudWindow
+        visualEffectView.blendingMode = .behindWindow
+        visualEffectView.state = .active
+
+        let hostingView = NSHostingView(
+            rootView: MainPanelView()
+                .environmentObject(telegramService)
+                .environmentObject(aiService)
+        )
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+
+        visualEffectView.addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.topAnchor.constraint(equalTo: visualEffectView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: visualEffectView.bottomAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor),
+        ])
+
+        panel.contentView = visualEffectView
         self.panel = panel
     }
 }

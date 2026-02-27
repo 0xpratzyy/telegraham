@@ -20,12 +20,11 @@ struct ChatListView: View {
             HStack(spacing: 8) {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.system(size: 13))
-                    .foregroundColor(Color(white: 0.45))
+                    .foregroundStyle(.tertiary)
 
                 TextField("Filter chats...", text: $filterText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
-                    .foregroundColor(Color(white: 0.89))
 
                 if !filterText.isEmpty {
                     Button {
@@ -33,16 +32,15 @@ struct ChatListView: View {
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 12))
-                            .foregroundColor(Color(white: 0.45))
+                            .foregroundStyle(.tertiary)
                     }
                     .buttonStyle(.plain)
                 }
             }
             .padding(10)
-            .background(Color.white.opacity(0.03))
+            .background(.ultraThinMaterial)
 
             Divider()
-                .background(Color.white.opacity(0.06))
 
             // Chat list
             if telegramService.isLoading && telegramService.chats.isEmpty {
@@ -51,17 +49,17 @@ struct ChatListView: View {
                         .controlSize(.regular)
                     Text("Loading chats...")
                         .font(.system(size: 13))
-                        .foregroundColor(Color(white: 0.45))
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filteredChats.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "tray")
                         .font(.system(size: 32))
-                        .foregroundColor(Color(white: 0.25))
+                        .foregroundStyle(.quaternary)
                     Text(filterText.isEmpty ? "No chats found" : "No matches for \"\(filterText)\"")
                         .font(.system(size: 13))
-                        .foregroundColor(Color(white: 0.45))
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

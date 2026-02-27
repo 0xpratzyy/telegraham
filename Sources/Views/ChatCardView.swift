@@ -14,7 +14,7 @@ struct ChatCardView: View {
                 HStack {
                     Text(chat.title)
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Color(white: 0.89))
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
 
                     Spacer()
@@ -22,7 +22,7 @@ struct ChatCardView: View {
                     if let date = chat.lastMessage?.date {
                         Text(relativeTime(from: date))
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(Color(white: 0.35))
+                            .foregroundStyle(.tertiary)
                     }
                 }
 
@@ -30,17 +30,17 @@ struct ChatCardView: View {
                     // Chat type tag
                     Text(chat.chatType.displayName)
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.45))
+                        .foregroundStyle(.tertiary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.05))
+                        .background(.quaternary.opacity(0.3))
                         .cornerRadius(4)
 
                     // Last message preview
                     if let lastMessage = chat.lastMessage {
                         Text(lastMessage.displayText)
                             .font(.system(size: 13))
-                            .foregroundColor(Color(white: 0.59))
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
 
@@ -53,7 +53,7 @@ struct ChatCardView: View {
                             .foregroundColor(.white)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
-                            .background(Color(red: 0.39, green: 0.40, blue: 0.95))
+                            .background(Color.accentColor)
                             .cornerRadius(10)
                     }
                 }
@@ -61,15 +61,22 @@ struct ChatCardView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(
+        .background {
             RoundedRectangle(cornerRadius: 12)
-                .fill(isSelected ? Color.white.opacity(0.06) : Color.white.opacity(0.03))
-        )
+                .fill(.ultraThinMaterial)
+                .opacity(isSelected ? 1.0 : 0.5)
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(
-                    isSelected ? Color(red: 0.39, green: 0.40, blue: 0.95).opacity(0.3) : Color.white.opacity(0.06),
-                    lineWidth: 1
+                .strokeBorder(
+                    LinearGradient(
+                        colors: isSelected
+                            ? [Color.accentColor.opacity(0.4), Color.accentColor.opacity(0.1)]
+                            : [.white.opacity(0.15), .white.opacity(0.05)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.5
                 )
         )
         .contentShape(Rectangle())

@@ -16,17 +16,17 @@ struct ChatHistoryView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(chat.title)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(Color(white: 0.89))
+                        .foregroundStyle(.primary)
 
                     HStack(spacing: 6) {
                         Text(chat.chatType.displayName)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(Color(white: 0.45))
+                            .foregroundStyle(.tertiary)
 
                         if chat.unreadCount > 0 {
                             Text("\(chat.unreadCount) unread")
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(Color(red: 0.39, green: 0.40, blue: 0.95))
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
                 }
@@ -45,39 +45,36 @@ struct ChatHistoryView: View {
                         Text("Open")
                             .font(.system(size: 12, weight: .medium))
                     }
-                    .foregroundColor(Color(red: 0.39, green: 0.40, blue: 0.95))
+                    .foregroundStyle(Color.accentColor)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color(red: 0.39, green: 0.40, blue: 0.95).opacity(0.1))
+                    .background(Color.accentColor.opacity(0.1))
                     .cornerRadius(6)
                 }
                 .buttonStyle(.plain)
             }
             .padding(14)
-            .background(Color.white.opacity(0.02))
+            .background(.ultraThinMaterial)
 
             Divider()
-                .background(Color.white.opacity(0.06))
 
             // Search within chat
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12))
-                    .foregroundColor(Color(white: 0.45))
+                    .foregroundStyle(.tertiary)
 
                 TextField("Search in this chat...", text: $searchQuery)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
-                    .foregroundColor(Color(white: 0.89))
                     .onSubmit {
                         Task { await searchInChat() }
                     }
             }
             .padding(10)
-            .background(Color.white.opacity(0.02))
+            .background(.ultraThinMaterial.opacity(0.5))
 
             Divider()
-                .background(Color.white.opacity(0.06))
 
             // Messages
             if isLoading {
@@ -85,17 +82,17 @@ struct ChatHistoryView: View {
                     ProgressView()
                     Text("Loading messages...")
                         .font(.system(size: 13))
-                        .foregroundColor(Color(white: 0.45))
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if messages.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "message")
                         .font(.system(size: 32))
-                        .foregroundColor(Color(white: 0.25))
+                        .foregroundStyle(.quaternary)
                     Text("No messages found")
                         .font(.system(size: 13))
-                        .foregroundColor(Color(white: 0.45))
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

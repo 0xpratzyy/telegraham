@@ -2,10 +2,17 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var telegramService: TelegramService
+    @EnvironmentObject var aiService: AIService
     @State private var apiId = ""
     @State private var apiHash = ""
     @State private var saveStatus: String?
     @State private var showDeleteConfirmation = false
+
+    // AI settings
+    @State private var selectedAIProvider: AIProviderConfig.ProviderType = .none
+    @State private var aiApiKey = ""
+    @State private var aiModel = ""
+    @State private var aiSaveStatus: String?
 
     var body: some View {
         TabView {
@@ -14,14 +21,20 @@ struct SettingsView: View {
                     Label("Credentials", systemImage: "key")
                 }
 
+            aiTab
+                .tabItem {
+                    Label("AI", systemImage: "sparkles")
+                }
+
             aboutTab
                 .tabItem {
                     Label("About", systemImage: "info.circle")
                 }
         }
-        .frame(width: 480, height: 350)
+        .frame(width: 500, height: 400)
         .onAppear {
             loadCredentials()
+            loadAIConfig()
         }
     }
 
@@ -114,6 +127,102 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - AI Tab
+
+    private var aiTab: some View {
+        Form {
+            Section {
+                Picker("Provider", selection: $selectedAIProvider) {
+                    Text("None").tag(AIProviderConfig.ProviderType.none)
+                    Text("Claude (Anthropic)").tag(AIProviderConfig.ProviderType.claude)
+                    Text("OpenAI").tag(AIProviderConfig.ProviderType.openai)
+                }
+
+                if selectedAIProvider != .none {
+                    SecureField("API Key", text: $aiApiKey)
+                        .textFieldStyle(.roundedBorder)
+
+                    TextField("Model (optional, uses default if empty)", text: $aiModel)
+                        .textFieldStyle(.roundedBorder)
+
+                    Text("Default: \(selectedAIProvider.defaultModel)")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+
+                    HStack {
+                        Button("Save AI Settings") {
+                            saveAIConfig()
+                        }
+
+                        if let status = aiSaveStatus {
+                            Text(status)
+                                .font(.system(size: 12))
+                                .foregroundColor(status.contains("Error") ? .red : .green)
+                        }
+                    }
+                }
+            } header: {
+                Text("AI Provider")
+            } footer: {
+                Text("Your own API key is used. No data is stored on any server beyond what the AI provider processes.")
+                    .font(.system(size: 11))
+            }
+
+            Section {
+                HStack {
+                    Text("Status")
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(aiService.isConfigured ? .green : .secondary)
+                            .frame(width: 8, height: 8)
+                        Text(aiService.isConfigured ? "Configured (\(aiService.providerType.rawValue))" : "Not configured")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Toggle("Show AI preview before sending", isOn: $aiService.showAIPreview)
+            } header: {
+                Text("Privacy")
+            } footer: {
+                Text("AI features send only message text and sender first names. No phone numbers, user IDs, or media files are ever sent.")
+                    .font(.system(size: 11))
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("What data is sent to AI:")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("- Message text (plaintext)")
+                        .font(.system(size: 11))
+                    Text("- Sender first name")
+                        .font(.system(size: 11))
+                    Text("- Relative timestamp (e.g. \"2h ago\")")
+                        .font(.system(size: 11))
+                    Text("- Chat name")
+                        .font(.system(size: 11))
+                }
+                .foregroundColor(.secondary)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("What is never sent:")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("- Phone numbers, user IDs, session tokens")
+                        .font(.system(size: 11))
+                    Text("- Media files, stickers, voice messages")
+                        .font(.system(size: 11))
+                    Text("- Last names, full chat histories")
+                        .font(.system(size: 11))
+                }
+                .foregroundColor(.secondary)
+            } header: {
+                Text("Privacy Details")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
     // MARK: - About Tab
 
     private var aboutTab: some View {
@@ -122,7 +231,7 @@ struct SettingsView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(
                     LinearGradient(
-                        colors: [Color(red: 0.39, green: 0.40, blue: 0.95), Color(red: 0.55, green: 0.36, blue: 0.95)],
+                        colors: [.accentColor, .purple],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -135,7 +244,7 @@ struct SettingsView: View {
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
 
-            Text("Spotlight for Telegram")
+            Text("AI-Powered Telegram Search")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
 
@@ -144,10 +253,6 @@ struct SettingsView: View {
 
             VStack(spacing: 4) {
                 Text("Read-only access. Your data stays on your machine.")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-
-                Text("Open Source (MIT License)")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
             }
@@ -181,18 +286,35 @@ struct SettingsView: View {
         }
     }
 
+    private func loadAIConfig() {
+        selectedAIProvider = aiService.providerType
+        aiApiKey = (try? KeychainManager.retrieve(for: .aiApiKey)) ?? ""
+        aiModel = (try? KeychainManager.retrieve(for: .aiModel)) ?? ""
+    }
+
+    private func saveAIConfig() {
+        aiService.configure(type: selectedAIProvider, apiKey: aiApiKey, model: aiModel.isEmpty ? nil : aiModel)
+        aiSaveStatus = "Saved"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            aiSaveStatus = nil
+        }
+    }
+
     private func deleteAllData() {
-        // Delete keychain entries
         try? KeychainManager.delete(for: .apiId)
         try? KeychainManager.delete(for: .apiHash)
+        try? KeychainManager.delete(for: .aiProviderType)
+        try? KeychainManager.delete(for: .aiApiKey)
+        try? KeychainManager.delete(for: .aiModel)
 
-        // Delete TDLib database
         let dbPath = TDLibClientWrapper.databasePath()
         try? FileManager.default.removeItem(atPath: dbPath)
 
-        // Reset state
         apiId = ""
         apiHash = ""
+        aiApiKey = ""
+        aiModel = ""
+        selectedAIProvider = .none
         saveStatus = "All data deleted"
     }
 

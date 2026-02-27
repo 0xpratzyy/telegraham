@@ -403,4 +403,46 @@ class TelegramService: ObservableObject {
             return (a.lastMessage?.date ?? .distantPast) > (b.lastMessage?.date ?? .distantPast)
         }
     }
+
+    // MARK: - AI Helper Methods
+
+    /// All group chats (basic groups + supergroups that aren't channels)
+    var groupChats: [TGChat] {
+        chats.filter { $0.chatType.isGroup }
+    }
+
+    /// All DM / private chats
+    var dmChats: [TGChat] {
+        chats.filter { $0.chatType.isPrivate }
+    }
+
+    /// Fetch recent messages from multiple chats
+    func getRecentMessagesAcrossChats(chatIds: [Int64], perChatLimit: Int = 20) async throws -> [TGMessage] {
+        var allMessages: [TGMessage] = []
+        for chatId in chatIds {
+            do {
+                let messages = try await getChatHistory(chatId: chatId, limit: perChatLimit)
+                allMessages.append(contentsOf: messages)
+            } catch {
+                print("[TelegramService] Failed to fetch history for chat \(chatId): \(error)")
+            }
+        }
+        return allMessages.sorted { $0.date > $1.date }
+    }
+
+    /// Fetch unread DM messages
+    func getUnreadDMs() async throws -> [TGMessage] {
+        let unreadDMChats = dmChats.filter { $0.unreadCount > 0 }
+        guard !unreadDMChats.isEmpty else { return [] }
+        return try await getRecentMessagesAcrossChats(
+            chatIds: unreadDMChats.map(\.id),
+            perChatLimit: 10
+        )
+    }
+
+    /// Fetch recent messages from all active chats (for digest)
+    func getRecentMessagesForDigest(limit: Int = 10) async throws -> [TGMessage] {
+        let activeChatIds = chats.prefix(20).map(\.id)
+        return try await getRecentMessagesAcrossChats(chatIds: Array(activeChatIds), perChatLimit: limit)
+    }
 }
