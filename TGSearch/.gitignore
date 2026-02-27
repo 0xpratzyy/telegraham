@@ -1,0 +1,26 @@
+# Xcode
+*.xcodeproj/
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/project.xcworkspace/
+*.xcworkspace/
+DerivedData/
+*.xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Build
+build/
+.build/
+
+# SPM
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
