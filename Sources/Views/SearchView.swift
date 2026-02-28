@@ -8,6 +8,7 @@ struct SearchView: View {
     @State private var isSearching = false
     @State private var hasSearched = false
     @State private var currentIntent: QueryIntent?
+    @State private var errorMessage: String?
     @FocusState private var isSearchFocused: Bool
 
     private let suggestionChips = [
@@ -181,19 +182,16 @@ struct SearchView: View {
 
     @ViewBuilder
     private var messageSearchResults: some View {
-        if results.isEmpty && !isSearching {
-            VStack(spacing: 12) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.quaternary)
-                Text("No results for \"\(query)\"")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-                Text("Try different keywords or a broader search")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+        if let error = errorMessage {
+            ErrorStateView(message: error) {
+                Task { await executeSearch() }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if results.isEmpty && !isSearching {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: "No results for \"\(query)\"",
+                subtitle: "Try different keywords or a broader search"
+            )
         } else if !results.isEmpty {
             ScrollView {
                 LazyVStack(spacing: 6) {
@@ -236,9 +234,10 @@ struct SearchView: View {
             }
 
             do {
+                errorMessage = nil
                 results = try await telegramService.searchMessages(query: keyword)
             } catch {
-                print("[Search] Error: \(error)")
+                errorMessage = error.localizedDescription
                 results = []
             }
         }

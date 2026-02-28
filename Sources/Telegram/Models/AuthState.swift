@@ -6,7 +6,6 @@ enum AuthState: Equatable {
     case waitingForPhoneNumber
     case waitingForCode(codeInfo: CodeInfo?)
     case waitingForPassword(hint: String?)
-    case waitingForRegistration
     case ready
     case loggingOut
     case closing

@@ -1,11 +1,38 @@
 import SwiftUI
 
+/// Controls concurrent AI summary requests to avoid overwhelming the API.
+private actor AISemaphore {
+    private var available: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) { available = limit }
+
+    func wait() async {
+        if available > 0 {
+            available -= 1
+        } else {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+    }
+
+    func signal() {
+        if waiters.isEmpty {
+            available += 1
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 struct GroupDiscoveryView: View {
     @EnvironmentObject var telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
     @State private var summaries: [Int64: String] = [:]
+    @State private var summaryErrors: [Int64: String] = [:]
     @State private var loadingChats: Set<Int64> = []
     @State private var filter = ""
+
+    private static let semaphore = AISemaphore(limit: 3)
 
     private var filteredGroups: [TGChat] {
         let groups = telegramService.groupChats
@@ -53,17 +80,7 @@ struct GroupDiscoveryView: View {
 
             // Group list
             if filteredGroups.isEmpty {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: "person.3")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.quaternary)
-                    Text("No groups found")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                EmptyStateView(icon: "person.3", title: "No groups found")
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
@@ -128,6 +145,25 @@ struct GroupDiscoveryView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .padding(.leading, 44)
+            } else if let error = summaryErrors[chat.id] {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                    Button {
+                        summaryErrors.removeValue(forKey: chat.id)
+                        Task { await loadSummary(for: chat) }
+                    } label: {
+                        Text("Retry")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.leading, 44)
             }
         }
         .padding(10)
@@ -149,17 +185,26 @@ struct GroupDiscoveryView: View {
     private func loadSummary(for chat: TGChat) async {
         guard aiService.isConfigured,
               summaries[chat.id] == nil,
+              summaryErrors[chat.id] == nil,
               !loadingChats.contains(chat.id) else { return }
 
         loadingChats.insert(chat.id)
-        defer { loadingChats.remove(chat.id) }
+
+        // Throttle: wait for a slot (max 3 concurrent AI calls)
+        await Self.semaphore.wait()
 
         do {
-            let messages = try await telegramService.getChatHistory(chatId: chat.id, limit: 20)
+            let messages = try await telegramService.getChatHistory(
+                chatId: chat.id,
+                limit: AppConstants.Fetch.groupSummaryPerChat
+            )
             let summary = try await aiService.summarizeGroup(messages: messages, chatTitle: chat.title)
             summaries[chat.id] = summary
         } catch {
-            print("[GroupDiscovery] Summary failed for \(chat.title): \(error)")
+            summaryErrors[chat.id] = "Summary failed"
         }
+
+        await Self.semaphore.signal()
+        loadingChats.remove(chat.id)
     }
 }

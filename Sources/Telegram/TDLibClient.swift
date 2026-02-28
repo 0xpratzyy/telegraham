@@ -5,6 +5,7 @@ enum TGError: LocalizedError {
     case clientNotInitialized
     case invalidResponse
     case authenticationRequired
+    case allChatsFailed
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +15,8 @@ enum TGError: LocalizedError {
             return "Invalid response from TDLib"
         case .authenticationRequired:
             return "Authentication required"
+        case .allChatsFailed:
+            return "Failed to fetch messages from all chats"
         }
     }
 }

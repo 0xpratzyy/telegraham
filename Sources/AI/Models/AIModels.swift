@@ -26,7 +26,7 @@ struct MessageSnippet: Codable {
     }
 
     /// Truncate an array of snippets to stay within ~4000 tokens (~16000 chars).
-    static func truncateToTokenBudget(_ snippets: [MessageSnippet], maxChars: Int = 16000) -> [MessageSnippet] {
+    static func truncateToTokenBudget(_ snippets: [MessageSnippet], maxChars: Int = AppConstants.AI.maxTokenBudgetChars) -> [MessageSnippet] {
         var totalChars = 0
         var result: [MessageSnippet] = []
         for snippet in snippets {
@@ -150,8 +150,8 @@ struct AIProviderConfig {
 
         var defaultModel: String {
             switch self {
-            case .claude: return "claude-sonnet-4-20250514"
-            case .openai: return "gpt-4o-mini"
+            case .claude: return AppConstants.AI.defaultClaudeModel
+            case .openai: return AppConstants.AI.defaultOpenAIModel
             case .none: return ""
             }
         }

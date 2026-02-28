@@ -16,6 +16,9 @@ protocol AIProvider {
 
     /// Generate a daily or weekly digest.
     func generateDigest(messages: [MessageSnippet], period: DigestPeriod) async throws -> DigestResult
+
+    /// Validates the API key by making a minimal request.
+    func testConnection() async throws -> Bool
 }
 
 // MARK: - DTOs for AI response parsing

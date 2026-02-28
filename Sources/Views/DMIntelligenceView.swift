@@ -51,39 +51,16 @@ struct DMIntelligenceView: View {
 
             // Content
             if isLoading {
-                VStack(spacing: 12) {
-                    Spacer()
-                    ProgressView()
-                    Text("Analyzing your DMs...")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                LoadingStateView(message: "Analyzing your DMs...")
             } else if let error = errorMessage {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.quaternary)
-                    Text(error)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                ErrorStateView(message: error) {
+                    Task { await loadCategorizedDMs() }
                 }
-                .frame(maxWidth: .infinity)
             } else if displayedMessages.isEmpty {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: "tray")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.quaternary)
-                    Text(selectedCategory == nil ? "No DMs to display" : "No messages in this category")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                EmptyStateView(
+                    icon: "tray",
+                    title: selectedCategory == nil ? "No DMs to display" : "No messages in this category"
+                )
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
@@ -191,7 +168,7 @@ struct DMIntelligenceView: View {
             if messages.isEmpty {
                 // Fall back to recent DMs
                 let recentDMs = try await telegramService.getRecentMessagesAcrossChats(
-                    chatIds: telegramService.dmChats.prefix(10).map(\.id),
+                    chatIds: telegramService.dmChats.prefix(AppConstants.Fetch.dmPerChat).map(\.id),
                     perChatLimit: 5
                 )
                 categorizedMessages = try await aiService.categorizedDMs(messages: recentDMs, chats: telegramService.dmChats)

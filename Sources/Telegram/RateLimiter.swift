@@ -11,7 +11,7 @@ actor RateLimiter {
     /// - Parameters:
     ///   - maxTokens: Maximum burst capacity
     ///   - refillRate: Tokens added per second
-    init(maxTokens: Double = 10, refillRate: Double = 5) {
+    init(maxTokens: Double = AppConstants.RateLimit.maxTokens, refillRate: Double = AppConstants.RateLimit.refillRate) {
         self.maxTokens = maxTokens
         self.refillRate = refillRate
         self.tokens = maxTokens

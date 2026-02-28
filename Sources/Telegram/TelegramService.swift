@@ -61,7 +61,7 @@ class TelegramService: ObservableObject {
         _ = try await client.setTdlibParameters(
             apiHash: apiHash,
             apiId: apiId,
-            applicationVersion: "1.0.0",
+            applicationVersion: AppConstants.App.version,
             databaseDirectory: dbPath,
             databaseEncryptionKey: Data(),
             deviceModel: "macOS",
@@ -215,6 +215,7 @@ class TelegramService: ObservableObject {
                 chats.append(tgChat)
                 sortChats()
             }
+            evictCacheIfNeeded()
 
         case .updateChatLastMessage(let msgUpdate):
             if let index = chats.firstIndex(where: { $0.id == msgUpdate.chatId }) {
@@ -419,13 +420,19 @@ class TelegramService: ObservableObject {
     /// Fetch recent messages from multiple chats
     func getRecentMessagesAcrossChats(chatIds: [Int64], perChatLimit: Int = 20) async throws -> [TGMessage] {
         var allMessages: [TGMessage] = []
+        var failCount = 0
         for chatId in chatIds {
             do {
                 let messages = try await getChatHistory(chatId: chatId, limit: perChatLimit)
                 allMessages.append(contentsOf: messages)
             } catch {
+                failCount += 1
                 print("[TelegramService] Failed to fetch history for chat \(chatId): \(error)")
             }
+        }
+        // Surface error if ALL chats failed instead of returning silent empty results
+        if allMessages.isEmpty && failCount == chatIds.count && !chatIds.isEmpty {
+            throw TGError.allChatsFailed
         }
         return allMessages.sorted { $0.date > $1.date }
     }
@@ -441,8 +448,28 @@ class TelegramService: ObservableObject {
     }
 
     /// Fetch recent messages from all active chats (for digest)
-    func getRecentMessagesForDigest(limit: Int = 10) async throws -> [TGMessage] {
-        let activeChatIds = chats.prefix(20).map(\.id)
-        return try await getRecentMessagesAcrossChats(chatIds: Array(activeChatIds), perChatLimit: limit)
+    func getRecentMessagesForDigest(limit: Int = 10, since: Foundation.Date? = nil) async throws -> [TGMessage] {
+        let activeChatIds = chats.prefix(AppConstants.Fetch.digestChatCount).map(\.id)
+        var messages = try await getRecentMessagesAcrossChats(chatIds: Array(activeChatIds), perChatLimit: limit)
+        if let since {
+            messages = messages.filter { $0.date >= since }
+        }
+        return messages
+    }
+
+    // MARK: - Cache Management
+
+    /// Trims user and chat caches when they exceed configured maximum sizes.
+    private func evictCacheIfNeeded() {
+        if userCache.count > AppConstants.Cache.maxUserCacheSize {
+            let excess = userCache.count - AppConstants.Cache.maxUserCacheSize
+            let keysToRemove = Array(userCache.keys.prefix(excess))
+            for key in keysToRemove { userCache.removeValue(forKey: key) }
+        }
+        if chatCache.count > AppConstants.Cache.maxChatCacheSize {
+            let excess = chatCache.count - AppConstants.Cache.maxChatCacheSize
+            let keysToRemove = Array(chatCache.keys.prefix(excess))
+            for key in keysToRemove { chatCache.removeValue(forKey: key) }
+        }
     }
 }

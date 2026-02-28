@@ -13,6 +13,8 @@ struct SettingsView: View {
     @State private var aiApiKey = ""
     @State private var aiModel = ""
     @State private var aiSaveStatus: String?
+    @State private var isTestingConnection = false
+    @State private var testConnectionResult: String?
 
     var body: some View {
         TabView {
@@ -160,6 +162,24 @@ struct SettingsView: View {
                                 .foregroundColor(status.contains("Error") ? .red : .green)
                         }
                     }
+
+                    HStack {
+                        Button("Test Connection") {
+                            Task { await testConnection() }
+                        }
+                        .disabled(isTestingConnection || aiApiKey.isEmpty)
+
+                        if isTestingConnection {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+
+                        if let result = testConnectionResult {
+                            Text(result)
+                                .font(.system(size: 12))
+                                .foregroundColor(result.contains("✓") ? .green : .red)
+                        }
+                    }
                 }
             } header: {
                 Text("AI Provider")
@@ -182,7 +202,6 @@ struct SettingsView: View {
                     }
                 }
 
-                Toggle("Show AI preview before sending", isOn: $aiService.showAIPreview)
             } header: {
                 Text("Privacy")
             } footer: {
@@ -240,7 +259,7 @@ struct SettingsView: View {
             Text("TGSearch")
                 .font(.system(size: 20, weight: .bold, design: .monospaced))
 
-            Text("Version 1.0.0")
+            Text("Version \(AppConstants.App.version)")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
 
@@ -300,6 +319,27 @@ struct SettingsView: View {
         }
     }
 
+    private func testConnection() async {
+        isTestingConnection = true
+        testConnectionResult = nil
+        defer { isTestingConnection = false }
+
+        // Save config first to ensure provider is up to date
+        saveAIConfig()
+
+        do {
+            let success = try await aiService.testConnection()
+            testConnectionResult = success ? "✓ Connection successful" : "✗ Test failed"
+        } catch {
+            testConnectionResult = "✗ \(error.localizedDescription)"
+        }
+
+        // Clear result after 5 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            testConnectionResult = nil
+        }
+    }
+
     private func deleteAllData() {
         try? KeychainManager.delete(for: .apiId)
         try? KeychainManager.delete(for: .apiHash)
@@ -329,7 +369,6 @@ struct SettingsView: View {
         case .loggingOut: return "Logging out..."
         case .closing: return "Closing..."
         case .closed: return "Disconnected"
-        case .waitingForRegistration: return "Registration needed"
         }
     }
 }

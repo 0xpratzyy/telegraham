@@ -43,9 +43,6 @@ struct AuthView: View {
                 case .closed:
                     Text("Session closed")
                         .foregroundStyle(.secondary)
-                case .waitingForRegistration:
-                    Text("Registration required. Please register in the Telegram app first.")
-                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 32)

@@ -6,6 +6,7 @@ struct ChatHistoryView: View {
     @State private var messages: [TGMessage] = []
     @State private var isLoading = false
     @State private var searchQuery = ""
+    @State private var errorMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -78,23 +79,13 @@ struct ChatHistoryView: View {
 
             // Messages
             if isLoading {
-                VStack(spacing: 12) {
-                    ProgressView()
-                    Text("Loading messages...")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+                LoadingStateView(message: "Loading messages...")
+            } else if let error = errorMessage {
+                ErrorStateView(message: error) {
+                    Task { await loadHistory() }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if messages.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "message")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.quaternary)
-                    Text("No messages found")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(icon: "message", title: "No messages found")
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
@@ -116,12 +107,13 @@ struct ChatHistoryView: View {
 
     private func loadHistory() async {
         isLoading = true
+        errorMessage = nil
         defer { isLoading = false }
 
         do {
-            messages = try await telegramService.getChatHistory(chatId: chat.id, limit: 50)
+            messages = try await telegramService.getChatHistory(chatId: chat.id, limit: AppConstants.Fetch.chatHistoryLimit)
         } catch {
-            print("[ChatHistory] Error: \(error)")
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -132,12 +124,13 @@ struct ChatHistoryView: View {
         }
 
         isLoading = true
+        errorMessage = nil
         defer { isLoading = false }
 
         do {
             messages = try await telegramService.searchChatMessages(chatId: chat.id, query: searchQuery)
         } catch {
-            print("[ChatHistory] Search error: \(error)")
+            errorMessage = error.localizedDescription
         }
     }
 }

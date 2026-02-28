@@ -44,24 +44,12 @@ struct ChatListView: View {
 
             // Chat list
             if telegramService.isLoading && telegramService.chats.isEmpty {
-                VStack(spacing: 12) {
-                    ProgressView()
-                        .controlSize(.regular)
-                    Text("Loading chats...")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                LoadingStateView(message: "Loading chats...")
             } else if filteredChats.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "tray")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.quaternary)
-                    Text(filterText.isEmpty ? "No chats found" : "No matches for \"\(filterText)\"")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    icon: "tray",
+                    title: filterText.isEmpty ? "No chats found" : "No matches for \"\(filterText)\""
+                )
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {

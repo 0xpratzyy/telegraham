@@ -46,30 +46,11 @@ struct DigestView: View {
 
             // Content
             if isLoading {
-                VStack(spacing: 12) {
-                    Spacer()
-                    ProgressView()
-                    Text("Generating your \(selectedPeriod.rawValue.lowercased()) digest...")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                LoadingStateView(message: "Generating your \(selectedPeriod.rawValue.lowercased()) digest...")
             } else if let error = errorMessage {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.quaternary)
-                    Text(error)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Button("Try Again") {
-                        Task { await generateDigest() }
-                    }
-                    Spacer()
+                ErrorStateView(message: error) {
+                    Task { await generateDigest() }
                 }
-                .frame(maxWidth: .infinity)
             } else if let digestResult = digest {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: 8) {
@@ -159,8 +140,13 @@ struct DigestView: View {
         defer { isLoading = false }
 
         do {
-            let limit = selectedPeriod == .daily ? 10 : 20
-            let messages = try await telegramService.getRecentMessagesForDigest(limit: limit)
+            let limit = selectedPeriod == .daily
+                ? AppConstants.Fetch.digestDailyPerChat
+                : AppConstants.Fetch.digestWeeklyPerChat
+            let since = selectedPeriod == .daily
+                ? Calendar.current.date(byAdding: .day, value: -1, to: Date())!
+                : Calendar.current.date(byAdding: .day, value: -7, to: Date())!
+            let messages = try await telegramService.getRecentMessagesForDigest(limit: limit, since: since)
             digest = try await aiService.generateDigest(messages: messages, period: selectedPeriod)
         } catch {
             errorMessage = error.localizedDescription

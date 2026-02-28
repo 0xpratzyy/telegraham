@@ -8,7 +8,7 @@ final class NoAIProvider: AIProvider {
     }
 
     func classify(query: String) async throws -> QueryIntent {
-        return .messageSearch
+        throw AIError.providerNotConfigured
     }
 
     func categorize(messages: [MessageSnippet]) async throws -> [CategorizedMessageDTO] {
@@ -20,6 +20,10 @@ final class NoAIProvider: AIProvider {
     }
 
     func generateDigest(messages: [MessageSnippet], period: DigestPeriod) async throws -> DigestResult {
+        throw AIError.providerNotConfigured
+    }
+
+    func testConnection() async throws -> Bool {
         throw AIError.providerNotConfigured
     }
 }

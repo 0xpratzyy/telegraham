@@ -7,8 +7,6 @@ import SwiftUI
 final class AIService: ObservableObject {
     @Published var isConfigured = false
     @Published var providerType: AIProviderConfig.ProviderType = .none
-    @Published var showAIPreview = false
-
     private(set) var provider: AIProvider = NoAIProvider()
     let queryRouter: QueryRouter
 
@@ -94,9 +92,9 @@ final class AIService: ObservableObject {
         return try await provider.generateDigest(messages: snippets, period: period)
     }
 
-    /// Get the current snippets that would be sent to AI (for preview mode).
-    func previewSnippets(from messages: [TGMessage]) -> [MessageSnippet] {
-        MessageSnippet.truncateToTokenBudget(MessageSnippet.fromMessages(messages))
+    /// Validates AI provider connection by making a minimal test request.
+    func testConnection() async throws -> Bool {
+        return try await provider.testConnection()
     }
 
     // MARK: - Persistence

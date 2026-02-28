@@ -1,0 +1,48 @@
+import Foundation
+
+/// Centralized constants for the TGSearch app.
+enum AppConstants {
+    enum Panel {
+        static let width: CGFloat = 680
+        static let height: CGFloat = 520
+        static let topOffsetRatio: CGFloat = 0.15
+    }
+
+    enum RateLimit {
+        static let maxTokens: Double = 10
+        static let refillRate: Double = 5
+    }
+
+    enum Fetch {
+        static let chatListLimit = 100
+        static let chatHistoryLimit = 50
+        static let searchLimit = 50
+        static let digestChatCount = 20
+        static let digestDailyPerChat = 10
+        static let digestWeeklyPerChat = 20
+        static let actionItemChatCount = 15
+        static let actionItemPerChat = 15
+        static let dmPerChat = 10
+        static let groupSummaryPerChat = 20
+    }
+
+    enum AI {
+        static let claudeBaseURL = URL(string: "https://api.anthropic.com/v1/messages")!
+        static let openAIBaseURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        static let claudeAPIVersion = "2023-06-01"
+        static let defaultClaudeModel = "claude-sonnet-4-20250514"
+        static let defaultOpenAIModel = "gpt-4o-mini"
+        static let maxResponseTokens = 4096
+        static let maxTokenBudgetChars = 16000
+        static let requestTimeoutSeconds: TimeInterval = 90
+    }
+
+    enum Cache {
+        static let maxUserCacheSize = 500
+        static let maxChatCacheSize = 200
+    }
+
+    enum App {
+        static let version = "1.0.0"
+    }
+}

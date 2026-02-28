@@ -38,8 +38,6 @@ struct TGMessage: Identifiable, Equatable {
     }
 
     var relativeDate: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        DateFormatting.compactRelativeTime(from: date)
     }
 }

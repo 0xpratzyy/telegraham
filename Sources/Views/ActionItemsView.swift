@@ -30,42 +30,17 @@ struct ActionItemsView: View {
 
             // Content
             if isLoading {
-                VStack(spacing: 12) {
-                    Spacer()
-                    ProgressView()
-                    Text("Finding items needing your attention...")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                LoadingStateView(message: "Finding items needing your attention...")
             } else if let error = errorMessage {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.quaternary)
-                    Text(error)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                ErrorStateView(message: error) {
+                    Task { await loadActionItems() }
                 }
-                .frame(maxWidth: .infinity)
             } else if items.isEmpty {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: "checkmark.circle")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.green.opacity(0.5))
-                    Text("All caught up!")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text("No conversations need your attention right now")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                EmptyStateView(
+                    icon: "checkmark.circle",
+                    title: "All caught up!",
+                    subtitle: "No conversations need your attention right now"
+                )
             } else {
                 ScrollView {
                     LazyVStack(spacing: 6) {
@@ -116,8 +91,8 @@ struct ActionItemsView: View {
 
         do {
             let messages = try await telegramService.getRecentMessagesAcrossChats(
-                chatIds: telegramService.chats.prefix(15).map(\.id),
-                perChatLimit: 15
+                chatIds: telegramService.chats.prefix(AppConstants.Fetch.actionItemChatCount).map(\.id),
+                perChatLimit: AppConstants.Fetch.actionItemPerChat
             )
             items = try await aiService.actionItems(messages: messages)
             // Sort by urgency: high first

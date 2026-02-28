@@ -12,11 +12,6 @@ enum DeepLinkGenerator {
         URL(string: "tg://openmessage?chat_id=\(chatId)&message_id=\(messageId)")
     }
 
-    /// Opens a user profile by username
-    static func userURL(username: String) -> URL? {
-        URL(string: "tg://resolve?domain=\(username)")
-    }
-
     /// Opens a URL in the default application (Telegram)
     static func openInTelegram(_ url: URL) {
         NSWorkspace.shared.open(url)

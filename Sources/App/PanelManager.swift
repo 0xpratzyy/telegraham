@@ -76,10 +76,10 @@ final class PanelManager {
         // Center on the active screen, upper third
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            let panelWidth: CGFloat = 680
-            let panelHeight: CGFloat = 520
+            let panelWidth = AppConstants.Panel.width
+            let panelHeight = AppConstants.Panel.height
             let x = screenFrame.midX - panelWidth / 2
-            let y = screenFrame.maxY - panelHeight - screenFrame.height * 0.15
+            let y = screenFrame.maxY - panelHeight - screenFrame.height * AppConstants.Panel.topOffsetRatio
             panel.setFrame(NSRect(x: x, y: y, width: panelWidth, height: panelHeight), display: true)
         }
 
@@ -89,7 +89,7 @@ final class PanelManager {
 
     private func createPanel() {
         let panel = FloatingPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: AppConstants.Panel.width, height: AppConstants.Panel.height),
             styleMask: [],
             backing: .buffered,
             defer: false
