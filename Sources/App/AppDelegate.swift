@@ -12,6 +12,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panelManager = PanelManager(telegramService: telegramService, aiService: aiService)
+        panelManager?.onOpenSettings = { [weak self] in self?.openSettings() }
 
         menuBarManager = MenuBarManager(
             onTogglePanel: { [weak self] in self?.panelManager?.toggle() },

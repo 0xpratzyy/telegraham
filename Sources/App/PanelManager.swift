@@ -1,6 +1,16 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Keyboard Navigation Notifications
+
+extension Notification.Name {
+    static let launcherArrowDown = Notification.Name("launcherArrowDown")
+    static let launcherArrowUp = Notification.Name("launcherArrowUp")
+    static let launcherEnter = Notification.Name("launcherEnter")
+}
+
+// MARK: - Floating Panel
+
 final class FloatingPanel: NSPanel {
     override init(
         contentRect: NSRect,
@@ -40,18 +50,28 @@ final class FloatingPanel: NSPanel {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { // Escape
+        switch event.keyCode {
+        case 53: // Escape
             orderOut(nil)
-        } else {
+        case 125: // Arrow Down
+            NotificationCenter.default.post(name: .launcherArrowDown, object: nil)
+        case 126: // Arrow Up
+            NotificationCenter.default.post(name: .launcherArrowUp, object: nil)
+        case 36: // Enter / Return
+            NotificationCenter.default.post(name: .launcherEnter, object: nil)
+        default:
             super.keyDown(with: event)
         }
     }
 }
 
+// MARK: - Panel Manager
+
 final class PanelManager {
     private var panel: FloatingPanel?
     private let telegramService: TelegramService
     private let aiService: AIService
+    var onOpenSettings: (() -> Void)?
 
     init(telegramService: TelegramService, aiService: AIService) {
         self.telegramService = telegramService
@@ -102,7 +122,9 @@ final class PanelManager {
         visualEffectView.state = .active
 
         let hostingView = NSHostingView(
-            rootView: MainPanelView()
+            rootView: LauncherView(onOpenSettings: { [weak self] in
+                    self?.onOpenSettings?()
+                })
                 .environmentObject(telegramService)
                 .environmentObject(aiService)
         )

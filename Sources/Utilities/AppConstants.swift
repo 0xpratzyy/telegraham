@@ -3,9 +3,9 @@ import Foundation
 /// Centralized constants for the TGSearch app.
 enum AppConstants {
     enum Panel {
-        static let width: CGFloat = 680
-        static let height: CGFloat = 520
-        static let topOffsetRatio: CGFloat = 0.15
+        static let width: CGFloat = 640
+        static let height: CGFloat = 480
+        static let topOffsetRatio: CGFloat = 0.12
     }
 
     enum RateLimit {
