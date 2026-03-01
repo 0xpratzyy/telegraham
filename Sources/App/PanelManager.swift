@@ -115,11 +115,11 @@ final class PanelManager {
             defer: false
         )
 
-        // NSVisualEffectView for translucent glass background
-        let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = .hudWindow
-        visualEffectView.blendingMode = .behindWindow
-        visualEffectView.state = .active
+        // Solid dark background — no glassmorphism
+        let containerView = NSView()
+        containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0).cgColor
+        containerView.layer?.cornerRadius = 12
 
         let hostingView = NSHostingView(
             rootView: LauncherView(onOpenSettings: { [weak self] in
@@ -130,15 +130,15 @@ final class PanelManager {
         )
         hostingView.translatesAutoresizingMaskIntoConstraints = false
 
-        visualEffectView.addSubview(hostingView)
+        containerView.addSubview(hostingView)
         NSLayoutConstraint.activate([
-            hostingView.topAnchor.constraint(equalTo: visualEffectView.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: visualEffectView.bottomAnchor),
-            hostingView.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: containerView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
         ])
 
-        panel.contentView = visualEffectView
+        panel.contentView = containerView
         self.panel = panel
     }
 }

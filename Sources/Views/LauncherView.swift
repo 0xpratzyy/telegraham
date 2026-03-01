@@ -337,7 +337,7 @@ struct LauncherView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
+        .background(Color.clear)
     }
 
     // MARK: - Filter Tags
@@ -359,43 +359,22 @@ struct LauncherView: View {
 
     private var filterTags: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 5) {
+            HStack(spacing: 2) {
                 ForEach(Filter.allCases, id: \.self) { filter in
                     Button {
                         activeFilter = filter
                     } label: {
-                        HStack(spacing: 3) {
-                            if let icon = filter.icon {
-                                Image(systemName: icon)
-                                    .font(.system(size: 9))
-                            }
-                            Text(filterLabel(for: filter))
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .foregroundStyle(activeFilter == filter ? .primary : .secondary)
-                        .background {
-                            if activeFilter == filter {
-                                Capsule().fill(Color.accentColor.opacity(0.15))
-                            }
-                        }
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(
-                                    activeFilter == filter
-                                        ? Color.clear
-                                        : Color.secondary.opacity(0.2),
-                                    lineWidth: 0.5
-                                )
-                        )
+                        Text(filterLabel(for: filter))
+                            .font(.system(size: 11, weight: activeFilter == filter ? .semibold : .regular))
+                            .foregroundStyle(activeFilter == filter ? .primary : .tertiary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
         }
     }
 
