@@ -8,6 +8,8 @@ struct TGChat: Identifiable, Equatable {
     let lastMessage: TGMessage?
     let memberCount: Int?
     let order: Int64
+    let isInMainList: Bool
+    let smallPhotoFileId: Int?
 
     enum ChatType: Equatable {
         case privateChat(userId: Int64)
@@ -24,11 +26,18 @@ struct TGChat: Identifiable, Equatable {
             }
         }
 
+        /// Basic groups + supergroups (not channels)
         var isGroup: Bool {
             switch self {
-            case .basicGroup, .supergroup: return true
+            case .basicGroup: return true
+            case .supergroup(_, let isChannel): return !isChannel
             default: return false
             }
+        }
+
+        var isChannel: Bool {
+            if case .supergroup(_, let ch) = self { return ch }
+            return false
         }
 
         var isPrivate: Bool {

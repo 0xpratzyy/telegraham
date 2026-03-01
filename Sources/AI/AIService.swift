@@ -37,32 +37,7 @@ final class AIService: ObservableObject {
 
     // MARK: - High-Level AI Operations
 
-    func summarizeGroup(messages: [TGMessage], chatTitle: String) async throws -> String {
-        let snippets = MessageSnippet.fromMessages(messages, chatTitle: chatTitle)
-        guard !snippets.isEmpty else { return "No recent activity" }
-        return try await provider.summarize(messages: snippets, prompt: "")
-    }
-
-    func categorizedDMs(messages: [TGMessage], chats: [TGChat]) async throws -> [CategorizedMessage] {
-        let snippets = MessageSnippet.fromMessages(messages)
-        guard !snippets.isEmpty else { return [] }
-
-        let dtos = try await provider.categorize(messages: snippets)
-
-        return dtos.compactMap { dto in
-            guard dto.index >= 0, dto.index < messages.count else { return nil }
-            let msg = messages[dto.index]
-            let category = DMCategory(rawValue: dto.category) ?? .fyi
-            return CategorizedMessage(
-                id: msg.id,
-                message: msg,
-                category: category,
-                reason: dto.reason,
-                chatTitle: msg.chatTitle ?? "DM"
-            )
-        }
-    }
-
+    /// Generate prioritized action items (used by Priority tab).
     func actionItems(messages: [TGMessage]) async throws -> [ActionItem] {
         let snippets = MessageSnippet.fromMessages(messages)
         guard !snippets.isEmpty else { return [] }
@@ -82,14 +57,33 @@ final class AIService: ObservableObject {
         }
     }
 
-    func generateDigest(messages: [TGMessage], period: DigestPeriod) async throws -> DigestResult {
+    /// Semantic search: find chats relevant to a query by analyzing messages.
+    func semanticSearch(query: String, messages: [TGMessage]) async throws -> [SemanticSearchResult] {
         let snippets = MessageSnippet.fromMessages(messages)
-        guard !snippets.isEmpty else {
-            return DigestResult(period: period, sections: [
-                DigestSection(emoji: "📭", title: "All Quiet", content: "- No significant activity to report")
-            ], generatedAt: Date())
+        guard !snippets.isEmpty else { return [] }
+        let dtos = try await provider.semanticSearch(query: query, messages: snippets)
+        return dtos.map {
+            SemanticSearchResult(
+                chatTitle: $0.chatName,
+                reason: $0.reason,
+                relevance: $0.relevance == "high" ? .high : .medium,
+                matchingMessages: $0.matchingMessages ?? []
+            )
         }
-        return try await provider.generateDigest(messages: snippets, period: period)
+    }
+
+    /// Generate a follow-up suggestion for a conversation. Marks the user's own messages with [ME].
+    /// Returns (isRelevant, suggestedAction). AI decides if the chat is BD-relevant.
+    func followUpSuggestion(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> (Bool, String) {
+        let snippets = messages.compactMap { msg -> MessageSnippet? in
+            guard let text = msg.textContent, !text.isEmpty else { return nil }
+            let isMe: Bool
+            if case .user(let uid) = msg.senderId { isMe = uid == myUserId } else { isMe = false }
+            let name = isMe ? "[ME]" : (msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown")
+            return MessageSnippet(senderFirstName: name, text: text, relativeTimestamp: msg.relativeDate, chatName: chatTitle)
+        }
+        guard !snippets.isEmpty else { return (true, "") }
+        return try await provider.generateFollowUpSuggestion(chatTitle: chatTitle, messages: snippets)
     }
 
     /// Validates AI provider connection by making a minimal test request.

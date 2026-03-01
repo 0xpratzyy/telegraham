@@ -5,30 +5,21 @@ protocol AIProvider {
     /// Summarize a group's recent activity in 1-2 lines.
     func summarize(messages: [MessageSnippet], prompt: String) async throws -> String
 
-    /// Classify a user query into an intent.
-    func classify(query: String) async throws -> QueryIntent
-
-    /// Categorize DM messages into buckets (Needs Reply, FYI, Resolved, Business).
-    func categorize(messages: [MessageSnippet]) async throws -> [CategorizedMessageDTO]
-
-    /// Generate prioritized action items from messages.
+    /// Generate prioritized action items from messages (used by Priority tab).
     func generateActionItems(messages: [MessageSnippet]) async throws -> [ActionItemDTO]
 
-    /// Generate a daily or weekly digest.
-    func generateDigest(messages: [MessageSnippet], period: DigestPeriod) async throws -> DigestResult
+    /// Semantic search: find chats relevant to a topic/concept.
+    func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO]
+
+    /// Generate a follow-up suggestion for a single chat conversation.
+    /// Returns (isRelevant, suggestedAction). If not relevant, the chat should be removed from pipeline.
+    func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String)
 
     /// Validates the API key by making a minimal request.
     func testConnection() async throws -> Bool
 }
 
 // MARK: - DTOs for AI response parsing
-
-/// Wire format for categorized messages returned by AI.
-struct CategorizedMessageDTO: Codable {
-    let index: Int
-    let category: String
-    let reason: String
-}
 
 /// Wire format for action items returned by AI.
 struct ActionItemDTO: Codable {
@@ -37,4 +28,18 @@ struct ActionItemDTO: Codable {
     let summary: String
     let suggestedAction: String
     let urgency: String
+}
+
+/// Wire format for follow-up suggestion returned by AI.
+struct FollowUpSuggestionDTO: Codable {
+    let relevant: Bool?
+    let suggestedAction: String
+}
+
+/// Wire format for semantic search results returned by AI.
+struct SemanticSearchResultDTO: Codable {
+    let chatName: String
+    let reason: String
+    let relevance: String
+    let matchingMessages: [String]?
 }

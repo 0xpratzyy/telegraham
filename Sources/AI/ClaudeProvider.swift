@@ -25,28 +25,6 @@ final class ClaudeProvider: AIProvider {
         }
     }
 
-    func classify(query: String) async throws -> QueryIntent {
-        let response = try await RetryHelper.withRetry {
-            try await self.makeRequest(
-                systemPrompt: ClassifyPrompt.systemPrompt,
-                userMessage: ClassifyPrompt.userMessage(query: query)
-            )
-        }
-        let cleaned = response.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return QueryIntent(rawValue: cleaned) ?? .messageSearch
-    }
-
-    func categorize(messages: [MessageSnippet]) async throws -> [CategorizedMessageDTO] {
-        let snippets = MessageSnippet.truncateToTokenBudget(messages)
-        let response = try await RetryHelper.withRetry {
-            try await self.makeRequest(
-                systemPrompt: CategorizationPrompt.systemPrompt,
-                userMessage: CategorizationPrompt.userMessage(snippets: snippets)
-            )
-        }
-        return try JSONExtractor.parseJSON(response)
-    }
-
     func generateActionItems(messages: [MessageSnippet]) async throws -> [ActionItemDTO] {
         let snippets = MessageSnippet.truncateToTokenBudget(messages)
         let response = try await RetryHelper.withRetry {
@@ -58,15 +36,27 @@ final class ClaudeProvider: AIProvider {
         return try JSONExtractor.parseJSON(response)
     }
 
-    func generateDigest(messages: [MessageSnippet], period: DigestPeriod) async throws -> DigestResult {
+    func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
         let snippets = MessageSnippet.truncateToTokenBudget(messages)
         let response = try await RetryHelper.withRetry {
             try await self.makeRequest(
-                systemPrompt: DigestPrompt.systemPrompt(period: period),
-                userMessage: DigestPrompt.userMessage(snippets: snippets)
+                systemPrompt: SemanticSearchPrompt.systemPrompt,
+                userMessage: SemanticSearchPrompt.userMessage(query: query, snippets: snippets)
             )
         }
-        return try DigestPrompt.parseResponse(response, period: period)
+        return try JSONExtractor.parseJSON(response)
+    }
+
+    func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
+        let snippets = MessageSnippet.truncateToTokenBudget(messages, maxChars: 4000)
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: FollowUpPrompt.systemPrompt,
+                userMessage: FollowUpPrompt.userMessage(chatTitle: chatTitle, snippets: snippets)
+            )
+        }
+        let dto: FollowUpSuggestionDTO = try JSONExtractor.parseJSON(response)
+        return (dto.relevant ?? true, dto.suggestedAction)
     }
 
     func testConnection() async throws -> Bool {

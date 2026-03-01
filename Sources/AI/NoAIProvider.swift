@@ -7,20 +7,16 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
-    func classify(query: String) async throws -> QueryIntent {
-        throw AIError.providerNotConfigured
-    }
-
-    func categorize(messages: [MessageSnippet]) async throws -> [CategorizedMessageDTO] {
-        throw AIError.providerNotConfigured
-    }
-
     func generateActionItems(messages: [MessageSnippet]) async throws -> [ActionItemDTO] {
         throw AIError.providerNotConfigured
     }
 
-    func generateDigest(messages: [MessageSnippet], period: DigestPeriod) async throws -> DigestResult {
+    func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
         throw AIError.providerNotConfigured
+    }
+
+    func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
+        return (true, "")
     }
 
     func testConnection() async throws -> Bool {

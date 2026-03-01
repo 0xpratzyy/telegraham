@@ -42,49 +42,11 @@ struct MessageSnippet: Codable {
 // MARK: - Query Intent
 
 enum QueryIntent: String, Codable {
-    case groupDiscovery = "group_discovery"
-    case dmIntelligence = "dm_intelligence"
-    case actionItems = "action_items"
-    case digest = "digest"
     case messageSearch = "message_search"
+    case semanticSearch = "semantic_search"
 }
 
-// MARK: - DM Categorization
-
-enum DMCategory: String, CaseIterable, Codable {
-    case needsReply = "Needs Reply"
-    case fyi = "FYI"
-    case resolved = "Resolved"
-    case business = "Business"
-
-    var icon: String {
-        switch self {
-        case .needsReply: return "exclamationmark.bubble"
-        case .fyi: return "info.circle"
-        case .resolved: return "checkmark.circle"
-        case .business: return "briefcase"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .needsReply: return .red
-        case .fyi: return .blue
-        case .resolved: return .green
-        case .business: return .orange
-        }
-    }
-}
-
-struct CategorizedMessage: Identifiable {
-    let id: Int64
-    let message: TGMessage
-    let category: DMCategory
-    let reason: String
-    let chatTitle: String
-}
-
-// MARK: - Action Items
+// MARK: - Action Items (used by Priority tab)
 
 struct ActionItem: Identifiable {
     let id = UUID()
@@ -116,24 +78,25 @@ struct ActionItem: Identifiable {
     }
 }
 
-// MARK: - Digest
+// MARK: - Semantic Search
 
-enum DigestPeriod: String, CaseIterable {
-    case daily = "Daily"
-    case weekly = "Weekly"
-}
-
-struct DigestSection: Identifiable {
+struct SemanticSearchResult: Identifiable {
     let id = UUID()
-    let emoji: String
-    let title: String
-    let content: String
-}
+    let chatTitle: String
+    let reason: String
+    let relevance: Relevance
+    let matchingMessages: [String]
 
-struct DigestResult {
-    let period: DigestPeriod
-    let sections: [DigestSection]
-    let generatedAt: Date
+    enum Relevance: String {
+        case high, medium
+
+        var color: Color {
+            switch self {
+            case .high: return .purple
+            case .medium: return .blue
+            }
+        }
+    }
 }
 
 // MARK: - AI Configuration

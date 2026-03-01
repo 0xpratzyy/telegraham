@@ -128,6 +128,21 @@ class TelegramService: ObservableObject {
         return tgChat
     }
 
+    // MARK: - File Downloads (read-only)
+
+    /// Download a file by ID and return the local path once complete.
+    func downloadFile(fileId: Int) async throws -> String {
+        guard let client else { throw TGError.clientNotInitialized }
+        let file = try await client.downloadFile(
+            fileId: fileId,
+            limit: 0,
+            offset: 0,
+            priority: 16,
+            synchronous: true
+        )
+        return file.local.path
+    }
+
     // MARK: - Message History (read-only)
 
     func getChatHistory(chatId: Int64, fromMessageId: Int64 = 0, limit: Int = 50, onlyLocal: Bool = false) async throws -> [TGMessage] {
@@ -220,6 +235,16 @@ class TelegramService: ObservableObject {
         case .updateChatLastMessage(let msgUpdate):
             if let index = chats.firstIndex(where: { $0.id == msgUpdate.chatId }) {
                 let lastMsg = msgUpdate.lastMessage.map { mapMessage($0) }
+                // Preserve existing order/mainList if positions is empty (only message changed)
+                let newOrder = msgUpdate.positions.isEmpty
+                    ? chats[index].order
+                    : extractOrder(from: msgUpdate.positions)
+                let inMainList = msgUpdate.positions.isEmpty
+                    ? chats[index].isInMainList
+                    : msgUpdate.positions.contains(where: {
+                        if case .chatListMain = $0.list { return true }
+                        return false
+                    })
                 let updated = TGChat(
                     id: chats[index].id,
                     title: chats[index].title,
@@ -227,11 +252,55 @@ class TelegramService: ObservableObject {
                     unreadCount: chats[index].unreadCount,
                     lastMessage: lastMsg,
                     memberCount: chats[index].memberCount,
-                    order: extractOrder(from: msgUpdate.positions)
+                    order: newOrder,
+                    isInMainList: inMainList,
+                    smallPhotoFileId: chats[index].smallPhotoFileId
                 )
                 chats[index] = updated
                 chatCache[updated.id] = updated
                 sortChats()
+            }
+
+        case .updateChatPosition(let posUpdate):
+            if let index = chats.firstIndex(where: { $0.id == posUpdate.chatId }) {
+                let chat = chats[index]
+                if case .chatListMain = posUpdate.position.list {
+                    let newOrder = posUpdate.position.order.rawValue
+                    let updated = TGChat(
+                        id: chat.id,
+                        title: chat.title,
+                        chatType: chat.chatType,
+                        unreadCount: chat.unreadCount,
+                        lastMessage: chat.lastMessage,
+                        memberCount: chat.memberCount,
+                        order: newOrder,
+                        isInMainList: newOrder > 0,
+                        smallPhotoFileId: chat.smallPhotoFileId
+                    )
+                    chats[index] = updated
+                    chatCache[updated.id] = updated
+                    sortChats()
+                }
+            }
+
+        case .updateChatRemovedFromList(let removedUpdate):
+            if case .chatListMain = removedUpdate.chatList {
+                if let index = chats.firstIndex(where: { $0.id == removedUpdate.chatId }) {
+                    let chat = chats[index]
+                    let updated = TGChat(
+                        id: chat.id,
+                        title: chat.title,
+                        chatType: chat.chatType,
+                        unreadCount: chat.unreadCount,
+                        lastMessage: chat.lastMessage,
+                        memberCount: chat.memberCount,
+                        order: 0,
+                        isInMainList: false,
+                        smallPhotoFileId: chat.smallPhotoFileId
+                    )
+                    chats[index] = updated
+                    chatCache[updated.id] = updated
+                }
             }
 
         case .updateChatReadInbox(let readUpdate):
@@ -244,7 +313,9 @@ class TelegramService: ObservableObject {
                     unreadCount: readUpdate.unreadCount,
                     lastMessage: chat.lastMessage,
                     memberCount: chat.memberCount,
-                    order: chat.order
+                    order: chat.order,
+                    isInMainList: chat.isInMainList,
+                    smallPhotoFileId: chat.smallPhotoFileId
                 )
                 chatCache[chat.id] = chats[index]
             }
@@ -317,6 +388,15 @@ class TelegramService: ObservableObject {
 
         let lastMsg = chat.lastMessage.map { mapMessage($0) }
         let order = extractOrder(from: chat.positions)
+        // Default to true: we only load chatListMain, so newly received chats
+        // are assumed to be in the main list. Only updateChatPosition(order=0) or
+        // updateChatRemovedFromList will set this to false.
+        let isInMain = chat.positions.isEmpty
+            ? true
+            : chat.positions.contains(where: {
+                if case .chatListMain = $0.list { return $0.order.rawValue > 0 }
+                return false
+            })
 
         return TGChat(
             id: chat.id,
@@ -325,7 +405,9 @@ class TelegramService: ObservableObject {
             unreadCount: chat.unreadCount,
             lastMessage: lastMsg,
             memberCount: nil,
-            order: order
+            order: order,
+            isInMainList: isInMain,
+            smallPhotoFileId: chat.photo?.small.id
         )
     }
 
@@ -405,16 +487,11 @@ class TelegramService: ObservableObject {
         }
     }
 
-    // MARK: - AI Helper Methods
+    // MARK: - Filtered Chat Lists
 
-    /// All group chats (basic groups + supergroups that aren't channels)
-    var groupChats: [TGChat] {
-        chats.filter { $0.chatType.isGroup }
-    }
-
-    /// All DM / private chats
-    var dmChats: [TGChat] {
-        chats.filter { $0.chatType.isPrivate }
+    /// Chats in the main list (excludes archived chats)
+    var visibleChats: [TGChat] {
+        chats.filter { $0.isInMainList }
     }
 
     /// Fetch recent messages from multiple chats
@@ -435,26 +512,6 @@ class TelegramService: ObservableObject {
             throw TGError.allChatsFailed
         }
         return allMessages.sorted { $0.date > $1.date }
-    }
-
-    /// Fetch unread DM messages
-    func getUnreadDMs() async throws -> [TGMessage] {
-        let unreadDMChats = dmChats.filter { $0.unreadCount > 0 }
-        guard !unreadDMChats.isEmpty else { return [] }
-        return try await getRecentMessagesAcrossChats(
-            chatIds: unreadDMChats.map(\.id),
-            perChatLimit: 10
-        )
-    }
-
-    /// Fetch recent messages from all active chats (for digest)
-    func getRecentMessagesForDigest(limit: Int = 10, since: Foundation.Date? = nil) async throws -> [TGMessage] {
-        let activeChatIds = chats.prefix(AppConstants.Fetch.digestChatCount).map(\.id)
-        var messages = try await getRecentMessagesAcrossChats(chatIds: Array(activeChatIds), perChatLimit: limit)
-        if let since {
-            messages = messages.filter { $0.date >= since }
-        }
-        return messages
     }
 
     // MARK: - Cache Management
