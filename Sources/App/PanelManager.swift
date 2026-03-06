@@ -76,6 +76,7 @@ final class PanelManager {
     init(telegramService: TelegramService, aiService: AIService) {
         self.telegramService = telegramService
         self.aiService = aiService
+        createPanel()  // Eager: LauncherView lifecycle starts immediately for background pipeline refresh
     }
 
     func toggle() {

@@ -67,6 +67,10 @@ struct LauncherView: View {
     @State private var pipelineTotalCount = 0
     @State private var pipelineSubFilter: FollowUpItem.Category? = nil
 
+    // Background pipeline refresh
+    @State private var pipelineAutoLoaded = false
+    @State private var backgroundRefreshTask: Task<Void, Never>?
+
     // Settings callback
     var onOpenSettings: () -> Void = {}
 
@@ -225,6 +229,28 @@ struct LauncherView: View {
             } else if activeFilter == .pipeline {
                 loadFollowUps()
             }
+        }
+        .task {
+            // Auto-load pipeline on startup so menu bar badge works even before user opens Pipeline tab
+            guard !pipelineAutoLoaded else { return }
+            // Wait for Telegram auth + chats to load
+            for _ in 0..<60 {  // 30s max (60 × 0.5s)
+                if telegramService.authState == .ready,
+                   !telegramService.chats.isEmpty {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            guard !telegramService.chats.isEmpty else { return }
+            pipelineAutoLoaded = true
+            loadFollowUps()
+        }
+        .onReceive(
+            telegramService.$chats
+                .dropFirst()  // Skip initial load (handled by .task above)
+                .debounce(for: .seconds(10), scheduler: RunLoop.main)
+        ) { _ in
+            backgroundRefreshPipeline()
         }
         .onChange(of: searchText) {
             selectedIndex = 0
@@ -1124,6 +1150,7 @@ struct LauncherView: View {
     }
 
     private func loadFollowUps() {
+        guard !isFollowUpsLoading else { return }  // Prevent concurrent loads
         let candidates = collectPipelineCandidates()
 
         // No AI? Fall back to rule-based categorization
@@ -1246,6 +1273,70 @@ struct LauncherView: View {
             object: nil,
             userInfo: ["count": count]
         )
+    }
+
+    // MARK: - Background Pipeline Refresh
+
+    /// Incrementally re-analyze only pipeline chats whose lastMessage changed since last categorization.
+    private func backgroundRefreshPipeline() {
+        // Guard: need existing items, AI configured, not doing a full load
+        guard !followUpItems.isEmpty, aiService.isConfigured, !isFollowUpsLoading else { return }
+
+        // Cancel any previous background refresh in flight
+        backgroundRefreshTask?.cancel()
+
+        backgroundRefreshTask = Task {
+            let myUserId = telegramService.currentUser?.id ?? 0
+
+            // Find chats with new messages since last categorization
+            var staleChats: [TGChat] = []
+            for item in followUpItems {
+                guard let currentChat = telegramService.visibleChats.first(where: { $0.id == item.chat.id }),
+                      let currentLastMsg = currentChat.lastMessage else { continue }
+                if currentLastMsg.id != item.lastMessage.id {
+                    staleChats.append(currentChat)
+                }
+            }
+
+            // Also detect new pipeline candidates not yet in followUpItems
+            let existingIds = Set(followUpItems.map(\.chat.id))
+            let newCandidates = collectPipelineCandidates().filter { !existingIds.contains($0.id) }
+
+            guard !staleChats.isEmpty || !newCandidates.isEmpty else { return }
+
+            // Re-analyze stale chats one at a time (gentle on API)
+            for chat in staleChats {
+                guard !Task.isCancelled else { return }
+                if let updatedItem = await categorizeSingleChat(chat: chat, myUserId: myUserId) {
+                    await MainActor.run {
+                        followUpItems.removeAll { $0.chat.id == chat.id }
+                        followUpItems.append(updatedItem)
+                        sortPipelineItems()
+                    }
+                }
+            }
+
+            // Categorize new candidates
+            for chat in newCandidates {
+                guard !Task.isCancelled else { return }
+                if let newItem = await categorizeSingleChat(chat: chat, myUserId: myUserId) {
+                    await MainActor.run {
+                        followUpItems.append(newItem)
+                        sortPipelineItems()
+                    }
+                }
+            }
+
+            // Prune chats no longer eligible for pipeline
+            let candidateIds = Set(collectPipelineCandidates().map(\.id))
+            let hasStale = followUpItems.contains { !candidateIds.contains($0.chat.id) }
+            if hasStale {
+                await MainActor.run {
+                    followUpItems.removeAll { !candidateIds.contains($0.chat.id) }
+                    sortPipelineItems()
+                }
+            }
+        }
     }
 
     // MARK: - Actions
