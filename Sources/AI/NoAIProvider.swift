@@ -19,6 +19,10 @@ final class NoAIProvider: AIProvider {
         return (true, "")
     }
 
+    func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO {
+        throw AIError.providerNotConfigured
+    }
+
     func testConnection() async throws -> Bool {
         throw AIError.providerNotConfigured
     }

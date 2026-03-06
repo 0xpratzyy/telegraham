@@ -38,16 +38,20 @@ enum AppConstants {
         static let replyThresholdSeconds: TimeInterval = 0          // immediate
         static let followUpThresholdSeconds: TimeInterval = 86400   // 24h
         static let staleThresholdSeconds: TimeInterval = 259200     // 3 days
-        static let maxPipelineAgeSeconds: TimeInterval = 2592000    // 30 days — older = dead, not pipeline
+        static let maxPipelineAgeSeconds: TimeInterval = 1209600    // 14 days
         static let maxGroupMembers = 20       // skip groups with KNOWN count > this
         static let maxGroupUnread = 10        // skip groups with > this many unread (community signal)
         static let maxAISuggestions = 15
-        static let messagesPerChat = 8
+        static let messagesPerChat = 10       // initial batch for AI categorization
+        static let progressiveFetchStep = 10  // fetch this many more each round
+        static let maxProgressiveFetches = 5  // max rounds (caps at 50 messages)
+        static let maxAIConcurrency = 5       // parallel AI calls
     }
 
     enum Cache {
         static let maxUserCacheSize = 500
         static let maxChatCacheSize = 200
+        static let maxCachedMessagesPerChat = 50
     }
 
     enum App {

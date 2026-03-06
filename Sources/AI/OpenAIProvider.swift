@@ -59,6 +59,17 @@ final class OpenAIProvider: AIProvider {
         return (dto.relevant ?? true, dto.suggestedAction)
     }
 
+    func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO {
+        let snippets = MessageSnippet.truncateToTokenBudget(messages, maxChars: 4000)
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: PipelineCategoryPrompt.systemPrompt,
+                userMessage: PipelineCategoryPrompt.userMessage(context: context, snippets: snippets)
+            )
+        }
+        return try JSONExtractor.parseJSON(response)
+    }
+
     func testConnection() async throws -> Bool {
         _ = try await makeRequest(systemPrompt: "Reply with OK", userMessage: "test")
         return true

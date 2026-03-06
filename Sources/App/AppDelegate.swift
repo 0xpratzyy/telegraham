@@ -37,6 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager?.unregister()
         telegramService.stop()
+        Task { await MessageCacheService.shared.flushToDisk() }
     }
 
     private func openSettings() {

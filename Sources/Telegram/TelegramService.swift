@@ -233,6 +233,12 @@ class TelegramService: ObservableObject {
             evictCacheIfNeeded()
 
         case .updateChatLastMessage(let msgUpdate):
+            // Push new message into the event-driven cache
+            if let rawMsg = msgUpdate.lastMessage {
+                let tgMsg = mapMessage(rawMsg)
+                Task { await MessageCacheService.shared.appendMessage(chatId: msgUpdate.chatId, message: tgMsg) }
+            }
+
             if let index = chats.firstIndex(where: { $0.id == msgUpdate.chatId }) {
                 let lastMsg = msgUpdate.lastMessage.map { mapMessage($0) }
                 // Preserve existing order/mainList if positions is empty (only message changed)

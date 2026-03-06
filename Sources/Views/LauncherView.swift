@@ -65,6 +65,7 @@ struct LauncherView: View {
     @State private var isFollowUpsLoading = false
     @State private var pipelineProcessedCount = 0
     @State private var pipelineTotalCount = 0
+    @State private var pipelineSubFilter: FollowUpItem.Category? = nil
 
     // Settings callback
     var onOpenSettings: () -> Void = {}
@@ -154,14 +155,16 @@ struct LauncherView: View {
 
     // MARK: - Pipeline Sections
 
-    /// Groups followUpItems into sections by category, with search filtering.
+    /// Groups followUpItems into sections by category, with sub-filter and search filtering.
     private var pipelineSections: [PipelineSection] {
-        let categoryOrder: [FollowUpItem.Category] = [.reply, .followUp, .stale]
-        let filtered: [FollowUpItem]
-        if searchText.isEmpty {
-            filtered = followUpItems
-        } else {
-            filtered = followUpItems.filter {
+        let categoryOrder: [FollowUpItem.Category] = [.onMe, .onThem, .quiet]
+        var filtered = followUpItems
+
+        if let subFilter = pipelineSubFilter {
+            filtered = filtered.filter { $0.category == subFilter }
+        }
+        if !searchText.isEmpty {
+            filtered = filtered.filter {
                 $0.chat.title.localizedCaseInsensitiveContains(searchText)
             }
         }
@@ -213,6 +216,7 @@ struct LauncherView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
         .onAppear {
             isSearchFocused = true
             selectedIndex = 0
@@ -232,6 +236,7 @@ struct LauncherView: View {
             aiSearchMode = nil
             aiResults = []
             aiSearchError = nil
+            pipelineSubFilter = nil
             if activeFilter == .priority {
                 Task { await loadPriority() }
             } else if activeFilter == .pipeline {
@@ -487,7 +492,7 @@ struct LauncherView: View {
     private var chatResultsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 1) {
+                LazyVStack(spacing: 2) {
                     if !searchText.isEmpty || activeFilter == .priority {
                         Text("\(displayedChats.count) result\(displayedChats.count == 1 ? "" : "s")")
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -539,7 +544,7 @@ struct LauncherView: View {
     private var aiResultsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 1) {
+                LazyVStack(spacing: 2) {
                     let titleMatches = titleMatchedChats
                     let totalCount = titleMatches.count + aiResults.count
 
@@ -609,7 +614,7 @@ struct LauncherView: View {
     private var priorityResultsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 1) {
+                LazyVStack(spacing: 2) {
                     // Refresh header with cache age
                     if !priorityItems.isEmpty {
                         HStack {
@@ -808,19 +813,64 @@ struct LauncherView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Pipeline Sub-Filter
+
+    private var pipelineSubFilterBar: some View {
+        HStack(spacing: 6) {
+            pipelineSubFilterButton(label: "All", filter: nil)
+            pipelineSubFilterButton(label: "On Me", filter: .onMe, color: .orange)
+            pipelineSubFilterButton(label: "On Them", filter: .onThem, color: .blue)
+            pipelineSubFilterButton(label: "Quiet", filter: .quiet, color: .gray)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
+    }
+
+    private func pipelineSubFilterButton(label: String, filter: FollowUpItem.Category?, color: Color = .primary) -> some View {
+        let isActive = pipelineSubFilter == filter
+        let count: Int? = {
+            guard let f = filter else { return nil }
+            return followUpItems.filter { $0.category == f }.count
+        }()
+
+        return Button {
+            pipelineSubFilter = filter
+        } label: {
+            HStack(spacing: 3) {
+                if let c = count, c > 0 {
+                    Text("\(c)")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(isActive ? .white : color)
+                }
+                Text(label)
+                    .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                    .foregroundStyle(isActive ? .white : .secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(isActive ? color.opacity(0.8) : Color.secondary.opacity(0.08))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(isActive ? Color.clear : Color.secondary.opacity(0.15), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Pipeline Results List (Sectioned CRM View)
 
     private var pipelineResultsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 1) {
+                LazyVStack(spacing: 2) {
                     let sections = pipelineSections
                     let flat = flatPipelineItems
 
-                    // Summary bar
-                    if !flat.isEmpty {
-                        pipelineSummaryBar
-                    }
+                    // Sub-filter bar
+                    pipelineSubFilterBar
 
                     // AI loading indicator with progress
                     if isFollowUpsLoading {
@@ -905,27 +955,21 @@ struct LauncherView: View {
         .background(Color.secondary.opacity(0.04))
     }
 
-    /// Ultra-compact colored section divider.
+    /// Clean section divider with icon + label in category color.
     private func pipelineSectionHeader(section: PipelineSection) -> some View {
-        HStack(spacing: 5) {
-            Rectangle()
-                .fill(section.category.color.opacity(0.4))
-                .frame(width: 3, height: 12)
-
+        HStack(spacing: 4) {
             Image(systemName: section.icon)
                 .font(.system(size: 9))
                 .foregroundStyle(section.category.color)
 
             Text("\(section.title) (\(section.items.count))")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(section.category.color.opacity(0.8))
 
-            Rectangle()
-                .fill(section.category.color.opacity(0.15))
-                .frame(height: 1)
+            Spacer()
         }
         .padding(.horizontal, 10)
-        .padding(.top, 6)
+        .padding(.top, 8)
         .padding(.bottom, 2)
     }
 
@@ -938,114 +982,242 @@ struct LauncherView: View {
 
     // MARK: - Pipeline Data Logic
 
-    private func buildFollowUpItems() -> [FollowUpItem] {
-        guard let myUserId = telegramService.currentUser?.id else { return [] }
+    /// Collect candidate chats for the pipeline (filtering only, no categorization).
+    private func collectPipelineCandidates() -> [TGChat] {
         let now = Date()
         let maxAge = AppConstants.FollowUp.maxPipelineAgeSeconds
 
-        return telegramService.visibleChats.compactMap { chat -> FollowUpItem? in
-            guard let lastMsg = chat.lastMessage else { return nil }
-            guard !chat.chatType.isChannel else { return nil }
+        return telegramService.visibleChats.filter { chat in
+            guard chat.lastMessage != nil else { return false }
+            guard !chat.chatType.isChannel else { return false }
+            let age = now.timeIntervalSince(chat.lastMessage!.date)
+            guard age <= maxAge else { return false }
 
-            let age = now.timeIntervalSince(lastMsg.date)
-
-            // Hard cutoff: anything older than 30 days is dead, not pipeline
-            guard age <= maxAge else { return nil }
-
-            // Skip community groups: known large OR high unread count (community signal)
             if chat.chatType.isGroup {
-                if let count = chat.memberCount, count > AppConstants.FollowUp.maxGroupMembers {
-                    return nil
-                }
-                if chat.unreadCount > AppConstants.FollowUp.maxGroupUnread {
-                    return nil
-                }
+                if let count = chat.memberCount, count > AppConstants.FollowUp.maxGroupMembers { return false }
+                if chat.unreadCount > AppConstants.FollowUp.maxGroupUnread { return false }
             }
+            return true
+        }
+    }
+
+    /// Rule-based fallback when AI is not configured.
+    private func buildRuleBasedFallbackItems(from candidates: [TGChat]) -> [FollowUpItem] {
+        guard let myUserId = telegramService.currentUser?.id else { return [] }
+        let now = Date()
+
+        return candidates.compactMap { chat -> FollowUpItem? in
+            guard let lastMsg = chat.lastMessage else { return nil }
+            let age = now.timeIntervalSince(lastMsg.date)
 
             let isFromMe: Bool
             if case .user(let uid) = lastMsg.senderId { isFromMe = uid == myUserId }
             else { isFromMe = false }
 
             if !isFromMe && chat.unreadCount > 0 {
-                // They sent, I haven't replied
-                return FollowUpItem(chat: chat, category: .reply, lastMessage: lastMsg, timeSinceLastActivity: age)
+                return FollowUpItem(chat: chat, category: .onMe, lastMessage: lastMsg, timeSinceLastActivity: age)
             } else if isFromMe && age > AppConstants.FollowUp.followUpThresholdSeconds {
-                // I sent last, 24h+ no reply
-                return FollowUpItem(chat: chat, category: .followUp, lastMessage: lastMsg, timeSinceLastActivity: age)
+                return FollowUpItem(chat: chat, category: .onThem, lastMessage: lastMsg, timeSinceLastActivity: age)
             } else if age > AppConstants.FollowUp.staleThresholdSeconds {
-                // 3-30 days no activity (gone quiet, not dead)
-                return FollowUpItem(chat: chat, category: .stale, lastMessage: lastMsg, timeSinceLastActivity: age)
+                return FollowUpItem(chat: chat, category: .quiet, lastMessage: lastMsg, timeSinceLastActivity: age)
             }
             return nil
         }
         .sorted { a, b in
-            // Sort by recency first (most recent at top), category as tiebreaker
             if abs(a.timeSinceLastActivity - b.timeSinceLastActivity) > 3600 {
                 return a.timeSinceLastActivity < b.timeSinceLastActivity
             }
-            // Within same hour: REPLY > FOLLOW UP > STALE
-            let order: [FollowUpItem.Category] = [.reply, .followUp, .stale]
-            let aIdx = order.firstIndex(of: a.category) ?? 2
-            let bIdx = order.firstIndex(of: b.category) ?? 2
-            return aIdx < bIdx
+            let order: [FollowUpItem.Category] = [.onMe, .onThem, .quiet]
+            return (order.firstIndex(of: a.category) ?? 2) < (order.firstIndex(of: b.category) ?? 2)
         }
     }
 
-    private func loadFollowUps() {
-        let candidates = buildFollowUpItems()
+    /// AI-powered categorization for a single chat with progressive message fetching.
+    /// Caches results to disk so re-analysis only happens when new messages arrive.
+    private func categorizeSingleChat(
+        chat: TGChat,
+        myUserId: Int64
+    ) async -> FollowUpItem? {
+        guard let lastMsg = chat.lastMessage else { return nil }
+        let age = Date().timeIntervalSince(lastMsg.date)
+        let batchSize = AppConstants.FollowUp.messagesPerChat
+        let maxRounds = AppConstants.FollowUp.maxProgressiveFetches
+        let cache = MessageCacheService.shared
 
-        // No AI? Show all items instantly (fallback)
+        var allMessages: [TGMessage] = []
+
+        // Try message cache first
+        if let cached = await cache.getMessages(chatId: chat.id) {
+            allMessages = cached
+        }
+
+        // If cache empty or insufficient, fetch from Telegram
+        if allMessages.count < batchSize {
+            do {
+                let fetched = try await telegramService.getChatHistory(chatId: chat.id, limit: batchSize)
+                allMessages = fetched
+                await cache.cacheMessages(chatId: chat.id, messages: fetched)
+            } catch {
+                if allMessages.isEmpty { return nil }
+            }
+        }
+
+        // Progressive categorization loop
+        for round in 0..<maxRounds {
+            let messagesToSend = Array(allMessages.prefix((round + 1) * batchSize))
+
+            do {
+                let myUser = telegramService.currentUser
+                let (category, suggestion, confident) = try await aiService.categorizePipelineChat(
+                    chat: chat,
+                    messages: messagesToSend,
+                    myUserId: myUserId,
+                    myUser: myUser
+                )
+
+                if confident || round == maxRounds - 1 {
+                    // Cache the AI result for next time
+                    let categoryStr: String
+                    switch category {
+                    case .onMe: categoryStr = "on_me"
+                    case .onThem: categoryStr = "on_them"
+                    case .quiet: categoryStr = "quiet"
+                    }
+                    await cache.cachePipelineCategory(
+                        chatId: chat.id,
+                        category: categoryStr,
+                        suggestedAction: suggestion,
+                        lastMessageId: lastMsg.id
+                    )
+
+                    return FollowUpItem(
+                        chat: chat,
+                        category: category,
+                        lastMessage: lastMsg,
+                        timeSinceLastActivity: age,
+                        suggestedAction: suggestion.isEmpty ? nil : suggestion
+                    )
+                }
+
+                // Not confident — fetch more messages
+                let oldestId = allMessages.last?.id ?? 0
+                guard oldestId != 0 else { break }
+
+                do {
+                    let moreMsgs = try await telegramService.getChatHistory(
+                        chatId: chat.id,
+                        fromMessageId: oldestId,
+                        limit: AppConstants.FollowUp.progressiveFetchStep
+                    )
+                    guard !moreMsgs.isEmpty else { break }
+                    allMessages.append(contentsOf: moreMsgs)
+                    await cache.cacheMessages(chatId: chat.id, messages: moreMsgs, append: true)
+                } catch {
+                    break
+                }
+            } catch {
+                break
+            }
+        }
+
+        return nil
+    }
+
+    private func loadFollowUps() {
+        let candidates = collectPipelineCandidates()
+
+        // No AI? Fall back to rule-based categorization
         guard aiService.isConfigured else {
-            followUpItems = candidates
+            followUpItems = buildRuleBasedFallbackItems(from: candidates)
+            postOnMeBadge()
             return
         }
 
-        // AI-first: start empty, items appear as AI confirms relevance
-        followUpItems = []
-        pipelineProcessedCount = 0
-        pipelineTotalCount = candidates.count
-        isFollowUpsLoading = true
-
         Task {
             let myUserId = telegramService.currentUser?.id ?? 0
+            let cache = MessageCacheService.shared
 
-            await withTaskGroup(of: (FollowUpItem, Bool, String).self) { group in
-                for item in candidates {
-                    group.addTask { [telegramService, aiService] in
-                        do {
-                            let messages = try await telegramService.getChatHistory(
-                                chatId: item.chat.id,
-                                limit: AppConstants.FollowUp.messagesPerChat
-                            )
-                            let (relevant, suggestion) = try await aiService.followUpSuggestion(
-                                chatTitle: item.chat.title,
-                                messages: messages,
-                                myUserId: myUserId
-                            )
-                            return (item, relevant, suggestion)
-                        } catch {
-                            return (item, true, "") // on error, keep the item
-                        }
+            // ── PASS 1: Load from pipeline category cache (instant) ──
+            var cachedItems: [FollowUpItem] = []
+            var staleChats: [TGChat] = []
+
+            for chat in candidates {
+                guard let lastMsg = chat.lastMessage else { continue }
+
+                if let cached = await cache.getPipelineCategory(chatId: chat.id),
+                   cached.lastMessageId == lastMsg.id {
+                    // Cache hit
+                    let category: FollowUpItem.Category
+                    switch cached.category {
+                    case "on_me": category = .onMe
+                    case "on_them": category = .onThem
+                    default: category = .quiet
                     }
+                    let age = Date().timeIntervalSince(lastMsg.date)
+                    cachedItems.append(FollowUpItem(
+                        chat: chat,
+                        category: category,
+                        lastMessage: lastMsg,
+                        timeSinceLastActivity: age,
+                        suggestedAction: cached.suggestedAction.isEmpty ? nil : cached.suggestedAction
+                    ))
+                } else {
+                    staleChats.append(chat)
+                }
+            }
+
+            // Show cached items immediately (no flash of empty state)
+            await MainActor.run {
+                followUpItems = cachedItems
+                sortPipelineItems()
+            }
+
+            // If nothing stale, we're done — no loading indicator needed
+            guard !staleChats.isEmpty else {
+                await MainActor.run { isFollowUpsLoading = false }
+                return
+            }
+
+            // ── PASS 2: AI-analyze ONLY stale chats ──
+            await MainActor.run {
+                pipelineProcessedCount = 0
+                pipelineTotalCount = staleChats.count
+                isFollowUpsLoading = true
+            }
+
+            let maxConcurrency = AppConstants.FollowUp.maxAIConcurrency
+
+            await withTaskGroup(of: FollowUpItem?.self) { group in
+                var queued = 0
+
+                for chat in staleChats {
+                    if queued >= maxConcurrency {
+                        if let result = await group.next() {
+                            await MainActor.run {
+                                pipelineProcessedCount += 1
+                                if let item = result {
+                                    followUpItems.removeAll { $0.chat.id == item.chat.id }
+                                    followUpItems.append(item)
+                                    sortPipelineItems()
+                                }
+                            }
+                        }
+                        queued -= 1
+                    }
+
+                    group.addTask { [self] in
+                        await self.categorizeSingleChat(chat: chat, myUserId: myUserId)
+                    }
+                    queued += 1
                 }
 
-                // As each result streams in, append relevant items immediately
-                for await (var item, relevant, suggestion) in group {
+                for await result in group {
                     await MainActor.run {
                         pipelineProcessedCount += 1
-                        if relevant {
-                            if !suggestion.isEmpty {
-                                item.suggestedAction = suggestion
-                            }
+                        if let item = result {
+                            followUpItems.removeAll { $0.chat.id == item.chat.id }
                             followUpItems.append(item)
-                            // Re-sort to maintain category order
-                            followUpItems.sort { a, b in
-                                let order: [FollowUpItem.Category] = [.reply, .followUp, .stale]
-                                let aIdx = order.firstIndex(of: a.category) ?? 2
-                                let bIdx = order.firstIndex(of: b.category) ?? 2
-                                if aIdx != bIdx { return aIdx < bIdx }
-                                return a.timeSinceLastActivity < b.timeSinceLastActivity
-                            }
+                            sortPipelineItems()
                         }
                     }
                 }
@@ -1053,6 +1225,27 @@ struct LauncherView: View {
 
             await MainActor.run { isFollowUpsLoading = false }
         }
+    }
+
+    private func sortPipelineItems() {
+        followUpItems.sort { a, b in
+            let order: [FollowUpItem.Category] = [.onMe, .onThem, .quiet]
+            let aIdx = order.firstIndex(of: a.category) ?? 2
+            let bIdx = order.firstIndex(of: b.category) ?? 2
+            if aIdx != bIdx { return aIdx < bIdx }
+            return a.timeSinceLastActivity < b.timeSinceLastActivity
+        }
+        postOnMeBadge()
+    }
+
+    /// Update menu bar badge with "On Me" count
+    private func postOnMeBadge() {
+        let count = followUpItems.filter { $0.category == .onMe }.count
+        NotificationCenter.default.post(
+            name: .onMeCountChanged,
+            object: nil,
+            userInfo: ["count": count]
+        )
     }
 
     // MARK: - Actions

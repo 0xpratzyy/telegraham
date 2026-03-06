@@ -15,6 +15,9 @@ protocol AIProvider {
     /// Returns (isRelevant, suggestedAction). If not relevant, the chat should be removed from pipeline.
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String)
 
+    /// Categorize a conversation for the Pipeline view (on_me / on_them / quiet).
+    func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO
+
     /// Validates the API key by making a minimal request.
     func testConnection() async throws -> Bool
 }
@@ -42,4 +45,21 @@ struct SemanticSearchResultDTO: Codable {
     let reason: String
     let relevance: String
     let matchingMessages: [String]?
+}
+
+/// Context passed to AI for pipeline categorization.
+struct PipelineChatContext {
+    let chatTitle: String
+    let chatType: String      // "DM", "Group", "Supergroup", "Channel"
+    let unreadCount: Int
+    let myName: String
+    let myUsername: String?
+}
+
+/// Wire format for pipeline AI categorization.
+struct PipelineCategoryDTO: Codable {
+    let category: String       // "on_me", "on_them", "quiet"
+    let relevant: Bool?        // kept optional for backward compat, no longer used
+    let suggestedAction: String
+    let confident: Bool?
 }

@@ -86,6 +86,38 @@ final class AIService: ObservableObject {
         return try await provider.generateFollowUpSuggestion(chatTitle: chatTitle, messages: snippets)
     }
 
+    /// AI-powered pipeline categorization. Marks [ME] messages and sends to AI.
+    /// Returns (category, suggestedAction, isConfident).
+    func categorizePipelineChat(chat: TGChat, messages: [TGMessage], myUserId: Int64, myUser: TGUser?) async throws -> (FollowUpItem.Category, String, Bool) {
+        let snippets = messages.compactMap { msg -> MessageSnippet? in
+            guard let text = msg.textContent, !text.isEmpty else { return nil }
+            let isMe: Bool
+            if case .user(let uid) = msg.senderId { isMe = uid == myUserId } else { isMe = false }
+            let name = isMe ? "[ME]" : (msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown")
+            return MessageSnippet(senderFirstName: name, text: text, relativeTimestamp: msg.relativeDate, chatName: chat.title)
+        }
+        guard !snippets.isEmpty else { return (.quiet, "", true) }
+
+        let context = PipelineChatContext(
+            chatTitle: chat.title,
+            chatType: chat.chatType.displayName,
+            unreadCount: chat.unreadCount,
+            myName: myUser?.firstName ?? "Me",
+            myUsername: myUser?.username
+        )
+
+        let dto = try await provider.categorizePipelineChat(context: context, messages: snippets)
+
+        let category: FollowUpItem.Category
+        switch dto.category.lowercased() {
+        case "on_me": category = .onMe
+        case "on_them": category = .onThem
+        default: category = .quiet
+        }
+
+        return (category, dto.suggestedAction, dto.confident ?? true)
+    }
+
     /// Validates AI provider connection by making a minimal test request.
     func testConnection() async throws -> Bool {
         return try await provider.testConnection()
