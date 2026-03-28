@@ -170,6 +170,14 @@ actor MessageCacheService {
         try? FileManager.default.removeItem(at: pipelineCacheDir)
     }
 
+    func invalidateAllLocalData() {
+        memoryCache.removeAll()
+        dirtyChats.removeAll()
+        pipelineCache.removeAll()
+        try? FileManager.default.removeItem(at: cacheDir)
+        try? FileManager.default.removeItem(at: pipelineCacheDir)
+    }
+
     // MARK: - Invalidation
 
     func invalidate(chatId: Int64) {

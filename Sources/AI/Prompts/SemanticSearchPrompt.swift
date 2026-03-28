@@ -6,6 +6,7 @@ enum SemanticSearchPrompt {
     Given recent messages from multiple chats, identify which chats discuss topics related to the query.
 
     For each relevant chat, provide:
+    - chatId: The exact numeric chat ID copied from the messages
     - chatName: The exact chat name as it appears in the messages
     - reason: Brief explanation of why this chat is relevant (1 sentence)
     - relevance: "high" (directly discusses the topic) or "medium" (tangentially related)
@@ -14,15 +15,15 @@ enum SemanticSearchPrompt {
     Respond with a JSON array sorted by relevance (high first). If no relevant chats found, respond with [].
     Example:
     [
-      {"chatName": "Startup Friends", "reason": "Discussed making first revenue this week", "relevance": "high", "matchingMessages": ["We just hit our first $1k MRR!", "Revenue is finally coming in"]},
-      {"chatName": "Tech Group", "reason": "Mentioned monetization strategies", "relevance": "medium", "matchingMessages": ["Has anyone tried usage-based pricing?"]}
+      {"chatId": 123456, "chatName": "Startup Friends", "reason": "Discussed making first revenue this week", "relevance": "high", "matchingMessages": ["We just hit our first $1k MRR!", "Revenue is finally coming in"]},
+      {"chatId": 987654, "chatName": "Tech Group", "reason": "Mentioned monetization strategies", "relevance": "medium", "matchingMessages": ["Has anyone tried usage-based pricing?"]}
     ]
     """
 
     static func userMessage(query: String, snippets: [MessageSnippet]) -> String {
         var text = "Find chats related to: \"\(query)\"\n\nRecent messages:\n"
         for s in snippets {
-            text += "[\(s.chatName)] [\(s.relativeTimestamp)] \(s.senderFirstName): \(s.text)\n"
+            text += "[chatId: \(s.chatId)] [\(s.chatName)] [\(s.relativeTimestamp)] \(s.senderFirstName): \(s.text)\n"
         }
         return text
     }

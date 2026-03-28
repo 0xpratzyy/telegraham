@@ -29,10 +29,42 @@ struct FollowUpSuggestionDTO: Codable {
 
 /// Wire format for semantic search results returned by AI.
 struct SemanticSearchResultDTO: Codable {
+    let chatId: Int64
     let chatName: String
     let reason: String
     let relevance: String
     let matchingMessages: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case chatId
+        case chatName
+        case reason
+        case relevance
+        case matchingMessages
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let numericId = try? container.decode(Int64.self, forKey: .chatId) {
+            chatId = numericId
+        } else {
+            let rawId = try container.decode(String.self, forKey: .chatId)
+            guard let numericId = Int64(rawId) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .chatId,
+                    in: container,
+                    debugDescription: "chatId must decode to an Int64"
+                )
+            }
+            chatId = numericId
+        }
+
+        chatName = try container.decode(String.self, forKey: .chatName)
+        reason = try container.decode(String.self, forKey: .reason)
+        relevance = try container.decode(String.self, forKey: .relevance)
+        matchingMessages = try container.decodeIfPresent([String].self, forKey: .matchingMessages)
+    }
 }
 
 /// Context passed to AI for pipeline categorization.

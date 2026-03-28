@@ -5,7 +5,9 @@ enum FollowUpPrompt {
     You are analyzing a Telegram conversation for a BD/partnerships professional.
     Messages marked with [ME] are from the user. All others are from contacts.
 
-    Assess whether this conversation is relevant to their work (BD, partnerships, deals, projects, collaborations) and suggest a follow-up action.
+    The messages are listed in chronological order (oldest first).
+
+    Assess whether this conversation is relevant to their work (BD, partnerships, deals, projects, collaborations) and suggest a follow-up action based on the latest open loop, if any.
 
     Respond with a JSON object:
     {"relevant": true, "suggestedAction": "Brief 1-sentence action"}
@@ -21,9 +23,9 @@ enum FollowUpPrompt {
     """
 
     static func userMessage(chatTitle: String, snippets: [MessageSnippet]) -> String {
-        var text = "Chat: \"\(chatTitle)\"\nRecent messages:\n"
+        var text = "Chat: \"\(chatTitle)\"\nMessages in chronological order (oldest first):\n"
         for s in snippets {
-            text += "[\(s.relativeTimestamp)] \(s.senderFirstName): \(s.text)\n"
+            text += "[messageId: \(s.messageId)] [\(s.relativeTimestamp)] \(s.senderFirstName): \(s.text)\n"
         }
         return text
     }

@@ -37,7 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager?.unregister()
         telegramService.stop()
-        Task { await MessageCacheService.shared.flushToDisk() }
+        flushCachesBeforeTermination()
     }
 
     private func openSettings() {
@@ -67,5 +67,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func flushCachesBeforeTermination(timeout: TimeInterval = 2) {
+        let flushGroup = DispatchGroup()
+        flushGroup.enter()
+
+        Task.detached {
+            await MessageCacheService.shared.flushToDisk()
+            flushGroup.leave()
+        }
+
+        _ = flushGroup.wait(timeout: .now() + timeout)
     }
 }

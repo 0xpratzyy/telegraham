@@ -41,8 +41,8 @@ enum AppConstants {
         static let maxGroupUnread = 10        // skip groups with > this many unread (community signal)
         static let maxAISuggestions = 15
         static let messagesPerChat = 10       // initial batch for AI categorization
-        static let progressiveFetchStep = 10  // fetch this many more each round
-        static let maxProgressiveFetches = 5  // max rounds (caps at 50 messages)
+        static let progressiveFetchStep = 5   // fetch only a small older slice when confidence is low
+        static let maxMessagesForAIClassification = 20
         static let maxAIConcurrency = 5       // parallel AI calls
     }
 

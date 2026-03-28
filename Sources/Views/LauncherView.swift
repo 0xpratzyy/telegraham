@@ -69,7 +69,7 @@ struct LauncherView: View {
         func linkedChat(in chats: [TGChat]) -> TGChat? {
             switch self {
             case .semanticResult(let result):
-                return chats.first(where: { $0.title == result.chatTitle })
+                return chats.first(where: { $0.id == result.chatId })
             }
         }
     }
@@ -452,13 +452,13 @@ struct LauncherView: View {
     private var titleMatchedChats: [TGChat] {
         guard !searchText.isEmpty else { return [] }
         let query = searchText.lowercased()
-        // Exclude chats already in AI results to avoid duplicates
-        let aiChatTitles = Set(aiResults.compactMap { result -> String? in
-            if case .semanticResult(let r) = result { return r.chatTitle }
+        // Exclude chats already in AI results to avoid duplicates.
+        let aiChatIds = Set(aiResults.compactMap { result -> Int64? in
+            if case .semanticResult(let r) = result { return r.chatId }
             return nil
         })
         return telegramService.visibleChats.filter {
-            $0.title.lowercased().contains(query) && !aiChatTitles.contains($0.title)
+            $0.title.lowercased().contains(query) && !aiChatIds.contains($0.id)
         }
     }
 
@@ -540,10 +540,14 @@ struct LauncherView: View {
         }
     }
 
-    /// Look up a chat by title and return its avatar with photo, or generate a fallback.
+    private func chatForSemanticResult(_ result: SemanticSearchResult) -> TGChat? {
+        telegramService.visibleChats.first(where: { $0.id == result.chatId })
+    }
+
+    /// Look up a chat by ID and return its avatar with photo, or generate a fallback.
     @ViewBuilder
-    private func avatarForChat(title: String) -> some View {
-        if let chat = telegramService.visibleChats.first(where: { $0.title == title }) {
+    private func avatarForChat(chat: TGChat?, fallbackTitle: String) -> some View {
+        if let chat {
             AvatarView(
                 initials: chat.initials,
                 colorIndex: chat.colorIndex,
@@ -557,7 +561,7 @@ struct LauncherView: View {
             }
         } else {
             // Fallback: generate initials from title
-            let words = title.split(separator: " ")
+            let words = fallbackTitle.split(separator: " ")
             let initials: String = {
                 if words.count >= 2 {
                     return "\(words[0].prefix(1))\(words[1].prefix(1))".uppercased()
@@ -566,18 +570,20 @@ struct LauncherView: View {
                 }
                 return "?"
             }()
-            AvatarView(initials: initials, colorIndex: abs(title.hashValue % 8), size: 26)
+            AvatarView(initials: initials, colorIndex: abs(fallbackTitle.hashValue % 8), size: 26)
         }
     }
 
     private func semanticResultRow(result: SemanticSearchResult, index: Int) -> some View {
-        Button {
-            if let chat = telegramService.visibleChats.first(where: { $0.title == result.chatTitle }) {
+        let linkedChat = chatForSemanticResult(result)
+
+        return Button {
+            if let chat = linkedChat {
                 openChat(chat)
             }
         } label: {
             HStack(spacing: 8) {
-                avatarForChat(title: result.chatTitle)
+                avatarForChat(chat: linkedChat, fallbackTitle: result.chatTitle)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
@@ -734,8 +740,9 @@ struct LauncherView: View {
     ) async -> FollowUpItem? {
         guard let lastMsg = chat.lastMessage else { return nil }
         let age = Date().timeIntervalSince(lastMsg.date)
-        let batchSize = AppConstants.FollowUp.messagesPerChat
-        let maxRounds = AppConstants.FollowUp.maxProgressiveFetches
+        let initialWindowSize = AppConstants.FollowUp.messagesPerChat
+        let progressiveStep = AppConstants.FollowUp.progressiveFetchStep
+        let maxMessages = AppConstants.FollowUp.maxMessagesForAIClassification
         let cache = MessageCacheService.shared
 
         var allMessages: [TGMessage] = []
@@ -746,9 +753,9 @@ struct LauncherView: View {
         }
 
         // If cache empty or insufficient, fetch from Telegram
-        if allMessages.count < batchSize {
+        if allMessages.count < initialWindowSize {
             do {
-                let fetched = try await telegramService.getChatHistory(chatId: chat.id, limit: batchSize)
+                let fetched = try await telegramService.getChatHistory(chatId: chat.id, limit: initialWindowSize)
                 allMessages = fetched
                 await cache.cacheMessages(chatId: chat.id, messages: fetched)
             } catch {
@@ -756,9 +763,14 @@ struct LauncherView: View {
             }
         }
 
-        // Progressive categorization loop
-        for round in 0..<maxRounds {
-            let messagesToSend = Array(allMessages.prefix((round + 1) * batchSize))
+        allMessages.sort { $0.date > $1.date }
+
+        var currentWindowSize = min(initialWindowSize, min(allMessages.count, maxMessages))
+        guard currentWindowSize > 0 else { return nil }
+
+        // Progressive categorization loop: 10 messages, then +5 only if the model is unsure.
+        while true {
+            let messagesToSend = Array(allMessages.prefix(currentWindowSize))
 
             do {
                 let myUser = telegramService.currentUser
@@ -769,7 +781,7 @@ struct LauncherView: View {
                     myUser: myUser
                 )
 
-                if confident || round == maxRounds - 1 {
+                if confident || currentWindowSize >= maxMessages {
                     // Cache the AI result for next time
                     let categoryStr: String
                     switch category {
@@ -793,22 +805,34 @@ struct LauncherView: View {
                     )
                 }
 
-                // Not confident — fetch more messages
-                let oldestId = allMessages.last?.id ?? 0
-                guard oldestId != 0 else { break }
+                let nextWindowSize = min(currentWindowSize + progressiveStep, maxMessages)
+                guard nextWindowSize > currentWindowSize else { break }
 
-                do {
-                    let moreMsgs = try await telegramService.getChatHistory(
-                        chatId: chat.id,
-                        fromMessageId: oldestId,
-                        limit: AppConstants.FollowUp.progressiveFetchStep
-                    )
-                    guard !moreMsgs.isEmpty else { break }
-                    allMessages.append(contentsOf: moreMsgs)
-                    await cache.cacheMessages(chatId: chat.id, messages: moreMsgs, append: true)
-                } catch {
-                    break
+                if allMessages.count < nextWindowSize {
+                    let fetchLimit = min(progressiveStep, maxMessages - allMessages.count)
+                    guard fetchLimit > 0 else { break }
+
+                    let oldestId = allMessages.last?.id ?? 0
+                    guard oldestId != 0 else { break }
+
+                    do {
+                        let moreMsgs = try await telegramService.getChatHistory(
+                            chatId: chat.id,
+                            fromMessageId: oldestId,
+                            limit: fetchLimit
+                        )
+                        guard !moreMsgs.isEmpty else { break }
+                        allMessages.append(contentsOf: moreMsgs)
+                        allMessages.sort { $0.date > $1.date }
+                        await cache.cacheMessages(chatId: chat.id, messages: moreMsgs, append: true)
+                    } catch {
+                        break
+                    }
                 }
+
+                let updatedWindowSize = min(nextWindowSize, allMessages.count)
+                guard updatedWindowSize > currentWindowSize else { break }
+                currentWindowSize = updatedWindowSize
             } catch {
                 break
             }
@@ -1004,16 +1028,28 @@ struct LauncherView: View {
                     sortPipelineItems()
                 }
             }
+
         }
     }
 
     // MARK: - Actions
 
     private func openChat(_ chat: TGChat) {
-        if let url = DeepLinkGenerator.chatURL(chat: chat) {
-            DeepLinkGenerator.openInTelegram(url)
+        Task { @MainActor in
+            let hints = await telegramService.getDeepLinkHints(for: chat)
+            let opened = DeepLinkGenerator.openChat(
+                chat,
+                username: hints.username,
+                phoneNumber: hints.phoneNumber
+            )
+
+            // If no deep-link strategy succeeds, at least open Telegram home.
+            if !opened, let fallback = URL(string: "tg://resolve?domain=telegram") {
+                _ = DeepLinkGenerator.openInTelegram(fallback)
+            }
+
+            NSApp.keyWindow?.orderOut(nil)
         }
-        NSApp.keyWindow?.orderOut(nil)
     }
 
     /// Debounced search: waits 300ms, then classifies via QueryRouter.
@@ -1150,18 +1186,18 @@ struct LauncherView: View {
         }
     }
 
-    /// Deduplicate AI results by chat title, keeping the higher-relevance entry.
+    /// Deduplicate AI results by chat ID, keeping the higher-relevance entry.
     private func deduplicateResults(_ results: [AISearchResult]) -> [AISearchResult] {
-        var seen: [String: AISearchResult] = [:]
+        var seen: [Int64: AISearchResult] = [:]
         for result in results {
             if case .semanticResult(let r) = result {
-                if let existing = seen[r.chatTitle], case .semanticResult(let e) = existing {
+                if let existing = seen[r.chatId], case .semanticResult(let e) = existing {
                     // Keep the higher-relevance version
                     if r.relevance == .high && e.relevance != .high {
-                        seen[r.chatTitle] = result
+                        seen[r.chatId] = result
                     }
                 } else {
-                    seen[r.chatTitle] = result
+                    seen[r.chatId] = result
                 }
             }
         }

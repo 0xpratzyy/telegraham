@@ -4,12 +4,14 @@ import SwiftUI
 // MARK: - Privacy-Safe Message Representation
 
 /// A privacy-filtered message snippet safe to send to AI providers.
-/// Contains only first name, text, relative timestamp, and chat name.
+/// Contains only message ID, first name, text, relative timestamp, chat ID, and chat name.
 /// Never includes phone numbers, user IDs, session tokens, or media files.
 struct MessageSnippet: Codable {
+    let messageId: Int64
     let senderFirstName: String
     let text: String
     let relativeTimestamp: String
+    let chatId: Int64
     let chatName: String
 
     static func fromMessages(_ messages: [TGMessage], chatTitle: String? = nil) -> [MessageSnippet] {
@@ -17,9 +19,11 @@ struct MessageSnippet: Codable {
             guard let text = msg.textContent, !text.isEmpty else { return nil }
             let firstName = msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown"
             return MessageSnippet(
+                messageId: msg.id,
                 senderFirstName: firstName,
                 text: text,
                 relativeTimestamp: msg.relativeDate,
+                chatId: msg.chatId,
                 chatName: chatTitle ?? msg.chatTitle ?? "Unknown"
             )
         }
@@ -30,7 +34,13 @@ struct MessageSnippet: Codable {
         var totalChars = 0
         var result: [MessageSnippet] = []
         for snippet in snippets {
-            let snippetChars = snippet.senderFirstName.count + snippet.text.count + snippet.relativeTimestamp.count + snippet.chatName.count + 20
+            let snippetChars =
+                String(snippet.messageId).count +
+                snippet.senderFirstName.count +
+                snippet.text.count +
+                snippet.relativeTimestamp.count +
+                String(snippet.chatId).count +
+                snippet.chatName.count + 20
             if totalChars + snippetChars > maxChars { break }
             totalChars += snippetChars
             result.append(snippet)
@@ -49,11 +59,13 @@ enum QueryIntent: String, Codable {
 // MARK: - Semantic Search
 
 struct SemanticSearchResult: Identifiable {
-    let id = UUID()
+    let chatId: Int64
     let chatTitle: String
     let reason: String
     let relevance: Relevance
     let matchingMessages: [String]
+
+    var id: Int64 { chatId }
 
     enum Relevance: String {
         case high, medium

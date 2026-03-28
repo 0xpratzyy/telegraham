@@ -219,6 +219,31 @@ class TelegramService: ObservableObject {
         return tgUser
     }
 
+    /// Resolves username/phone hints for deep-link generation.
+    /// Uses lightweight TDLib lookups and local caches when available.
+    func getDeepLinkHints(for chat: TGChat) async -> (username: String?, phoneNumber: String?) {
+        switch chat.chatType {
+        case .privateChat(let userId):
+            if let cached = userCache[userId] {
+                return (cached.username, cached.phoneNumber)
+            }
+            if let user = try? await getUser(id: userId) {
+                return (user.username, user.phoneNumber)
+            }
+            return (nil, nil)
+
+        case .supergroup(let supergroupId, _):
+            guard let client else { return (nil, nil) }
+            if let supergroup = try? await client.getSupergroup(supergroupId: supergroupId) {
+                return (supergroup.usernames?.activeUsernames.first, nil)
+            }
+            return (nil, nil)
+
+        case .basicGroup, .secretChat:
+            return (nil, nil)
+        }
+    }
+
     // MARK: - Update Handling
 
     private func handleUpdate(_ update: Update) {

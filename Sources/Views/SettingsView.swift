@@ -205,7 +205,7 @@ struct SettingsView: View {
             } header: {
                 Text("Privacy")
             } footer: {
-                Text("AI features send only message text and sender first names. No phone numbers, user IDs, or media files are ever sent.")
+                Text("AI features send message text, sender first names, relative timestamps, chat names, and numeric chat IDs. No phone numbers, user IDs, or media files are ever sent.")
                     .font(.system(size: 11))
             }
 
@@ -218,6 +218,8 @@ struct SettingsView: View {
                     Text("- Sender first name")
                         .font(.system(size: 11))
                     Text("- Relative timestamp (e.g. \"2h ago\")")
+                        .font(.system(size: 11))
+                    Text("- Numeric chat ID")
                         .font(.system(size: 11))
                     Text("- Chat name")
                         .font(.system(size: 11))
@@ -347,14 +349,35 @@ struct SettingsView: View {
         try? KeychainManager.delete(for: .aiApiKey)
         try? KeychainManager.delete(for: .aiModel)
 
-        let dbPath = TDLibClientWrapper.databasePath()
-        try? FileManager.default.removeItem(atPath: dbPath)
+        let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let pidgyDataDir = appSupportDir?.appendingPathComponent("Pidgy", isDirectory: true)
+        if let pidgyDataDir {
+            try? FileManager.default.removeItem(at: pidgyDataDir)
+        }
+
+        let cacheResetGroup = DispatchGroup()
+        cacheResetGroup.enter()
+        Task.detached {
+            await MessageCacheService.shared.invalidateAllLocalData()
+            cacheResetGroup.leave()
+        }
+        _ = cacheResetGroup.wait(timeout: .now() + 2)
+
+        telegramService.stop()
+        telegramService.authState = .uninitialized
+        telegramService.chats = []
+        telegramService.currentUser = nil
+        telegramService.isLoading = false
+        telegramService.errorMessage = nil
+        aiService.clearConfigurationState()
 
         apiId = ""
         apiHash = ""
         aiApiKey = ""
         aiModel = ""
         selectedAIProvider = .none
+        aiSaveStatus = nil
+        testConnectionResult = nil
         saveStatus = "All data deleted"
     }
 

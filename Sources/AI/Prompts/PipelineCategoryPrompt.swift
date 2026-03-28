@@ -5,36 +5,34 @@ enum PipelineCategoryPrompt {
     You triage Telegram conversations. Messages marked [ME] are from the user. \
     All others are from contacts.
 
+    The messages are listed in chronological order (oldest first). \
+    Reason step by step through the timeline and decide who currently owes the next meaningful response.
+
+    Definitions:
+    - A substantive message is a question, request, proposal, assignment, follow-up, or update that creates a next step.
+    - A closed thread is a natural ending such as "thanks", "sounds good", emoji acknowledgment, or a discussion with no open loop.
+    - Use recency heavily, but earlier messages matter if they establish who is waiting on whom.
+
     Classify the conversation into exactly ONE category:
 
     ## DM (1-on-1) Rules
-    - "on_me": The contact sent the last substantive message, asked a question, \
-    shared something needing a response, or is waiting for the user to act. \
-    Unread messages from the contact are a strong signal.
-    - "on_them": The user ([ME]) sent the last substantive message, asked a question, \
-    or is waiting for the contact to respond/act.
-    - "quiet": The conversation ended naturally ("thanks!", "sounds good", thumbs up), \
-    has gone cold with no pending action, or both sides have disengaged.
+    - "on_me": The contact sent the latest substantive message, is waiting on the user, or followed up on something the user owes.
+    - "on_them": The user ([ME]) sent the latest substantive message and is waiting on the contact to reply or act.
+    - "quiet": The thread is closed, stale with no pending obligation, or does not clearly leave anyone waiting.
 
     ## Group Rules
-    - "on_me": The user is specifically addressed — someone @mentioned the user, \
-    replied to the user's message, asked the user a direct question by name, \
-    or the user was assigned a task. General group chatter does NOT count.
-    - "on_them": The user asked a specific question or made a request in the group \
-    that someone else needs to respond to, and no one has replied yet.
-    - "quiet": General group discussion not involving the user, or no pending \
-    action from/for the user.
-
-    ## Output
-    Respond with a single JSON object:
-    {"category": "on_me", "suggestedAction": "Brief 1-sentence next step", "confident": true}
+    - "on_me": The user is directly addressed, @mentioned, assigned a task, or clearly the expected responder.
+    - "on_them": The user asked a specific question or made a concrete request and the group has not answered yet.
+    - "quiet": General discussion, side chatter, or anything that does not clearly leave an obligation on either side.
 
     Rules:
-    - "confident": false if context is ambiguous or messages are insufficient. \
-    Still provide your best guess for category.
-    - "suggestedAction": short, direct, actionable (e.g. "Reply to John's pricing question"). \
-    Empty string if quiet.
-    - Channels, bot chats, news feeds, meme groups → always "quiet" with empty suggestedAction.
+    - If context is ambiguous or insufficient, set "confident" to false but still provide the best category.
+    - "suggestedAction" must be short, direct, and actionable. Use empty string for quiet.
+    - Channels, bot chats, news feeds, meme groups, and broadcast-style chats are always "quiet".
+    - Do not over-index on unread count if the latest substantive turn clearly indicates the opposite responsibility.
+
+    Respond with a single JSON object:
+    {"category": "on_me", "suggestedAction": "Brief 1-sentence next step", "confident": true}
     """
 
     static func userMessage(context: PipelineChatContext, snippets: [MessageSnippet]) -> String {
@@ -50,9 +48,9 @@ enum PipelineCategoryPrompt {
         }
         text += identity + "\n\n"
 
-        text += "Recent messages (newest first):\n"
+        text += "Messages in chronological order (oldest first):\n"
         for s in snippets {
-            text += "[\(s.relativeTimestamp)] \(s.senderFirstName): \(s.text)\n"
+            text += "[messageId: \(s.messageId)] [\(s.relativeTimestamp)] \(s.senderFirstName): \(s.text)\n"
         }
         return text
     }

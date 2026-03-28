@@ -44,6 +44,7 @@ final class AIService: ObservableObject {
         let dtos = try await provider.semanticSearch(query: query, messages: snippets)
         return dtos.map {
             SemanticSearchResult(
+                chatId: $0.chatId,
                 chatTitle: $0.chatName,
                 reason: $0.reason,
                 relevance: $0.relevance == "high" ? .high : .medium,
@@ -55,13 +56,7 @@ final class AIService: ObservableObject {
     /// Generate a follow-up suggestion for a conversation. Marks the user's own messages with [ME].
     /// Returns (isRelevant, suggestedAction). AI decides if the chat is BD-relevant.
     func followUpSuggestion(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> (Bool, String) {
-        let snippets = messages.compactMap { msg -> MessageSnippet? in
-            guard let text = msg.textContent, !text.isEmpty else { return nil }
-            let isMe: Bool
-            if case .user(let uid) = msg.senderId { isMe = uid == myUserId } else { isMe = false }
-            let name = isMe ? "[ME]" : (msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown")
-            return MessageSnippet(senderFirstName: name, text: text, relativeTimestamp: msg.relativeDate, chatName: chatTitle)
-        }
+        let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
         guard !snippets.isEmpty else { return (true, "") }
         return try await provider.generateFollowUpSuggestion(chatTitle: chatTitle, messages: snippets)
     }
@@ -69,13 +64,7 @@ final class AIService: ObservableObject {
     /// AI-powered pipeline categorization. Marks [ME] messages and sends to AI.
     /// Returns (category, suggestedAction, isConfident).
     func categorizePipelineChat(chat: TGChat, messages: [TGMessage], myUserId: Int64, myUser: TGUser?) async throws -> (FollowUpItem.Category, String, Bool) {
-        let snippets = messages.compactMap { msg -> MessageSnippet? in
-            guard let text = msg.textContent, !text.isEmpty else { return nil }
-            let isMe: Bool
-            if case .user(let uid) = msg.senderId { isMe = uid == myUserId } else { isMe = false }
-            let name = isMe ? "[ME]" : (msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown")
-            return MessageSnippet(senderFirstName: name, text: text, relativeTimestamp: msg.relativeDate, chatName: chat.title)
-        }
+        let snippets = conversationSnippets(messages: messages, chatTitle: chat.title, myUserId: myUserId)
         guard !snippets.isEmpty else { return (.quiet, "", true) }
 
         let context = PipelineChatContext(
@@ -96,6 +85,25 @@ final class AIService: ObservableObject {
         }
 
         return (category, dto.suggestedAction, dto.confident ?? true)
+    }
+
+    private func conversationSnippets(messages: [TGMessage], chatTitle: String, myUserId: Int64) -> [MessageSnippet] {
+        messages
+            .sorted { $0.date < $1.date }
+            .compactMap { msg -> MessageSnippet? in
+            guard let text = msg.textContent, !text.isEmpty else { return nil }
+            let isMe: Bool
+            if case .user(let uid) = msg.senderId { isMe = uid == myUserId } else { isMe = false }
+            let name = isMe ? "[ME]" : (msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown")
+            return MessageSnippet(
+                messageId: msg.id,
+                senderFirstName: name,
+                text: text,
+                relativeTimestamp: msg.relativeDate,
+                chatId: msg.chatId,
+                chatName: chatTitle
+            )
+        }
     }
 
     /// Validates AI provider connection by making a minimal test request.
@@ -121,5 +129,12 @@ final class AIService: ObservableObject {
         try? KeychainManager.save(type.rawValue, for: .aiProviderType)
         try? KeychainManager.save(apiKey, for: .aiApiKey)
         try? KeychainManager.save(model, for: .aiModel)
+    }
+
+    func clearConfigurationState() {
+        provider = NoAIProvider()
+        queryRouter.updateProvider(provider)
+        providerType = .none
+        isConfigured = false
     }
 }
