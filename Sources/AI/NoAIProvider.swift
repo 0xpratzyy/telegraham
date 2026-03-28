@@ -7,10 +7,6 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
-    func generateActionItems(messages: [MessageSnippet]) async throws -> [ActionItemDTO] {
-        throw AIError.providerNotConfigured
-    }
-
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
         throw AIError.providerNotConfigured
     }

@@ -59,7 +59,7 @@ final class TDLibClientWrapper {
 
     static func databasePath() -> String {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dbDir = appSupport.appendingPathComponent("TGSearch/tdlib", isDirectory: true)
+        let dbDir = appSupport.appendingPathComponent("Pidgy/tdlib", isDirectory: true)
         try? FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
         return dbDir.path
     }

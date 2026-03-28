@@ -1,6 +1,6 @@
-name: TGSearch
+name: Pidgy
 options:
-  bundleIdPrefix: com.tgsearch
+  bundleIdPrefix: com.pidgy
   deploymentTarget:
     macOS: "26.0"
   generateEmptyDirectories: true
@@ -12,7 +12,7 @@ packages:
     exactVersion: "1.5.2-tdlib-1.8.61-6d509061"
 
 targets:
-  TGSearch:
+  Pidgy:
     type: application
     platform: macOS
     sources:
@@ -21,14 +21,14 @@ targets:
       - package: TDLibKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.tgsearch.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.pidgy.app
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         SWIFT_VERSION: "5.10"
-        PRODUCT_NAME: TGSearch
+        PRODUCT_NAME: Pidgy
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: 1
         INFOPLIST_KEY_LSUIElement: true
-        INFOPLIST_KEY_CFBundleDisplayName: TGSearch
+        INFOPLIST_KEY_CFBundleDisplayName: Pidgy
         ENABLE_APP_SANDBOX: false
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: false

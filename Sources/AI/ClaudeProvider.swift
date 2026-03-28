@@ -25,17 +25,6 @@ final class ClaudeProvider: AIProvider {
         }
     }
 
-    func generateActionItems(messages: [MessageSnippet]) async throws -> [ActionItemDTO] {
-        let snippets = MessageSnippet.truncateToTokenBudget(messages)
-        let response = try await RetryHelper.withRetry {
-            try await self.makeRequest(
-                systemPrompt: ActionPrompt.systemPrompt,
-                userMessage: ActionPrompt.userMessage(snippets: snippets)
-            )
-        }
-        return try JSONExtractor.parseJSON(response)
-    }
-
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
         let snippets = MessageSnippet.truncateToTokenBudget(messages)
         let response = try await RetryHelper.withRetry {

@@ -32,27 +32,3 @@ struct FollowUpItem: Identifiable {
         }
     }
 }
-
-/// Groups FollowUpItems by category for the sectioned Pipeline view.
-struct PipelineSection: Identifiable {
-    let category: FollowUpItem.Category
-    let items: [FollowUpItem]
-
-    var id: FollowUpItem.Category { category }
-
-    var title: String {
-        switch category {
-        case .onMe: return "ON ME"
-        case .onThem: return "ON THEM"
-        case .quiet: return "QUIET"
-        }
-    }
-
-    var icon: String {
-        switch category {
-        case .onMe: return "envelope.badge"
-        case .onThem: return "clock.arrow.circlepath"
-        case .quiet: return "moon.zzz"
-        }
-    }
-}

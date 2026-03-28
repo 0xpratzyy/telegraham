@@ -37,26 +37,6 @@ final class AIService: ObservableObject {
 
     // MARK: - High-Level AI Operations
 
-    /// Generate prioritized action items (used by Priority tab).
-    func actionItems(messages: [TGMessage]) async throws -> [ActionItem] {
-        let snippets = MessageSnippet.fromMessages(messages)
-        guard !snippets.isEmpty else { return [] }
-
-        let dtos = try await provider.generateActionItems(messages: snippets)
-
-        return dtos.map { dto in
-            let urgency = ActionItem.Urgency(rawValue: dto.urgency) ?? .medium
-            return ActionItem(
-                chatTitle: dto.chatName,
-                senderName: dto.senderName,
-                summary: dto.summary,
-                suggestedAction: dto.suggestedAction,
-                urgency: urgency,
-                originalMessages: []
-            )
-        }
-    }
-
     /// Semantic search: find chats relevant to a query by analyzing messages.
     func semanticSearch(query: String, messages: [TGMessage]) async throws -> [SemanticSearchResult] {
         let snippets = MessageSnippet.fromMessages(messages)

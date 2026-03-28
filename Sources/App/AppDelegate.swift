@@ -59,7 +59,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             backing: .buffered,
             defer: false
         )
-        window.title = "TGSearch Settings"
+        window.title = "Pidgy Settings"
         window.contentView = hostingView
         window.center()
         window.isReleasedWhenClosed = false

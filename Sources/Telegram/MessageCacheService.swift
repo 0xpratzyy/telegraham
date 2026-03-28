@@ -8,7 +8,7 @@ actor MessageCacheService {
     private let cacheDir: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport
-            .appendingPathComponent("TGSearch", isDirectory: true)
+            .appendingPathComponent("Pidgy", isDirectory: true)
             .appendingPathComponent("message_cache", isDirectory: true)
     }()
 
@@ -19,7 +19,7 @@ actor MessageCacheService {
     private let pipelineCacheDir: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport
-            .appendingPathComponent("TGSearch", isDirectory: true)
+            .appendingPathComponent("Pidgy", isDirectory: true)
             .appendingPathComponent("pipeline_cache", isDirectory: true)
     }()
     private var pipelineCache: [Int64: CachedPipelineCategory] = [:]

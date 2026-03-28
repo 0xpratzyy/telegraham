@@ -46,38 +46,6 @@ enum QueryIntent: String, Codable {
     case semanticSearch = "semantic_search"
 }
 
-// MARK: - Action Items (used by Priority tab)
-
-struct ActionItem: Identifiable {
-    let id = UUID()
-    let chatTitle: String
-    let senderName: String
-    let summary: String
-    let suggestedAction: String
-    let urgency: Urgency
-    let originalMessages: [TGMessage]
-
-    enum Urgency: String, Codable, CaseIterable {
-        case high, medium, low
-
-        var color: Color {
-            switch self {
-            case .high: return .red
-            case .medium: return .yellow
-            case .low: return .green
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .high: return "exclamationmark.triangle.fill"
-            case .medium: return "exclamationmark.circle.fill"
-            case .low: return "arrow.down.circle.fill"
-            }
-        }
-    }
-}
-
 // MARK: - Semantic Search
 
 struct SemanticSearchResult: Identifiable {

@@ -4,6 +4,7 @@ enum AuthState: Equatable {
     case uninitialized
     case waitingForParameters
     case waitingForPhoneNumber
+    case waitingForQrCode(link: String)
     case waitingForCode(codeInfo: CodeInfo?)
     case waitingForPassword(hint: String?)
     case ready

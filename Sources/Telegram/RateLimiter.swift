@@ -1,7 +1,7 @@
 import Foundation
 
 /// Token-bucket rate limiter for TDLib API calls.
-/// Conservative defaults to ensure TGSearch is invisible to Telegram's rate limiting.
+/// Conservative defaults to ensure Pidgy is invisible to Telegram's rate limiting.
 actor RateLimiter {
     private let maxTokens: Double
     private let refillRate: Double // tokens per second

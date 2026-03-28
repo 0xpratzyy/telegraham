@@ -5,9 +5,6 @@ protocol AIProvider {
     /// Summarize a group's recent activity in 1-2 lines.
     func summarize(messages: [MessageSnippet], prompt: String) async throws -> String
 
-    /// Generate prioritized action items from messages (used by Priority tab).
-    func generateActionItems(messages: [MessageSnippet]) async throws -> [ActionItemDTO]
-
     /// Semantic search: find chats relevant to a topic/concept.
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO]
 
@@ -23,15 +20,6 @@ protocol AIProvider {
 }
 
 // MARK: - DTOs for AI response parsing
-
-/// Wire format for action items returned by AI.
-struct ActionItemDTO: Codable {
-    let chatName: String
-    let senderName: String
-    let summary: String
-    let suggestedAction: String
-    let urgency: String
-}
 
 /// Wire format for follow-up suggestion returned by AI.
 struct FollowUpSuggestionDTO: Codable {

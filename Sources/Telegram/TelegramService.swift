@@ -101,6 +101,11 @@ class TelegramService: ObservableObject {
         _ = try await client.checkAuthenticationPassword(password: password)
     }
 
+    func requestQrCodeAuth() async throws {
+        guard let client else { throw TGError.clientNotInitialized }
+        _ = try await client.requestQrCodeAuthentication(otherUserIds: [])
+    }
+
     func logOut() async throws {
         guard let client else { throw TGError.clientNotInitialized }
         _ = try await client.logOut()
@@ -342,6 +347,9 @@ class TelegramService: ObservableObject {
 
         case .authorizationStateWaitPhoneNumber:
             authState = .waitingForPhoneNumber
+
+        case .authorizationStateWaitOtherDeviceConfirmation(let info):
+            authState = .waitingForQrCode(link: info.link)
 
         case .authorizationStateWaitCode(let info):
             authState = .waitingForCode(codeInfo: CodeInfo(

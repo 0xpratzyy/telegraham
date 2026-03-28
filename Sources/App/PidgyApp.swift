@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct TGSearchApp: App {
+struct PidgyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {

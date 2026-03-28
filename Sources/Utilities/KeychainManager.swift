@@ -1,15 +1,15 @@
 import Foundation
 
-/// File-based credential storage in ~/Library/Application Support/TGSearch/
+/// File-based credential storage in ~/Library/Application Support/Pidgy/
 /// Uses POSIX 0600 permissions (user-only read/write). Avoids macOS Keychain
 /// password prompts that occur with ad-hoc signed development builds.
 enum KeychainManager {
     enum Key: String {
-        case apiId = "com.tgsearch.apiId"
-        case apiHash = "com.tgsearch.apiHash"
-        case aiProviderType = "com.tgsearch.aiProviderType"
-        case aiApiKey = "com.tgsearch.aiApiKey"
-        case aiModel = "com.tgsearch.aiModel"
+        case apiId = "com.pidgy.apiId"
+        case apiHash = "com.pidgy.apiHash"
+        case aiProviderType = "com.pidgy.aiProviderType"
+        case aiApiKey = "com.pidgy.aiApiKey"
+        case aiModel = "com.pidgy.aiModel"
     }
 
     enum KeychainError: Error, LocalizedError {
@@ -30,7 +30,7 @@ enum KeychainManager {
 
     private static let storageDir: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("TGSearch", isDirectory: true).appendingPathComponent("credentials", isDirectory: true)
+        return appSupport.appendingPathComponent("Pidgy", isDirectory: true).appendingPathComponent("credentials", isDirectory: true)
     }()
 
     private static func ensureDirectory() throws {

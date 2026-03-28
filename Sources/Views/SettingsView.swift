@@ -256,7 +256,7 @@ struct SettingsView: View {
                     )
                 )
 
-            Text("TGSearch")
+            Text("Pidgy")
                 .font(.system(size: 20, weight: .bold, design: .monospaced))
 
             Text("Version \(AppConstants.App.version)")
@@ -363,6 +363,7 @@ struct SettingsView: View {
         case .uninitialized: return "Not initialized"
         case .waitingForParameters: return "Configuring..."
         case .waitingForPhoneNumber: return "Waiting for phone"
+        case .waitingForQrCode: return "Scan QR code"
         case .waitingForCode: return "Waiting for code"
         case .waitingForPassword: return "Waiting for password"
         case .ready: return "Connected"

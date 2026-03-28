@@ -7,7 +7,6 @@ struct ChatRowView: View {
 
     let chat: TGChat
     let isHighlighted: Bool
-    var priorityReason: String? = nil
     var pipelineStatus: FollowUpItem.Category? = nil
     var pipelineSuggestion: String? = nil
     let onOpen: () -> Void
@@ -72,23 +71,13 @@ struct ChatRowView: View {
                         }
                     }
 
-                    // Line 2: Pipeline suggestion, priority reason, or message preview
+                    // Line 2: Pipeline suggestion, or message preview
                     if let suggestion = pipelineSuggestion, !suggestion.isEmpty,
                        suggestion != "No action needed", pipelineStatus != nil {
                         Text("→ \(suggestion)")
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                    } else if let reason = priorityReason {
-                        HStack(spacing: 3) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.purple)
-                            Text(reason)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.purple.opacity(0.8))
-                                .lineLimit(1)
-                        }
                     } else if let lastMessage = chat.lastMessage {
                         Text(lastMessage.displayText)
                             .font(.system(size: 11.5))

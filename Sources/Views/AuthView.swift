@@ -1,5 +1,6 @@
 import SwiftUI
 import TDLibKit
+import CoreImage.CIFilterBuiltins
 
 struct AuthView: View {
     @EnvironmentObject var telegramService: TelegramService
@@ -10,6 +11,7 @@ struct AuthView: View {
     @State private var apiHash = ""
     @State private var errorMessage: String?
     @State private var isSubmitting = false
+    @State private var showPhoneLogin = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +20,7 @@ struct AuthView: View {
                 Image(systemName: "bolt.circle.fill")
                     .font(.system(size: 48))
                     .foregroundStyle(Color.accentColor)
-                Text("TGSearch")
+                Text("Pidgy")
                     .font(.system(size: 24, weight: .bold, design: .monospaced))
                     .foregroundStyle(.primary)
             }
@@ -31,7 +33,13 @@ struct AuthView: View {
                 case .uninitialized, .waitingForParameters:
                     credentialsView
                 case .waitingForPhoneNumber:
-                    phoneNumberView
+                    if showPhoneLogin {
+                        phoneNumberView
+                    } else {
+                        qrCodeRequestView
+                    }
+                case .waitingForQrCode(let link):
+                    qrCodeView(link: link)
                 case .waitingForCode(let codeInfo):
                     verificationCodeView(codeInfo: codeInfo)
                 case .waitingForPassword(let hint):
@@ -58,7 +66,7 @@ struct AuthView: View {
             Spacer()
 
             // Safety notice
-            Text("TGSearch is read-only. It can never send messages or modify your account.")
+            Text("Pidgy is read-only. It can never send messages or modify your account.")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -110,6 +118,72 @@ struct AuthView: View {
         }
     }
 
+    // MARK: - QR Code Login
+
+    private var qrCodeRequestView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.regular)
+
+            Text("Requesting QR code...")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+        }
+        .onAppear {
+            Task {
+                do {
+                    try await telegramService.requestQrCodeAuth()
+                } catch {
+                    errorMessage = Self.extractErrorMessage(error)
+                }
+            }
+        }
+    }
+
+    private func qrCodeView(link: String) -> some View {
+        VStack(spacing: 20) {
+            Text("Scan with Telegram")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.primary)
+
+            if let qrImage = generateQRCode(from: link) {
+                Image(nsImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 200, height: 200)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.quaternary)
+                    .frame(width: 200, height: 200)
+                    .overlay {
+                        Text("Failed to generate QR")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+            }
+
+            VStack(spacing: 6) {
+                Text("Open Telegram on your phone")
+                Text("Go to **Settings → Devices → Link Desktop Device**")
+                Text("Point your phone at this QR code")
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+
+            Button {
+                showPhoneLogin = true
+            } label: {
+                Text("Log in with phone number instead")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     // MARK: - Phone Number
 
     private var phoneNumberView: some View {
@@ -128,6 +202,15 @@ struct AuthView: View {
                     errorMessage = Self.extractErrorMessage(error)
                 }
             }
+
+            Button {
+                showPhoneLogin = false
+            } label: {
+                Text("Log in with QR code instead")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -203,6 +286,23 @@ struct AuthView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    // MARK: - QR Code Generator
+
+    private func generateQRCode(from string: String) -> NSImage? {
+        let context = CIContext()
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(string.utf8)
+        filter.correctionLevel = "M"
+
+        guard let ciImage = filter.outputImage else { return nil }
+
+        let scale = 10.0
+        let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
     }
 
     // MARK: - Reusable Components

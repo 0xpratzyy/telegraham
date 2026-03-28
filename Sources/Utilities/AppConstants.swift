@@ -1,6 +1,6 @@
 import Foundation
 
-/// Centralized constants for the TGSearch app.
+/// Centralized constants for the Pidgy app.
 enum AppConstants {
     enum Panel {
         static let width: CGFloat = 640
@@ -17,8 +17,6 @@ enum AppConstants {
         static let chatListLimit = 100
         static let chatHistoryLimit = 50
         static let searchLimit = 50
-        static let actionItemChatCount = 50
-        static let actionItemPerChat = 15
     }
 
     enum AI {

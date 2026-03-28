@@ -20,7 +20,7 @@ final class MenuBarManager: NSObject {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "TGSearch")
+            button.image = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "Pidgy")
             button.image?.size = NSSize(width: 18, height: 18)
             button.action = #selector(statusBarClicked(_:))
             button.target = self
@@ -50,7 +50,7 @@ final class MenuBarManager: NSObject {
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Quit TGSearch", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit Pidgy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
 
         self.menu = menu
@@ -94,7 +94,7 @@ final class MenuBarManager: NSObject {
         guard let button = statusItem?.button else { return }
 
         // Keep icon as template so it adapts to dark/light menu bar
-        let icon = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "TGSearch")!
+        let icon = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "Pidgy")!
         icon.size = NSSize(width: 18, height: 18)
         icon.isTemplate = true
         button.image = icon
