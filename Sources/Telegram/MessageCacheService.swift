@@ -130,6 +130,55 @@ actor MessageCacheService {
         dirtyChats.insert(chatId)
     }
 
+    /// Applies a TDLib content-edit event to an already cached message.
+    /// No-op if the chat/message isn't currently cached in memory or on disk.
+    func updateMessageContent(
+        chatId: Int64,
+        messageId: Int64,
+        textContent: String?,
+        mediaType: TGMessage.MediaType?
+    ) {
+        guard var existing = loadCachedEntry(chatId: chatId) else { return }
+        guard let index = existing.messages.firstIndex(where: { $0.id == messageId }) else { return }
+
+        let old = existing.messages[index]
+        existing.messages[index] = CachedMessage(
+            id: old.id,
+            chatId: old.chatId,
+            senderUserId: old.senderUserId,
+            senderName: old.senderName,
+            date: old.date,
+            textContent: textContent,
+            mediaTypeRaw: mediaType?.rawValue
+        )
+
+        memoryCache[chatId] = existing
+        dirtyChats.insert(chatId)
+    }
+
+    /// Removes deleted messages from local cache.
+    /// No-op if the chat isn't currently cached in memory or on disk.
+    func deleteMessages(chatId: Int64, messageIds: [Int64]) {
+        guard !messageIds.isEmpty else { return }
+        guard var existing = loadCachedEntry(chatId: chatId) else { return }
+
+        let toDelete = Set(messageIds)
+        let originalCount = existing.messages.count
+        existing.messages.removeAll { toDelete.contains($0.id) }
+        guard existing.messages.count != originalCount else { return }
+
+        if existing.messages.isEmpty {
+            memoryCache.removeValue(forKey: chatId)
+            dirtyChats.remove(chatId)
+            deleteFromDisk(chatId: chatId)
+            return
+        }
+
+        existing.oldestMessageId = existing.messages.last?.id
+        memoryCache[chatId] = existing
+        dirtyChats.insert(chatId)
+    }
+
     // MARK: - Pipeline Category Cache
 
     func getPipelineCategory(chatId: Int64) -> CachedPipelineCategory? {
@@ -228,6 +277,17 @@ actor MessageCacheService {
     private func deleteFromDisk(chatId: Int64) {
         let url = cacheDir.appendingPathComponent("\(chatId).json")
         try? FileManager.default.removeItem(at: url)
+    }
+
+    private func loadCachedEntry(chatId: Int64) -> CachedChatMessages? {
+        if let cached = memoryCache[chatId] {
+            return cached
+        }
+        if let diskCached = loadFromDisk(chatId: chatId) {
+            memoryCache[chatId] = diskCached
+            return diskCached
+        }
+        return nil
     }
 
     // MARK: - Pipeline Disk I/O

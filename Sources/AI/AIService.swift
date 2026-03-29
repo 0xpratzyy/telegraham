@@ -7,6 +7,7 @@ import SwiftUI
 final class AIService: ObservableObject {
     @Published var isConfigured = false
     @Published var providerType: AIProviderConfig.ProviderType = .none
+    @Published private(set) var providerModel: String = ""
     private(set) var provider: AIProvider = NoAIProvider()
     let queryRouter: QueryRouter
 
@@ -18,7 +19,11 @@ final class AIService: ObservableObject {
     // MARK: - Configuration
 
     func configure(type: AIProviderConfig.ProviderType, apiKey: String, model: String? = nil) {
-        let resolvedModel = model?.isEmpty == false ? model! : type.defaultModel
+        let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedModel = normalizedModel(
+            type: type,
+            model: requestedModel?.isEmpty == false ? requestedModel! : type.defaultModel
+        )
 
         switch type {
         case .claude:
@@ -31,6 +36,7 @@ final class AIService: ObservableObject {
 
         queryRouter.updateProvider(provider)
         providerType = type
+        providerModel = resolvedModel
         isConfigured = type != .none && !apiKey.isEmpty
         saveConfiguration(type: type, apiKey: apiKey, model: resolvedModel)
     }
@@ -51,6 +57,70 @@ final class AIService: ObservableObject {
                 matchingMessages: $0.matchingMessages ?? []
             )
         }
+    }
+
+    /// Agentic search: rerank candidate chats for actionability and reply priority.
+    func agenticSearch(
+        query: String,
+        querySpec: QuerySpec,
+        candidates: [AgenticSearchCandidate],
+        myUserId: Int64
+    ) async throws -> [AgenticSearchResult] {
+        guard !candidates.isEmpty else { return [] }
+
+        let maxMessages = AppConstants.AI.AgenticSearch.maxMessagesPerChat
+        let candidateDTOs: [AgenticCandidateDTO] = candidates.compactMap { candidate in
+            let bounded = Array(candidate.messages.sorted { $0.date > $1.date }.prefix(maxMessages))
+            let snippets = conversationSnippets(messages: bounded, chatTitle: candidate.chat.title, myUserId: myUserId)
+            guard !snippets.isEmpty else { return nil }
+
+            return AgenticCandidateDTO(
+                chatId: candidate.chat.id,
+                chatName: candidate.chat.title,
+                pipelineCategory: candidate.pipelineCategory,
+                messages: snippets
+            )
+        }
+        guard !candidateDTOs.isEmpty else { return [] }
+
+        let knownTitles = Dictionary(uniqueKeysWithValues: candidates.map { ($0.chat.id, $0.chat.title) })
+        let knownIds = Set(knownTitles.keys)
+        let dtos = try await provider.agenticSearch(
+            query: query,
+            constraints: makeAgenticConstraintsDTO(from: querySpec),
+            candidates: candidateDTOs
+        )
+
+        return dtos
+            .filter { knownIds.contains($0.chatId) }
+            .map { dto in
+                let warmth: AgenticSearchResult.Warmth
+                switch dto.warmth.lowercased() {
+                case "hot": warmth = .hot
+                case "warm": warmth = .warm
+                default: warmth = .cold
+                }
+
+                let replyability: AgenticSearchResult.Replyability
+                switch dto.replyability.lowercased() {
+                case "reply_now": replyability = .replyNow
+                case "waiting_on_them": replyability = .waitingOnThem
+                default: replyability = .unclear
+                }
+
+                return AgenticSearchResult(
+                    chatId: dto.chatId,
+                    chatTitle: knownTitles[dto.chatId] ?? "Unknown",
+                    score: max(0, min(100, dto.score)),
+                    warmth: warmth,
+                    replyability: replyability,
+                    reason: dto.reason,
+                    suggestedAction: dto.suggestedAction,
+                    confidence: max(0, min(1, dto.confidence)),
+                    supportingMessageIds: dto.supportingMessageIds
+                )
+            }
+            .sorted { $0.score > $1.score }
     }
 
     /// Generate a follow-up suggestion for a conversation. Marks the user's own messages with [ME].
@@ -106,6 +176,21 @@ final class AIService: ObservableObject {
         }
     }
 
+    private func makeAgenticConstraintsDTO(from querySpec: QuerySpec) -> AgenticSearchConstraintsDTO {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+
+        return AgenticSearchConstraintsDTO(
+            scope: querySpec.scope.rawValue,
+            replyConstraint: querySpec.replyConstraint.rawValue,
+            startDateISO8601: querySpec.timeRange.map { formatter.string(from: $0.startDate) },
+            endDateISO8601: querySpec.timeRange.map { formatter.string(from: $0.endDate) },
+            timeRangeLabel: querySpec.timeRange?.label,
+            parseConfidence: querySpec.parseConfidence,
+            unsupportedFragments: querySpec.unsupportedFragments
+        )
+    }
+
     /// Validates AI provider connection by making a minimal test request.
     func testConnection() async throws -> Bool {
         return try await provider.testConnection()
@@ -131,10 +216,25 @@ final class AIService: ObservableObject {
         try? KeychainManager.save(model, for: .aiModel)
     }
 
+    private func normalizedModel(type: AIProviderConfig.ProviderType, model: String) -> String {
+        switch type {
+        case .openai:
+            switch model.lowercased() {
+            case "gpt-5.4-mini":
+                return "gpt-5-mini"
+            default:
+                return model
+            }
+        default:
+            return model
+        }
+    }
+
     func clearConfigurationState() {
         provider = NoAIProvider()
         queryRouter.updateProvider(provider)
         providerType = .none
+        providerModel = ""
         isConfigured = false
     }
 }

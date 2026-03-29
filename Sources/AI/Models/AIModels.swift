@@ -54,6 +54,57 @@ struct MessageSnippet: Codable {
 enum QueryIntent: String, Codable {
     case messageSearch = "message_search"
     case semanticSearch = "semantic_search"
+    case agenticSearch = "agentic_search"
+}
+
+enum QueryScope: String, Codable {
+    case all
+    case dms
+    case groups
+
+    var label: String {
+        switch self {
+        case .all: return "All"
+        case .dms: return "DMs"
+        case .groups: return "Groups"
+        }
+    }
+}
+
+enum ReplyConstraint: String, Codable {
+    case none
+    case pipelineOnMeOnly = "pipeline_on_me_only"
+}
+
+struct TimeRangeConstraint: Codable {
+    let startDate: Date
+    let endDate: Date
+    let label: String
+
+    func contains(_ date: Date) -> Bool {
+        date >= startDate && date <= endDate
+    }
+}
+
+struct QuerySpec: Codable {
+    let rawQuery: String
+    let mode: QueryIntent
+    let scope: QueryScope
+    let scopeWasExplicit: Bool
+    let replyConstraint: ReplyConstraint
+    let timeRange: TimeRangeConstraint?
+    let parseConfidence: Double
+    let unsupportedFragments: [String]
+
+    var hasActionableConstraints: Bool {
+        scopeWasExplicit || replyConstraint != .none || timeRange != nil
+    }
+}
+
+struct AgenticSearchCandidate {
+    let chat: TGChat
+    let pipelineCategory: String
+    let messages: [TGMessage]
 }
 
 // MARK: - Semantic Search
@@ -74,6 +125,54 @@ struct SemanticSearchResult: Identifiable {
             switch self {
             case .high: return .purple
             case .medium: return .blue
+            }
+        }
+    }
+}
+
+struct AgenticSearchResult: Identifiable {
+    let chatId: Int64
+    let chatTitle: String
+    let score: Int
+    let warmth: Warmth
+    let replyability: Replyability
+    let reason: String
+    let suggestedAction: String
+    let confidence: Double
+    let supportingMessageIds: [Int64]
+
+    var id: Int64 { chatId }
+
+    enum Warmth: String {
+        case hot, warm, cold
+
+        var color: Color {
+            switch self {
+            case .hot: return .red
+            case .warm: return .orange
+            case .cold: return .blue
+            }
+        }
+    }
+
+    enum Replyability: String {
+        case replyNow = "reply_now"
+        case waitingOnThem = "waiting_on_them"
+        case unclear
+
+        var label: String {
+            switch self {
+            case .replyNow: return "REPLY NOW"
+            case .waitingOnThem: return "WAITING"
+            case .unclear: return "UNCLEAR"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .replyNow: return .green
+            case .waitingOnThem: return .blue
+            case .unclear: return .gray
             }
         }
     }

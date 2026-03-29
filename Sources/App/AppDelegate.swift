@@ -9,6 +9,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var panelManager: PanelManager?
     private var hotkeyManager: HotkeyManager?
     private var settingsWindow: NSWindow?
+    private var periodicCacheFlushTask: Task<Void, Never>?
+    private let periodicCacheFlushIntervalNanos: UInt64 = 15_000_000_000
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panelManager = PanelManager(telegramService: telegramService, aiService: aiService)
@@ -32,9 +34,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 telegramService.start(apiId: apiId, apiHash: apiHash)
             }
         }
+
+        startPeriodicCacheFlush()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        periodicCacheFlushTask?.cancel()
+        periodicCacheFlushTask = nil
         hotkeyManager?.unregister()
         telegramService.stop()
         flushCachesBeforeTermination()
@@ -79,5 +85,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
 
         _ = flushGroup.wait(timeout: .now() + timeout)
+    }
+
+    /// Periodically persists incremental message updates to disk.
+    /// This does not trigger any Telegram fetches; it only flushes dirty in-memory cache entries.
+    private func startPeriodicCacheFlush() {
+        periodicCacheFlushTask?.cancel()
+        periodicCacheFlushTask = Task.detached(priority: .utility) { [intervalNanos = periodicCacheFlushIntervalNanos] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNanos)
+                guard !Task.isCancelled else { break }
+                await MessageCacheService.shared.flushToDisk()
+            }
+        }
     }
 }

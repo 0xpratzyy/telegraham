@@ -36,6 +36,25 @@ final class ClaudeProvider: AIProvider {
         return try JSONExtractor.parseJSON(response)
     }
 
+    func agenticSearch(
+        query: String,
+        constraints: AgenticSearchConstraintsDTO,
+        candidates: [AgenticCandidateDTO]
+    ) async throws -> [AgenticSearchResultDTO] {
+        guard !candidates.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: AgenticSearchPrompt.systemPrompt,
+                userMessage: AgenticSearchPrompt.userMessage(
+                    query: query,
+                    constraints: constraints,
+                    candidates: candidates
+                )
+            )
+        }
+        return try JSONExtractor.parseJSON(response)
+    }
+
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
         let snippets = MessageSnippet.truncateToTokenBudget(messages, maxChars: 4000)
         let response = try await RetryHelper.withRetry {

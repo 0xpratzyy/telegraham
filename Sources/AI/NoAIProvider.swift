@@ -11,6 +11,14 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
+    func agenticSearch(
+        query: String,
+        constraints: AgenticSearchConstraintsDTO,
+        candidates: [AgenticCandidateDTO]
+    ) async throws -> [AgenticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
         return (true, "")
     }

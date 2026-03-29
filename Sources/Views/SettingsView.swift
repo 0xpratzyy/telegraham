@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var aiSaveStatus: String?
     @State private var isTestingConnection = false
     @State private var testConnectionResult: String?
+    @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
 
     var body: some View {
         TabView {
@@ -210,6 +211,15 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Include Bot Chats In AI Search", isOn: $includeBotsInAISearch)
+                Text("Turn this off to hide Telegram bots like BotFather from AI search and agentic ranking.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } header: {
+                Text("AI Search Preferences")
+            }
+
+            Section {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("What data is sent to AI:")
                         .font(.system(size: 12, weight: .semibold))
@@ -348,6 +358,7 @@ struct SettingsView: View {
         try? KeychainManager.delete(for: .aiProviderType)
         try? KeychainManager.delete(for: .aiApiKey)
         try? KeychainManager.delete(for: .aiModel)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Preferences.includeBotsInAISearchKey)
 
         let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         let pidgyDataDir = appSupportDir?.appendingPathComponent("Pidgy", isDirectory: true)
@@ -376,6 +387,7 @@ struct SettingsView: View {
         aiApiKey = ""
         aiModel = ""
         selectedAIProvider = .none
+        includeBotsInAISearch = false
         aiSaveStatus = nil
         testConnectionResult = nil
         saveStatus = "All data deleted"

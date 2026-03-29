@@ -6,6 +6,7 @@ struct TGUser: Identifiable, Equatable {
     let lastName: String
     let username: String?
     let phoneNumber: String?
+    let isBot: Bool
 
     var displayName: String {
         let full = "\(firstName) \(lastName)".trimmingCharacters(in: .whitespaces)

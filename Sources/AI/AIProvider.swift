@@ -8,6 +8,13 @@ protocol AIProvider {
     /// Semantic search: find chats relevant to a topic/concept.
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO]
 
+    /// Agentic search: rank candidate chats for actionability against the exact query.
+    func agenticSearch(
+        query: String,
+        constraints: AgenticSearchConstraintsDTO,
+        candidates: [AgenticCandidateDTO]
+    ) async throws -> [AgenticSearchResultDTO]
+
     /// Generate a follow-up suggestion for a single chat conversation.
     /// Returns (isRelevant, suggestedAction). If not relevant, the chat should be removed from pipeline.
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String)
@@ -64,6 +71,88 @@ struct SemanticSearchResultDTO: Codable {
         reason = try container.decode(String.self, forKey: .reason)
         relevance = try container.decode(String.self, forKey: .relevance)
         matchingMessages = try container.decodeIfPresent([String].self, forKey: .matchingMessages)
+    }
+}
+
+/// Candidate chats passed to agentic search reranker.
+struct AgenticCandidateDTO: Codable {
+    let chatId: Int64
+    let chatName: String
+    let pipelineCategory: String
+    let messages: [MessageSnippet]
+}
+
+/// Query constraints that must be respected by agentic ranking.
+struct AgenticSearchConstraintsDTO: Codable {
+    let scope: String
+    let replyConstraint: String
+    let startDateISO8601: String?
+    let endDateISO8601: String?
+    let timeRangeLabel: String?
+    let parseConfidence: Double
+    let unsupportedFragments: [String]
+}
+
+/// Wire format for agentic search ranking returned by AI.
+struct AgenticSearchResultDTO: Codable {
+    let chatId: Int64
+    let score: Int
+    let warmth: String
+    let replyability: String
+    let reason: String
+    let suggestedAction: String
+    let confidence: Double
+    let supportingMessageIds: [Int64]
+
+    enum CodingKeys: String, CodingKey {
+        case chatId
+        case score
+        case warmth
+        case replyability
+        case reason
+        case suggestedAction
+        case confidence
+        case supportingMessageIds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let numericId = try? container.decode(Int64.self, forKey: .chatId) {
+            chatId = numericId
+        } else {
+            let rawId = try container.decode(String.self, forKey: .chatId)
+            guard let numericId = Int64(rawId) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .chatId,
+                    in: container,
+                    debugDescription: "chatId must decode to an Int64"
+                )
+            }
+            chatId = numericId
+        }
+
+        if let numericScore = try? container.decode(Int.self, forKey: .score) {
+            score = max(0, min(100, numericScore))
+        } else {
+            let rawScore = try container.decode(String.self, forKey: .score)
+            score = max(0, min(100, Int(rawScore) ?? 0))
+        }
+
+        warmth = try container.decode(String.self, forKey: .warmth)
+        replyability = try container.decode(String.self, forKey: .replyability)
+        reason = try container.decode(String.self, forKey: .reason)
+        suggestedAction = try container.decode(String.self, forKey: .suggestedAction)
+        confidence = try container.decodeIfPresent(Double.self, forKey: .confidence) ?? 0
+
+        let rawIds = try container.decodeIfPresent([String].self, forKey: .supportingMessageIds)
+        if let rawIds {
+            supportingMessageIds = rawIds.compactMap(Int64.init)
+        } else if let numericIds = try? container.decode([Int64].self, forKey: .supportingMessageIds) {
+            supportingMessageIds = numericIds
+        } else {
+            supportingMessageIds = []
+        }
     }
 }
 

@@ -219,6 +219,54 @@ class TelegramService: ObservableObject {
         return tgUser
     }
 
+    /// Lightweight bot check for private chats used by AI search filters.
+    /// Uses cached user metadata when available and falls back to title heuristic.
+    func isLikelyBotChat(_ chat: TGChat) -> Bool {
+        guard case .privateChat(let userId) = chat.chatType else { return false }
+
+        if let cachedUser = userCache[userId] {
+            return isLikelyBotUser(cachedUser)
+        }
+
+        let normalizedTitle = chat.title.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedTitle.hasSuffix("bot") { return true }
+        if normalizedTitle.contains("botfather") { return true }
+        if normalizedTitle.contains(" bot") || normalizedTitle.hasPrefix("bot ") { return true }
+        return false
+    }
+
+    /// Strong bot check for private chats. Falls back to lightweight heuristic only if user lookup fails.
+    func isBotChat(_ chat: TGChat) async -> Bool {
+        guard case .privateChat(let userId) = chat.chatType else { return false }
+
+        if let cachedUser = userCache[userId] {
+            return isLikelyBotUser(cachedUser)
+        }
+
+        if let user = try? await getUser(id: userId) {
+            return isLikelyBotUser(user)
+        }
+
+        return isLikelyBotChat(chat)
+    }
+
+    private func isLikelyBotUser(_ user: TGUser) -> Bool {
+        if user.isBot { return true }
+
+        if let username = user.username?.lowercased() {
+            if username.hasSuffix("bot") || username.hasSuffix("_bot") {
+                return true
+            }
+        }
+
+        let normalizedName = user.displayName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedName.contains("botfather") { return true }
+        if normalizedName.hasSuffix("bot") { return true }
+        if normalizedName.hasSuffix(" bot") { return true }
+        if normalizedName.hasPrefix("bot ") { return true }
+        return false
+    }
+
     /// Resolves username/phone hints for deep-link generation.
     /// Uses lightweight TDLib lookups and local caches when available.
     func getDeepLinkHints(for chat: TGChat) async -> (username: String?, phoneNumber: String?) {
@@ -295,6 +343,29 @@ class TelegramService: ObservableObject {
                 chats[index] = updated
                 chatCache[updated.id] = updated
                 sortChats()
+            }
+
+        case .updateMessageContent(let contentUpdate):
+            let (textContent, mediaType) = extractContent(from: contentUpdate.newContent)
+            Task {
+                await MessageCacheService.shared.updateMessageContent(
+                    chatId: contentUpdate.chatId,
+                    messageId: contentUpdate.messageId,
+                    textContent: textContent,
+                    mediaType: mediaType
+                )
+                // Content edits can change follow-up semantics; force fresh categorization next run.
+                await MessageCacheService.shared.invalidatePipelineCategory(chatId: contentUpdate.chatId)
+            }
+
+        case .updateDeleteMessages(let deleteUpdate):
+            Task {
+                await MessageCacheService.shared.deleteMessages(
+                    chatId: deleteUpdate.chatId,
+                    messageIds: deleteUpdate.messageIds
+                )
+                // Deletions can alter conversation state; avoid stale cached AI category.
+                await MessageCacheService.shared.invalidatePipelineCategory(chatId: deleteUpdate.chatId)
             }
 
         case .updateChatPosition(let posUpdate):
@@ -480,12 +551,20 @@ class TelegramService: ObservableObject {
     }
 
     private func mapUser(_ user: TDLibKit.User) -> TGUser {
-        TGUser(
+        let isBot: Bool
+        if case .userTypeBot = user.type {
+            isBot = true
+        } else {
+            isBot = false
+        }
+
+        return TGUser(
             id: user.id,
             firstName: user.firstName,
             lastName: user.lastName,
             username: user.usernames?.activeUsernames.first,
-            phoneNumber: user.phoneNumber.isEmpty ? nil : user.phoneNumber
+            phoneNumber: user.phoneNumber.isEmpty ? nil : user.phoneNumber,
+            isBot: isBot
         )
     }
 

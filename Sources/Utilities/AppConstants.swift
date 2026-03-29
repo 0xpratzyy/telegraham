@@ -24,12 +24,30 @@ enum AppConstants {
         static let openAIBaseURL = URL(string: "https://api.openai.com/v1/chat/completions")!
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
-        static let defaultOpenAIModel = "gpt-4o-mini"
+        static let defaultOpenAIModel = "gpt-5-mini"
         static let followUpClaudeModel = "claude-3-5-haiku-20241022"
-        static let followUpOpenAIModel = "gpt-4o-mini"
+        static let followUpOpenAIModel = "gpt-5-mini"
         static let maxResponseTokens = 4096
         static let maxTokenBudgetChars = 16000
         static let requestTimeoutSeconds: TimeInterval = 90
+
+        enum AgenticSearch {
+            static let maxCandidateChats = 12
+            static let retrievalBatchCount = 3
+            static let retrievalBatchSize = 10
+            static let initialScanChats = 12
+            static let adaptiveExpansionStep = 8
+            static let maxAdaptiveScanChats = 48
+            static let maxAdaptiveRounds = 4
+            static let confidentTopAverageThreshold = 0.72
+            static let initialMessagesPerChat = 8
+            static let topUpAdditionalMessages = 4
+            static let maxMessagesPerChat = 12
+            static let maxLowConfidenceTopUps = 2
+            static let lowConfidenceThreshold = 0.60
+            static let dateProbeStep = 12
+            static let maxDateProbeMessagesPerChat = 80
+        }
     }
 
     enum FollowUp {
@@ -54,5 +72,9 @@ enum AppConstants {
 
     enum App {
         static let version = "1.0.0"
+    }
+
+    enum Preferences {
+        static let includeBotsInAISearchKey = "includeBotsInAISearch"
     }
 }

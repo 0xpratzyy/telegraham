@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Pidgy (Debug)",
+      "runtimeExecutable": "xcodebuild",
+      "runtimeArgs": ["-scheme", "Pidgy", "-configuration", "Debug", "build"],
+      "port": null
+    },
+    {
+      "name": "Pidgy (Run App)",
+      "runtimeExecutable": "open",
+      "runtimeArgs": ["-a", "Pidgy"],
+      "port": null
+    }
+  ]
+}
