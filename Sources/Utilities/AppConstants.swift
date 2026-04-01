@@ -101,6 +101,18 @@ enum AppConstants {
         static let startupReadinessTimeoutSeconds: TimeInterval = 8
     }
 
+    enum Indexing {
+        static let batchSize = 50
+        static let interBatchDelayMilliseconds: UInt64 = 200
+        static let idlePollIntervalMilliseconds: UInt64 = 1500
+        static let pausedPollIntervalMilliseconds: UInt64 = 350
+        static let maxPrioritizedChats = 32
+        static let maxIndexedGroupMembers = 20
+        static let minEmbeddingTextLength = 10
+        static let embeddingPreviewCharacterLimit = 160
+        static let embeddingBackfillBatchSize = 128
+    }
+
     enum App {
         static let version = "1.0.0"
     }

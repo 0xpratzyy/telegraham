@@ -41,6 +41,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             await waitForGraphBuildReadiness()
             guard !Task.isCancelled else { return }
             await GraphBuilder.shared.buildIfNeeded(using: telegramService)
+            guard !Task.isCancelled else { return }
+            await IndexScheduler.shared.start(using: telegramService)
         }
     }
 
@@ -49,6 +51,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildTask?.cancel()
         telegramService.stop()
         Task.detached {
+            await IndexScheduler.shared.stop()
             await DatabaseManager.shared.close()
         }
     }

@@ -151,8 +151,14 @@ class TelegramService: ObservableObject {
 
     // MARK: - Message History (read-only)
 
-    func getChatHistory(chatId: Int64, fromMessageId: Int64 = 0, limit: Int = 50, onlyLocal: Bool = false) async throws -> [TGMessage] {
-        let result = try await withRateLimitedCall(method: "getChatHistory") { client in
+    func getChatHistory(
+        chatId: Int64,
+        fromMessageId: Int64 = 0,
+        limit: Int = 50,
+        onlyLocal: Bool = false,
+        priority: RateLimiter.Priority = .userInitiated
+    ) async throws -> [TGMessage] {
+        let result = try await withRateLimitedCall(priority: priority, method: "getChatHistory") { client in
             try await client.getChatHistory(
                 chatId: chatId,
                 fromMessageId: fromMessageId,

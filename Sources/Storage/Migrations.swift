@@ -144,6 +144,24 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v4_embeddings") { db in
+            try db.execute(sql: """
+                CREATE TABLE embeddings (
+                    message_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    text_preview TEXT,
+                    PRIMARY KEY (message_id, chat_id),
+                    FOREIGN KEY (message_id, chat_id) REFERENCES messages(id, chat_id)
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_embeddings_chat
+                ON embeddings(chat_id)
+                """)
+        }
+
         return migrator
     }
 }

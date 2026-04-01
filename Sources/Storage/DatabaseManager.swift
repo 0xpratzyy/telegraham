@@ -27,6 +27,14 @@ actor DatabaseManager {
         let analyzedAt: Date
     }
 
+    struct SyncStateRecord: Sendable, Equatable {
+        let chatId: Int64
+        let lastIndexedMessageId: Int64
+        let lastIndexedAt: Date?
+        let totalMessagesIndexed: Int
+        let isSearchReady: Bool
+    }
+
     private struct LegacyCachedChatMessages: Decodable {
         let chatId: Int64
         let messages: [LegacyCachedMessage]
@@ -399,9 +407,73 @@ actor DatabaseManager {
         }
     }
 
-    func unindexedChatIds(in chatIds: [Int64]) async -> Set<Int64> {
+    func messagesMissingEmbeddings(limit: Int) async -> [MessageRecord] {
+        guard limit > 0 else { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing
+                        FROM messages AS m
+                        LEFT JOIN embeddings AS e
+                          ON e.message_id = m.id
+                         AND e.chat_id = m.chat_id
+                        WHERE e.message_id IS NULL
+                          AND m.text_content IS NOT NULL
+                          AND length(trim(m.text_content)) >= ?
+                        ORDER BY m.date DESC, m.id DESC
+                        LIMIT ?
+                        """,
+                    arguments: [AppConstants.Indexing.minEmbeddingTextLength, limit]
+                )
+
+                return rows.map(Self.messageRecord(from:))
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load messages missing embeddings: \(error)")
+            return []
+        }
+    }
+
+    func loadSyncState(chatId: Int64) async -> SyncStateRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+
+        do {
+            return try await pool.read { db in
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT chat_id, last_indexed_message_id, last_indexed_at, total_messages_indexed, is_search_ready
+                        FROM sync_state
+                        WHERE chat_id = ?
+                        """,
+                    arguments: [chatId]
+                ) else {
+                    return nil
+                }
+
+                let lastIndexedAtSeconds: Double? = row["last_indexed_at"]
+                let isSearchReadyValue: Int64 = row["is_search_ready"]
+                return SyncStateRecord(
+                    chatId: row["chat_id"],
+                    lastIndexedMessageId: row["last_indexed_message_id"],
+                    lastIndexedAt: lastIndexedAtSeconds.map(Date.init(timeIntervalSince1970:)),
+                    totalMessagesIndexed: row["total_messages_indexed"],
+                    isSearchReady: isSearchReadyValue != 0
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load sync state for chat \(chatId): \(error)")
+            return nil
+        }
+    }
+
+    func searchReadyChatIds(in chatIds: [Int64]) async -> Set<Int64> {
         guard !chatIds.isEmpty else { return [] }
-        guard let pool = await ensureDatabase() else { return Set(chatIds) }
+        guard let pool = await ensureDatabase() else { return [] }
 
         do {
             return try await pool.read { db in
@@ -411,7 +483,7 @@ actor DatabaseManager {
                     arguments += [chatId]
                 }
 
-                let searchReadyIds = try Set(
+                return try Set(
                     Int64.fetchAll(
                         db,
                         sql: """
@@ -423,12 +495,77 @@ actor DatabaseManager {
                         arguments: arguments
                     )
                 )
-
-                return Set(chatIds).subtracting(searchReadyIds)
             }
         } catch {
-            print("[DatabaseManager] Failed to load sync state for chats: \(error)")
-            return Set(chatIds)
+            print("[DatabaseManager] Failed to load search-ready chats: \(error)")
+            return []
+        }
+    }
+
+    func unindexedChatIds(in chatIds: [Int64]) async -> Set<Int64> {
+        guard !chatIds.isEmpty else { return [] }
+        let searchReadyIds = await searchReadyChatIds(in: chatIds)
+        return Set(chatIds).subtracting(searchReadyIds)
+    }
+
+    func upsertIndexedMessages(
+        chatId: Int64,
+        messages: [MessageRecord],
+        preferredOldestMessageId: Int64?,
+        isSearchReady: Bool
+    ) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                if !messages.isEmpty {
+                    try Self.insertMessages(messages, into: db)
+                }
+
+                let existingState = try Self.syncStateRecord(in: db, chatId: chatId)
+                try Self.refreshSyncState(
+                    in: db,
+                    chatId: chatId,
+                    preferredOldestMessageId: preferredOldestMessageId ?? existingState?.lastIndexedMessageId,
+                    isSearchReady: isSearchReady || (existingState?.isSearchReady ?? false)
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to upsert indexed messages for chat \(chatId): \(error)")
+        }
+    }
+
+    func markChatSearchReady(chatId: Int64, preferredOldestMessageId: Int64? = nil) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                let existingState = try Self.syncStateRecord(in: db, chatId: chatId)
+                let lastIndexedMessageId = preferredOldestMessageId
+                    ?? existingState?.lastIndexedMessageId
+                    ?? 0
+                let totalMessagesIndexed = existingState?.totalMessagesIndexed ?? 0
+
+                try db.execute(
+                    sql: """
+                        INSERT INTO sync_state (chat_id, last_indexed_message_id, last_indexed_at, total_messages_indexed, is_search_ready)
+                        VALUES (?, ?, ?, ?, 1)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            last_indexed_message_id = excluded.last_indexed_message_id,
+                            last_indexed_at = excluded.last_indexed_at,
+                            total_messages_indexed = MAX(sync_state.total_messages_indexed, excluded.total_messages_indexed),
+                            is_search_ready = 1
+                        """,
+                    arguments: [
+                        chatId,
+                        lastIndexedMessageId,
+                        Date().timeIntervalSince1970,
+                        totalMessagesIndexed
+                    ]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to mark chat \(chatId) search-ready: \(error)")
         }
     }
 
@@ -642,6 +779,30 @@ actor DatabaseManager {
                 totalMessages,
                 isSearchReady ? 1 : 0
             ]
+        )
+    }
+
+    private static func syncStateRecord(in db: Database, chatId: Int64) throws -> SyncStateRecord? {
+        guard let row = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT chat_id, last_indexed_message_id, last_indexed_at, total_messages_indexed, is_search_ready
+                FROM sync_state
+                WHERE chat_id = ?
+                """,
+            arguments: [chatId]
+        ) else {
+            return nil
+        }
+
+        let lastIndexedAtSeconds: Double? = row["last_indexed_at"]
+        let isSearchReadyValue: Int64 = row["is_search_ready"]
+        return SyncStateRecord(
+            chatId: row["chat_id"],
+            lastIndexedMessageId: row["last_indexed_message_id"],
+            lastIndexedAt: lastIndexedAtSeconds.map(Date.init(timeIntervalSince1970:)),
+            totalMessagesIndexed: row["total_messages_indexed"],
+            isSearchReady: isSearchReadyValue != 0
         )
     }
 

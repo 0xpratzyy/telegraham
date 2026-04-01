@@ -192,6 +192,10 @@ struct LauncherView: View {
         .onAppear {
             isSearchFocused = true
             selectedIndex = 0
+            Task { await IndexScheduler.shared.pause() }
+        }
+        .onDisappear {
+            Task { await IndexScheduler.shared.resume() }
         }
         .task {
             // Auto-load pipeline on startup so menu bar badge works even before user opens Pipeline tab
@@ -217,7 +221,25 @@ struct LauncherView: View {
         }
         .onChange(of: searchText) {
             selectedIndex = 0
+            let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            Task {
+                if trimmedQuery.isEmpty && !isSearchFocused {
+                    await IndexScheduler.shared.resume()
+                } else {
+                    await IndexScheduler.shared.pause()
+                }
+            }
             triggerSearch()
+        }
+        .onChange(of: isSearchFocused) { _, focused in
+            Task {
+                let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if focused || !trimmedQuery.isEmpty {
+                    await IndexScheduler.shared.pause()
+                } else {
+                    await IndexScheduler.shared.resume()
+                }
+            }
         }
         .onChange(of: activeFilter) {
             selectedIndex = 0
@@ -1489,6 +1511,9 @@ struct LauncherView: View {
 
     private func openChat(_ chat: TGChat) {
         Task { @MainActor in
+            Task {
+                await IndexScheduler.shared.prioritize(chatId: chat.id)
+            }
             let hints = await telegramService.getDeepLinkHints(for: chat)
             let opened = DeepLinkGenerator.openChat(
                 chat,
@@ -1511,6 +1536,11 @@ struct LauncherView: View {
         searchTask?.cancel()
 
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let matchingChat = aiSearchSourceChats.first(where: { $0.title.localizedCaseInsensitiveContains(query) }) {
+            Task {
+                await IndexScheduler.shared.prioritize(chatId: matchingChat.id)
+            }
+        }
         guard query.count >= 2 else {
             searchResultChatIds = []
             aiResults = []

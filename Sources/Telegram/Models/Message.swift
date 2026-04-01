@@ -41,4 +41,11 @@ struct TGMessage: Identifiable, Equatable, Sendable {
     var relativeDate: String {
         DateFormatting.compactRelativeTime(from: date)
     }
+
+    var senderUserId: Int64? {
+        if case .user(let userId) = senderId {
+            return userId
+        }
+        return nil
+    }
 }

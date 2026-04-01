@@ -28,6 +28,7 @@ struct SettingsView: View {
     @State private var isLoadingUsage = false
     @State private var graphDebugSummary: GraphBuilder.DebugSummary = .empty
     @State private var isLoadingGraphDebug = false
+    @StateObject private var indexingProgress = IndexScheduler.shared.progress
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
 
     var body: some View {
@@ -470,6 +471,33 @@ struct SettingsView: View {
 
                         LazyVGrid(columns: usageGridColumns, spacing: 12) {
                             usageMetricCard(
+                                title: "Search-Ready Chats",
+                                value: "\(integerString(indexingProgress.indexed)) / \(integerString(indexingProgress.total))",
+                                caption: "Indexable chats fully deep-indexed for local search",
+                                accent: indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total ? .green : .orange
+                            )
+                            usageMetricCard(
+                                title: "Indexer Status",
+                                value: indexingStatusLabel,
+                                caption: indexingStatusCaption,
+                                accent: indexingStatusAccent
+                            )
+                            usageMetricCard(
+                                title: "Current Chat",
+                                value: indexingCurrentChatLabel,
+                                caption: "Chat currently being indexed",
+                                accent: .teal
+                            )
+                            usageMetricCard(
+                                title: "Index Coverage",
+                                value: percentString(indexingCoverageFraction),
+                                caption: "Indexable chats ready for local search",
+                                accent: .mint
+                            )
+                        }
+
+                        LazyVGrid(columns: usageGridColumns, spacing: 12) {
+                            usageMetricCard(
                                 title: "Chats Processed",
                                 value: "\(integerString(graphDebugSummary.processedChats)) / \(integerString(graphDebugSummary.totalChats))",
                                 caption: graphDebugSummary.isComplete ? "Graph build complete" : "Startup graph build progress",
@@ -695,6 +723,54 @@ struct SettingsView: View {
             return "\(progress) • Last update \(DateFormatting.compactRelativeTime(from: lastUpdatedAt))"
         }
         return progress
+    }
+
+    private var indexingCoverageFraction: Double {
+        guard indexingProgress.total > 0 else { return 0 }
+        return min(max(Double(indexingProgress.indexed) / Double(indexingProgress.total), 0), 1)
+    }
+
+    private var indexingStatusLabel: String {
+        if indexingProgress.isPaused {
+            return "Paused"
+        }
+        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
+            return "Idle"
+        }
+        return "Running"
+    }
+
+    private var indexingStatusCaption: String {
+        if indexingProgress.isPaused {
+            return "Indexer yields while you actively search"
+        }
+        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
+            return "All visible chats are currently search-ready"
+        }
+        return "Background deep indexing is active"
+    }
+
+    private var indexingStatusAccent: Color {
+        if indexingProgress.isPaused {
+            return .orange
+        }
+        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
+            return .green
+        }
+        return .blue
+    }
+
+    private var indexingCurrentChatLabel: String {
+        if let currentChat = indexingProgress.currentChat, !currentChat.isEmpty {
+            return currentChat
+        }
+        if indexingProgress.isPaused {
+            return "Search active"
+        }
+        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
+            return "Up to date"
+        }
+        return "Waiting"
     }
 
     private var usageInfoCard: some View {
