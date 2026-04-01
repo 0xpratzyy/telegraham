@@ -1,6 +1,6 @@
 import Foundation
 
-struct TGChat: Identifiable, Equatable {
+struct TGChat: Identifiable, Equatable, Sendable {
     let id: Int64
     let title: String
     let chatType: ChatType
@@ -11,7 +11,7 @@ struct TGChat: Identifiable, Equatable {
     let isInMainList: Bool
     let smallPhotoFileId: Int?
 
-    enum ChatType: Equatable {
+    enum ChatType: Equatable, Sendable {
         case privateChat(userId: Int64)
         case basicGroup(groupId: Int64)
         case supergroup(supergroupId: Int64, isChannel: Bool)

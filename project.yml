@@ -10,6 +10,9 @@ packages:
   TDLibKit:
     url: https://github.com/Swiftgram/TDLibKit
     exactVersion: "1.5.2-tdlib-1.8.61-6d509061"
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "7.0.0"
 
 targets:
   Pidgy:
@@ -19,6 +22,7 @@ targets:
       - path: Sources
     dependencies:
       - package: TDLibKit
+      - package: GRDB
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pidgy.app

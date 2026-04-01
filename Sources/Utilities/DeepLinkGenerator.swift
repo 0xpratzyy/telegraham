@@ -23,7 +23,15 @@ enum DeepLinkGenerator {
             candidates.append("tg://user?id=\(userId)")
 
         case .basicGroup(let groupId):
-            // Basic groups don't have public usernames, so keep legacy openmessage fallback.
+            // Basic groups are easiest to open via their MTProto-style negative group ID.
+            // Put the most specific candidates first because NSWorkspace only tells us that
+            // Telegram accepted the URL, not that it navigated to the intended chat.
+            let mtprotoGroupId = -abs(groupId)
+            if let messageId = chat.lastMessage?.id {
+                candidates.append("tg://openmessage?chat_id=\(mtprotoGroupId)&message_id=\(messageId)")
+                candidates.append("tg://openmessage?chat_id=\(chat.id)&message_id=\(messageId)")
+            }
+            candidates.append("tg://openmessage?chat_id=\(mtprotoGroupId)")
             candidates.append("tg://openmessage?chat_id=\(chat.id)")
             candidates.append("tg://openmessage?chat_id=\(groupId)")
 

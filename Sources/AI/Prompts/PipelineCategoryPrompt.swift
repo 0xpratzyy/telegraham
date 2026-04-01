@@ -2,41 +2,72 @@ import Foundation
 
 enum PipelineCategoryPrompt {
     static let systemPrompt = """
-    You triage Telegram conversations. Messages marked [ME] are from the user. \
-    All others are from contacts.
+    You triage Telegram conversations.
+    Messages marked [ME] are from the user. All others are from contacts.
+    Messages are listed chronologically (oldest first).
 
-    The messages are listed in chronological order (oldest first). \
-    Reason step by step through the timeline and decide who currently owes the next meaningful response.
+    Your job: determine who holds the ball - who owes the next meaningful response.
 
-    Definitions:
-    - A substantive message is a question, request, proposal, assignment, follow-up, or update that creates a next step.
-    - A closed thread is a natural ending such as "thanks", "sounds good", emoji acknowledgment, or a discussion with no open loop.
-    - Use recency heavily, but earlier messages matter if they establish who is waiting on whom.
+    Message classification:
+    - SUBSTANTIVE: question, request, assignment, proposal, follow-up, deliverable, decision needed, or information expecting acknowledgment.
+    - CLOSING: acknowledgment, agreement, confirmation, thanks, "done", "on it", emoji/sticker as direct reply, or natural endpoint.
+    - NON-SIGNAL: greetings without follow-up, standalone reactions, service/bot noise, forwarded content without commentary, pins, join/leave notices.
 
-    Classify the conversation into exactly ONE category:
+    Critical: a closing signal from [ME] (for example "ok" or emoji) does NOT flip responsibility.
+    Look past closing messages and find the last OPEN substantive loop.
 
-    ## DM (1-on-1) Rules
-    - "on_me": The contact sent the latest substantive message, is waiting on the user, or followed up on something the user owes.
-    - "on_them": The user ([ME]) sent the latest substantive message and is waiting on the contact to reply or act.
-    - "quiet": The thread is closed, stale with no pending obligation, or does not clearly leave anyone waiting.
+    Reasoning steps:
+    1. Identify open threads. Group chats may have parallel threads.
+    2. For each open thread, find the latest substantive message and who it waits on.
+    3. Overall chat category uses the MOST URGENT open thread:
+       - If ANY thread is on_me -> on_me
+       - Else if any thread is on_them -> on_them
+       - Else -> quiet
+    4. Intended recipient rules:
+       - @mention or direct reply to [ME] -> directed at [ME]
+       - Direct reply to someone else -> not directed at [ME]
+       - DM open question -> directed at [ME]
+       - Small groups: untargeted operational questions may be on_me only if context strongly supports it.
+       - Large groups: untargeted questions default quiet.
+    5. If ambiguous and more context would resolve it, request more context instead of guessing.
 
-    ## Group Rules
-    - "on_me": The user is directly addressed, @mentioned, assigned a task, or clearly the expected responder.
-    - "on_them": The user asked a specific question or made a concrete request and the group has not answered yet.
-    - "quiet": General discussion, side chatter, or anything that does not clearly leave an obligation on either side.
+    Chat shape:
+    - DM: use last open substantive loop.
+    - Small group (<=50): allow multiple threads, trace obligations.
+    - Large group (>50): on_me only with explicit targeting toward [ME].
+    - Channel/Broadcast/Bot: always quiet.
 
-    Rules:
-    - If context is ambiguous or insufficient, set "confident" to false but still provide the best category.
-    - "suggestedAction" must be short, direct, and actionable. Use empty string for quiet.
-    - Channels, bot chats, news feeds, meme groups, and broadcast-style chats are always "quiet".
-    - Do not over-index on unread count if the latest substantive turn clearly indicates the opposite responsibility.
+    Staleness:
+    - Substantive >48h with no follow-up -> lean quiet,
+      unless it is a direct question/assignment to [ME], then keep on_me.
+    - on_them older than 24h should suggest a nudge.
 
-    Respond with a single JSON object:
-    {"category": "on_me", "suggestedAction": "Brief 1-sentence next step", "confident": true}
+    Output exactly ONE JSON object, no extra text.
+
+    Decision:
+    {
+      "status": "decision",
+      "category": "on_me" | "on_them" | "quiet",
+      "urgency": "high" | "low",
+      "suggestedAction": "Specific action under 12 words; empty for quiet"
+    }
+
+    Need-more:
+    {
+      "status": "need_more",
+      "reason": "Short ambiguity reason under 20 words",
+      "additionalMessages": 10
+    }
+
+    Prefer decision whenever possible.
+    The caller allows only one retry. If this is the second pass, always return "status":"decision".
     """
 
     static func userMessage(context: PipelineChatContext, snippets: [MessageSnippet]) -> String {
         var text = "Chat: \"\(context.chatTitle)\" (\(context.chatType)"
+        if let memberCount = context.memberCount {
+            text += ", \(memberCount) members"
+        }
         if context.unreadCount > 0 {
             text += ", \(context.unreadCount) unread"
         }
@@ -47,6 +78,13 @@ enum PipelineCategoryPrompt {
             identity += " (@\(username))"
         }
         text += identity + "\n\n"
+
+        text += "Context window size: \(snippets.count) messages\n"
+        if snippets.count > AppConstants.FollowUp.messagesPerChat {
+            text += "Retry pass: you MUST return status=decision.\n\n"
+        } else {
+            text += "If this window is insufficient, return status=need_more.\n\n"
+        }
 
         text += "Messages in chronological order (oldest first):\n"
         for s in snippets {

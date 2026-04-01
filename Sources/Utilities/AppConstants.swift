@@ -11,6 +11,10 @@ enum AppConstants {
     enum RateLimit {
         static let maxTokens: Double = 10
         static let refillRate: Double = 5
+        static let defaultMethod = "default"
+        static let userPriorityPollIntervalMilliseconds: UInt64 = 60
+        static let backgroundPriorityPollIntervalMilliseconds: UInt64 = 120
+        static let floodWaitBackoffMultiplier = 1.2
     }
 
     enum Fetch {
@@ -58,9 +62,9 @@ enum AppConstants {
         static let maxGroupMembers = 20       // skip groups with KNOWN count > this
         static let maxGroupUnread = 10        // skip groups with > this many unread (community signal)
         static let maxAISuggestions = 15
-        static let messagesPerChat = 10       // initial batch for AI categorization
-        static let progressiveFetchStep = 5   // fetch only a small older slice when confidence is low
-        static let maxMessagesForAIClassification = 20
+        static let messagesPerChat = 10       // first pass window
+        static let progressiveFetchStep = 5   // chunk size while expanding older history
+        static let maxMessagesForAIClassification = 30 // one retry max: 10 -> 30
         static let maxAIConcurrency = 5       // parallel AI calls
     }
 
@@ -68,6 +72,33 @@ enum AppConstants {
         static let maxUserCacheSize = 500
         static let maxChatCacheSize = 200
         static let maxCachedMessagesPerChat = 50
+    }
+
+    enum Storage {
+        static let appSupportFolderName = "Pidgy"
+        static let databaseFileName = "pidgy.db"
+        static let messageCacheDirectoryName = "message_cache"
+        static let pipelineCacheDirectoryName = "pipeline_cache"
+    }
+
+    enum Graph {
+        static let buildProgressChatId: Int64 = -1
+        static let selfEntityType = "self"
+        static let userEntityType = "user"
+        static let groupEntityType = "group"
+        static let channelEntityType = "channel"
+        static let dmEdgeType = "dm"
+        static let sharedGroupEdgeType = "shared_group"
+        static let defaultCategory = "uncategorized"
+        static let automaticCategorySource = "auto"
+        static let manualCategorySource = "manual"
+        static let groupParticipantLimit = 50
+        static let scoreRecentWindowDays: TimeInterval = 7
+        static let scoreMonthlyWindowDays: TimeInterval = 30
+        static let directMessageBonus = 5.0
+        static let unreadBonus = 2.0
+        static let startupReadinessPollMilliseconds: UInt64 = 300
+        static let startupReadinessTimeoutSeconds: TimeInterval = 8
     }
 
     enum App {

@@ -9,8 +9,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var panelManager: PanelManager?
     private var hotkeyManager: HotkeyManager?
     private var settingsWindow: NSWindow?
-    private var periodicCacheFlushTask: Task<Void, Never>?
-    private let periodicCacheFlushIntervalNanos: UInt64 = 15_000_000_000
+    private var graphBuildTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panelManager = PanelManager(telegramService: telegramService, aiService: aiService)
@@ -26,24 +25,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         hotkeyManager?.register()
 
-        // Start TDLib if credentials exist
-        if let apiIdStr = try? KeychainManager.retrieve(for: .apiId),
-           let apiHash = try? KeychainManager.retrieve(for: .apiHash),
-           let apiId = Int(apiIdStr) {
-            Task {
+        Task {
+            await DatabaseManager.shared.initialize()
+
+            // Start TDLib if credentials exist
+            if let apiIdStr = try? KeychainManager.retrieve(for: .apiId),
+               let apiHash = try? KeychainManager.retrieve(for: .apiHash),
+               let apiId = Int(apiIdStr) {
                 telegramService.start(apiId: apiId, apiHash: apiHash)
             }
         }
 
-        startPeriodicCacheFlush()
+        graphBuildTask = Task { [weak self] in
+            guard let self else { return }
+            await waitForGraphBuildReadiness()
+            guard !Task.isCancelled else { return }
+            await GraphBuilder.shared.buildIfNeeded(using: telegramService)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        periodicCacheFlushTask?.cancel()
-        periodicCacheFlushTask = nil
         hotkeyManager?.unregister()
+        graphBuildTask?.cancel()
         telegramService.stop()
-        flushCachesBeforeTermination()
+        Task.detached {
+            await DatabaseManager.shared.close()
+        }
     }
 
     private func openSettings() {
@@ -60,7 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let hostingView = NSHostingView(rootView: settingsView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
@@ -75,28 +82,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func flushCachesBeforeTermination(timeout: TimeInterval = 2) {
-        let flushGroup = DispatchGroup()
-        flushGroup.enter()
+    private func waitForGraphBuildReadiness() async {
+        let timeoutAt = Date().addingTimeInterval(AppConstants.Graph.startupReadinessTimeoutSeconds)
 
-        Task.detached {
-            await MessageCacheService.shared.flushToDisk()
-            flushGroup.leave()
-        }
+        while !Task.isCancelled {
+            let isReady = telegramService.authState == .ready && telegramService.currentUser != nil
+            let chatsLoaded = !telegramService.visibleChats.isEmpty || !telegramService.isLoading
 
-        _ = flushGroup.wait(timeout: .now() + timeout)
-    }
-
-    /// Periodically persists incremental message updates to disk.
-    /// This does not trigger any Telegram fetches; it only flushes dirty in-memory cache entries.
-    private func startPeriodicCacheFlush() {
-        periodicCacheFlushTask?.cancel()
-        periodicCacheFlushTask = Task.detached(priority: .utility) { [intervalNanos = periodicCacheFlushIntervalNanos] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: intervalNanos)
-                guard !Task.isCancelled else { break }
-                await MessageCacheService.shared.flushToDisk()
+            if isReady && chatsLoaded {
+                return
             }
+
+            if Date() >= timeoutAt, isReady {
+                return
+            }
+
+            try? await Task.sleep(
+                for: .milliseconds(Int(AppConstants.Graph.startupReadinessPollMilliseconds))
+            )
         }
     }
 }

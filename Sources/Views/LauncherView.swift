@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import TDLibKit
 
 struct LauncherView: View {
     @EnvironmentObject var telegramService: TelegramService
@@ -144,6 +145,14 @@ struct LauncherView: View {
 
     private func pipelineSuggestion(for chatId: Int64) -> String? {
         followUpItems.first(where: { $0.chat.id == chatId })?.suggestedAction
+    }
+
+    private func pipelineCategoryString(_ category: FollowUpItem.Category) -> String {
+        switch category {
+        case .onMe: return "on_me"
+        case .onThem: return "on_them"
+        case .quiet: return "quiet"
+        }
     }
 
     /// Total navigable items (either AI results or chat rows depending on mode).
@@ -1091,8 +1100,8 @@ struct LauncherView: View {
         }
     }
 
-    /// AI-powered categorization for a single chat with progressive message fetching.
-    /// Caches results to disk so re-analysis only happens when new messages arrive.
+    /// AI-powered categorization for a single chat with bounded two-pass context expansion.
+    /// Pass 1 uses the initial window. Pass 2 (optional) fetches more context once.
     private func categorizeSingleChat(
         chat: TGChat,
         myUserId: Int64
@@ -1102,6 +1111,8 @@ struct LauncherView: View {
         let initialWindowSize = AppConstants.FollowUp.messagesPerChat
         let progressiveStep = AppConstants.FollowUp.progressiveFetchStep
         let maxMessages = AppConstants.FollowUp.maxMessagesForAIClassification
+        let maxAIAttempts = 2
+        let defaultNeedMoreMessages = 20
         let cache = MessageCacheService.shared
 
         var allMessages: [TGMessage] = []
@@ -1127,77 +1138,142 @@ struct LauncherView: View {
         var currentWindowSize = min(initialWindowSize, min(allMessages.count, maxMessages))
         guard currentWindowSize > 0 else { return nil }
 
-        // Progressive categorization loop: 10 messages, then +5 only if the model is unsure.
-        while true {
+        func expandWindow(toAtLeast targetSize: Int) async -> Bool {
+            let target = min(maxMessages, targetSize)
+            guard target > currentWindowSize else { return false }
+
+            while allMessages.count < target {
+                let remaining = target - allMessages.count
+                let fetchLimit = min(max(progressiveStep, 1), remaining)
+                guard fetchLimit > 0 else { break }
+
+                let oldestId = allMessages.last?.id ?? 0
+                guard oldestId != 0 else { break }
+
+                do {
+                    let moreMsgs = try await telegramService.getChatHistory(
+                        chatId: chat.id,
+                        fromMessageId: oldestId,
+                        limit: fetchLimit
+                    )
+                    guard !moreMsgs.isEmpty else { break }
+                    allMessages.append(contentsOf: moreMsgs)
+                    allMessages.sort { $0.date > $1.date }
+                    await cache.cacheMessages(chatId: chat.id, messages: moreMsgs, append: true)
+                } catch {
+                    break
+                }
+            }
+
+            let updatedWindowSize = min(target, allMessages.count)
+            guard updatedWindowSize > currentWindowSize else { return false }
+            currentWindowSize = updatedWindowSize
+            return true
+        }
+
+        var attempt = 0
+        while attempt < maxAIAttempts {
+            attempt += 1
             let messagesToSend = Array(allMessages.prefix(currentWindowSize))
 
             do {
                 let myUser = telegramService.currentUser
-                let (category, suggestion, confident) = try await aiService.categorizePipelineChat(
+                let triage = try await aiService.categorizePipelineChat(
                     chat: chat,
                     messages: messagesToSend,
                     myUserId: myUserId,
                     myUser: myUser
                 )
 
-                if confident || currentWindowSize >= maxMessages {
-                    // Cache the AI result for next time
-                    let categoryStr: String
-                    switch category {
-                    case .onMe: categoryStr = "on_me"
-                    case .onThem: categoryStr = "on_them"
-                    case .quiet: categoryStr = "quiet"
+                switch triage.status {
+                case .needMore:
+                    guard attempt == 1 else { break }
+                    let requested = triage.additionalMessages ?? defaultNeedMoreMessages
+                    let boundedAdditional = max(10, min(defaultNeedMoreMessages, requested))
+                    let targetWindowSize = min(maxMessages, currentWindowSize + boundedAdditional)
+                    let expanded = await expandWindow(toAtLeast: targetWindowSize)
+                    guard expanded else { break }
+                    continue
+
+                case .decision:
+                    let normalizedCategory = normalizePipelineCategory(
+                        proposed: triage.category,
+                        suggestedAction: triage.suggestedAction,
+                        chat: chat,
+                        messages: messagesToSend,
+                        myUserId: myUserId
+                    )
+                    let finalSuggestion = triage.suggestedAction.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    let needsConfidenceRetry = !triage.confident && attempt == 1 && currentWindowSize < maxMessages
+                    if needsConfidenceRetry {
+                        let targetWindowSize = min(maxMessages, currentWindowSize + defaultNeedMoreMessages)
+                        let expanded = await expandWindow(toAtLeast: targetWindowSize)
+                        guard expanded else { break }
+                        continue
                     }
+
                     await cache.cachePipelineCategory(
                         chatId: chat.id,
-                        category: categoryStr,
-                        suggestedAction: suggestion,
+                        category: pipelineCategoryString(normalizedCategory),
+                        suggestedAction: finalSuggestion,
                         lastMessageId: lastMsg.id
                     )
 
                     return FollowUpItem(
                         chat: chat,
-                        category: category,
+                        category: normalizedCategory,
                         lastMessage: lastMsg,
                         timeSinceLastActivity: age,
-                        suggestedAction: suggestion.isEmpty ? nil : suggestion
+                        suggestedAction: finalSuggestion.isEmpty ? nil : finalSuggestion
                     )
                 }
-
-                let nextWindowSize = min(currentWindowSize + progressiveStep, maxMessages)
-                guard nextWindowSize > currentWindowSize else { break }
-
-                if allMessages.count < nextWindowSize {
-                    let fetchLimit = min(progressiveStep, maxMessages - allMessages.count)
-                    guard fetchLimit > 0 else { break }
-
-                    let oldestId = allMessages.last?.id ?? 0
-                    guard oldestId != 0 else { break }
-
-                    do {
-                        let moreMsgs = try await telegramService.getChatHistory(
-                            chatId: chat.id,
-                            fromMessageId: oldestId,
-                            limit: fetchLimit
-                        )
-                        guard !moreMsgs.isEmpty else { break }
-                        allMessages.append(contentsOf: moreMsgs)
-                        allMessages.sort { $0.date > $1.date }
-                        await cache.cacheMessages(chatId: chat.id, messages: moreMsgs, append: true)
-                    } catch {
-                        break
-                    }
-                }
-
-                let updatedWindowSize = min(nextWindowSize, allMessages.count)
-                guard updatedWindowSize > currentWindowSize else { break }
-                currentWindowSize = updatedWindowSize
             } catch {
                 break
             }
         }
 
-        return nil
+        // Deterministic fallback so this chat never silently disappears.
+        let fallbackWindow = Array(allMessages.prefix(currentWindowSize))
+        let fallbackCategoryHint = resolvePipelineCategory(
+            for: chat,
+            hint: "quiet",
+            messages: fallbackWindow,
+            myUserId: myUserId
+        )
+        let fallbackCategory: FollowUpItem.Category
+        switch fallbackCategoryHint {
+        case "on_me":
+            fallbackCategory = .onMe
+        case "on_them":
+            fallbackCategory = .onThem
+        default:
+            fallbackCategory = .quiet
+        }
+        let fallbackSuggestion: String
+        switch fallbackCategory {
+        case .onMe:
+            fallbackSuggestion = "Reply with a concrete next step."
+        case .onThem:
+            fallbackSuggestion = age > 24 * 3600 ? "Send a short nudge for an update." : "Wait for their update."
+        case .quiet:
+            fallbackSuggestion = ""
+        }
+
+        await cache.cachePipelineCategory(
+            chatId: chat.id,
+            category: pipelineCategoryString(fallbackCategory),
+            suggestedAction: fallbackSuggestion,
+            lastMessageId: lastMsg.id
+        )
+
+        return FollowUpItem(
+            chat: chat,
+            category: fallbackCategory,
+            lastMessage: lastMsg,
+            timeSinceLastActivity: age,
+            suggestedAction: fallbackSuggestion.isEmpty ? nil : fallbackSuggestion
+        )
     }
 
     private func loadFollowUps() {
@@ -1225,16 +1301,34 @@ struct LauncherView: View {
                 if let cached = await cache.getPipelineCategory(chatId: chat.id),
                    cached.lastMessageId == lastMsg.id {
                     // Cache hit
-                    let category: FollowUpItem.Category
+                    let cachedCategory: FollowUpItem.Category
                     switch cached.category {
-                    case "on_me": category = .onMe
-                    case "on_them": category = .onThem
-                    default: category = .quiet
+                    case "on_me": cachedCategory = .onMe
+                    case "on_them": cachedCategory = .onThem
+                    default: cachedCategory = .quiet
                     }
+
+                    let recentMessages = (await cache.getMessages(chatId: chat.id)) ?? []
+                    let normalizedCategory = normalizePipelineCategory(
+                        proposed: cachedCategory,
+                        suggestedAction: cached.suggestedAction,
+                        chat: chat,
+                        messages: recentMessages,
+                        myUserId: myUserId
+                    )
+                    if normalizedCategory != cachedCategory {
+                        await cache.cachePipelineCategory(
+                            chatId: chat.id,
+                            category: pipelineCategoryString(normalizedCategory),
+                            suggestedAction: cached.suggestedAction,
+                            lastMessageId: lastMsg.id
+                        )
+                    }
+
                     let age = Date().timeIntervalSince(lastMsg.date)
                     cachedItems.append(FollowUpItem(
                         chat: chat,
-                        category: category,
+                        category: normalizedCategory,
                         lastMessage: lastMsg,
                         timeSinceLastActivity: age,
                         suggestedAction: cached.suggestedAction.isEmpty ? nil : cached.suggestedAction
@@ -1412,7 +1506,7 @@ struct LauncherView: View {
     }
 
     /// Debounced search: waits 300ms, then classifies via QueryRouter.
-    /// If AI intent detected → runs AI pipeline. Otherwise → TDLib keyword search.
+    /// If AI intent detected → runs AI pipeline. Otherwise → local FTS first, TDLib fallback for unindexed chats only.
     private func triggerSearch() {
         searchTask?.cancel()
 
@@ -1487,7 +1581,7 @@ struct LauncherView: View {
                     }
                 }
             } else {
-                // Keyword mode: TDLib message content search
+                // Keyword mode: SQLite FTS first, TDLib fallback only for chats with no local index yet
                 await MainActor.run {
                     aiSearchMode = nil
                     aiResults = []
@@ -1497,9 +1591,55 @@ struct LauncherView: View {
                 }
 
                 do {
-                    let messages = try await telegramService.searchMessages(query: query, limit: 50)
+                    let scopedChats: [TGChat]
+                    switch activeFilter {
+                    case .all:
+                        scopedChats = telegramService.visibleChats
+                    case .dms:
+                        scopedChats = telegramService.visibleChats.filter { $0.chatType.isPrivate }
+                    case .groups:
+                        scopedChats = telegramService.visibleChats.filter { $0.chatType.isGroup }
+                    }
+
+                    let scopedChatIds = Set(scopedChats.map(\.id))
+                    let localMessages = await telegramService.localSearch(
+                        query: query,
+                        chatIds: scopedChats.map(\.id),
+                        limit: 50
+                    )
+                    let unindexedChatIds = await DatabaseManager.shared.unindexedChatIds(in: scopedChats.map(\.id))
+
+                    var mergedMessages = Dictionary(
+                        uniqueKeysWithValues: localMessages.map { message in
+                            ("\(message.chatId):\(message.id)", message)
+                        }
+                    )
+
+                    if !unindexedChatIds.isEmpty {
+                        let chatTypeFilter: SearchMessagesChatTypeFilter?
+                        switch activeFilter {
+                        case .all:
+                            chatTypeFilter = nil
+                        case .dms:
+                            chatTypeFilter = .searchMessagesChatTypeFilterPrivate
+                        case .groups:
+                            chatTypeFilter = .searchMessagesChatTypeFilterGroup
+                        }
+
+                        let fallbackMessages = try await telegramService.searchMessages(
+                            query: query,
+                            limit: 50,
+                            chatTypeFilter: chatTypeFilter
+                        )
+
+                        for message in fallbackMessages
+                        where scopedChatIds.contains(message.chatId) && unindexedChatIds.contains(message.chatId) {
+                            mergedMessages["\(message.chatId):\(message.id)"] = message
+                        }
+                    }
+
                     guard !Task.isCancelled else { return }
-                    let chatIds = Set(messages.map(\.chatId))
+                    let chatIds = Set(mergedMessages.values.map(\.chatId))
                     await MainActor.run {
                         searchResultChatIds = chatIds
                         isSearching = false
@@ -2112,9 +2252,10 @@ struct LauncherView: View {
             return true
         }
 
-        // If we have never replied in this sampled window, any inbound should be considered pending.
+        // If the sampled window has no outbound message from me, avoid assuming pending by default.
+        // This prevents false "on_me" tags when the window only captured inbound acknowledgements.
         if lastIndexFromMe == nil {
-            return true
+            return chat.unreadCount > 0 && inboundTail.count >= 2
         }
 
         // Weak unread signal: only trust it when multiple inbound messages stacked up.
@@ -2132,18 +2273,78 @@ struct LauncherView: View {
         return false
     }
 
-    private func inboundMessageLikelyNeedsReply(_ message: TGMessage) -> Bool {
-        guard let rawText = message.textContent?
-            .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawText.isEmpty else {
-            return false
+    private func normalizePipelineCategory(
+        proposed: FollowUpItem.Category,
+        suggestedAction: String?,
+        chat: TGChat,
+        messages: [TGMessage],
+        myUserId: Int64
+    ) -> FollowUpItem.Category {
+        guard myUserId > 0 else { return proposed }
+
+        let textMessages = messages.filter { ($0.textContent?.isEmpty == false) }
+        guard !textMessages.isEmpty else { return proposed }
+
+        if hasPendingReplySignal(chat: chat, messages: textMessages, myUserId: myUserId) {
+            return .onMe
         }
 
-        let compact = rawText
+        let latestText = textMessages.sorted { $0.date > $1.date }.first
+        guard let latestText else { return proposed }
+
+        if messageIsFromMe(latestText, myUserId: myUserId) {
+            return .onThem
+        }
+
+        let compact = normalizedSignalText(latestText.textContent)
+        if inboundMessageImpliesContactOwnsNextStep(compact) {
+            return .onThem
+        }
+
+        if let suggestion = suggestedAction?.lowercased(),
+           suggestion.contains("wait for") || suggestion.contains("waiting on") {
+            return .onThem
+        }
+
+        if proposed == .onThem || proposed == .quiet {
+            return proposed
+        }
+
+        return .quiet
+    }
+
+    private func normalizedSignalText(_ rawText: String?) -> String {
+        guard let rawText else { return "" }
+        return rawText
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "[^a-z0-9\\s?]", with: " ", options: .regularExpression)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func inboundMessageImpliesContactOwnsNextStep(_ compact: String) -> Bool {
+        guard !compact.isEmpty else { return false }
+
+        let exactSignals: Set<String> = [
+            "on it", "will do", "i will", "i ll", "working on it",
+            "let me do it", "let me check", "will share", "will send",
+            "done", "completed"
+        ]
+        if exactSignals.contains(compact) {
+            return true
+        }
+
+        let phraseSignals = [
+            "on it", "will do", "i will", "i ll", "working on",
+            "let me", "will share", "will send", "sending", "share soon"
+        ]
+        return phraseSignals.contains(where: { compact.contains($0) })
+    }
+
+    private func inboundMessageLikelyNeedsReply(_ message: TGMessage) -> Bool {
+        let compact = normalizedSignalText(message.textContent)
+        guard !compact.isEmpty else { return false }
 
         if compact.contains("?") { return true }
 
@@ -2173,7 +2374,7 @@ struct LauncherView: View {
         return compact.count >= 28
     }
 
-    private func compactAIErrorReason(_ error: Error) -> String {
+    private func compactAIErrorReason(_ error: Swift.Error) -> String {
         let raw: String
 
         if let aiError = error as? AIError {

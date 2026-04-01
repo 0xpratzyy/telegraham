@@ -5,6 +5,26 @@ import SwiftUI
 /// and exposes high-level AI operations that combine TelegramService data with AI.
 @MainActor
 final class AIService: ObservableObject {
+    struct PipelineTriageResult {
+        enum Status: Equatable {
+            case decision
+            case needMore
+        }
+
+        enum Urgency: String {
+            case high
+            case low
+        }
+
+        let status: Status
+        let category: FollowUpItem.Category
+        let suggestedAction: String
+        let urgency: Urgency
+        let reason: String?
+        let additionalMessages: Int?
+        let confident: Bool
+    }
+
     @Published var isConfigured = false
     @Published var providerType: AIProviderConfig.ProviderType = .none
     @Published private(set) var providerModel: String = ""
@@ -131,30 +151,65 @@ final class AIService: ObservableObject {
         return try await provider.generateFollowUpSuggestion(chatTitle: chatTitle, messages: snippets)
     }
 
-    /// AI-powered pipeline categorization. Marks [ME] messages and sends to AI.
-    /// Returns (category, suggestedAction, isConfident).
-    func categorizePipelineChat(chat: TGChat, messages: [TGMessage], myUserId: Int64, myUser: TGUser?) async throws -> (FollowUpItem.Category, String, Bool) {
+    /// AI-powered pipeline triage. Marks [ME] messages and sends to AI.
+    /// Supports decision + one-step "need_more" requests.
+    func categorizePipelineChat(chat: TGChat, messages: [TGMessage], myUserId: Int64, myUser: TGUser?) async throws -> PipelineTriageResult {
         let snippets = conversationSnippets(messages: messages, chatTitle: chat.title, myUserId: myUserId)
-        guard !snippets.isEmpty else { return (.quiet, "", true) }
+        guard !snippets.isEmpty else {
+            return PipelineTriageResult(
+                status: .decision,
+                category: .quiet,
+                suggestedAction: "",
+                urgency: .low,
+                reason: nil,
+                additionalMessages: nil,
+                confident: true
+            )
+        }
 
         let context = PipelineChatContext(
             chatTitle: chat.title,
             chatType: chat.chatType.displayName,
             unreadCount: chat.unreadCount,
+            memberCount: chat.memberCount,
             myName: myUser?.firstName ?? "Me",
             myUsername: myUser?.username
         )
 
         let dto = try await provider.categorizePipelineChat(context: context, messages: snippets)
 
+        let status: PipelineTriageResult.Status
+        switch dto.status?.lowercased() {
+        case "need_more":
+            status = .needMore
+        default:
+            status = .decision
+        }
+
         let category: FollowUpItem.Category
-        switch dto.category.lowercased() {
+        switch dto.category?.lowercased() {
         case "on_me": category = .onMe
         case "on_them": category = .onThem
         default: category = .quiet
         }
 
-        return (category, dto.suggestedAction, dto.confident ?? true)
+        let urgency: PipelineTriageResult.Urgency
+        switch dto.urgency?.lowercased() {
+        case "high":
+            urgency = .high
+        default:
+            urgency = .low
+        }
+
+        return PipelineTriageResult(
+            status: status,
+            category: category,
+            suggestedAction: dto.suggestedAction,
+            urgency: urgency,
+            reason: dto.reason,
+            additionalMessages: dto.additionalMessages,
+            confident: dto.confident ?? true
+        )
     }
 
     private func conversationSnippets(messages: [TGMessage], chatTitle: String, myUserId: Int64) -> [MessageSnippet] {
@@ -194,6 +249,10 @@ final class AIService: ObservableObject {
     /// Validates AI provider connection by making a minimal test request.
     func testConnection() async throws -> Bool {
         return try await provider.testConnection()
+    }
+
+    func loadUsageOverview() async -> AIUsageOverview {
+        await AIUsageStore.shared.loadOverview()
     }
 
     // MARK: - Persistence

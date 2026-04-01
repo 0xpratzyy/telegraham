@@ -114,20 +114,21 @@ class TelegramService: ObservableObject {
     // MARK: - Chat Operations (read-only)
 
     func loadChats(limit: Int = 100) async throws {
-        guard let client else { throw TGError.clientNotInitialized }
         isLoading = true
         defer { isLoading = false }
 
-        await rateLimiter.acquire()
-        _ = try await client.loadChats(chatList: .chatListMain, limit: limit)
+        _ = try await withRateLimitedCall(method: "loadChats") { client in
+            try await client.loadChats(chatList: .chatListMain, limit: limit)
+        }
         // Chats arrive via updateNewChat updates
     }
 
     func getChat(id: Int64) async throws -> TGChat? {
         if let cached = chatCache[id] { return cached }
-        guard let client else { throw TGError.clientNotInitialized }
 
-        let chat = try await client.getChat(chatId: id)
+        let chat = try await withRateLimitedCall(method: "getChat") { client in
+            try await client.getChat(chatId: id)
+        }
         let tgChat = mapChat(chat)
         chatCache[tgChat.id] = tgChat
         return tgChat
@@ -151,69 +152,74 @@ class TelegramService: ObservableObject {
     // MARK: - Message History (read-only)
 
     func getChatHistory(chatId: Int64, fromMessageId: Int64 = 0, limit: Int = 50, onlyLocal: Bool = false) async throws -> [TGMessage] {
-        guard let client else { throw TGError.clientNotInitialized }
-        await rateLimiter.acquire()
-
-        let result = try await client.getChatHistory(
-            chatId: chatId,
-            fromMessageId: fromMessageId,
-            limit: limit,
-            offset: 0,
-            onlyLocal: onlyLocal
-        )
+        let result = try await withRateLimitedCall(method: "getChatHistory") { client in
+            try await client.getChatHistory(
+                chatId: chatId,
+                fromMessageId: fromMessageId,
+                limit: limit,
+                offset: 0,
+                onlyLocal: onlyLocal
+            )
+        }
 
         return (result.messages ?? []).compactMap { mapMessage($0) }
     }
 
     // MARK: - Search (read-only)
 
-    func searchMessages(query: String, limit: Int = 50) async throws -> [TGMessage] {
+    func searchMessages(
+        query: String,
+        limit: Int = 50,
+        chatTypeFilter: SearchMessagesChatTypeFilter? = nil
+    ) async throws -> [TGMessage] {
         guard !query.isEmpty else { return [] }
-        guard let client else { throw TGError.clientNotInitialized }
+        let result = try await withRateLimitedCall(method: "searchMessages") { client in
+            try await client.searchMessages(
+                chatList: .chatListMain,
+                chatTypeFilter: chatTypeFilter,
+                filter: nil,
+                limit: limit,
+                maxDate: 0,
+                minDate: 0,
+                offset: "",
+                query: query
+            )
+        }
 
-        await rateLimiter.acquire()
-
-        let result = try await client.searchMessages(
-            chatList: .chatListMain,
-            chatTypeFilter: nil,
-            filter: nil,
-            limit: limit,
-            maxDate: 0,
-            minDate: 0,
-            offset: "",
-            query: query
-        )
-
-        return (result.messages ?? []).compactMap { mapMessage($0) }
+        return result.messages.compactMap { mapMessage($0) }
     }
 
     func searchChatMessages(chatId: Int64, query: String, limit: Int = 50) async throws -> [TGMessage] {
         guard !query.isEmpty else { return [] }
-        guard let client else { throw TGError.clientNotInitialized }
+        let result = try await withRateLimitedCall(method: "searchChatMessages") { client in
+            try await client.searchChatMessages(
+                chatId: chatId,
+                filter: nil,
+                fromMessageId: 0,
+                limit: limit,
+                offset: 0,
+                query: query,
+                senderId: nil,
+                topicId: nil
+            )
+        }
 
-        await rateLimiter.acquire()
+        return result.messages.compactMap { mapMessage($0) }
+    }
 
-        let result = try await client.searchChatMessages(
-            chatId: chatId,
-            filter: nil,
-            fromMessageId: 0,
-            limit: limit,
-            offset: 0,
-            query: query,
-            senderId: nil,
-            topicId: nil
-        )
-
-        return (result.messages ?? []).compactMap { mapMessage($0) }
+    func localSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [TGMessage] {
+        let records = await DatabaseManager.shared.localSearch(query: query, chatIds: chatIds, limit: limit)
+        return records.map { mapStoredMessage($0) }
     }
 
     // MARK: - User Info (read-only)
 
-    func getUser(id: Int64) async throws -> TGUser? {
+    func getUser(id: Int64, priority: RateLimiter.Priority = .userInitiated) async throws -> TGUser? {
         if let cached = userCache[id] { return cached }
-        guard let client else { throw TGError.clientNotInitialized }
 
-        let user = try await client.getUser(userId: id)
+        let user = try await withRateLimitedCall(priority: priority, method: "getUser") { client in
+            try await client.getUser(userId: id)
+        }
         let tgUser = mapUser(user)
         userCache[tgUser.id] = tgUser
         return tgUser
@@ -281,8 +287,9 @@ class TelegramService: ObservableObject {
             return (nil, nil)
 
         case .supergroup(let supergroupId, _):
-            guard let client else { return (nil, nil) }
-            if let supergroup = try? await client.getSupergroup(supergroupId: supergroupId) {
+            if let supergroup = try? await withRateLimitedCall(method: "getSupergroup", operation: { client in
+                try await client.getSupergroup(supergroupId: supergroupId)
+            }) {
                 return (supergroup.usernames?.activeUsernames.first, nil)
             }
             return (nil, nil)
@@ -460,10 +467,8 @@ class TelegramService: ObservableObject {
             authState = .ready
             Task {
                 try? await loadChats()
-                if let client {
-                    if let me = try? await client.getMe() {
-                        currentUser = mapUser(me)
-                    }
+                if let me = try? await fetchCurrentUser() {
+                    currentUser = me
                 }
             }
 
@@ -545,7 +550,34 @@ class TelegramService: ObservableObject {
             date: Date(timeIntervalSince1970: TimeInterval(message.date)),
             textContent: text,
             mediaType: mediaType,
+            isOutgoing: message.isOutgoing,
             chatTitle: chatTitle,
+            senderName: senderName
+        )
+    }
+
+    private func mapStoredMessage(_ record: DatabaseManager.MessageRecord) -> TGMessage {
+        let senderId: TGMessage.MessageSenderId
+        if let senderUserId = record.senderUserId {
+            senderId = .user(senderUserId)
+        } else {
+            senderId = .chat(record.chatId)
+        }
+
+        let senderName = record.senderName ?? {
+            guard let senderUserId = record.senderUserId else { return nil }
+            return userCache[senderUserId]?.displayName
+        }()
+
+        return TGMessage(
+            id: record.id,
+            chatId: record.chatId,
+            senderId: senderId,
+            date: record.date,
+            textContent: record.textContent,
+            mediaType: record.mediaTypeRaw.flatMap { TGMessage.MediaType(rawValue: $0) },
+            isOutgoing: record.isOutgoing,
+            chatTitle: chatCache[record.chatId]?.title,
             senderName: senderName
         )
     }
@@ -646,5 +678,67 @@ class TelegramService: ObservableObject {
             let keysToRemove = Array(chatCache.keys.prefix(excess))
             for key in keysToRemove { chatCache.removeValue(forKey: key) }
         }
+    }
+
+    private func fetchCurrentUser() async throws -> TGUser {
+        let user = try await withRateLimitedCall(method: "getMe") { client in
+            try await client.getMe()
+        }
+        let tgUser = mapUser(user)
+        userCache[tgUser.id] = tgUser
+        return tgUser
+    }
+
+    private func withRateLimitedCall<T>(
+        priority: RateLimiter.Priority = .userInitiated,
+        method: String,
+        operation: @escaping (TDLibKit.TDLibClient) async throws -> T
+    ) async throws -> T {
+        guard let client else { throw TGError.clientNotInitialized }
+
+        var attempt = 0
+        var pendingFloodWaitSeconds: Int?
+        while true {
+            attempt += 1
+            await rateLimiter.acquire(
+                priority: priority,
+                method: method,
+                floodWaitSeconds: pendingFloodWaitSeconds
+            )
+            pendingFloodWaitSeconds = nil
+
+            do {
+                return try await operation(client)
+            } catch let error as TDLibKit.Error {
+                guard attempt < 3, let floodWaitSeconds = floodWaitSeconds(from: error) else {
+                    throw error
+                }
+
+                print("[TelegramService] FLOOD_WAIT detected for \(method): \(floodWaitSeconds)s")
+                pendingFloodWaitSeconds = floodWaitSeconds
+            }
+        }
+    }
+
+    private func floodWaitSeconds(from error: TDLibKit.Error) -> Int? {
+        let message = error.message.uppercased()
+
+        if let range = message.range(of: "FLOOD_WAIT_") {
+            let suffix = message[range.upperBound...]
+            let digits = suffix.prefix { $0.isNumber }
+            if let seconds = Int(digits) {
+                return seconds
+            }
+        }
+
+        if let range = message.range(of: "RETRY AFTER ") {
+            let suffix = message[range.upperBound...]
+            let digits = suffix.prefix { $0.isNumber }
+            if let seconds = Int(digits) {
+                return seconds
+            }
+        }
+
+        return nil
     }
 }

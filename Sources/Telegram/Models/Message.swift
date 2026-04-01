@@ -1,21 +1,22 @@
 import Foundation
 
-struct TGMessage: Identifiable, Equatable {
+struct TGMessage: Identifiable, Equatable, Sendable {
     let id: Int64
     let chatId: Int64
     let senderId: MessageSenderId
     let date: Date
     let textContent: String?
     let mediaType: MediaType?
+    let isOutgoing: Bool
     let chatTitle: String?
     let senderName: String?
 
-    enum MessageSenderId: Equatable {
+    enum MessageSenderId: Equatable, Sendable {
         case user(Int64)
         case chat(Int64)
     }
 
-    enum MediaType: String, Equatable {
+    enum MediaType: String, Equatable, Sendable {
         case photo = "Photo"
         case video = "Video"
         case document = "Document"

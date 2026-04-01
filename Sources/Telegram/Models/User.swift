@@ -1,6 +1,6 @@
 import Foundation
 
-struct TGUser: Identifiable, Equatable {
+struct TGUser: Identifiable, Equatable, Sendable {
     let id: Int64
     let firstName: String
     let lastName: String

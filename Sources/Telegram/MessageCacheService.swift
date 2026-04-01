@@ -1,27 +1,11 @@
 import Foundation
 
 /// Event-driven message cache. Kept fresh via TDLib real-time updates — no TTL/expiry.
-/// Two-tier: in-memory dictionary + disk JSON files.
+/// Two-tier: in-memory dictionary + SQLite read-through persistence.
 actor MessageCacheService {
     static let shared = MessageCacheService()
 
-    private let cacheDir: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("Pidgy", isDirectory: true)
-            .appendingPathComponent("message_cache", isDirectory: true)
-    }()
-
     private var memoryCache: [Int64: CachedChatMessages] = [:]
-    private var dirtyChats: Set<Int64> = []  // Chats with unsaved changes
-
-    // Pipeline category cache (AI results)
-    private let pipelineCacheDir: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("Pidgy", isDirectory: true)
-            .appendingPathComponent("pipeline_cache", isDirectory: true)
-    }()
     private var pipelineCache: [Int64: CachedPipelineCategory] = [:]
 
     // MARK: - Codable Models
@@ -48,6 +32,7 @@ actor MessageCacheService {
         let date: Date
         let textContent: String?
         let mediaTypeRaw: String?
+        let isOutgoing: Bool
 
         static func == (lhs: CachedMessage, rhs: CachedMessage) -> Bool {
             lhs.id == rhs.id
@@ -56,41 +41,46 @@ actor MessageCacheService {
 
     // MARK: - Read
 
-    func getMessages(chatId: Int64) -> [TGMessage]? {
+    func getMessages(chatId: Int64) async -> [TGMessage]? {
         if let cached = memoryCache[chatId], !cached.messages.isEmpty {
             return cached.messages.map { $0.toTGMessage() }
         }
-        if let diskCached = loadFromDisk(chatId: chatId), !diskCached.messages.isEmpty {
-            memoryCache[chatId] = diskCached
-            return diskCached.messages.map { $0.toTGMessage() }
+
+        guard let cached = await loadCachedEntry(chatId: chatId), !cached.messages.isEmpty else {
+            return nil
         }
-        return nil
+        return cached.messages.map { $0.toTGMessage() }
     }
 
-    func getOldestMessageId(chatId: Int64) -> Int64? {
-        memoryCache[chatId]?.oldestMessageId
+    func getOldestMessageId(chatId: Int64) async -> Int64? {
+        let cached = await loadCachedEntry(chatId: chatId)
+        return cached?.oldestMessageId
     }
 
-    func messageCount(chatId: Int64) -> Int {
-        memoryCache[chatId]?.messages.count ?? 0
+    func messageCount(chatId: Int64) async -> Int {
+        let cached = await loadCachedEntry(chatId: chatId)
+        return cached?.messages.count ?? 0
     }
 
     // MARK: - Write
 
-    func cacheMessages(chatId: Int64, messages: [TGMessage], append: Bool = false) {
-        let newCached = messages.map { CachedMessage.from($0) }
+    func cacheMessages(chatId: Int64, messages: [TGMessage], append: Bool = false) async {
+        let newCachedMessages = messages.map { CachedMessage.from($0) }
 
         var allMessages: [CachedMessage]
-        if append, let existing = memoryCache[chatId] {
+        if append, let existing = await loadCachedEntry(chatId: chatId) {
             var byId: [Int64: CachedMessage] = [:]
-            for m in existing.messages { byId[m.id] = m }
-            for m in newCached { byId[m.id] = m }
-            allMessages = Array(byId.values).sorted { $0.date > $1.date }
+            for message in existing.messages {
+                byId[message.id] = message
+            }
+            for message in newCachedMessages {
+                byId[message.id] = message
+            }
+            allMessages = Array(byId.values).sorted(by: Self.sortMessagesDescending)
         } else {
-            allMessages = newCached.sorted { $0.date > $1.date }
+            allMessages = newCachedMessages.sorted(by: Self.sortMessagesDescending)
         }
 
-        // Cap at max messages per chat
         let maxMessages = AppConstants.Cache.maxCachedMessagesPerChat
         if allMessages.count > maxMessages {
             allMessages = Array(allMessages.prefix(maxMessages))
@@ -102,17 +92,29 @@ actor MessageCacheService {
             oldestMessageId: allMessages.last?.id
         )
         memoryCache[chatId] = entry
-        saveToDisk(entry)  // write-through: persist batch writes immediately
+
+        if append {
+            await DatabaseManager.shared.mergeMessages(
+                chatId: chatId,
+                messages: newCachedMessages.map { $0.toDatabaseRecord() },
+                limit: maxMessages
+            )
+        } else {
+            await DatabaseManager.shared.replaceMessages(
+                chatId: chatId,
+                messages: entry.messages.map { $0.toDatabaseRecord() },
+                limit: maxMessages
+            )
+        }
     }
 
-    /// Append a single message from a real-time update. Does not write to disk immediately.
-    func appendMessage(chatId: Int64, message: TGMessage) {
-        let cached = CachedMessage.from(message)
+    /// Append a single message from a real-time update.
+    func appendMessage(chatId: Int64, message: TGMessage) async {
+        let cachedMessage = CachedMessage.from(message)
 
-        if var existing = memoryCache[chatId] {
-            // Remove old version if exists (message edit), then prepend (newest first)
-            existing.messages.removeAll { $0.id == cached.id }
-            existing.messages.insert(cached, at: 0)
+        if var existing = await loadCachedEntry(chatId: chatId) {
+            existing.messages.removeAll { $0.id == cachedMessage.id }
+            existing.messages.insert(cachedMessage, at: 0)
 
             let maxMessages = AppConstants.Cache.maxCachedMessagesPerChat
             if existing.messages.count > maxMessages {
@@ -123,22 +125,27 @@ actor MessageCacheService {
         } else {
             memoryCache[chatId] = CachedChatMessages(
                 chatId: chatId,
-                messages: [cached],
-                oldestMessageId: cached.id
+                messages: [cachedMessage],
+                oldestMessageId: cachedMessage.id
             )
         }
-        dirtyChats.insert(chatId)
+
+        await DatabaseManager.shared.mergeMessages(
+            chatId: chatId,
+            messages: [cachedMessage.toDatabaseRecord()],
+            limit: AppConstants.Cache.maxCachedMessagesPerChat
+        )
     }
 
     /// Applies a TDLib content-edit event to an already cached message.
-    /// No-op if the chat/message isn't currently cached in memory or on disk.
+    /// No-op if the chat/message isn't currently cached in memory or SQLite.
     func updateMessageContent(
         chatId: Int64,
         messageId: Int64,
         textContent: String?,
         mediaType: TGMessage.MediaType?
-    ) {
-        guard var existing = loadCachedEntry(chatId: chatId) else { return }
+    ) async {
+        guard var existing = await loadCachedEntry(chatId: chatId) else { return }
         guard let index = existing.messages.firstIndex(where: { $0.id == messageId }) else { return }
 
         let old = existing.messages[index]
@@ -149,18 +156,24 @@ actor MessageCacheService {
             senderName: old.senderName,
             date: old.date,
             textContent: textContent,
-            mediaTypeRaw: mediaType?.rawValue
+            mediaTypeRaw: mediaType?.rawValue,
+            isOutgoing: old.isOutgoing
         )
 
         memoryCache[chatId] = existing
-        dirtyChats.insert(chatId)
+        await DatabaseManager.shared.updateMessageContent(
+            chatId: chatId,
+            messageId: messageId,
+            textContent: textContent,
+            mediaTypeRaw: mediaType?.rawValue
+        )
     }
 
     /// Removes deleted messages from local cache.
-    /// No-op if the chat isn't currently cached in memory or on disk.
-    func deleteMessages(chatId: Int64, messageIds: [Int64]) {
+    /// No-op if the chat isn't currently cached in memory or SQLite.
+    func deleteMessages(chatId: Int64, messageIds: [Int64]) async {
         guard !messageIds.isEmpty else { return }
-        guard var existing = loadCachedEntry(chatId: chatId) else { return }
+        guard var existing = await loadCachedEntry(chatId: chatId) else { return }
 
         let toDelete = Set(messageIds)
         let originalCount = existing.messages.count
@@ -169,27 +182,35 @@ actor MessageCacheService {
 
         if existing.messages.isEmpty {
             memoryCache.removeValue(forKey: chatId)
-            dirtyChats.remove(chatId)
-            deleteFromDisk(chatId: chatId)
+            await DatabaseManager.shared.deleteMessages(for: chatId)
             return
         }
 
         existing.oldestMessageId = existing.messages.last?.id
         memoryCache[chatId] = existing
-        dirtyChats.insert(chatId)
+        await DatabaseManager.shared.deleteMessages(chatId: chatId, messageIds: messageIds)
     }
 
     // MARK: - Pipeline Category Cache
 
-    func getPipelineCategory(chatId: Int64) -> CachedPipelineCategory? {
+    func getPipelineCategory(chatId: Int64) async -> CachedPipelineCategory? {
         if let cached = pipelineCache[chatId] {
             return cached
         }
-        if let diskCached = loadPipelineFromDisk(chatId: chatId) {
-            pipelineCache[chatId] = diskCached
-            return diskCached
+
+        guard let record = await DatabaseManager.shared.loadPipelineCache(chatId: chatId) else {
+            return nil
         }
-        return nil
+
+        let cached = CachedPipelineCategory(
+            chatId: record.chatId,
+            category: record.category,
+            suggestedAction: record.suggestedAction,
+            lastMessageId: record.lastMessageId,
+            analyzedAt: record.analyzedAt
+        )
+        pipelineCache[chatId] = cached
+        return cached
     }
 
     func cachePipelineCategory(
@@ -197,7 +218,7 @@ actor MessageCacheService {
         category: String,
         suggestedAction: String,
         lastMessageId: Int64
-    ) {
+    ) async {
         let cached = CachedPipelineCategory(
             chatId: chatId,
             category: category,
@@ -206,122 +227,92 @@ actor MessageCacheService {
             analyzedAt: Date()
         )
         pipelineCache[chatId] = cached
-        savePipelineToDisk(cached)  // write-through: persist immediately
+
+        await DatabaseManager.shared.savePipelineCache(
+            DatabaseManager.PipelineCacheRecord(
+                chatId: cached.chatId,
+                category: cached.category,
+                suggestedAction: cached.suggestedAction,
+                lastMessageId: cached.lastMessageId,
+                analyzedAt: cached.analyzedAt
+            )
+        )
     }
 
-    func invalidatePipelineCategory(chatId: Int64) {
+    func invalidatePipelineCategory(chatId: Int64) async {
         pipelineCache.removeValue(forKey: chatId)
-        deletePipelineFromDisk(chatId: chatId)
+        await DatabaseManager.shared.deletePipelineCache(chatId: chatId)
     }
 
-    func invalidateAllPipelineCache() {
+    func invalidateAllPipelineCache() async {
         pipelineCache.removeAll()
-        try? FileManager.default.removeItem(at: pipelineCacheDir)
+        await DatabaseManager.shared.clearPipelineCache()
     }
 
-    func invalidateAllLocalData() {
+    func invalidateAllLocalData() async {
         memoryCache.removeAll()
-        dirtyChats.removeAll()
         pipelineCache.removeAll()
-        try? FileManager.default.removeItem(at: cacheDir)
-        try? FileManager.default.removeItem(at: pipelineCacheDir)
+        await DatabaseManager.shared.clearAllMessageAndPipelineData()
     }
 
     // MARK: - Invalidation
 
-    func invalidate(chatId: Int64) {
+    func invalidate(chatId: Int64) async {
         memoryCache.removeValue(forKey: chatId)
-        dirtyChats.remove(chatId)
-        deleteFromDisk(chatId: chatId)
+        await DatabaseManager.shared.deleteMessages(for: chatId)
     }
 
-    func invalidateAll() {
+    func invalidateAll() async {
         memoryCache.removeAll()
-        dirtyChats.removeAll()
-        try? FileManager.default.removeItem(at: cacheDir)
+        await DatabaseManager.shared.clearMessageCache()
     }
 
-    // MARK: - Flush (call on app quit or periodically)
+    // MARK: - Flush
 
-    func flushToDisk() {
-        // Flush incremental message updates (from appendMessage real-time path)
-        for chatId in dirtyChats {
-            if let cached = memoryCache[chatId] {
-                saveToDisk(cached)
-            }
-        }
-        dirtyChats.removeAll()
-        // Pipeline categories are write-through (saved immediately on write), no flush needed.
-    }
+    /// SQLite writes are immediate; compatibility no-op kept so older callsites remain safe.
+    func flushToDisk() async {}
 
-    // MARK: - Disk I/O
+    // MARK: - Persistence Helpers
 
-    private func saveToDisk(_ cached: CachedChatMessages) {
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        let url = cacheDir.appendingPathComponent("\(cached.chatId).json")
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        if let data = try? encoder.encode(cached) {
-            try? data.write(to: url, options: [.atomic])
-        }
-    }
-
-    private func loadFromDisk(chatId: Int64) -> CachedChatMessages? {
-        let url = cacheDir.appendingPathComponent("\(chatId).json")
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        return try? decoder.decode(CachedChatMessages.self, from: data)
-    }
-
-    private func deleteFromDisk(chatId: Int64) {
-        let url = cacheDir.appendingPathComponent("\(chatId).json")
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    private func loadCachedEntry(chatId: Int64) -> CachedChatMessages? {
+    private func loadCachedEntry(chatId: Int64) async -> CachedChatMessages? {
         if let cached = memoryCache[chatId] {
             return cached
         }
-        if let diskCached = loadFromDisk(chatId: chatId) {
-            memoryCache[chatId] = diskCached
-            return diskCached
+
+        let records = await DatabaseManager.shared.loadMessages(
+            chatId: chatId,
+            limit: AppConstants.Cache.maxCachedMessagesPerChat
+        )
+        guard !records.isEmpty else { return nil }
+
+        let cached = CachedChatMessages(
+            chatId: chatId,
+            messages: records.map { CachedMessage.from($0) },
+            oldestMessageId: records.last?.id
+        )
+        memoryCache[chatId] = cached
+        return cached
+    }
+
+    private static func sortMessagesDescending(lhs: CachedMessage, rhs: CachedMessage) -> Bool {
+        if lhs.date != rhs.date {
+            return lhs.date > rhs.date
         }
-        return nil
-    }
-
-    // MARK: - Pipeline Disk I/O
-
-    private func savePipelineToDisk(_ cached: CachedPipelineCategory) {
-        try? FileManager.default.createDirectory(at: pipelineCacheDir, withIntermediateDirectories: true)
-        let url = pipelineCacheDir.appendingPathComponent("\(cached.chatId).json")
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        if let data = try? encoder.encode(cached) {
-            try? data.write(to: url, options: [.atomic])
-        }
-    }
-
-    private func loadPipelineFromDisk(chatId: Int64) -> CachedPipelineCategory? {
-        let url = pipelineCacheDir.appendingPathComponent("\(chatId).json")
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        return try? decoder.decode(CachedPipelineCategory.self, from: data)
-    }
-
-    private func deletePipelineFromDisk(chatId: Int64) {
-        let url = pipelineCacheDir.appendingPathComponent("\(chatId).json")
-        try? FileManager.default.removeItem(at: url)
+        return lhs.id > rhs.id
     }
 }
 
-// MARK: - CachedMessage ↔ TGMessage conversion
+// MARK: - CachedMessage ↔ TGMessage / DB conversion
 
 extension MessageCacheService.CachedMessage {
     static func from(_ msg: TGMessage) -> Self {
         let senderUserId: Int64?
-        if case .user(let uid) = msg.senderId { senderUserId = uid } else { senderUserId = nil }
+        if case .user(let userId) = msg.senderId {
+            senderUserId = userId
+        } else {
+            senderUserId = nil
+        }
+
         return Self(
             id: msg.id,
             chatId: msg.chatId,
@@ -329,27 +320,55 @@ extension MessageCacheService.CachedMessage {
             senderName: msg.senderName,
             date: msg.date,
             textContent: msg.textContent,
-            mediaTypeRaw: msg.mediaType?.rawValue
+            mediaTypeRaw: msg.mediaType?.rawValue,
+            isOutgoing: msg.isOutgoing
+        )
+    }
+
+    static func from(_ record: DatabaseManager.MessageRecord) -> Self {
+        Self(
+            id: record.id,
+            chatId: record.chatId,
+            senderUserId: record.senderUserId,
+            senderName: record.senderName,
+            date: record.date,
+            textContent: record.textContent,
+            mediaTypeRaw: record.mediaTypeRaw,
+            isOutgoing: record.isOutgoing
         )
     }
 
     func toTGMessage() -> TGMessage {
         let senderId: TGMessage.MessageSenderId
-        if let uid = senderUserId {
-            senderId = .user(uid)
+        if let userId = senderUserId {
+            senderId = .user(userId)
         } else {
             senderId = .chat(chatId)
         }
-        let mediaType = mediaTypeRaw.flatMap { TGMessage.MediaType(rawValue: $0) }
+
         return TGMessage(
             id: id,
             chatId: chatId,
             senderId: senderId,
             date: date,
             textContent: textContent,
-            mediaType: mediaType,
+            mediaType: mediaTypeRaw.flatMap { TGMessage.MediaType(rawValue: $0) },
+            isOutgoing: isOutgoing,
             chatTitle: nil,
             senderName: senderName
+        )
+    }
+
+    func toDatabaseRecord() -> DatabaseManager.MessageRecord {
+        DatabaseManager.MessageRecord(
+            id: id,
+            chatId: chatId,
+            senderUserId: senderUserId,
+            senderName: senderName,
+            date: date,
+            textContent: textContent,
+            mediaTypeRaw: mediaTypeRaw,
+            isOutgoing: isOutgoing
         )
     }
 }

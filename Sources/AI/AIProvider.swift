@@ -161,14 +161,71 @@ struct PipelineChatContext {
     let chatTitle: String
     let chatType: String      // "DM", "Group", "Supergroup", "Channel"
     let unreadCount: Int
+    let memberCount: Int?
     let myName: String
     let myUsername: String?
 }
 
 /// Wire format for pipeline AI categorization.
 struct PipelineCategoryDTO: Codable {
-    let category: String       // "on_me", "on_them", "quiet"
-    let relevant: Bool?        // kept optional for backward compat, no longer used
-    let suggestedAction: String
-    let confident: Bool?
+    let status: String?         // "decision" | "need_more"
+    let category: String?       // "on_me", "on_them", "quiet" (decision)
+    let urgency: String?        // "high" | "low" (decision)
+    let suggestedAction: String // may be empty string
+    let reason: String?         // need_more reason
+    let additionalMessages: Int? // need_more message ask
+    let relevant: Bool?         // backward compat, no longer used
+    let confident: Bool?        // backward compat
+
+    init(
+        status: String? = nil,
+        category: String? = nil,
+        urgency: String? = nil,
+        suggestedAction: String = "",
+        reason: String? = nil,
+        additionalMessages: Int? = nil,
+        relevant: Bool? = nil,
+        confident: Bool? = nil
+    ) {
+        self.status = status
+        self.category = category
+        self.urgency = urgency
+        self.suggestedAction = suggestedAction
+        self.reason = reason
+        self.additionalMessages = additionalMessages
+        self.relevant = relevant
+        self.confident = confident
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case category
+        case urgency
+        case suggestedAction
+        case reason
+        case additionalMessages
+        case relevant
+        case confident
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        category = try container.decodeIfPresent(String.self, forKey: .category)
+        urgency = try container.decodeIfPresent(String.self, forKey: .urgency)
+        suggestedAction = try container.decodeIfPresent(String.self, forKey: .suggestedAction) ?? ""
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+
+        if let intCount = try? container.decode(Int.self, forKey: .additionalMessages) {
+            additionalMessages = intCount
+        } else if let stringCount = try? container.decode(String.self, forKey: .additionalMessages),
+                  let intCount = Int(stringCount) {
+            additionalMessages = intCount
+        } else {
+            additionalMessages = nil
+        }
+
+        relevant = try container.decodeIfPresent(Bool.self, forKey: .relevant)
+        confident = try container.decodeIfPresent(Bool.self, forKey: .confident)
+    }
 }

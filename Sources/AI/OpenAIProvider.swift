@@ -21,7 +21,11 @@ final class OpenAIProvider: AIProvider {
         let snippets = MessageSnippet.truncateToTokenBudget(messages)
         let userMessage = SummaryPrompt.userMessage(snippets: snippets)
         return try await RetryHelper.withRetry {
-            try await self.makeRequest(systemPrompt: SummaryPrompt.systemPrompt, userMessage: userMessage)
+            try await self.makeRequest(
+                systemPrompt: SummaryPrompt.systemPrompt,
+                userMessage: userMessage,
+                requestKind: .summary
+            )
         }
     }
 
@@ -30,7 +34,8 @@ final class OpenAIProvider: AIProvider {
         let response = try await RetryHelper.withRetry {
             try await self.makeRequest(
                 systemPrompt: SemanticSearchPrompt.systemPrompt,
-                userMessage: SemanticSearchPrompt.userMessage(query: query, snippets: snippets)
+                userMessage: SemanticSearchPrompt.userMessage(query: query, snippets: snippets),
+                requestKind: .semanticSearch
             )
         }
         return try JSONExtractor.parseJSON(response)
@@ -49,7 +54,8 @@ final class OpenAIProvider: AIProvider {
                     query: query,
                     constraints: constraints,
                     candidates: candidates
-                )
+                ),
+                requestKind: .agenticSearch
             )
         }
         return try JSONExtractor.parseJSON(response)
@@ -60,7 +66,8 @@ final class OpenAIProvider: AIProvider {
         let response = try await RetryHelper.withRetry {
             try await self.makeRequest(
                 systemPrompt: FollowUpPrompt.systemPrompt,
-                userMessage: FollowUpPrompt.userMessage(chatTitle: chatTitle, snippets: snippets)
+                userMessage: FollowUpPrompt.userMessage(chatTitle: chatTitle, snippets: snippets),
+                requestKind: .followUpSuggestion
             )
         }
         let dto: FollowUpSuggestionDTO = try JSONExtractor.parseJSON(response)
@@ -72,7 +79,8 @@ final class OpenAIProvider: AIProvider {
         let response = try await RetryHelper.withRetry {
             try await self.makeRequest(
                 systemPrompt: PipelineCategoryPrompt.systemPrompt,
-                userMessage: PipelineCategoryPrompt.userMessage(context: context, snippets: snippets)
+                userMessage: PipelineCategoryPrompt.userMessage(context: context, snippets: snippets),
+                requestKind: .pipelineTriage
             )
         }
         return try JSONExtractor.parseJSON(response)
@@ -85,7 +93,11 @@ final class OpenAIProvider: AIProvider {
 
     // MARK: - HTTP
 
-    private func makeRequest(systemPrompt: String, userMessage: String) async throws -> String {
+    private func makeRequest(
+        systemPrompt: String,
+        userMessage: String,
+        requestKind: AIRequestKind? = nil
+    ) async throws -> String {
         var request = URLRequest(url: AppConstants.AI.openAIBaseURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -119,6 +131,39 @@ final class OpenAIProvider: AIProvider {
             throw AIError.invalidResponse
         }
 
+        if let requestKind {
+            let usage = parseUsage(from: json["usage"])
+            await AIUsageStore.shared.record(
+                provider: .openAI,
+                model: model,
+                requestKind: requestKind,
+                usage: usage
+            )
+        }
+
         return content
+    }
+
+    private func parseUsage(from rawUsage: Any?) -> AIProviderUsage? {
+        guard let usage = rawUsage as? [String: Any] else { return nil }
+
+        let inputTokens = intValue(usage["prompt_tokens"]) ?? 0
+        let outputTokens = intValue(usage["completion_tokens"]) ?? 0
+
+        guard inputTokens > 0 || outputTokens > 0 else { return nil }
+        return AIProviderUsage(inputTokens: inputTokens, outputTokens: outputTokens)
+    }
+
+    private func intValue(_ rawValue: Any?) -> Int? {
+        switch rawValue {
+        case let int as Int:
+            return int
+        case let number as NSNumber:
+            return number.intValue
+        case let string as String:
+            return Int(string)
+        default:
+            return nil
+        }
     }
 }
