@@ -104,6 +104,7 @@ struct QuerySpec: Codable {
 struct AgenticSearchCandidate {
     let chat: TGChat
     let pipelineCategory: String
+    let strictReplySignal: Bool
     let messages: [TGMessage]
 }
 

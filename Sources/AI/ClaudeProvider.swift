@@ -41,6 +41,22 @@ final class ClaudeProvider: AIProvider {
         return try JSONExtractor.parseJSON(response)
     }
 
+    func rerankResults(
+        query: String,
+        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
+    ) async throws -> [Int64] {
+        guard !candidates.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: SearchRerankPrompt.systemPrompt,
+                userMessage: SearchRerankPrompt.userMessage(query: query, candidates: candidates),
+                requestKind: .semanticSearch
+            )
+        }
+        let dto: SearchRerankResultDTO = try JSONExtractor.parseJSON(response)
+        return dto.rankedChatIds
+    }
+
     func agenticSearch(
         query: String,
         constraints: AgenticSearchConstraintsDTO,
@@ -58,7 +74,7 @@ final class ClaudeProvider: AIProvider {
                 requestKind: .agenticSearch
             )
         }
-        return try JSONExtractor.parseJSON(response)
+        return try AgenticSearchResultParser.parse(response)
     }
 
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {

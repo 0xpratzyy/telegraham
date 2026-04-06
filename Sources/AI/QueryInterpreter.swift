@@ -91,8 +91,6 @@ final class QueryInterpreter: QueryInterpreting {
         let agenticSignals = [
             "intro",
             "connect",
-            "partner",
-            "ecosystem",
             "warm",
             "lead",
             "reply",
@@ -102,8 +100,7 @@ final class QueryInterpreter: QueryInterpreting {
             "follow-up",
             "who should i",
             "who do i",
-            "waiting on me",
-            "first dollar"
+            "waiting on me"
         ]
         let mode: QueryIntent =
             (replyConstraint != .none || timeRange != nil || scopeWasExplicit || containsAny(agenticSignals, in: normalized))

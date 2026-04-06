@@ -42,8 +42,6 @@ final class QueryRouter: ObservableObject {
         let agenticPhrases = [
             "intro",
             "connect",
-            "partner",
-            "ecosystem",
             "warm",
             "lead",
             "reply",
@@ -55,8 +53,7 @@ final class QueryRouter: ObservableObject {
             "who do i",
             "waiting on me",
             "haven't replied",
-            "have not replied",
-            "first dollar"
+            "have not replied"
         ]
 
         if agenticPhrases.contains(where: { normalized.contains($0) }) {

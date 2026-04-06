@@ -11,6 +11,13 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
+    func rerankResults(
+        query: String,
+        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
+    ) async throws -> [Int64] {
+        throw AIError.providerNotConfigured
+    }
+
     func agenticSearch(
         query: String,
         constraints: AgenticSearchConstraintsDTO,

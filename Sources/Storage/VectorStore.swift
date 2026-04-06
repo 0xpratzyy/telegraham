@@ -56,20 +56,27 @@ actor VectorStore {
         }
     }
 
-    func search(query: [Double], topK: Int, chatFilter: Int64? = nil) async -> [SearchResult] {
+    func search(query: [Double], topK: Int, chatIds: [Int64]? = nil) async -> [SearchResult] {
         guard !query.isEmpty, topK > 0 else { return [] }
+        if let chatIds, chatIds.isEmpty { return [] }
 
         do {
             let rows: [(messageId: Int64, chatId: Int64, vectorData: Data)] = try await DatabaseManager.shared.read { db in
-                if let chatFilter {
+                if let chatIds {
+                    let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
+                    var arguments = StatementArguments()
+                    for chatId in chatIds {
+                        arguments += [chatId]
+                    }
+
                     return try Row.fetchAll(
                         db,
                         sql: """
                             SELECT message_id, chat_id, vector
                             FROM embeddings
-                            WHERE chat_id = ?
+                            WHERE chat_id IN (\(placeholders))
                             """,
-                        arguments: [chatFilter]
+                        arguments: arguments
                     ).compactMap { row in
                         guard let vectorData: Data = row["vector"] else { return nil }
                         return (

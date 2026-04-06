@@ -5,6 +5,11 @@ import TDLibKit
 /// Read-only by design — no write/send/modify methods exist.
 @MainActor
 class TelegramService: ObservableObject {
+    struct LocalMessageSearchHit: Sendable {
+        let message: TGMessage
+        let score: Double
+    }
+
     @Published var authState: AuthState = .uninitialized
     @Published var chats: [TGChat] = []
     @Published var currentUser: TGUser?
@@ -216,6 +221,50 @@ class TelegramService: ObservableObject {
     func localSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [TGMessage] {
         let records = await DatabaseManager.shared.localSearch(query: query, chatIds: chatIds, limit: limit)
         return records.map { mapStoredMessage($0) }
+    }
+
+    func localScoredSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
+        let records = await DatabaseManager.shared.localSearchScored(query: query, chatIds: chatIds, limit: limit)
+        return records.map { record in
+            LocalMessageSearchHit(
+                message: mapStoredMessage(record.message),
+                score: record.score
+            )
+        }
+    }
+
+    func localVectorSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
+        guard let queryVector = await EmbeddingService.shared.embed(text: query) else { return [] }
+
+        let searchResults = await VectorStore.shared.search(query: queryVector, topK: limit, chatIds: chatIds)
+        guard !searchResults.isEmpty else { return [] }
+
+        let records = await DatabaseManager.shared.loadMessages(
+            keys: searchResults.map { result in
+                DatabaseManager.MessageLookupKey(
+                    messageId: result.messageId,
+                    chatId: result.chatId
+                )
+            }
+        )
+
+        let recordByKey = Dictionary(
+            uniqueKeysWithValues: records.map { record in
+                (
+                    DatabaseManager.MessageLookupKey(messageId: record.id, chatId: record.chatId),
+                    record
+                )
+            }
+        )
+
+        return searchResults.compactMap { result in
+            let key = DatabaseManager.MessageLookupKey(messageId: result.messageId, chatId: result.chatId)
+            guard let record = recordByKey[key] else { return nil }
+            return LocalMessageSearchHit(
+                message: mapStoredMessage(record),
+                score: result.score
+            )
+        }
     }
 
     // MARK: - User Info (read-only)

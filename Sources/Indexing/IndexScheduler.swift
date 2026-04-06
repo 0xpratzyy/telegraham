@@ -4,6 +4,12 @@ import Combine
 actor IndexScheduler {
     static let shared = IndexScheduler()
 
+    private struct GroupBatchParticipant {
+        var count: Int
+        var lastActiveAt: Date?
+        var latestSenderName: String?
+    }
+
     final class ProgressState: ObservableObject {
         @Published var indexed = 0
         @Published var total = 0
@@ -247,6 +253,7 @@ actor IndexScheduler {
 
         switch chat.chatType {
         case .privateChat(let otherUserId):
+            guard !messages.isEmpty else { return }
             await RelationGraph.shared.upsertNode(
                 entityId: otherUserId,
                 type: AppConstants.Graph.userEntityType,
@@ -256,35 +263,69 @@ actor IndexScheduler {
 
             let source = min(currentUserId, otherUserId)
             let target = max(currentUserId, otherUserId)
-            for _ in messages {
-                await RelationGraph.shared.incrementEdge(
+            let lastActiveAt = messages.map(\.date).max()
+            await RelationGraph.shared.incrementEdges([
+                RelationGraph.EdgeIncrement(
                     source: source,
                     target: target,
                     type: AppConstants.Graph.dmEdgeType,
-                    contextChatId: nil
+                    contextChatId: nil,
+                    weightDelta: Double(messages.count),
+                    messageCountDelta: messages.count,
+                    lastActiveAt: lastActiveAt
                 )
-            }
+            ])
 
         case .basicGroup, .supergroup(_, false):
+            var participantsByUserId: [Int64: GroupBatchParticipant] = [:]
+
             for message in messages {
                 guard let senderUserId = message.senderUserId, senderUserId != currentUserId else { continue }
 
+                var participant = participantsByUserId[senderUserId] ?? GroupBatchParticipant(
+                    count: 0,
+                    lastActiveAt: nil,
+                    latestSenderName: nil
+                )
+                participant.count += 1
+                if let existingDate = participant.lastActiveAt {
+                    if message.date >= existingDate {
+                        participant.lastActiveAt = message.date
+                        participant.latestSenderName = message.senderName ?? participant.latestSenderName
+                    }
+                } else {
+                    participant.lastActiveAt = message.date
+                    participant.latestSenderName = message.senderName
+                }
+                participantsByUserId[senderUserId] = participant
+            }
+
+            guard !participantsByUserId.isEmpty else { return }
+
+            for (senderUserId, participant) in participantsByUserId {
                 await RelationGraph.shared.upsertNode(
                     entityId: senderUserId,
                     type: AppConstants.Graph.userEntityType,
-                    name: message.senderName,
+                    name: participant.latestSenderName,
                     username: nil
                 )
+            }
 
+            let updates = participantsByUserId.map { senderUserId, participant in
                 let source = min(currentUserId, senderUserId)
                 let target = max(currentUserId, senderUserId)
-                await RelationGraph.shared.incrementEdge(
+                return RelationGraph.EdgeIncrement(
                     source: source,
                     target: target,
                     type: AppConstants.Graph.sharedGroupEdgeType,
-                    contextChatId: chat.id
+                    contextChatId: chat.id,
+                    weightDelta: Double(participant.count),
+                    messageCountDelta: participant.count,
+                    lastActiveAt: participant.lastActiveAt
                 )
             }
+
+            await RelationGraph.shared.incrementEdges(updates)
 
         case .supergroup(_, true), .secretChat:
             break

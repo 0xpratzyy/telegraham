@@ -4,6 +4,16 @@ import GRDB
 actor RelationGraph {
     static let shared = RelationGraph()
 
+    struct EdgeIncrement: Sendable, Hashable {
+        let source: Int64
+        let target: Int64
+        let type: String
+        let contextChatId: Int64?
+        let weightDelta: Double
+        let messageCountDelta: Int
+        let lastActiveAt: Date?
+    }
+
     struct Node: Sendable, Equatable, Hashable {
         let entityId: Int64
         let entityType: String
@@ -151,44 +161,77 @@ actor RelationGraph {
     }
 
     func incrementEdge(source: Int64, target: Int64, type: String, contextChatId: Int64?) async {
-        let now = Date().timeIntervalSince1970
+        await incrementEdges([
+            EdgeIncrement(
+                source: source,
+                target: target,
+                type: type,
+                contextChatId: contextChatId,
+                weightDelta: 1,
+                messageCountDelta: 1,
+                lastActiveAt: Date()
+            )
+        ])
+    }
+
+    func incrementEdges(_ updates: [EdgeIncrement]) async {
+        let mergedUpdates = Self.merge(updates)
+        guard !mergedUpdates.isEmpty else { return }
 
         do {
             try await DatabaseManager.shared.write { db in
-                if let edgeId = try Self.edgeId(
-                    in: db,
-                    source: source,
-                    target: target,
-                    type: type,
-                    contextChatId: contextChatId
-                ) {
-                    try db.execute(
-                        sql: """
-                            UPDATE edges
-                            SET weight = weight + 1,
-                                message_count = message_count + 1,
-                                last_active_at = MAX(last_active_at, ?)
-                            WHERE id = ?
-                            """,
-                        arguments: [now, edgeId]
-                    )
-                } else {
-                    try Self.insertEdge(
+                var touchedEntityIds = Set<Int64>()
+
+                for update in mergedUpdates {
+                    let lastActiveAt = (update.lastActiveAt ?? Date()).timeIntervalSince1970
+
+                    if let edgeId = try Self.edgeId(
                         in: db,
-                        source: source,
-                        target: target,
-                        type: type,
-                        contextChatId: contextChatId,
-                        weight: 1,
-                        messageCount: 1,
-                        lastActiveAt: now
-                    )
+                        source: update.source,
+                        target: update.target,
+                        type: update.type,
+                        contextChatId: update.contextChatId
+                    ) {
+                        try db.execute(
+                            sql: """
+                                UPDATE edges
+                                SET weight = weight + ?,
+                                    message_count = message_count + ?,
+                                    last_active_at = MAX(last_active_at, ?)
+                                WHERE id = ?
+                                """,
+                            arguments: [
+                                update.weightDelta,
+                                update.messageCountDelta,
+                                lastActiveAt,
+                                edgeId
+                            ]
+                        )
+                    } else {
+                        try Self.insertEdge(
+                            in: db,
+                            source: update.source,
+                            target: update.target,
+                            type: update.type,
+                            contextChatId: update.contextChatId,
+                            weight: update.weightDelta,
+                            messageCount: update.messageCountDelta,
+                            lastActiveAt: lastActiveAt
+                        )
+                    }
+
+                    touchedEntityIds.insert(update.source)
+                    touchedEntityIds.insert(update.target)
                 }
 
-                try Self.refreshNodeStats(in: db, entityIds: [source, target])
+                try Self.refreshNodeStats(in: db, entityIds: Array(touchedEntityIds))
             }
         } catch {
-            print("[RelationGraph] Failed to increment edge \(source)->\(target) [\(type)]: \(error)")
+            let summary = mergedUpdates
+                .prefix(3)
+                .map { "\($0.source)->\($0.target) [\($0.type)]" }
+                .joined(separator: ", ")
+            print("[RelationGraph] Failed to increment \(mergedUpdates.count) edges (\(summary)): \(error)")
         }
     }
 
@@ -355,6 +398,53 @@ actor RelationGraph {
                 contextChatId
             ]
         )
+    }
+
+    private struct EdgeIncrementKey: Hashable {
+        let source: Int64
+        let target: Int64
+        let type: String
+        let contextChatId: Int64?
+    }
+
+    private static func merge(_ updates: [EdgeIncrement]) -> [EdgeIncrement] {
+        var merged: [EdgeIncrementKey: EdgeIncrement] = [:]
+
+        for update in updates {
+            let key = EdgeIncrementKey(
+                source: update.source,
+                target: update.target,
+                type: update.type,
+                contextChatId: update.contextChatId
+            )
+
+            if let existing = merged[key] {
+                merged[key] = EdgeIncrement(
+                    source: update.source,
+                    target: update.target,
+                    type: update.type,
+                    contextChatId: update.contextChatId,
+                    weightDelta: existing.weightDelta + update.weightDelta,
+                    messageCountDelta: existing.messageCountDelta + update.messageCountDelta,
+                    lastActiveAt: [existing.lastActiveAt, update.lastActiveAt].compactMap { $0 }.max()
+                )
+            } else {
+                merged[key] = update
+            }
+        }
+
+        return merged.values.sorted { lhs, rhs in
+            if lhs.source != rhs.source {
+                return lhs.source < rhs.source
+            }
+            if lhs.target != rhs.target {
+                return lhs.target < rhs.target
+            }
+            if lhs.type != rhs.type {
+                return lhs.type < rhs.type
+            }
+            return (lhs.contextChatId ?? .min) < (rhs.contextChatId ?? .min)
+        }
     }
 
     private static func edgeId(

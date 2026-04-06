@@ -52,6 +52,9 @@ struct LauncherView: View {
     private var agenticDebugInfo: AgenticDebugInfo? { searchCoordinator.agenticDebugInfo }
     private var semanticMatchedChats: Int { searchCoordinator.semanticMatchedChats }
     private var totalChatsToScan: Int { searchCoordinator.totalChatsToScan }
+    private var agenticUsedLocalFallback: Bool {
+        agenticDebugInfo?.stopReason.contains("using local fallback") == true
+    }
 
     private var displayedChats: [TGChat] {
         var chats: [TGChat]
@@ -133,8 +136,8 @@ struct LauncherView: View {
 
     /// Total navigable items (either AI results or chat rows depending on mode).
     private var navigableCount: Int {
-        if aiSearchMode == .semanticSearch && (!aiResults.isEmpty || !titleMatchedChats.isEmpty) {
-            return titleMatchedChats.count + aiResults.count
+        if aiSearchMode == .semanticSearch && !aiResults.isEmpty {
+            return aiResults.count
         }
         if aiSearchMode == .agenticSearch && !aiResults.isEmpty {
             return aiResults.count
@@ -236,17 +239,8 @@ struct LauncherView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .launcherEnter)) { _ in
-            if aiSearchMode == .semanticSearch && (!aiResults.isEmpty || !titleMatchedChats.isEmpty) {
-                // AI mode: title matches first, then AI results
-                let titleMatches = titleMatchedChats
-                if selectedIndex < titleMatches.count {
-                    openChat(titleMatches[selectedIndex])
-                } else {
-                    let aiIndex = selectedIndex - titleMatches.count
-                    if aiIndex < aiResults.count {
-                        openAISearchResult(aiResults[aiIndex])
-                    }
-                }
+            if aiSearchMode == .semanticSearch && selectedIndex < aiResults.count {
+                openAISearchResult(aiResults[selectedIndex])
             } else if aiSearchMode == .agenticSearch && selectedIndex < aiResults.count {
                 openAISearchResult(aiResults[selectedIndex])
             } else if selectedIndex < displayedChats.count {
@@ -344,6 +338,7 @@ struct LauncherView: View {
             if intent == .agenticSearch,
                let querySpec = currentQuerySpec {
                 let chips = agenticConstraintChips(from: querySpec)
+                    + (agenticUsedLocalFallback ? ["Local Fallback"] : [])
                 if !chips.isEmpty {
                     HStack(spacing: 6) {
                         ForEach(chips, id: \.self) { chip in
@@ -382,6 +377,9 @@ struct LauncherView: View {
                     return "Scanning \(semanticMatchedChats) of \(totalChatsToScan), ranking intent..."
                 }
                 return "Ranking warm, reply-ready chats..."
+            }
+            if agenticUsedLocalFallback {
+                return "Agentic fallback ranking"
             }
             if let querySpec = currentQuerySpec, !querySpec.unsupportedFragments.isEmpty {
                 return "Agentic ranking (partial parse)"
@@ -503,15 +501,69 @@ struct LauncherView: View {
         lines.append(contentsOf: [
             "scoped \(debug.scopedChats) • scanCap \(debug.maxScanChats) • scanned \(debug.scannedChats)",
             "inRange \(debug.inRangeChats) • replyOwed \(debug.replyOwedChats) • queryMatch \(debug.matchedChats)",
+            "matchedDMs \(debug.matchedPrivateChats) • matchedGroups \(debug.matchedGroupChats) • finalDMs \(debug.finalPrivateChats) • finalGroups \(debug.finalGroupChats)",
             "toAI \(debug.candidatesSentToAI) • aiReturned \(debug.aiReturned) • ranked \(debug.rankedBeforeValidation)",
             "dropped \(debug.droppedByValidation) • final \(debug.finalCount) • reason \(debug.stopReason)"
         ])
         return lines
     }
 
+    private var agenticDebugBuckets: [AgenticDebugExclusionBucket] {
+        guard let debug = agenticDebugInfo else { return [] }
+        return debug.exclusionBuckets.sorted { lhs, rhs in
+            if lhs.count != rhs.count {
+                return lhs.count > rhs.count
+            }
+            return lhs.reason < rhs.reason
+        }
+    }
+
+    private var agenticDebugSection: some View {
+        let debugLines = agenticDebugLines()
+        let buckets = agenticDebugBuckets
+
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Debug")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            ForEach(Array(debugLines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            if !buckets.isEmpty {
+                Divider()
+                    .overlay(Color.secondary.opacity(0.15))
+
+                Text("Excluded")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                ForEach(buckets.prefix(6)) { bucket in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(bucket.reason) • \(bucket.count)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        if !bucket.sampleChats.isEmpty {
+                            Text(bucket.sampleChats.joined(separator: ", "))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
     private var agenticEmptyStateView: some View {
         let content = agenticEmptyStateContent()
-        let debugLines = agenticDebugLines()
+        let hasDebug = !agenticDebugLines().isEmpty || !agenticDebugBuckets.isEmpty
 
         return VStack(spacing: 12) {
             Spacer()
@@ -525,22 +577,9 @@ struct LauncherView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
 
-            if !debugLines.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Debug")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    ForEach(Array(debugLines.enumerated()), id: \.offset) { _, line in
-                        Text(line)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .padding(.top, 4)
+            if hasDebug {
+                agenticDebugSection
+                    .padding(.top, 4)
             }
 
             Spacer()
@@ -558,7 +597,7 @@ struct LauncherView: View {
             ErrorStateView(message: error) {
                 triggerSearch()
             }
-        } else if aiSearchMode == .semanticSearch && (!aiResults.isEmpty || !titleMatchedChats.isEmpty) {
+        } else if aiSearchMode == .semanticSearch && !aiResults.isEmpty {
             aiResultsList
         } else if aiSearchMode == .agenticSearch && !aiResults.isEmpty {
             aiResultsList
@@ -659,26 +698,11 @@ struct LauncherView: View {
 
     // MARK: - AI Results List
 
-    /// Chats whose title matches the search text (shown above AI results for direct matches).
-    private var titleMatchedChats: [TGChat] {
-        guard !searchText.isEmpty else { return [] }
-        let query = searchText.lowercased()
-        // Exclude chats already in AI results to avoid duplicates.
-        let aiChatIds = Set(aiResults.compactMap { result -> Int64? in
-            if case .semanticResult(let r) = result { return r.chatId }
-            return nil
-        })
-        return scopedAISearchSourceChats.filter {
-            $0.title.lowercased().contains(query) && !aiChatIds.contains($0.id)
-        }
-    }
-
     private var aiResultsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    let titleMatches = aiSearchMode == .semanticSearch ? titleMatchedChats : []
-                    let totalCount = titleMatches.count + aiResults.count
+                    let totalCount = aiResults.count
 
                     Text("\(totalCount) result\(totalCount == 1 ? "" : "s")")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -687,47 +711,27 @@ struct LauncherView: View {
                         .padding(.horizontal, 10)
                         .padding(.top, 2)
 
-                    if aiSearchMode == .semanticSearch {
-                        // Direct title matches first
-                        ForEach(Array(titleMatches.enumerated()), id: \.element.id) { index, chat in
-                            ChatRowView(
-                                chat: chat,
-                                isHighlighted: index == selectedIndex,
-                                onOpen: { openChat(chat) }
-                            )
-                            .id(chat.id)
-                        }
-                    }
-
                     // AI semantic/agentic results
                     ForEach(Array(aiResults.enumerated()), id: \.element.id) { index, result in
-                        aiResultRow(result: result, index: titleMatches.count + index)
+                        aiResultRow(result: result, index: index)
                             .id(result.id)
+                    }
+
+                    if aiSearchMode == .agenticSearch,
+                       (!agenticDebugLines().isEmpty || !agenticDebugBuckets.isEmpty) {
+                        agenticDebugSection
+                            .padding(.horizontal, 10)
+                            .padding(.top, 8)
+                            .padding(.bottom, 6)
                     }
                 }
                 .padding(.horizontal, 4)
                 .padding(.vertical, 2)
             }
             .onChange(of: selectedIndex) { _, newIndex in
-                if aiSearchMode == .semanticSearch {
-                    let titleMatches = titleMatchedChats
-                    if newIndex < titleMatches.count {
-                        withAnimation(.easeOut(duration: 0.1)) {
-                            proxy.scrollTo(titleMatches[newIndex].id, anchor: .center)
-                        }
-                    } else {
-                        let aiIndex = newIndex - titleMatches.count
-                        if aiIndex < aiResults.count {
-                            withAnimation(.easeOut(duration: 0.1)) {
-                                proxy.scrollTo(aiResults[aiIndex].id, anchor: .center)
-                            }
-                        }
-                    }
-                } else {
-                    if newIndex < aiResults.count {
-                        withAnimation(.easeOut(duration: 0.1)) {
-                            proxy.scrollTo(aiResults[newIndex].id, anchor: .center)
-                        }
+                if newIndex < aiResults.count {
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        proxy.scrollTo(aiResults[newIndex].id, anchor: .center)
                     }
                 }
             }

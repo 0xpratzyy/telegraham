@@ -42,7 +42,10 @@ enum AppConstants {
             static let initialScanChats = 12
             static let adaptiveExpansionStep = 8
             static let maxAdaptiveScanChats = 48
-            static let maxAdaptiveRounds = 4
+            static let maxAdaptiveRounds = 5
+            static let replyQueueMinimumScanChats = 32
+            static let replyQueueMinimumFinalResults = 5
+            static let replyQueuePrivateMaxAgeSeconds: TimeInterval = 45 * 86_400
             static let confidentTopAverageThreshold = 0.72
             static let initialMessagesPerChat = 8
             static let topUpAdditionalMessages = 4
@@ -51,6 +54,27 @@ enum AppConstants {
             static let lowConfidenceThreshold = 0.60
             static let dateProbeStep = 12
             static let maxDateProbeMessagesPerChat = 80
+        }
+
+        enum SemanticSearch {
+            static let ftsTopMessages = 50
+            static let vectorTopMessages = 50
+            static let fallbackTopMessages = 40
+            static let maxLocalChatsForRerank = 20
+            static let maxRenderedSemanticResults = 24
+            static let messagePreviewCharacterLimit = 180
+            static let highRelevanceThreshold = 0.72
+            static let mediumRelevanceThreshold = 0.40
+            static let ftsWeight = 0.6
+            static let vectorWeight = 0.4
+            static let titleWeight = 0.45
+            static let fallbackWeight = 0.35
+            static let exactTitleBoost = 0.18
+            static let titleHistoryBonus = 0.08
+            static let titleOnlyPenalty = 0.18
+            static let dmBonus = 0.10
+            static let smallGroupBonus = 0.04
+            static let largeGroupPenalty = 0.08
         }
     }
 

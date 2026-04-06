@@ -27,20 +27,17 @@ private struct LocalSemanticMessageScore {
     let message: TGMessage
     var ftsScore: Double
     var vectorScore: Double
-
-    var combinedScore: Double {
-        (ftsScore * AppConstants.AI.SemanticSearch.ftsWeight)
-        + (vectorScore * AppConstants.AI.SemanticSearch.vectorWeight)
-    }
 }
 
 private struct LocalSemanticChatCandidate {
     let chat: TGChat
-    let bestMessage: TGMessage
-    let bestSnippet: String
-    let combinedScore: Double
-    let ftsScore: Double
-    let vectorScore: Double
+    var bestMessage: TGMessage?
+    var bestSnippet: String
+    var sortDate: Foundation.Date
+    var ftsScore: Double
+    var vectorScore: Double
+    var titleScore: Double
+    var fallbackScore: Double
 }
 
 @MainActor
@@ -135,7 +132,10 @@ final class SearchCoordinator: ObservableObject {
             )
             guard !Task.isCancelled else { return }
 
-            if intent != .messageSearch && aiService.isConfigured {
+            let shouldUseAIResultsPath =
+                intent == .semanticSearch || (intent == .agenticSearch && aiService.isConfigured)
+
+            if shouldUseAIResultsPath {
                 aiSearchMode = intent
                 isAISearching = true
                 aiSearchError = nil
@@ -229,6 +229,7 @@ final class SearchCoordinator: ObservableObject {
         case .semanticSearch:
             return await executeLocalSemanticSearch(
                 query: query,
+                activeScope: activeScope,
                 scopedChats: scopedAISearchSourceChats,
                 telegramService: telegramService,
                 aiService: aiService
@@ -252,6 +253,7 @@ final class SearchCoordinator: ObservableObject {
 
     private func executeLocalSemanticSearch(
         query: String,
+        activeScope: QueryScope,
         scopedChats: [TGChat],
         telegramService: TelegramService,
         aiService: AIService
@@ -266,6 +268,7 @@ final class SearchCoordinator: ObservableObject {
 
         let scopedChatIds = scopedChats.map(\.id)
         let chatById = Dictionary(uniqueKeysWithValues: scopedChats.map { ($0.id, $0) })
+        let unindexedChatIds = await DatabaseManager.shared.unindexedChatIds(in: scopedChatIds)
 
         let ftsHits = await telegramService.localScoredSearch(
             query: query,
@@ -279,7 +282,37 @@ final class SearchCoordinator: ObservableObject {
         )
 
         let mergedHits = mergeLocalSemanticHits(ftsHits: ftsHits, vectorHits: vectorHits)
-        let candidates = buildLocalSemanticCandidates(from: mergedHits, chatsById: chatById)
+        var candidatesByChatId = buildLocalSemanticCandidates(from: mergedHits, chatsById: chatById)
+        mergeTitleSemanticCandidates(
+            query: query,
+            chats: scopedChats,
+            candidatesByChatId: &candidatesByChatId
+        )
+
+        if !unindexedChatIds.isEmpty,
+           let fallbackMessages = try? await telegramService.searchMessages(
+                query: query,
+                limit: constants.fallbackTopMessages,
+                chatTypeFilter: keywordFallbackChatTypeFilter(for: activeScope)
+           ) {
+            mergeFallbackSemanticCandidates(
+                messages: fallbackMessages.filter { unindexedChatIds.contains($0.chatId) },
+                chatsById: chatById,
+                candidatesByChatId: &candidatesByChatId
+            )
+        }
+
+        let candidates = Array(candidatesByChatId.values).sorted { (lhs: LocalSemanticChatCandidate, rhs: LocalSemanticChatCandidate) in
+            let leftScore = semanticCandidateScore(lhs)
+            let rightScore = semanticCandidateScore(rhs)
+            if leftScore != rightScore {
+                return leftScore > rightScore
+            }
+            if lhs.sortDate != rhs.sortDate {
+                return lhs.sortDate > rhs.sortDate
+            }
+            return lhs.chat.id < rhs.chat.id
+        }
 
         totalChatsToScan = candidates.count
         semanticMatchedChats = candidates.count
@@ -356,8 +389,10 @@ final class SearchCoordinator: ObservableObject {
         }
 
         return merged.values.sorted { lhs, rhs in
-            if lhs.combinedScore != rhs.combinedScore {
-                return lhs.combinedScore > rhs.combinedScore
+            let leftScore = semanticMessageScore(lhs)
+            let rightScore = semanticMessageScore(rhs)
+            if leftScore != rightScore {
+                return leftScore > rightScore
             }
             if lhs.message.date != rhs.message.date {
                 return lhs.message.date > rhs.message.date
@@ -369,7 +404,7 @@ final class SearchCoordinator: ObservableObject {
     private func buildLocalSemanticCandidates(
         from mergedHits: [LocalSemanticMessageScore],
         chatsById: [Int64: TGChat]
-    ) -> [LocalSemanticChatCandidate] {
+    ) -> [Int64: LocalSemanticChatCandidate] {
         var bestByChatId: [Int64: LocalSemanticChatCandidate] = [:]
 
         for hit in mergedHits {
@@ -380,26 +415,199 @@ final class SearchCoordinator: ObservableObject {
                 chat: chat,
                 bestMessage: hit.message,
                 bestSnippet: snippet,
-                combinedScore: hit.combinedScore,
+                sortDate: hit.message.date,
                 ftsScore: hit.ftsScore,
-                vectorScore: hit.vectorScore
+                vectorScore: hit.vectorScore,
+                titleScore: 0,
+                fallbackScore: 0
             )
 
-            if let existing = bestByChatId[chat.id], existing.combinedScore >= candidate.combinedScore {
-                continue
+            if let existing = bestByChatId[chat.id] {
+                bestByChatId[chat.id] = betterSemanticCandidate(existing, candidate)
+            } else {
+                bestByChatId[chat.id] = candidate
             }
-            bestByChatId[chat.id] = candidate
         }
 
-        return bestByChatId.values.sorted { lhs, rhs in
-            if lhs.combinedScore != rhs.combinedScore {
-                return lhs.combinedScore > rhs.combinedScore
+        return bestByChatId
+    }
+
+    private func mergeTitleSemanticCandidates(
+        query: String,
+        chats: [TGChat],
+        candidatesByChatId: inout [Int64: LocalSemanticChatCandidate]
+    ) {
+        for chat in chats {
+            let titleScore = normalizedTitleMatchScore(query: query, title: chat.title)
+            guard titleScore > 0 else { continue }
+
+            let normalizedQuery = query.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedTitle = chat.title.lowercased()
+            let latestTitleContext = semanticSnippet(from: chat.lastMessage?.textContent ?? chat.lastMessage?.displayText ?? "")
+            let titleSnippet: String
+            if normalizedTitle == normalizedQuery {
+                titleSnippet = latestTitleContext.isEmpty
+                    ? "Exact chat title match"
+                    : latestTitleContext
+            } else if !latestTitleContext.isEmpty && latestTitleContext.lowercased().contains(normalizedQuery) {
+                titleSnippet = latestTitleContext
+            } else {
+                titleSnippet = "Chat title contains \"\(query)\""
             }
-            if lhs.bestMessage.date != rhs.bestMessage.date {
-                return lhs.bestMessage.date > rhs.bestMessage.date
+
+            let titleCandidate = LocalSemanticChatCandidate(
+                chat: chat,
+                bestMessage: chat.lastMessage,
+                bestSnippet: titleSnippet,
+                sortDate: chat.lastMessage?.date ?? .distantPast,
+                ftsScore: 0,
+                vectorScore: 0,
+                titleScore: titleScore,
+                fallbackScore: 0
+            )
+
+            if let existing = candidatesByChatId[chat.id] {
+                var merged = existing
+                merged.titleScore = max(existing.titleScore, titleScore)
+                if semanticCandidateScore(titleCandidate) > semanticCandidateScore(existing) && existing.ftsScore == 0 && existing.vectorScore == 0 {
+                    merged.bestSnippet = titleCandidate.bestSnippet
+                }
+                if titleCandidate.sortDate > merged.sortDate {
+                    merged.sortDate = titleCandidate.sortDate
+                    if merged.bestMessage == nil {
+                        merged.bestMessage = titleCandidate.bestMessage
+                    }
+                }
+                candidatesByChatId[chat.id] = merged
+            } else {
+                candidatesByChatId[chat.id] = titleCandidate
             }
-            return lhs.chat.id < rhs.chat.id
         }
+    }
+
+    private func mergeFallbackSemanticCandidates(
+        messages: [TGMessage],
+        chatsById: [Int64: TGChat],
+        candidatesByChatId: inout [Int64: LocalSemanticChatCandidate]
+    ) {
+        guard !messages.isEmpty else { return }
+
+        let denominator = Double(max(1, messages.count - 1))
+        for (index, message) in messages.enumerated() {
+            guard let chat = chatsById[message.chatId] else { continue }
+
+            let normalizedRankScore = denominator == 0
+                ? 1
+                : max(0.1, 1 - (Double(index) / denominator))
+
+            let fallbackCandidate = LocalSemanticChatCandidate(
+                chat: chat,
+                bestMessage: message,
+                bestSnippet: semanticSnippet(from: message.textContent ?? message.displayText),
+                sortDate: message.date,
+                ftsScore: 0,
+                vectorScore: 0,
+                titleScore: 0,
+                fallbackScore: normalizedRankScore
+            )
+
+            if let existing = candidatesByChatId[chat.id] {
+                var merged = existing
+                merged.fallbackScore = max(existing.fallbackScore, normalizedRankScore)
+                if semanticCandidateScore(fallbackCandidate) > semanticCandidateScore(existing) {
+                    merged.bestMessage = fallbackCandidate.bestMessage
+                    merged.bestSnippet = fallbackCandidate.bestSnippet
+                    merged.sortDate = fallbackCandidate.sortDate
+                } else if fallbackCandidate.sortDate > merged.sortDate {
+                    merged.sortDate = fallbackCandidate.sortDate
+                }
+                candidatesByChatId[chat.id] = merged
+            } else {
+                candidatesByChatId[chat.id] = fallbackCandidate
+            }
+        }
+    }
+
+    private func betterSemanticCandidate(
+        _ existing: LocalSemanticChatCandidate,
+        _ incoming: LocalSemanticChatCandidate
+    ) -> LocalSemanticChatCandidate {
+        let existingScore = semanticCandidateScore(existing)
+        let incomingScore = semanticCandidateScore(incoming)
+
+        if incomingScore > existingScore {
+            return incoming
+        }
+
+        if incomingScore == existingScore && incoming.sortDate > existing.sortDate {
+            return incoming
+        }
+
+        return existing
+    }
+
+    private func semanticMessageScore(_ hit: LocalSemanticMessageScore) -> Double {
+        (hit.ftsScore * AppConstants.AI.SemanticSearch.ftsWeight)
+        + (hit.vectorScore * AppConstants.AI.SemanticSearch.vectorWeight)
+    }
+
+    private func semanticCandidateScore(_ candidate: LocalSemanticChatCandidate) -> Double {
+        let hasHistorySignal = candidate.ftsScore > 0 || candidate.vectorScore > 0 || candidate.fallbackScore > 0
+        let isExactTitleMatch = candidate.titleScore >= 0.99
+
+        var score =
+            (candidate.ftsScore * AppConstants.AI.SemanticSearch.ftsWeight) +
+            (candidate.vectorScore * AppConstants.AI.SemanticSearch.vectorWeight) +
+            (candidate.titleScore * AppConstants.AI.SemanticSearch.titleWeight) +
+            (candidate.fallbackScore * AppConstants.AI.SemanticSearch.fallbackWeight)
+
+        if candidate.titleScore > 0 {
+            if isExactTitleMatch {
+                score += AppConstants.AI.SemanticSearch.exactTitleBoost
+            }
+            if hasHistorySignal {
+                score += AppConstants.AI.SemanticSearch.titleHistoryBonus
+            } else {
+                score -= AppConstants.AI.SemanticSearch.titleOnlyPenalty
+            }
+        }
+
+        if candidate.chat.chatType.isPrivate {
+            score += AppConstants.AI.SemanticSearch.dmBonus
+        } else if candidate.chat.chatType.isGroup {
+            if let memberCount = candidate.chat.memberCount, memberCount <= 8 {
+                score += AppConstants.AI.SemanticSearch.smallGroupBonus
+            } else if let memberCount = candidate.chat.memberCount, memberCount > 50 {
+                score -= AppConstants.AI.SemanticSearch.largeGroupPenalty
+            }
+        }
+
+        return score
+    }
+
+    private func normalizedTitleMatchScore(query: String, title: String) -> Double {
+        let normalizedQuery = query.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedTitle = title.lowercased()
+        guard !normalizedQuery.isEmpty, !normalizedTitle.isEmpty else { return 0 }
+
+        if normalizedTitle == normalizedQuery {
+            return 1
+        }
+
+        if normalizedTitle.contains(normalizedQuery) {
+            return 0.55
+        }
+
+        let tokens = normalizedQuery
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { $0.count >= 2 }
+        guard !tokens.isEmpty else { return 0 }
+
+        let matched = tokens.filter { normalizedTitle.contains($0) }
+        guard !matched.isEmpty else { return 0 }
+
+        return min(0.85, max(0.2, Double(matched.count) / Double(tokens.count)))
     }
 
     private func rerankSemanticCandidates(
@@ -446,11 +654,23 @@ final class SearchCoordinator: ObservableObject {
     }
 
     private func semanticReason(for candidate: LocalSemanticChatCandidate) -> String {
+        if candidate.titleScore > 0 && candidate.ftsScore == 0 && candidate.vectorScore == 0 && candidate.fallbackScore == 0 {
+            return candidate.titleScore >= 0.99 ? "Exact chat title match" : "Chat title matched the query"
+        }
+        if candidate.fallbackScore > 0 && candidate.ftsScore == 0 && candidate.vectorScore == 0 {
+            return "Matched in live Telegram search for an unindexed chat"
+        }
+        if candidate.titleScore > 0 && (candidate.ftsScore > 0 || candidate.vectorScore > 0) {
+            return "Matched title and local history"
+        }
         if candidate.ftsScore > 0 && candidate.vectorScore > 0 {
             return "Matched both keywords and semantic context"
         }
         if candidate.ftsScore > 0 {
             return "Strong keyword match in local history"
+        }
+        if candidate.vectorScore > 0 {
+            return "Strong semantic match in local history"
         }
         return "Strong semantic match in local history"
     }
@@ -459,7 +679,15 @@ final class SearchCoordinator: ObservableObject {
         for candidate: LocalSemanticChatCandidate,
         rank: Int
     ) -> SemanticSearchResult.Relevance {
-        let score = candidate.combinedScore
+        let score = semanticCandidateScore(candidate)
+        let isTitleOnly = candidate.titleScore > 0
+            && candidate.ftsScore == 0
+            && candidate.vectorScore == 0
+            && candidate.fallbackScore == 0
+
+        if isTitleOnly && candidate.titleScore < 0.99 {
+            return .medium
+        }
         if score >= AppConstants.AI.SemanticSearch.highRelevanceThreshold {
             return .high
         }

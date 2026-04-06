@@ -98,6 +98,7 @@ final class AIService: ObservableObject {
                 chatId: candidate.chat.id,
                 chatName: candidate.chat.title,
                 pipelineCategory: candidate.pipelineCategory,
+                strictReplySignal: candidate.strictReplySignal,
                 messages: snippets
             )
         }
@@ -141,6 +142,23 @@ final class AIService: ObservableObject {
                 )
             }
             .sorted { $0.score > $1.score }
+    }
+
+    func rerankSearchResults(
+        query: String,
+        candidates: [(chatId: Int64, chatTitle: String, bestMessage: String)]
+    ) async throws -> [Int64] {
+        guard !candidates.isEmpty else { return [] }
+        return try await provider.rerankResults(
+            query: query,
+            candidates: candidates.map { candidate in
+                (
+                    chatId: candidate.chatId,
+                    chatTitle: candidate.chatTitle,
+                    snippet: candidate.bestMessage
+                )
+            }
+        )
     }
 
     /// Generate a follow-up suggestion for a conversation. Marks the user's own messages with [ME].

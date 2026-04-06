@@ -19,6 +19,16 @@ actor DatabaseManager {
         let isOutgoing: Bool
     }
 
+    struct ScoredMessageRecord: Sendable, Equatable {
+        let message: MessageRecord
+        let score: Double
+    }
+
+    struct MessageLookupKey: Sendable, Hashable {
+        let messageId: Int64
+        let chatId: Int64
+    }
+
     struct PipelineCacheRecord: Sendable, Equatable {
         let chatId: Int64
         let category: String
@@ -354,6 +364,11 @@ actor DatabaseManager {
     }
 
     func localSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [MessageRecord] {
+        let scored = await localSearchScored(query: query, chatIds: chatIds, limit: limit)
+        return scored.map(\.message)
+    }
+
+    func localSearchScored(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [ScoredMessageRecord] {
         let ftsQuery = Self.normalizedFTSQuery(from: query)
         guard !ftsQuery.isEmpty else { return [] }
         if let chatIds, chatIds.isEmpty { return [] }
@@ -374,12 +389,13 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                                   (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
                             WHERE messages_fts MATCH ?
                               AND m.chat_id IN (\(placeholders))
-                            ORDER BY bm25(messages_fts), m.date DESC, m.id DESC
+                            ORDER BY semantic_score DESC, m.date DESC, m.id DESC
                             LIMIT ?
                             """,
                         arguments: arguments
@@ -388,21 +404,61 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                                   (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
                             WHERE messages_fts MATCH ?
-                            ORDER BY bm25(messages_fts), m.date DESC, m.id DESC
+                            ORDER BY semantic_score DESC, m.date DESC, m.id DESC
                             LIMIT ?
                             """,
                         arguments: [ftsQuery, limit]
                     )
                 }
 
-                return rows.map(Self.messageRecord(from:))
+                return rows.map { row in
+                    let rawScore: Double = row["semantic_score"] ?? 0
+                    return ScoredMessageRecord(
+                        message: Self.messageRecord(from: row),
+                        score: max(0, rawScore)
+                    )
+                }
             }
         } catch {
             print("[DatabaseManager] Local FTS search failed for query '\(query)': \(error)")
+            return []
+        }
+    }
+
+    func loadMessages(keys: [MessageLookupKey]) async -> [MessageRecord] {
+        guard !keys.isEmpty else { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                var records: [MessageRecord] = []
+                records.reserveCapacity(keys.count)
+
+                for key in keys {
+                    guard let row = try Row.fetchOne(
+                        db,
+                        sql: """
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            FROM messages
+                            WHERE id = ? AND chat_id = ?
+                            LIMIT 1
+                            """,
+                        arguments: [key.messageId, key.chatId]
+                    ) else {
+                        continue
+                    }
+                    records.append(Self.messageRecord(from: row))
+                }
+
+                return records
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load messages by key: \(error)")
             return []
         }
     }
