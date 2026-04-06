@@ -6,32 +6,12 @@ struct LauncherView: View {
     @EnvironmentObject var telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
     @ObservedObject var photoManager = ChatPhotoManager.shared
-    private let queryInterpreter: QueryInterpreting = QueryInterpreter()
+    @StateObject private var searchCoordinator = SearchCoordinator()
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
 
     // Search & filter
     @State private var searchText = ""
     @FocusState private var isSearchFocused: Bool
-
-    // Message search results (from TDLib)
-    @State private var searchResultChatIds: Set<Int64> = []
-    @State private var isSearching = false
-    @State private var searchTask: Task<Void, Never>?
-
-    // AI search state
-    @State private var aiResults: [AISearchResult] = []
-    @State private var aiSearchMode: QueryIntent? = nil
-    @State private var isAISearching = false
-    @State private var aiSearchError: String?
-    @State private var currentQuerySpec: QuerySpec?
-    @State private var agenticDebugInfo: AgenticDebugInfo?
-
-    // Semantic search lazy loading
-    @State private var semanticBatchOffset: Int = 0
-    @State private var hasMoreSemanticBatches: Bool = true
-    @State private var isLoadingMoreSemantic: Bool = false
-    @State private var currentSemanticQuery: String = ""
-    @State private var totalChatsToScan: Int = 0
 
     // Filter tags
     enum Filter: String, CaseIterable {
@@ -60,47 +40,18 @@ struct LauncherView: View {
     var onOpenSettings: () -> Void = {}
 
     // MARK: - AI Search Result Types
-
-    enum AISearchResult: Identifiable {
-        case semanticResult(SemanticSearchResult)
-        case agenticResult(AgenticSearchResult)
-
-        var id: String {
-            switch self {
-            case .semanticResult(let result): return "sem-\(result.id)"
-            case .agenticResult(let result): return "ag-\(result.id)"
-            }
-        }
-
-        /// The chat that should be opened when this result is tapped (if any).
-        func linkedChat(in chats: [TGChat]) -> TGChat? {
-            switch self {
-            case .semanticResult(let result):
-                return chats.first(where: { $0.id == result.chatId })
-            case .agenticResult(let result):
-                return chats.first(where: { $0.id == result.chatId })
-            }
-        }
-    }
-
-    struct AgenticDebugInfo {
-        var scopedChats: Int
-        var maxScanChats: Int
-        var providerName: String = ""
-        var providerModel: String = ""
-        var scannedChats: Int = 0
-        var inRangeChats: Int = 0
-        var replyOwedChats: Int = 0
-        var matchedChats: Int = 0
-        var candidatesSentToAI: Int = 0
-        var aiReturned: Int = 0
-        var rankedBeforeValidation: Int = 0
-        var droppedByValidation: Int = 0
-        var finalCount: Int = 0
-        var stopReason: String = "unknown"
-    }
-
     // MARK: - Computed
+
+    private var searchResultChatIds: Set<Int64> { searchCoordinator.searchResultChatIds }
+    private var isSearching: Bool { searchCoordinator.isSearching }
+    private var aiResults: [AISearchResult] { searchCoordinator.aiResults }
+    private var aiSearchMode: QueryIntent? { searchCoordinator.aiSearchMode }
+    private var isAISearching: Bool { searchCoordinator.isAISearching }
+    private var aiSearchError: String? { searchCoordinator.aiSearchError }
+    private var currentQuerySpec: QuerySpec? { searchCoordinator.currentQuerySpec }
+    private var agenticDebugInfo: AgenticDebugInfo? { searchCoordinator.agenticDebugInfo }
+    private var semanticMatchedChats: Int { searchCoordinator.semanticMatchedChats }
+    private var totalChatsToScan: Int { searchCoordinator.totalChatsToScan }
 
     private var displayedChats: [TGChat] {
         var chats: [TGChat]
@@ -137,6 +88,17 @@ struct LauncherView: View {
         }
     }
 
+    private var scopedAISearchSourceChats: [TGChat] {
+        switch activeFilter {
+        case .all:
+            return aiSearchSourceChats
+        case .dms:
+            return aiSearchSourceChats.filter { $0.chatType.isPrivate }
+        case .groups:
+            return aiSearchSourceChats.filter { $0.chatType.isGroup }
+        }
+    }
+
     // MARK: - Pipeline Helpers
 
     private func pipelineCategory(for chatId: Int64) -> FollowUpItem.Category? {
@@ -145,6 +107,20 @@ struct LauncherView: View {
 
     private func pipelineSuggestion(for chatId: Int64) -> String? {
         followUpItems.first(where: { $0.chat.id == chatId })?.suggestedAction
+    }
+
+    private func pipelineHintForSearch(chatId: Int64) async -> String {
+        if let category = pipelineCategory(for: chatId) {
+            switch category {
+            case .onMe: return "on_me"
+            case .onThem: return "on_them"
+            case .quiet: return "quiet"
+            }
+        }
+        if let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chatId) {
+            return cached.category
+        }
+        return "unknown"
     }
 
     private func pipelineCategoryString(_ category: FollowUpItem.Category) -> String {
@@ -157,7 +133,7 @@ struct LauncherView: View {
 
     /// Total navigable items (either AI results or chat rows depending on mode).
     private var navigableCount: Int {
-        if aiSearchMode == .semanticSearch && (!aiResults.isEmpty || hasMoreSemanticBatches) {
+        if aiSearchMode == .semanticSearch && (!aiResults.isEmpty || !titleMatchedChats.isEmpty) {
             return titleMatchedChats.count + aiResults.count
         }
         if aiSearchMode == .agenticSearch && !aiResults.isEmpty {
@@ -244,11 +220,8 @@ struct LauncherView: View {
         .onChange(of: activeFilter) {
             selectedIndex = 0
             // Clear AI state when switching filters
-            aiSearchMode = nil
-            aiResults = []
-            aiSearchError = nil
-            currentQuerySpec = nil
-            agenticDebugInfo = nil
+            searchCoordinator.cancelSearch()
+            searchCoordinator.clearAIState()
             pipelineSubFilter = nil
         }
         // Keyboard navigation from FloatingPanel
@@ -298,16 +271,7 @@ struct LauncherView: View {
             if !searchText.isEmpty {
                 Button {
                     searchText = ""
-                    searchResultChatIds = []
-                    aiResults = []
-                    aiSearchMode = nil
-                    aiSearchError = nil
-                    currentQuerySpec = nil
-                    agenticDebugInfo = nil
-                    semanticBatchOffset = 0
-                    hasMoreSemanticBatches = true
-                    isLoadingMoreSemantic = false
-                    currentSemanticQuery = ""
+                    searchCoordinator.clearAllState()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 13))
@@ -403,18 +367,19 @@ struct LauncherView: View {
         switch intent {
         case .semanticSearch:
             if isAISearching {
-                return "Scanning chats..."
-            } else if hasMoreSemanticBatches && totalChatsToScan > 0 {
-                return "Scanned \(semanticBatchOffset) of \(totalChatsToScan) chats"
+                if totalChatsToScan > 0 {
+                    return "Searching \(totalChatsToScan) local chat matches..."
+                }
+                return "Searching local index..."
             } else if totalChatsToScan > 0 {
-                return "Scanned all \(totalChatsToScan) chats"
+                return "Ranked \(semanticMatchedChats) chats from \(totalChatsToScan) local matches"
             } else {
-                return "Finding chats about this topic..."
+                return "Searching local index..."
             }
         case .agenticSearch:
             if isAISearching {
                 if totalChatsToScan > 0 {
-                    return "Scanning \(semanticBatchOffset) of \(totalChatsToScan), ranking intent..."
+                    return "Scanning \(semanticMatchedChats) of \(totalChatsToScan), ranking intent..."
                 }
                 return "Ranking warm, reply-ready chats..."
             }
@@ -439,10 +404,10 @@ struct LauncherView: View {
             ]
         case .semanticSearch:
             return [
-                "reading chat context",
-                "matching query intent",
-                "scoring relevance",
-                "deduplicating results",
+                "searching local keywords",
+                "matching semantic vectors",
+                "merging local signals",
+                "grouping by chat",
                 "preparing top matches"
             ]
         case .messageSearch:
@@ -456,7 +421,7 @@ struct LauncherView: View {
         guard totalChatsToScan > 0 else { return nil }
         switch intent {
         case .agenticSearch, .semanticSearch:
-            return "Scanned \(semanticBatchOffset) of \(totalChatsToScan) chats"
+            return "Scanned \(semanticMatchedChats) of \(totalChatsToScan) chats"
         case .messageSearch:
             return nil
         }
@@ -593,11 +558,11 @@ struct LauncherView: View {
             ErrorStateView(message: error) {
                 triggerSearch()
             }
-        } else if aiSearchMode == .semanticSearch && (!aiResults.isEmpty || hasMoreSemanticBatches) {
+        } else if aiSearchMode == .semanticSearch && (!aiResults.isEmpty || !titleMatchedChats.isEmpty) {
             aiResultsList
         } else if aiSearchMode == .agenticSearch && !aiResults.isEmpty {
             aiResultsList
-        } else if aiSearchMode == .semanticSearch && aiResults.isEmpty && !hasMoreSemanticBatches {
+        } else if aiSearchMode == .semanticSearch && aiResults.isEmpty {
             EmptyStateView(
                 icon: "magnifyingglass",
                 title: "No relevant chats found",
@@ -703,7 +668,7 @@ struct LauncherView: View {
             if case .semanticResult(let r) = result { return r.chatId }
             return nil
         })
-        return aiSearchSourceChats.filter {
+        return scopedAISearchSourceChats.filter {
             $0.title.lowercased().contains(query) && !aiChatIds.contains($0.id)
         }
     }
@@ -738,23 +703,6 @@ struct LauncherView: View {
                     ForEach(Array(aiResults.enumerated()), id: \.element.id) { index, result in
                         aiResultRow(result: result, index: titleMatches.count + index)
                             .id(result.id)
-                    }
-
-                    // Lazy loading sentinel for semantic search
-                    if hasMoreSemanticBatches && aiSearchMode == .semanticSearch {
-                        HStack(spacing: 6) {
-                            if isLoadingMoreSemantic {
-                                ProgressView()
-                                    .scaleEffect(0.5)
-                                    .frame(width: 12, height: 12)
-                            }
-                            Text(isLoadingMoreSemantic ? "Scanning more chats..." : "Loading more...")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .onAppear { loadNextSemanticBatch() }
                     }
                 }
                 .padding(.horizontal, 4)
@@ -1257,7 +1205,7 @@ struct LauncherView: View {
 
         // Deterministic fallback so this chat never silently disappears.
         let fallbackWindow = Array(allMessages.prefix(currentWindowSize))
-        let fallbackCategoryHint = resolvePipelineCategory(
+        let fallbackCategoryHint = ConversationReplyHeuristics.resolvePipelineCategory(
             for: chat,
             hint: "quiet",
             messages: fallbackWindow,
@@ -1533,774 +1481,22 @@ struct LauncherView: View {
     /// Debounced search: waits 300ms, then classifies via QueryRouter.
     /// If AI intent detected → runs AI pipeline. Otherwise → local FTS first, TDLib fallback for unindexed chats only.
     private func triggerSearch() {
-        searchTask?.cancel()
-
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let matchingChat = aiSearchSourceChats.first(where: { $0.title.localizedCaseInsensitiveContains(query) }) {
-            Task {
-                await IndexScheduler.shared.prioritize(chatId: matchingChat.id)
+        searchCoordinator.triggerSearch(
+            query: searchText,
+            activeScope: queryScope(for: activeFilter),
+            visibleChats: telegramService.visibleChats,
+            aiSearchSourceChats: aiSearchSourceChats,
+            scopedAISearchSourceChats: scopedAISearchSourceChats,
+            includeBotsInAISearch: includeBotsInAISearch,
+            telegramService: telegramService,
+            aiService: aiService,
+            pipelineCategoryProvider: { chatId in
+                pipelineCategory(for: chatId)
+            },
+            pipelineHintProvider: { chatId in
+                await pipelineHintForSearch(chatId: chatId)
             }
-        }
-        guard query.count >= 2 else {
-            searchResultChatIds = []
-            aiResults = []
-            aiSearchMode = nil
-            isSearching = false
-            isAISearching = false
-            aiSearchError = nil
-            currentQuerySpec = nil
-            agenticDebugInfo = nil
-            semanticBatchOffset = 0
-            hasMoreSemanticBatches = true
-            isLoadingMoreSemantic = false
-            currentSemanticQuery = ""
-            totalChatsToScan = 0
-            return
-        }
-
-        searchTask = Task {
-            // Debounce: wait 300ms
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-
-            // Step 1: Classify intent via QueryRouter
-            let activeScope = queryScope(for: activeFilter)
-            let parsedSpec = queryInterpreter.parse(
-                query: query,
-                now: Date(),
-                timezone: .current,
-                activeFilter: activeScope
-            )
-            let intent = await aiService.queryRouter.route(
-                query: query,
-                querySpec: parsedSpec,
-                activeFilter: activeScope,
-                timezone: .current,
-                now: Date()
-            )
-            guard !Task.isCancelled else { return }
-
-            if intent != .messageSearch && aiService.isConfigured {
-                // AI mode: run the AI pipeline
-                await MainActor.run {
-                    aiSearchMode = intent
-                    isAISearching = true
-                    aiSearchError = nil
-                    currentQuerySpec = parsedSpec
-                    agenticDebugInfo = nil
-                    searchResultChatIds = []
-                }
-
-                do {
-                    let results = try await executeAISearch(intent: intent, querySpec: parsedSpec)
-                    guard !Task.isCancelled else { return }
-                    await MainActor.run {
-                        aiResults = results
-                        isAISearching = false
-                        selectedIndex = 0
-                        // If first batch returned empty but more chats exist, auto-load next batch
-                        if intent == .semanticSearch && results.isEmpty && hasMoreSemanticBatches {
-                            loadNextSemanticBatch()
-                        }
-                    }
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    await MainActor.run {
-                        aiSearchError = error.localizedDescription
-                        isAISearching = false
-                    }
-                }
-            } else {
-                // Keyword mode: SQLite FTS first, TDLib fallback only for chats with no local index yet
-                await MainActor.run {
-                    aiSearchMode = nil
-                    aiResults = []
-                    currentQuerySpec = nil
-                    agenticDebugInfo = nil
-                    isSearching = true
-                }
-
-                do {
-                    let scopedChats: [TGChat]
-                    switch activeFilter {
-                    case .all:
-                        scopedChats = telegramService.visibleChats
-                    case .dms:
-                        scopedChats = telegramService.visibleChats.filter { $0.chatType.isPrivate }
-                    case .groups:
-                        scopedChats = telegramService.visibleChats.filter { $0.chatType.isGroup }
-                    }
-
-                    let scopedChatIds = Set(scopedChats.map(\.id))
-                    let localMessages = await telegramService.localSearch(
-                        query: query,
-                        chatIds: scopedChats.map(\.id),
-                        limit: 50
-                    )
-                    let unindexedChatIds = await DatabaseManager.shared.unindexedChatIds(in: scopedChats.map(\.id))
-
-                    var mergedMessages = Dictionary(
-                        uniqueKeysWithValues: localMessages.map { message in
-                            ("\(message.chatId):\(message.id)", message)
-                        }
-                    )
-
-                    if !unindexedChatIds.isEmpty {
-                        let chatTypeFilter: SearchMessagesChatTypeFilter?
-                        switch activeFilter {
-                        case .all:
-                            chatTypeFilter = nil
-                        case .dms:
-                            chatTypeFilter = .searchMessagesChatTypeFilterPrivate
-                        case .groups:
-                            chatTypeFilter = .searchMessagesChatTypeFilterGroup
-                        }
-
-                        let fallbackMessages = try await telegramService.searchMessages(
-                            query: query,
-                            limit: 50,
-                            chatTypeFilter: chatTypeFilter
-                        )
-
-                        for message in fallbackMessages
-                        where scopedChatIds.contains(message.chatId) && unindexedChatIds.contains(message.chatId) {
-                            mergedMessages["\(message.chatId):\(message.id)"] = message
-                        }
-                    }
-
-                    guard !Task.isCancelled else { return }
-                    let chatIds = Set(mergedMessages.values.map(\.chatId))
-                    await MainActor.run {
-                        searchResultChatIds = chatIds
-                        isSearching = false
-                    }
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    await MainActor.run { isSearching = false }
-                }
-            }
-        }
-    }
-
-    // MARK: - AI Search Execution
-
-    private func executeAISearch(intent: QueryIntent, querySpec: QuerySpec?) async throws -> [AISearchResult] {
-        switch intent {
-        case .semanticSearch:
-            await MainActor.run { agenticDebugInfo = nil }
-            let concurrentBatches = 3
-            let batchSize = 10
-            let allChats = aiSearchSourceChats
-            let query = searchText
-            guard !allChats.isEmpty else { return [] }
-
-            await MainActor.run { totalChatsToScan = allChats.count }
-
-            var allResults: [AISearchResult] = []
-
-            await withTaskGroup(of: [SemanticSearchResult].self) { group in
-                for i in 0..<concurrentBatches {
-                    let start = i * batchSize
-                    let batchChats = Array(allChats.dropFirst(start).prefix(batchSize))
-                    guard !batchChats.isEmpty else { continue }
-
-                    group.addTask { [telegramService, aiService] in
-                        do {
-                            let messages = try await telegramService.getRecentMessagesAcrossChats(
-                                chatIds: batchChats.map(\.id), perChatLimit: 15
-                            )
-                            return try await aiService.semanticSearch(query: query, messages: messages)
-                        } catch {
-                            return []
-                        }
-                    }
-                }
-
-                for await batchResults in group {
-                    allResults.append(contentsOf: batchResults.map { .semanticResult($0) })
-                }
-            }
-
-            let totalScanned = min(concurrentBatches * batchSize, allChats.count)
-            let deduplicated = deduplicateResults(allResults)
-            await MainActor.run {
-                semanticBatchOffset = totalScanned
-                hasMoreSemanticBatches = allChats.count > totalScanned
-                currentSemanticQuery = query
-            }
-            return deduplicated
-
-        case .agenticSearch:
-            return try await executeAgenticSearch(query: searchText, querySpec: querySpec)
-
-        case .messageSearch:
-            return [] // Handled by keyword path
-        }
-    }
-
-    private func executeAgenticSearch(query: String, querySpec: QuerySpec?) async throws -> [AISearchResult] {
-        let constants = AppConstants.AI.AgenticSearch.self
-        let resolvedQuerySpec = querySpec ?? queryInterpreter.parse(
-            query: query,
-            now: Date(),
-            timezone: .current,
-            activeFilter: queryScope(for: activeFilter)
         )
-        let rawScopedChats = await collectAgenticCandidateChats(scope: resolvedQuerySpec.scope)
-        let allChats = prioritizeAgenticChats(rawScopedChats, query: query)
-        let maxScanChats = min(allChats.count, constants.maxAdaptiveScanChats)
-        var debug = AgenticDebugInfo(
-            scopedChats: allChats.count,
-            maxScanChats: maxScanChats,
-            providerName: aiService.providerType.rawValue,
-            providerModel: aiService.providerModel
-        )
-        guard !allChats.isEmpty else {
-            debug.stopReason = "no chats after scope/type prefilters"
-            await MainActor.run { agenticDebugInfo = debug }
-            return []
-        }
-
-        let chatById = Dictionary(uniqueKeysWithValues: allChats.map { ($0.id, $0) })
-        let myUserId = telegramService.currentUser?.id ?? 0
-
-        await MainActor.run {
-            totalChatsToScan = maxScanChats
-            hasMoreSemanticBatches = false
-            isLoadingMoreSemantic = false
-            semanticBatchOffset = 0
-            currentSemanticQuery = query
-            currentQuerySpec = resolvedQuerySpec
-        }
-
-        var candidateByChatId: [Int64: AgenticSearchCandidate] = [:]
-        var latestRanked: [AgenticSearchResult] = []
-        var scanOffset = 0
-        var round = 0
-        var previousTopIds: [Int64] = []
-        var stableRounds = 0
-        var providerFailed = false
-
-        while scanOffset < maxScanChats && round < constants.maxAdaptiveRounds {
-            let scanThisRound = round == 0 ? constants.initialScanChats : constants.adaptiveExpansionStep
-            let remaining = maxScanChats - scanOffset
-            let takeCount = min(scanThisRound, remaining)
-            guard takeCount > 0 else { break }
-
-            let roundChats = Array(allChats.dropFirst(scanOffset).prefix(takeCount))
-            scanOffset += roundChats.count
-            guard !roundChats.isEmpty else { break }
-
-            for chat in roundChats {
-                debug.scannedChats += 1
-                let rawMessages = await cachedFirstMessages(
-                    for: chat,
-                    desiredCount: constants.initialMessagesPerChat,
-                    timeRange: resolvedQuerySpec.timeRange
-                )
-                let messages = applyTimeRange(rawMessages, timeRange: resolvedQuerySpec.timeRange)
-                guard !messages.isEmpty else { continue }
-                debug.inRangeChats += 1
-
-                let pipelineHint = await pipelineCategoryHint(for: chat.id)
-                let effectivePipelineCategory = resolvePipelineCategory(
-                    for: chat,
-                    hint: pipelineHint,
-                    messages: messages,
-                    myUserId: myUserId
-                )
-                let replyOwed = isReplyOwed(
-                    for: chat,
-                    messages: messages,
-                    myUserId: myUserId
-                )
-                if replyOwed {
-                    debug.replyOwedChats += 1
-                }
-
-                guard chatLikelyMatchesAgenticQuery(
-                    chat: chat,
-                    messages: messages,
-                    query: query,
-                    pipelineHint: effectivePipelineCategory,
-                    replyOwed: replyOwed,
-                    querySpec: resolvedQuerySpec
-                ) else { continue }
-                debug.matchedChats += 1
-
-                candidateByChatId[chat.id] = AgenticSearchCandidate(
-                    chat: chat,
-                    pipelineCategory: replyOwed ? "on_me" : effectivePipelineCategory,
-                    messages: messages
-                )
-            }
-
-            await MainActor.run { semanticBatchOffset = scanOffset }
-
-            let candidates = allChats
-                .compactMap { candidateByChatId[$0.id] }
-                .prefix(constants.maxCandidateChats)
-                .map { $0 }
-            debug.candidatesSentToAI = max(debug.candidatesSentToAI, candidates.count)
-
-            if candidates.isEmpty {
-                round += 1
-                continue
-            }
-
-            let ranked: [AgenticSearchResult]
-            do {
-                ranked = try await aiService.agenticSearch(
-                    query: query,
-                    querySpec: resolvedQuerySpec,
-                    candidates: candidates,
-                    myUserId: myUserId
-                )
-            } catch {
-                providerFailed = true
-                let reason = compactAIErrorReason(error)
-                debug.stopReason = reason.isEmpty
-                    ? "agentic provider call failed"
-                    : "agentic provider call failed: \(reason)"
-
-                let fallbackRanked = heuristicAgenticFallbackRanking(
-                    query: query,
-                    querySpec: resolvedQuerySpec,
-                    candidates: candidates,
-                    myUserId: myUserId
-                )
-                latestRanked = fallbackRanked
-                debug.aiReturned = max(debug.aiReturned, fallbackRanked.count)
-                if !fallbackRanked.isEmpty {
-                    debug.stopReason += " • using local fallback"
-                }
-                break
-            }
-
-            latestRanked = ranked
-            debug.aiReturned = max(debug.aiReturned, ranked.count)
-            let topIds = Array(ranked.prefix(5).map(\.chatId))
-            let topCount = min(5, ranked.count)
-            let avgTopConfidence: Double
-            if topCount > 0 {
-                avgTopConfidence = ranked.prefix(topCount).map(\.confidence).reduce(0, +) / Double(topCount)
-            } else {
-                avgTopConfidence = 0
-            }
-
-            if !topIds.isEmpty {
-                if topIds == previousTopIds {
-                    stableRounds += 1
-                } else {
-                    stableRounds = 0
-                    previousTopIds = topIds
-                }
-            }
-
-            let foundEnoughCandidates = candidates.count >= constants.maxCandidateChats
-            let confidenceGood = avgTopConfidence >= constants.confidentTopAverageThreshold && ranked.count >= 5
-            if confidenceGood || stableRounds >= 1 || (foundEnoughCandidates && round > 0) {
-                break
-            }
-
-            round += 1
-        }
-
-        guard !latestRanked.isEmpty else {
-            if debug.candidatesSentToAI == 0 {
-                debug.stopReason = "no candidates reached AI reranker"
-            } else {
-                debug.stopReason = "AI reranker returned empty list"
-            }
-            await MainActor.run { agenticDebugInfo = debug }
-            return []
-        }
-        var rankedByChatId = Dictionary(uniqueKeysWithValues: latestRanked.map { ($0.chatId, $0) })
-
-        // Low-confidence top-up (+4 older messages, max 12, top 2 chats).
-        let lowConfidence = latestRanked
-            .filter { $0.confidence < constants.lowConfidenceThreshold }
-            .prefix(constants.maxLowConfidenceTopUps)
-
-        if !providerFailed, !lowConfidence.isEmpty {
-            var topUpCandidates: [AgenticSearchCandidate] = []
-            for result in lowConfidence {
-                guard let chat = chatById[result.chatId] else { continue }
-                let baseMessages = await cachedFirstMessages(
-                    for: chat,
-                    desiredCount: constants.initialMessagesPerChat,
-                    timeRange: resolvedQuerySpec.timeRange
-                )
-                let filteredBase = applyTimeRange(baseMessages, timeRange: resolvedQuerySpec.timeRange)
-                guard !filteredBase.isEmpty else { continue }
-                let pipelineHint = await pipelineCategoryHint(for: chat.id)
-                let effectivePipelineCategory = resolvePipelineCategory(
-                    for: chat,
-                    hint: pipelineHint,
-                    messages: filteredBase,
-                    myUserId: myUserId
-                )
-                let replyOwed = isReplyOwed(
-                    for: chat,
-                    messages: filteredBase,
-                    myUserId: myUserId
-                )
-
-                let expanded = await topUpOlderMessages(
-                    for: chat,
-                    existingMessages: filteredBase,
-                    additionalCount: constants.topUpAdditionalMessages,
-                    maxTotal: constants.maxMessagesPerChat,
-                    timeRange: resolvedQuerySpec.timeRange
-                )
-                let filteredExpanded = applyTimeRange(expanded, timeRange: resolvedQuerySpec.timeRange)
-                guard filteredExpanded.count > filteredBase.count else { continue }
-
-                let topUpCandidate = AgenticSearchCandidate(
-                    chat: chat,
-                    pipelineCategory: replyOwed ? "on_me" : effectivePipelineCategory,
-                    messages: filteredExpanded
-                )
-                candidateByChatId[chat.id] = topUpCandidate
-                topUpCandidates.append(topUpCandidate)
-            }
-
-            if !topUpCandidates.isEmpty,
-               let refined = try? await aiService.agenticSearch(
-                    query: query,
-                    querySpec: resolvedQuerySpec,
-                    candidates: topUpCandidates,
-                    myUserId: myUserId
-               ) {
-                debug.aiReturned = max(debug.aiReturned, refined.count)
-                for item in refined {
-                    rankedByChatId[item.chatId] = item
-                }
-            }
-        }
-
-        let rankedBeforeValidation = rankedByChatId.values
-            .sorted { $0.score > $1.score }
-        debug.rankedBeforeValidation = rankedBeforeValidation.count
-
-        let validatedRanked = rankedBeforeValidation
-            .filter { result in
-                satisfiesHardConstraints(
-                    result: result,
-                    candidateByChatId: candidateByChatId,
-                    querySpec: resolvedQuerySpec
-                )
-            }
-        debug.droppedByValidation = max(0, rankedBeforeValidation.count - validatedRanked.count)
-
-        let finalRanked = validatedRanked
-            .prefix(constants.maxCandidateChats)
-            .map { $0 }
-        debug.finalCount = finalRanked.count
-
-        if finalRanked.isEmpty {
-            if debug.rankedBeforeValidation > 0 {
-                debug.stopReason = "all ranked results failed hard constraints"
-            } else {
-                debug.stopReason = "no ranked results before validation"
-            }
-            await MainActor.run { agenticDebugInfo = debug }
-            return []
-        }
-
-        debug.stopReason = "ok"
-        await MainActor.run { agenticDebugInfo = debug }
-        return finalRanked.map { .agenticResult($0) }
-    }
-
-    private func prioritizeAgenticChats(_ chats: [TGChat], query: String) -> [TGChat] {
-        let normalizedQuery = query.lowercased()
-        let tokens = normalizedQuery
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
-            .filter { $0.count >= 3 }
-        let now = Date()
-
-        return chats.sorted { a, b in
-            func score(_ chat: TGChat) -> Int {
-                let title = chat.title.lowercased()
-                let preview = chat.lastMessage?.displayText.lowercased() ?? ""
-                var total = 0
-
-                if title.contains(normalizedQuery) { total += 30 }
-                for token in tokens {
-                    if title.contains(token) { total += 8 }
-                    if preview.contains(token) { total += 5 }
-                }
-
-                if let status = pipelineCategory(for: chat.id) {
-                    switch status {
-                    case .onMe: total += 12
-                    case .onThem: total += 4
-                    case .quiet: break
-                    }
-                }
-
-                if chat.unreadCount > 0 { total += 6 }
-
-                if let lastDate = chat.lastMessage?.date {
-                    let age = now.timeIntervalSince(lastDate)
-                    if age <= 86_400 { total += 8 }         // 24h
-                    else if age <= 259_200 { total += 4 }   // 3d
-                }
-
-                return total
-            }
-
-            let left = score(a)
-            let right = score(b)
-            if left != right { return left > right }
-            return a.order > b.order
-        }
-    }
-
-    private func chatLikelyMatchesAgenticQuery(
-        chat: TGChat,
-        messages: [TGMessage],
-        query: String,
-        pipelineHint: String,
-        replyOwed: Bool,
-        querySpec: QuerySpec
-    ) -> Bool {
-        if querySpec.replyConstraint == .pipelineOnMeOnly && pipelineHint == "on_me" {
-            return true
-        }
-
-        let normalizedQuery = query.lowercased()
-        let stopWords: Set<String> = [
-            "who", "what", "when", "where", "why", "how", "have", "has", "had",
-            "with", "that", "this", "from", "your", "you", "for", "the", "and",
-            "are", "was", "were", "can", "could", "would", "should", "about"
-        ]
-        let tokens = normalizedQuery
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
-            .filter { $0.count >= 3 && !stopWords.contains($0) }
-
-        let corpus = (
-            [chat.title.lowercased(), chat.lastMessage?.displayText.lowercased() ?? ""]
-            + messages.prefix(8).map { $0.displayText.lowercased() }
-        ).joined(separator: " ")
-
-        let tokenMatches = tokens.filter { corpus.contains($0) }.count
-        if tokenMatches >= max(1, min(2, tokens.count)) {
-            return true
-        }
-
-        let isReplyIntent =
-            normalizedQuery.contains("reply")
-            || normalizedQuery.contains("respond")
-            || normalizedQuery.contains("follow up")
-            || normalizedQuery.contains("follow-up")
-            || normalizedQuery.contains("waiting on me")
-            || normalizedQuery.contains("who do i")
-            || normalizedQuery.contains("who should i")
-            || normalizedQuery.contains("have to reply")
-
-        if isReplyIntent {
-            if pipelineHint == "on_me" {
-                return true
-            }
-            if replyOwed { return true }
-        }
-
-        if normalizedQuery.contains("intro") || normalizedQuery.contains("connect") {
-            if corpus.contains("intro") || corpus.contains("connect") {
-                return true
-            }
-        }
-
-        return false
-    }
-
-    private func applyTimeRange(_ messages: [TGMessage], timeRange: TimeRangeConstraint?) -> [TGMessage] {
-        guard let timeRange else { return messages }
-        return messages.filter { timeRange.contains($0.date) }
-    }
-
-    private func chatMatchesScope(_ chat: TGChat, scope: QueryScope) -> Bool {
-        switch scope {
-        case .all:
-            return chat.chatType.isPrivate || chat.chatType.isGroup
-        case .dms:
-            return chat.chatType.isPrivate
-        case .groups:
-            return chat.chatType.isGroup
-        }
-    }
-
-    private func satisfiesHardConstraints(
-        result: AgenticSearchResult,
-        candidateByChatId: [Int64: AgenticSearchCandidate],
-        querySpec: QuerySpec
-    ) -> Bool {
-        guard let candidate = candidateByChatId[result.chatId] else { return false }
-
-        if !chatMatchesScope(candidate.chat, scope: querySpec.scope) {
-            return false
-        }
-
-        if querySpec.replyConstraint == .pipelineOnMeOnly {
-            let satisfiesPipeline = candidate.pipelineCategory == "on_me"
-            let satisfiesReplySignal = result.replyability == .replyNow
-            if !satisfiesPipeline && !satisfiesReplySignal {
-                return false
-            }
-        }
-
-        if let timeRange = querySpec.timeRange,
-           !candidate.messages.contains(where: { timeRange.contains($0.date) }) {
-            return false
-        }
-
-        return true
-    }
-
-    private func collectAgenticCandidateChats(scope: QueryScope) async -> [TGChat] {
-        let now = Date()
-        let maxAge = AppConstants.FollowUp.maxPipelineAgeSeconds
-
-        let scoped = aiSearchSourceChats.filter { chat in
-            guard let lastMessage = chat.lastMessage else { return false }
-            guard !chat.chatType.isChannel else { return false }
-            switch scope {
-            case .all:
-                guard chat.chatType.isPrivate || chat.chatType.isGroup else { return false }
-            case .dms:
-                guard chat.chatType.isPrivate else { return false }
-            case .groups:
-                guard chat.chatType.isGroup else { return false }
-            }
-
-            let age = now.timeIntervalSince(lastMessage.date)
-            guard age <= maxAge else { return false }
-
-            if chat.chatType.isGroup {
-                if let count = chat.memberCount, count > AppConstants.FollowUp.maxGroupMembers { return false }
-                if chat.unreadCount > AppConstants.FollowUp.maxGroupUnread { return false }
-            }
-            return true
-        }
-
-        guard !includeBotsInAISearch else { return scoped }
-
-        var filtered: [TGChat] = []
-        filtered.reserveCapacity(scoped.count)
-        for chat in scoped {
-            if await telegramService.isBotChat(chat) {
-                continue
-            }
-            filtered.append(chat)
-        }
-        return filtered
-    }
-
-    private func pipelineCategoryHint(for chatId: Int64) async -> String {
-        if let category = pipelineCategory(for: chatId) {
-            switch category {
-            case .onMe: return "on_me"
-            case .onThem: return "on_them"
-            case .quiet: return "quiet"
-            }
-        }
-        if let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chatId) {
-            return cached.category
-        }
-        return "unknown"
-    }
-
-    private func resolvePipelineCategory(
-        for chat: TGChat,
-        hint: String,
-        messages: [TGMessage],
-        myUserId: Int64
-    ) -> String {
-        let normalizedHint = hint.lowercased()
-        let hasReplySignal = hasPendingReplySignal(
-            chat: chat,
-            messages: messages,
-            myUserId: myUserId
-        )
-        if hasReplySignal { return "on_me" }
-
-        let latestTextMessage = messages
-            .filter { ($0.textContent?.isEmpty == false) }
-            .sorted { $0.date > $1.date }
-            .first
-
-        guard let latestTextMessage else {
-            if normalizedHint == "on_them" || normalizedHint == "quiet" {
-                return normalizedHint
-            }
-            return chat.unreadCount > 0 ? "on_me" : "quiet"
-        }
-
-        let latestFromMe = messageIsFromMe(latestTextMessage, myUserId: myUserId)
-
-        if latestFromMe {
-            return "on_them"
-        }
-
-        if normalizedHint == "on_them" || normalizedHint == "quiet" {
-            return normalizedHint
-        }
-
-        return "quiet"
-    }
-
-    private func isReplyOwed(
-        for chat: TGChat,
-        messages: [TGMessage],
-        myUserId: Int64
-    ) -> Bool {
-        hasPendingReplySignal(chat: chat, messages: messages, myUserId: myUserId)
-    }
-
-    private func hasPendingReplySignal(
-        chat: TGChat,
-        messages: [TGMessage],
-        myUserId: Int64
-    ) -> Bool {
-        let sorted = messages.sorted { $0.date < $1.date }
-        guard !sorted.isEmpty else { return chat.unreadCount > 0 }
-
-        let lastIndexFromMe = sorted.lastIndex(where: { messageIsFromMe($0, myUserId: myUserId) })
-        let inboundTail: [TGMessage]
-        if let index = lastIndexFromMe {
-            inboundTail = Array(sorted[(index + 1)...].filter { !messageIsFromMe($0, myUserId: myUserId) })
-        } else {
-            inboundTail = sorted.filter { !messageIsFromMe($0, myUserId: myUserId) }
-        }
-
-        guard !inboundTail.isEmpty else { return false }
-        if inboundTail.contains(where: inboundMessageLikelyNeedsReply) {
-            return true
-        }
-
-        // If the sampled window has no outbound message from me, avoid assuming pending by default.
-        // This prevents false "on_me" tags when the window only captured inbound acknowledgements.
-        if lastIndexFromMe == nil {
-            return chat.unreadCount > 0 && inboundTail.count >= 2
-        }
-
-        // Weak unread signal: only trust it when multiple inbound messages stacked up.
-        if chat.unreadCount > 0 && inboundTail.count >= 2 {
-            return true
-        }
-
-        return false
-    }
-
-    private func messageIsFromMe(_ message: TGMessage, myUserId: Int64) -> Bool {
-        if case .user(let senderId) = message.senderId {
-            return senderId == myUserId
-        }
-        return false
     }
 
     private func normalizePipelineCategory(
@@ -2310,546 +1506,12 @@ struct LauncherView: View {
         messages: [TGMessage],
         myUserId: Int64
     ) -> FollowUpItem.Category {
-        guard myUserId > 0 else { return proposed }
-
-        let textMessages = messages.filter { ($0.textContent?.isEmpty == false) }
-        guard !textMessages.isEmpty else { return proposed }
-
-        if hasPendingReplySignal(chat: chat, messages: textMessages, myUserId: myUserId) {
-            return .onMe
-        }
-
-        let latestText = textMessages.sorted { $0.date > $1.date }.first
-        guard let latestText else { return proposed }
-
-        if messageIsFromMe(latestText, myUserId: myUserId) {
-            return .onThem
-        }
-
-        let compact = normalizedSignalText(latestText.textContent)
-        if inboundMessageImpliesContactOwnsNextStep(compact) {
-            return .onThem
-        }
-
-        if let suggestion = suggestedAction?.lowercased(),
-           suggestion.contains("wait for") || suggestion.contains("waiting on") {
-            return .onThem
-        }
-
-        if proposed == .onThem || proposed == .quiet {
-            return proposed
-        }
-
-        return .quiet
+        ConversationReplyHeuristics.normalizePipelineCategory(
+            proposed: proposed,
+            suggestedAction: suggestedAction,
+            chat: chat,
+            messages: messages,
+            myUserId: myUserId
+        )
     }
-
-    private func normalizedSignalText(_ rawText: String?) -> String {
-        guard let rawText else { return "" }
-        return rawText
-            .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "[^a-z0-9\\s?]", with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func inboundMessageImpliesContactOwnsNextStep(_ compact: String) -> Bool {
-        guard !compact.isEmpty else { return false }
-
-        let exactSignals: Set<String> = [
-            "on it", "will do", "i will", "i ll", "working on it",
-            "let me do it", "let me check", "will share", "will send",
-            "done", "completed"
-        ]
-        if exactSignals.contains(compact) {
-            return true
-        }
-
-        let phraseSignals = [
-            "on it", "will do", "i will", "i ll", "working on",
-            "let me", "will share", "will send", "sending", "share soon"
-        ]
-        return phraseSignals.contains(where: { compact.contains($0) })
-    }
-
-    private func inboundMessageLikelyNeedsReply(_ message: TGMessage) -> Bool {
-        let compact = normalizedSignalText(message.textContent)
-        guard !compact.isEmpty else { return false }
-
-        if compact.contains("?") { return true }
-
-        let requestSignals = [
-            "please", "pls", "can you", "could you", "let me know", "update",
-            "when", "where", "why", "what", "how", "share", "send",
-            "review", "check", "approve", "eta", "follow up", "follow-up", "reply"
-        ]
-        if requestSignals.contains(where: { compact.contains($0) }) {
-            return true
-        }
-
-        let acknowledgementSignals: Set<String> = [
-            "ok", "okay", "kk", "k", "cool", "great", "done", "noted", "got it",
-            "thanks", "thank you", "sure", "hmm", "hmmm", "hmmmm", "haha", "lol",
-            "on it", "will do", "dekh rhe", "dekh rahe", "dekh rha", "dekh rahi"
-        ]
-        if acknowledgementSignals.contains(compact) {
-            return false
-        }
-
-        let wordCount = compact.split(separator: " ").count
-        if wordCount <= 3 && compact.count <= 24 {
-            return false
-        }
-
-        return compact.count >= 28
-    }
-
-    private func compactAIErrorReason(_ error: Swift.Error) -> String {
-        let raw: String
-
-        if let aiError = error as? AIError {
-            switch aiError {
-            case .httpError(let code, let body):
-                let compactBody = body
-                    .replacingOccurrences(of: "\n", with: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let suffix = compactBody.isEmpty ? "" : " \(String(compactBody.prefix(140)))"
-                raw = "HTTP \(code)\(suffix)"
-            case .parsingError(let detail):
-                raw = "parse error \(String(detail.prefix(140)))"
-            case .networkError(let err):
-                raw = "network \(String(err.localizedDescription.prefix(120)))"
-            case .noAPIKey:
-                raw = "no API key configured"
-            case .providerNotConfigured:
-                raw = "provider not configured"
-            case .invalidResponse:
-                raw = "invalid provider response"
-            }
-        } else {
-            let localized = error.localizedDescription
-            if !localized.isEmpty {
-                raw = localized
-            } else {
-                raw = String(describing: error)
-            }
-        }
-
-        return raw
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func heuristicAgenticFallbackRanking(
-        query: String,
-        querySpec: QuerySpec,
-        candidates: [AgenticSearchCandidate],
-        myUserId: Int64
-    ) -> [AgenticSearchResult] {
-        let now = Date()
-        let stopWords: Set<String> = [
-            "who", "what", "when", "where", "why", "how", "have", "has", "had",
-            "with", "that", "this", "from", "your", "you", "for", "the", "and",
-            "are", "was", "were", "can", "could", "would", "should", "about",
-            "only", "last", "week", "month", "reply", "replied", "responded"
-        ]
-        let queryTokens = query
-            .lowercased()
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
-            .filter { $0.count >= 3 && !stopWords.contains($0) }
-
-        return candidates.compactMap { candidate in
-            guard chatMatchesScope(candidate.chat, scope: querySpec.scope) else { return nil }
-
-            let rangedMessages = applyTimeRange(candidate.messages, timeRange: querySpec.timeRange)
-            guard !rangedMessages.isEmpty else { return nil }
-
-            let replyOwed = isReplyOwed(for: candidate.chat, messages: rangedMessages, myUserId: myUserId)
-            if querySpec.replyConstraint == .pipelineOnMeOnly,
-               !replyOwed,
-               candidate.pipelineCategory != "on_me" {
-                return nil
-            }
-
-            let newestFirst = rangedMessages.sorted { $0.date > $1.date }
-            let inboundMessages = newestFirst.filter { message in
-                if case .user(let senderId) = message.senderId {
-                    return senderId != myUserId
-                }
-                return true
-            }
-            let outboundMessages = newestFirst.filter { message in
-                if case .user(let senderId) = message.senderId {
-                    return senderId == myUserId
-                }
-                return false
-            }
-            let latestInboundText = inboundMessages.first(where: { ($0.textContent?.isEmpty == false) })
-            let latestOutboundText = outboundMessages.first(where: { ($0.textContent?.isEmpty == false) })
-
-            let messageTexts = rangedMessages.compactMap(\.textContent)
-            let corpus = ([candidate.chat.title.lowercased()] + messageTexts.map { $0.lowercased() })
-                .joined(separator: " ")
-            let matchedTokens = queryTokens.filter { corpus.contains($0) }
-            let tokenHits = matchedTokens.count
-
-            var score = 24
-            if replyOwed { score += 20 }
-            if candidate.chat.unreadCount > 0 { score += 4 }
-            switch candidate.pipelineCategory {
-            case "on_me":
-                score += 9
-            case "on_them":
-                score += 3
-            default:
-                break
-            }
-            score += min(18, tokenHits * 6)
-
-            if let latestInboundDate = inboundMessages.map(\.date).max() {
-                let age = now.timeIntervalSince(latestInboundDate)
-                if age <= 86_400 {
-                    score += 12
-                } else if age <= 3 * 86_400 {
-                    score += 8
-                } else if age <= 7 * 86_400 {
-                    score += 4
-                }
-            }
-
-            let boundedScore = max(1, min(99, score))
-            let warmth: AgenticSearchResult.Warmth
-            if boundedScore >= 74 {
-                warmth = .hot
-            } else if boundedScore >= 54 {
-                warmth = .warm
-            } else {
-                warmth = .cold
-            }
-
-            let replyability: AgenticSearchResult.Replyability
-            if replyOwed {
-                replyability = .replyNow
-            } else if latestOutboundText != nil {
-                replyability = .waitingOnThem
-            } else {
-                replyability = .unclear
-            }
-
-            let inboundSender = latestInboundText?.senderName?
-                .split(separator: " ")
-                .first
-                .map(String.init) ?? "them"
-            let inboundSnippet = compactFallbackSnippet(latestInboundText?.textContent)
-            let outboundSnippet = compactFallbackSnippet(latestOutboundText?.textContent)
-
-            let suggestedAction: String
-            switch replyability {
-            case .replyNow:
-                if !inboundSnippet.isEmpty {
-                    suggestedAction = "Reply to \(inboundSender) on \"\(inboundSnippet)\" with a concrete next step."
-                } else {
-                    suggestedAction = "Send a quick reply and lock in the next step."
-                }
-            case .waitingOnThem:
-                if !outboundSnippet.isEmpty, let latestOutboundText {
-                    suggestedAction = "You already replied (\(latestOutboundText.relativeDate)); nudge only if \"\(outboundSnippet)\" is urgent."
-                } else {
-                    suggestedAction = "No immediate reply owed; keep this warm and nudge only if it is priority."
-                }
-            case .unclear:
-                if tokenHits > 0 {
-                    suggestedAction = "Re-open this thread with a short context check tied to your query."
-                } else {
-                    suggestedAction = "Review the latest context before deciding whether to engage."
-                }
-            }
-
-            let reason: String
-            if replyability == .replyNow, let latestInboundText {
-                if tokenHits > 0 {
-                    reason = "Inbound \(latestInboundText.relativeDate) ago and matched \(tokenHits) query term\(tokenHits == 1 ? "" : "s")."
-                } else {
-                    reason = "Inbound \(latestInboundText.relativeDate) ago suggests this thread is waiting on you."
-                }
-            } else if tokenHits > 0, let topToken = matchedTokens.first {
-                reason = "Recent context matches \"\(topToken)\" but reply urgency is lower."
-            } else if let latestOutboundText {
-                reason = "Last outbound was \(latestOutboundText.relativeDate); waiting on their response."
-            } else {
-                reason = "Thread is relevant but currently lacks a clear open loop."
-            }
-
-            let tokenMatchedIds = newestFirst.compactMap { message -> Int64? in
-                guard let text = message.textContent?.lowercased() else { return nil }
-                return queryTokens.contains(where: { text.contains($0) }) ? message.id : nil
-            }
-
-            var supportingMessageIds: [Int64] = []
-            if let inboundId = latestInboundText?.id {
-                supportingMessageIds.append(inboundId)
-            }
-            if let outboundId = latestOutboundText?.id, !supportingMessageIds.contains(outboundId) {
-                supportingMessageIds.append(outboundId)
-            }
-            for id in tokenMatchedIds where !supportingMessageIds.contains(id) {
-                supportingMessageIds.append(id)
-                if supportingMessageIds.count >= 2 { break }
-            }
-            if supportingMessageIds.isEmpty {
-                supportingMessageIds = newestFirst.prefix(2).map(\.id)
-            } else {
-                supportingMessageIds = Array(supportingMessageIds.prefix(2))
-            }
-
-            let confidence = min(
-                0.74,
-                0.46 + (replyOwed ? 0.10 : 0) + min(0.12, Double(tokenHits) * 0.04)
-            )
-
-            return AgenticSearchResult(
-                chatId: candidate.chat.id,
-                chatTitle: candidate.chat.title,
-                score: boundedScore,
-                warmth: warmth,
-                replyability: replyability,
-                reason: reason,
-                suggestedAction: suggestedAction,
-                confidence: confidence,
-                supportingMessageIds: supportingMessageIds
-            )
-        }
-        .sorted { $0.score > $1.score }
-    }
-
-    private func compactFallbackSnippet(_ raw: String?, maxLength: Int = 70) -> String {
-        guard let raw else { return "" }
-        let cleaned = raw
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\t", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return "" }
-        if cleaned.count <= maxLength { return cleaned }
-
-        let index = cleaned.index(cleaned.startIndex, offsetBy: maxLength)
-        let prefix = String(cleaned[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(prefix)…"
-    }
-
-    private func cachedFirstMessages(
-        for chat: TGChat,
-        desiredCount: Int,
-        timeRange: TimeRangeConstraint?
-    ) async -> [TGMessage] {
-        let cache = MessageCacheService.shared
-        let step = AppConstants.AI.AgenticSearch.dateProbeStep
-        let maxProbe = AppConstants.AI.AgenticSearch.maxDateProbeMessagesPerChat
-        var deduped: [Int64: TGMessage] = [:]
-
-        if let cached = await cache.getMessages(chatId: chat.id) {
-            for message in cached {
-                deduped[message.id] = message
-            }
-        }
-
-        func textMessagesDescending() -> [TGMessage] {
-            deduped.values
-                .filter { ($0.textContent?.isEmpty == false) }
-                .sorted { $0.date > $1.date }
-        }
-
-        func inRangeCount(from messages: [TGMessage]) -> Int {
-            applyTimeRange(messages, timeRange: timeRange).count
-        }
-
-        var textMessages = textMessagesDescending()
-        let requiresDateProbe = timeRange != nil
-
-        // Always fetch at least one Telegram slice when cache is thin.
-        if textMessages.count < desiredCount || (requiresDateProbe && inRangeCount(from: textMessages) < desiredCount) {
-            let firstFetchLimit = requiresDateProbe ? max(desiredCount, step) : desiredCount
-            if let fetched = try? await telegramService.getChatHistory(chatId: chat.id, limit: firstFetchLimit),
-               !fetched.isEmpty {
-                await cache.cacheMessages(chatId: chat.id, messages: fetched)
-                for message in fetched {
-                    deduped[message.id] = message
-                }
-                textMessages = textMessagesDescending()
-            }
-        }
-
-        // For date-bounded queries, probe older history (within hard cap) until we find enough in-range text.
-        if let timeRange {
-            while inRangeCount(from: textMessages) < desiredCount && textMessages.count < maxProbe {
-                if let oldestDate = textMessages.last?.date, oldestDate <= timeRange.startDate {
-                    break
-                }
-
-                let oldestKnownId = textMessages.last?.id ?? 0
-                guard oldestKnownId != 0 else { break }
-
-                let remaining = maxProbe - textMessages.count
-                let fetchLimit = min(step, remaining)
-                guard fetchLimit > 0 else { break }
-
-                guard let older = try? await telegramService.getChatHistory(
-                    chatId: chat.id,
-                    fromMessageId: oldestKnownId,
-                    limit: fetchLimit
-                ), !older.isEmpty else {
-                    break
-                }
-
-                let previousCount = textMessages.count
-                await cache.cacheMessages(chatId: chat.id, messages: older, append: true)
-                for message in older {
-                    deduped[message.id] = message
-                }
-                textMessages = textMessagesDescending()
-                if textMessages.count <= previousCount {
-                    break
-                }
-            }
-        }
-
-        let filtered = applyTimeRange(textMessages, timeRange: timeRange)
-        return Array(filtered.prefix(desiredCount))
-    }
-
-    private func topUpOlderMessages(
-        for chat: TGChat,
-        existingMessages: [TGMessage],
-        additionalCount: Int,
-        maxTotal: Int,
-        timeRange: TimeRangeConstraint?
-    ) async -> [TGMessage] {
-        var deduped: [Int64: TGMessage] = [:]
-        for message in existingMessages {
-            deduped[message.id] = message
-        }
-
-        let currentCount = deduped.values.filter { ($0.textContent?.isEmpty == false) }.count
-        guard currentCount < maxTotal else {
-            let messages = deduped.values
-                .filter { ($0.textContent?.isEmpty == false) }
-                .sorted { $0.date > $1.date }
-                .prefix(maxTotal)
-                .map { $0 }
-            return applyTimeRange(messages, timeRange: timeRange)
-        }
-
-        let toFetch = min(additionalCount, maxTotal - currentCount)
-        guard toFetch > 0 else {
-            let messages = deduped.values
-                .filter { ($0.textContent?.isEmpty == false) }
-                .sorted { $0.date > $1.date }
-                .prefix(maxTotal)
-                .map { $0 }
-            return applyTimeRange(messages, timeRange: timeRange)
-        }
-
-        let oldestKnownId = deduped.values.sorted { $0.date > $1.date }.last?.id ?? 0
-        guard oldestKnownId != 0 else {
-            let messages = deduped.values
-                .filter { ($0.textContent?.isEmpty == false) }
-                .sorted { $0.date > $1.date }
-                .prefix(maxTotal)
-                .map { $0 }
-            return applyTimeRange(messages, timeRange: timeRange)
-        }
-
-        if let older = try? await telegramService.getChatHistory(
-            chatId: chat.id,
-            fromMessageId: oldestKnownId,
-            limit: toFetch
-        ), !older.isEmpty {
-            await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: older, append: true)
-            for message in older {
-                deduped[message.id] = message
-            }
-        }
-
-        let messages = deduped.values
-            .filter { ($0.textContent?.isEmpty == false) }
-            .sorted { $0.date > $1.date }
-            .prefix(maxTotal)
-            .map { $0 }
-        return applyTimeRange(messages, timeRange: timeRange)
-    }
-
-    /// Deduplicate AI results by chat ID, keeping the higher-relevance entry.
-    private func deduplicateResults(_ results: [AISearchResult]) -> [AISearchResult] {
-        var seen: [Int64: AISearchResult] = [:]
-        for result in results {
-            if case .semanticResult(let r) = result {
-                if let existing = seen[r.chatId], case .semanticResult(let e) = existing {
-                    // Keep the higher-relevance version
-                    if r.relevance == .high && e.relevance != .high {
-                        seen[r.chatId] = result
-                    }
-                } else {
-                    seen[r.chatId] = result
-                }
-            }
-        }
-        // Sort: high relevance first, then medium
-        return seen.values.sorted { a, b in
-            if case .semanticResult(let ra) = a, case .semanticResult(let rb) = b {
-                if ra.relevance == .high && rb.relevance != .high { return true }
-                if ra.relevance != .high && rb.relevance == .high { return false }
-            }
-            return false
-        }
-    }
-
-    // MARK: - Semantic Search Lazy Loading
-
-    private func loadNextSemanticBatch() {
-        guard hasMoreSemanticBatches, !isLoadingMoreSemantic, aiSearchMode == .semanticSearch else { return }
-        isLoadingMoreSemantic = true
-
-        Task {
-            let concurrentBatches = 3
-            let batchSize = 10
-            let allChats = aiSearchSourceChats
-            let query = currentSemanticQuery
-            let startOffset = semanticBatchOffset
-
-            var newResults: [AISearchResult] = []
-
-            await withTaskGroup(of: [SemanticSearchResult].self) { group in
-                for i in 0..<concurrentBatches {
-                    let start = startOffset + i * batchSize
-                    let batchChats = Array(allChats.dropFirst(start).prefix(batchSize))
-                    guard !batchChats.isEmpty else { continue }
-
-                    group.addTask { [telegramService, aiService] in
-                        do {
-                            let messages = try await telegramService.getRecentMessagesAcrossChats(
-                                chatIds: batchChats.map(\.id), perChatLimit: 15
-                            )
-                            return try await aiService.semanticSearch(query: query, messages: messages)
-                        } catch {
-                            return []
-                        }
-                    }
-                }
-
-                for await batchResults in group {
-                    newResults.append(contentsOf: batchResults.map { .semanticResult($0) })
-                }
-            }
-
-            let totalNewlyScanned = min(concurrentBatches * batchSize, max(0, allChats.count - startOffset))
-            await MainActor.run {
-                let combined = aiResults + newResults
-                aiResults = deduplicateResults(combined)
-                semanticBatchOffset = startOffset + totalNewlyScanned
-                hasMoreSemanticBatches = semanticBatchOffset < allChats.count
-                isLoadingMoreSemantic = false
-            }
-        }
-    }
-
 }
