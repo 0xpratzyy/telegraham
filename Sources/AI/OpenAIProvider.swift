@@ -22,7 +22,7 @@ final class OpenAIProvider: AIProvider {
         let userMessage = SummaryPrompt.userMessage(snippets: snippets)
         return try await RetryHelper.withRetry {
             try await self.makeRequest(
-                systemPrompt: SummaryPrompt.systemPrompt,
+                systemPrompt: prompt,
                 userMessage: userMessage,
                 requestKind: .summary
             )
@@ -92,6 +92,36 @@ final class OpenAIProvider: AIProvider {
             persistAgenticParseFailure(response: response, error: error)
             throw AIError.parsingError("agentic JSON parse failure; raw payload saved to debug")
         }
+    }
+
+    func triageReplyQueue(
+        query: String,
+        scope: QueryScope,
+        candidates: [ReplyQueueCandidateDTO]
+    ) async throws -> [ReplyQueueTriageResultDTO] {
+        guard !candidates.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: ReplyQueueTriagePrompt.systemPrompt,
+                userMessage: ReplyQueueTriagePrompt.userMessage(
+                    query: query,
+                    scope: scope,
+                    candidates: candidates
+                ),
+                requestKind: .replyQueueTriage,
+                responseFormat: self.replyQueueTriageResponseFormat(candidates: candidates)
+            )
+        }
+
+        let parsed = try ReplyQueueTriageResultParser.parse(response)
+        let expectedIds = Set(candidates.map(\.chatId))
+        let returnedIds = Set(parsed.map(\.chatId))
+        guard parsed.count == candidates.count, returnedIds == expectedIds else {
+            throw AIError.parsingError(
+                "reply queue response cardinality mismatch: expected \(candidates.count) candidates but got \(parsed.count)"
+            )
+        }
+        return parsed
     }
 
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
@@ -253,6 +283,65 @@ final class OpenAIProvider: AIProvider {
             "type": "json_schema",
             "json_schema": [
                 "name": "agentic_search_results",
+                "strict": true,
+                "schema": schema
+            ]
+        ]
+    }
+
+    private func replyQueueTriageResponseFormat(candidates: [ReplyQueueCandidateDTO]) -> [String: Any] {
+        let candidateIds: [Any] = candidates.map { NSNumber(value: $0.chatId) }
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "results": [
+                    "type": "array",
+                    "minItems": candidates.count,
+                    "maxItems": candidates.count,
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "chatId": [
+                                "type": "integer",
+                                "enum": candidateIds
+                            ],
+                            "classification": [
+                                "type": "string",
+                                "enum": ["on_me", "on_them", "quiet", "need_more"]
+                            ],
+                            "urgency": [
+                                "type": "string",
+                                "enum": ["high", "medium", "low"]
+                            ],
+                            "reason": ["type": "string"],
+                            "suggestedAction": ["type": "string"],
+                            "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                            "supportingMessageIds": [
+                                "type": "array",
+                                "items": ["type": "integer"]
+                            ]
+                        ],
+                        "required": [
+                            "chatId",
+                            "classification",
+                            "urgency",
+                            "reason",
+                            "suggestedAction",
+                            "confidence",
+                            "supportingMessageIds"
+                        ],
+                        "additionalProperties": false
+                    ]
+                ]
+            ],
+            "required": ["results"],
+            "additionalProperties": false
+        ]
+
+        return [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "reply_queue_triage_results",
                 "strict": true,
                 "schema": schema
             ]

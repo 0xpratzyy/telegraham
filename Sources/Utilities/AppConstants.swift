@@ -137,6 +137,32 @@ enum AppConstants {
         static let embeddingBackfillBatchSize = 128
     }
 
+    enum Search {
+        enum Pattern {
+            static let maxSearchableMessages = 12_000
+            static let ftsCandidateLimit = 160
+            static let fallbackCandidateLimit = 40
+            static let maxRenderedResults = 30
+            static let snippetCharacterLimit = 220
+        }
+
+        enum Summary {
+            static let localChatLimit = 12
+            static let supportingResultLimit = 8
+            static let summaryMessageLimit = 18
+            static let fallbackSnippetLimit = 3
+        }
+
+        enum ReplyQueue {
+            static let aiBatchSize = 12
+            static let initialMessagesPerChat = 8
+            static let additionalMessagesForNeedMore = 12
+            static let maxMessagesPerChat = 20
+            static let maxRenderedResults = 15
+            static let progressiveConfidenceThreshold = 0.72
+        }
+    }
+
     enum App {
         static let version = "1.0.0"
     }

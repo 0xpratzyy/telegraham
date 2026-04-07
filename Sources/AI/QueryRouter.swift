@@ -22,8 +22,6 @@ final class QueryRouter: ObservableObject {
         timezone: TimeZone = .current,
         now: Date = Date()
     ) async -> QueryIntent {
-        guard !(aiProvider is NoAIProvider) else { return .messageSearch }
-
         let normalized = query
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -35,30 +33,18 @@ final class QueryRouter: ObservableObject {
             timezone: timezone,
             activeFilter: activeFilter
         )
-        if spec.mode == .agenticSearch || spec.hasActionableConstraints {
-            return .agenticSearch
-        }
 
-        let agenticPhrases = [
-            "intro",
-            "connect",
-            "warm",
-            "lead",
-            "reply",
-            "replied",
-            "respond",
-            "follow up",
-            "follow-up",
-            "who should i",
-            "who do i",
-            "waiting on me",
-            "haven't replied",
-            "have not replied"
-        ]
-
-        if agenticPhrases.contains(where: { normalized.contains($0) }) {
+        switch spec.preferredEngine {
+        case .messageLookup:
+            return .messageSearch
+        case .semanticRetrieval:
+            return .semanticSearch
+        case .replyTriage:
             return .agenticSearch
+        case .summarize:
+            return .summarySearch
+        case .graphCRM:
+            return .unsupported
         }
-        return .semanticSearch
     }
 }

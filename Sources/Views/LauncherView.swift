@@ -49,12 +49,15 @@ struct LauncherView: View {
     private var isAISearching: Bool { searchCoordinator.isAISearching }
     private var aiSearchError: String? { searchCoordinator.aiSearchError }
     private var currentQuerySpec: QuerySpec? { searchCoordinator.currentQuerySpec }
+    private var routingSnapshot: SearchRoutingSnapshot? { searchCoordinator.routingSnapshot }
     private var agenticDebugInfo: AgenticDebugInfo? { searchCoordinator.agenticDebugInfo }
+    private var summaryOutput: SummarySearchOutput? { searchCoordinator.summaryOutput }
     private var semanticMatchedChats: Int { searchCoordinator.semanticMatchedChats }
     private var totalChatsToScan: Int { searchCoordinator.totalChatsToScan }
     private var agenticUsedLocalFallback: Bool {
         agenticDebugInfo?.stopReason.contains("using local fallback") == true
     }
+    private var showLauncherDebugOverlays: Bool { false }
 
     private var displayedChats: [TGChat] {
         var chats: [TGChat]
@@ -136,10 +139,9 @@ struct LauncherView: View {
 
     /// Total navigable items (either AI results or chat rows depending on mode).
     private var navigableCount: Int {
-        if aiSearchMode == .semanticSearch && !aiResults.isEmpty {
-            return aiResults.count
-        }
-        if aiSearchMode == .agenticSearch && !aiResults.isEmpty {
+        if let aiSearchMode,
+           aiSearchMode != .unsupported,
+           !aiResults.isEmpty {
             return aiResults.count
         }
         return displayedChats.count
@@ -239,9 +241,9 @@ struct LauncherView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .launcherEnter)) { _ in
-            if aiSearchMode == .semanticSearch && selectedIndex < aiResults.count {
-                openAISearchResult(aiResults[selectedIndex])
-            } else if aiSearchMode == .agenticSearch && selectedIndex < aiResults.count {
+            if let aiSearchMode,
+               aiSearchMode != .unsupported,
+               selectedIndex < aiResults.count {
                 openAISearchResult(aiResults[selectedIndex])
             } else if selectedIndex < displayedChats.count {
                 openChat(displayedChats[selectedIndex])
@@ -373,6 +375,9 @@ struct LauncherView: View {
             }
         case .agenticSearch:
             if isAISearching {
+                if !aiResults.isEmpty {
+                    return "Showing \(aiResults.count) confident chats • still scanning \(semanticMatchedChats) of \(totalChatsToScan)"
+                }
                 if totalChatsToScan > 0 {
                     return "Scanning \(semanticMatchedChats) of \(totalChatsToScan), ranking intent..."
                 }
@@ -386,7 +391,11 @@ struct LauncherView: View {
             }
             return "Agentic ranking ready"
         case .messageSearch:
-            return "Searching messages..."
+            return isAISearching ? "Searching exact matches..." : "Exact lookup ready"
+        case .summarySearch:
+            return isAISearching ? "Preparing summary..." : "Summary ready"
+        case .unsupported:
+            return "Unsupported in MVP"
         }
     }
 
@@ -410,7 +419,19 @@ struct LauncherView: View {
             ]
         case .messageSearch:
             return [
-                "searching messages"
+                "checking exact phrases",
+                "verifying entities",
+                "ranking sent messages"
+            ]
+        case .summarySearch:
+            return [
+                "retrieving relevant chats",
+                "gathering recent context",
+                "drafting summary"
+            ]
+        case .unsupported:
+            return [
+                "waiting"
             ]
         }
     }
@@ -419,8 +440,15 @@ struct LauncherView: View {
         guard totalChatsToScan > 0 else { return nil }
         switch intent {
         case .agenticSearch, .semanticSearch:
+            if intent == .agenticSearch, !aiResults.isEmpty {
+                return "Scanned \(semanticMatchedChats) of \(totalChatsToScan) chats • showing \(aiResults.count) confident results"
+            }
             return "Scanned \(semanticMatchedChats) of \(totalChatsToScan) chats"
         case .messageSearch:
+            return nil
+        case .summarySearch:
+            return "Ranked \(totalChatsToScan) local chat matches"
+        case .unsupported:
             return nil
         }
     }
@@ -518,6 +546,42 @@ struct LauncherView: View {
         }
     }
 
+    private var queryRoutingDebugLines: [String] {
+        guard let snapshot = routingSnapshot else { return [] }
+        let querySpec = snapshot.spec
+        var lines: [String] = [
+            "family \(querySpec.family.rawValue) • engine \(querySpec.preferredEngine.rawValue)",
+            "route \(snapshot.runtimeIntent.rawValue) • mode \(querySpec.mode.rawValue) • scope \(querySpec.scope.rawValue)",
+            "replyConstraint \(querySpec.replyConstraint.rawValue) • confidence \(String(format: "%.2f", querySpec.parseConfidence))"
+        ]
+
+        if !querySpec.unsupportedFragments.isEmpty {
+            lines.append("unsupported \(querySpec.unsupportedFragments.joined(separator: " • "))")
+        }
+
+        return lines
+    }
+
+    private var queryRoutingDebugSection: some View {
+        let lines = queryRoutingDebugLines
+
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Routing")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
     private var agenticDebugSection: some View {
         let debugLines = agenticDebugLines()
         let buckets = agenticDebugBuckets
@@ -563,7 +627,7 @@ struct LauncherView: View {
 
     private var agenticEmptyStateView: some View {
         let content = agenticEmptyStateContent()
-        let hasDebug = !agenticDebugLines().isEmpty || !agenticDebugBuckets.isEmpty
+        let hasDebug = showLauncherDebugOverlays && (!agenticDebugLines().isEmpty || !agenticDebugBuckets.isEmpty)
 
         return VStack(spacing: 12) {
             Spacer()
@@ -591,28 +655,57 @@ struct LauncherView: View {
 
     @ViewBuilder
     private var resultsList: some View {
-        if isAISearching {
-            aiLoadingStateView
-        } else if let error = aiSearchError {
-            ErrorStateView(message: error) {
-                triggerSearch()
+        VStack(spacing: 0) {
+            if showLauncherDebugOverlays && !queryRoutingDebugLines.isEmpty {
+                queryRoutingDebugSection
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    .padding(.bottom, 6)
             }
-        } else if aiSearchMode == .semanticSearch && !aiResults.isEmpty {
-            aiResultsList
-        } else if aiSearchMode == .agenticSearch && !aiResults.isEmpty {
-            aiResultsList
-        } else if aiSearchMode == .semanticSearch && aiResults.isEmpty {
-            EmptyStateView(
-                icon: "magnifyingglass",
-                title: "No relevant chats found",
-                subtitle: "Try a different search query"
-            )
-        } else if aiSearchMode == .agenticSearch && aiResults.isEmpty {
-            agenticEmptyStateView
-        } else if telegramService.isLoading && telegramService.chats.isEmpty {
-            LoadingStateView(message: "Loading chats...")
-        } else {
-            chatResultsList
+
+            if isAISearching {
+                VStack(spacing: 0) {
+                    if !aiResults.isEmpty {
+                        aiResultsList
+                    } else if aiSearchMode == .summarySearch, let summaryOutput {
+                        summaryOnlyStateView(summaryOutput)
+                    } else {
+                        aiLoadingStateView
+                    }
+                }
+            } else if let error = aiSearchError {
+                ErrorStateView(message: error) {
+                    triggerSearch()
+                }
+            } else if let aiSearchMode, aiSearchMode != .unsupported, !aiResults.isEmpty {
+                aiResultsList
+            } else if aiSearchMode == .summarySearch, let summaryOutput {
+                summaryOnlyStateView(summaryOutput)
+            } else if aiSearchMode == .messageSearch && aiResults.isEmpty {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No exact matches found",
+                    subtitle: "Try a more specific phrase or identifier"
+                )
+            } else if aiSearchMode == .summarySearch && aiResults.isEmpty {
+                EmptyStateView(
+                    icon: "text.book.closed",
+                    title: "No summary context found",
+                    subtitle: "Try a narrower person, topic, or time window"
+                )
+            } else if aiSearchMode == .semanticSearch && aiResults.isEmpty {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No relevant chats found",
+                    subtitle: "Try a different search query"
+                )
+            } else if aiSearchMode == .agenticSearch && aiResults.isEmpty {
+                agenticEmptyStateView
+            } else if telegramService.isLoading && telegramService.chats.isEmpty {
+                LoadingStateView(message: "Loading chats...")
+            } else {
+                chatResultsList
+            }
         }
     }
 
@@ -711,13 +804,20 @@ struct LauncherView: View {
                         .padding(.horizontal, 10)
                         .padding(.top, 2)
 
+                    if aiSearchMode == .summarySearch, let summaryOutput {
+                        summaryCardView(summaryOutput)
+                            .padding(.horizontal, 8)
+                            .padding(.bottom, 6)
+                    }
+
                     // AI semantic/agentic results
                     ForEach(Array(aiResults.enumerated()), id: \.element.id) { index, result in
                         aiResultRow(result: result, index: index)
                             .id(result.id)
                     }
 
-                    if aiSearchMode == .agenticSearch,
+                    if showLauncherDebugOverlays,
+                       aiSearchMode == .agenticSearch,
                        (!agenticDebugLines().isEmpty || !agenticDebugBuckets.isEmpty) {
                         agenticDebugSection
                             .padding(.horizontal, 10)
@@ -747,6 +847,10 @@ struct LauncherView: View {
             semanticResultRow(result: result, index: index)
         case .agenticResult(let result):
             agenticResultRow(result: result, index: index)
+        case .patternResult(let result):
+            patternResultRow(result: result, index: index)
+        case .replyQueueResult(let result):
+            replyQueueResultRow(result: result, index: index)
         }
     }
 
@@ -800,6 +904,10 @@ struct LauncherView: View {
             openChatById(semantic.chatId, preferredChat: chatForSemanticResult(semantic))
         case .agenticResult(let agentic):
             openChatById(agentic.chatId, preferredChat: chatForAgenticResult(agentic))
+        case .patternResult(let pattern):
+            openChatById(pattern.message.chatId, preferredChat: pattern.chat)
+        case .replyQueueResult(let replyQueue):
+            openChatById(replyQueue.chatId, preferredChat: telegramService.chats.first(where: { $0.id == replyQueue.chatId }))
         }
     }
 
@@ -955,6 +1063,150 @@ struct LauncherView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func patternResultRow(result: PatternSearchResult, index: Int) -> some View {
+        Button {
+            openChatById(result.message.chatId, preferredChat: result.chat)
+        } label: {
+            HStack(spacing: 8) {
+                avatarForChat(chat: result.chat, fallbackTitle: result.chatTitle)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(result.chatTitle)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text(result.matchKind.label)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(result.matchKind.color)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(result.matchKind.color.opacity(0.14))
+                            .clipShape(Capsule())
+
+                        if result.message.isOutgoing {
+                            Text("YOU")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .foregroundStyle(Color.green)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.green.opacity(0.14))
+                                .clipShape(Capsule())
+                        }
+
+                        Spacer()
+
+                        Text(DateFormatting.compactRelativeTime(from: result.message.date))
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(result.snippet)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(index == selectedIndex ? Color.accentColor.opacity(0.12) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func replyQueueResultRow(result: ReplyQueueResult, index: Int) -> some View {
+        let linkedChat = telegramService.chats.first(where: { $0.id == result.chatId })
+        let displayTitle = resolvedChatTitle(
+            chatId: result.chatId,
+            preferredTitle: result.chatTitle,
+            linkedChat: linkedChat
+        )
+
+        return Button {
+            openChatById(result.chatId, preferredChat: linkedChat)
+        } label: {
+            HStack(spacing: 8) {
+                avatarForChat(chat: linkedChat, fallbackTitle: displayTitle)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(displayTitle)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text(result.urgency.warmth.rawValue.uppercased())
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(result.urgency.warmth.color)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(result.urgency.warmth.color.opacity(0.14))
+                            .clipShape(Capsule())
+
+                        Text(result.replyability.label)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(result.replyability.color)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(result.replyability.color.opacity(0.14))
+                            .clipShape(Capsule())
+
+                        Spacer()
+
+                        Text(DateFormatting.compactRelativeTime(from: result.latestMessageDate))
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("→ \(result.suggestedAction)")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(index == selectedIndex ? Color.accentColor.opacity(0.12) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func summaryCardView(_ output: SummarySearchOutput) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(output.title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+
+            Text(output.summaryText)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.secondary.opacity(0.08))
+        )
+    }
+
+    private func summaryOnlyStateView(_ output: SummarySearchOutput) -> some View {
+        ScrollView {
+            summaryCardView(output)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+        }
     }
 
     private func agenticSubtitleText(for result: AgenticSearchResult) -> String {

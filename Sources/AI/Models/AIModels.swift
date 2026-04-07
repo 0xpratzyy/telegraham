@@ -55,6 +55,24 @@ enum QueryIntent: String, Codable {
     case messageSearch = "message_search"
     case semanticSearch = "semantic_search"
     case agenticSearch = "agentic_search"
+    case summarySearch = "summary_search"
+    case unsupported = "unsupported"
+}
+
+enum QueryFamily: String, Codable {
+    case exactLookup = "exact_lookup"
+    case topicSearch = "topic_search"
+    case replyQueue = "reply_queue"
+    case relationship = "relationship"
+    case summary = "summary"
+}
+
+enum QueryEngine: String, Codable {
+    case messageLookup = "message_lookup"
+    case semanticRetrieval = "semantic_retrieval"
+    case replyTriage = "reply_triage"
+    case graphCRM = "graph_crm"
+    case summarize = "summarize"
 }
 
 enum QueryScope: String, Codable {
@@ -89,6 +107,8 @@ struct TimeRangeConstraint: Codable {
 struct QuerySpec: Codable {
     let rawQuery: String
     let mode: QueryIntent
+    let family: QueryFamily
+    let preferredEngine: QueryEngine
     let scope: QueryScope
     let scopeWasExplicit: Bool
     let replyConstraint: ReplyConstraint
@@ -99,6 +119,18 @@ struct QuerySpec: Codable {
     var hasActionableConstraints: Bool {
         scopeWasExplicit || replyConstraint != .none || timeRange != nil
     }
+
+    var requiresExhaustiveChatReview: Bool {
+        preferredEngine == .replyTriage
+    }
+}
+
+struct SearchRoutingSnapshot: Identifiable {
+    let query: String
+    let spec: QuerySpec
+    let runtimeIntent: QueryIntent
+
+    var id: String { query }
 }
 
 struct AgenticSearchCandidate {

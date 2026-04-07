@@ -22,7 +22,7 @@ final class ClaudeProvider: AIProvider {
         let userMessage = SummaryPrompt.userMessage(snippets: snippets)
         return try await RetryHelper.withRetry {
             try await self.makeRequest(
-                systemPrompt: SummaryPrompt.systemPrompt,
+                systemPrompt: prompt,
                 userMessage: userMessage,
                 requestKind: .summary
             )
@@ -75,6 +75,34 @@ final class ClaudeProvider: AIProvider {
             )
         }
         return try AgenticSearchResultParser.parse(response)
+    }
+
+    func triageReplyQueue(
+        query: String,
+        scope: QueryScope,
+        candidates: [ReplyQueueCandidateDTO]
+    ) async throws -> [ReplyQueueTriageResultDTO] {
+        guard !candidates.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: ReplyQueueTriagePrompt.systemPrompt,
+                userMessage: ReplyQueueTriagePrompt.userMessage(
+                    query: query,
+                    scope: scope,
+                    candidates: candidates
+                ),
+                requestKind: .replyQueueTriage
+            )
+        }
+        let parsed = try ReplyQueueTriageResultParser.parse(response)
+        let expectedIds = Set(candidates.map(\.chatId))
+        let returnedIds = Set(parsed.map(\.chatId))
+        guard parsed.count == candidates.count, returnedIds == expectedIds else {
+            throw AIError.parsingError(
+                "reply queue response cardinality mismatch: expected \(candidates.count) candidates but got \(parsed.count)"
+            )
+        }
+        return parsed
     }
 
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {

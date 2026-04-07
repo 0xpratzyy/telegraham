@@ -102,6 +102,7 @@ extension SearchCoordinator {
     func executeAgenticSearch(
         query: String,
         querySpec: QuerySpec?,
+        searchRunID: UUID,
         activeScope: QueryScope,
         aiSearchSourceChats: [TGChat],
         includeBotsInAISearch: Bool,
@@ -153,16 +154,36 @@ extension SearchCoordinator {
         let myUsername = telegramService.currentUser?.username
 
         if replyQueueQuery {
-            return await executeReplyQueueTriageSearch(
+            let execution = await ReplyQueueEngine.shared.search(
                 query: query,
                 querySpec: resolvedQuerySpec,
-                allChats: allChats,
-                debug: debug,
+                aiSearchSourceChats: aiSearchSourceChats,
+                includeBotsInAISearch: includeBotsInAISearch,
                 telegramService: telegramService,
                 aiService: aiService,
-                myUserId: myUserId,
-                myUsername: myUsername
+                pipelineHintProvider: pipelineHintProvider,
+                onProgress: { [weak self] partial in
+                    guard let self, self.activeSearchRunID == searchRunID else { return }
+                    self.totalChatsToScan = partial.debug.scopedChats
+                    self.semanticMatchedChats = partial.debug.scannedChats
+                    self.aiResults = partial.results.map { .replyQueueResult($0) }
+                    self.publishAgenticDebugInfo(
+                        partial.debug,
+                        chatAudits: partial.chatAudits,
+                        query: query,
+                        querySpec: resolvedQuerySpec
+                    )
+                }
             )
+            totalChatsToScan = execution.debug.scopedChats
+            semanticMatchedChats = execution.debug.scannedChats
+            publishAgenticDebugInfo(
+                execution.debug,
+                chatAudits: execution.chatAudits,
+                query: query,
+                querySpec: resolvedQuerySpec
+            )
+            return execution.results.map { AISearchResult.replyQueueResult($0) }
         }
 
         let minimumScanChatsBeforeEarlyStop = replyQueueQuery
@@ -635,6 +656,7 @@ extension SearchCoordinator {
                 ]
                 if let querySpec = snapshot.querySpec {
                     lines.append("scope: \(querySpec.scope.rawValue) • replyConstraint: \(querySpec.replyConstraint.rawValue)")
+                    lines.append("family: \(querySpec.family.rawValue) • engine: \(querySpec.preferredEngine.rawValue)")
                     if let timeRange = querySpec.timeRange {
                         lines.append("timeRange: \(timeRange.label)")
                     }

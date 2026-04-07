@@ -26,6 +26,8 @@ final class QueryInterpreter: QueryInterpreting {
             return QuerySpec(
                 rawQuery: query,
                 mode: .semanticSearch,
+                family: .topicSearch,
+                preferredEngine: .semanticRetrieval,
                 scope: activeFilter,
                 scopeWasExplicit: false,
                 replyConstraint: .none,
@@ -88,36 +90,31 @@ final class QueryInterpreter: QueryInterpreting {
             unsupportedFragments.append("Advanced time operators are not fully supported yet.")
         }
 
-        let agenticSignals = [
-            "intro",
-            "connect",
-            "warm",
-            "lead",
-            "reply",
-            "replied",
-            "respond",
-            "follow up",
-            "follow-up",
-            "who should i",
-            "who do i",
-            "waiting on me"
-        ]
-        let mode: QueryIntent =
-            (replyConstraint != .none || timeRange != nil || scopeWasExplicit || containsAny(agenticSignals, in: normalized))
-            ? .agenticSearch
-            : .semanticSearch
+        let family = inferFamily(
+            normalized: normalized,
+            replyConstraint: replyConstraint
+        )
+        let preferredEngine = preferredEngine(for: family)
+        let mode = runtimeMode(
+            for: family,
+            preferredEngine: preferredEngine
+        )
 
         var confidence = 0.45
         if mode == .agenticSearch { confidence += 0.15 }
         if scopeWasExplicit { confidence += 0.15 }
         if replyConstraint != .none { confidence += 0.20 }
         if timeRange != nil { confidence += 0.20 }
+        if family == .exactLookup { confidence += 0.10 }
+        if family == .summary || family == .relationship { confidence += 0.08 }
         confidence -= Double(unsupportedFragments.count) * 0.12
         confidence = min(0.99, max(0.05, confidence))
 
         return QuerySpec(
             rawQuery: query,
             mode: mode,
+            family: family,
+            preferredEngine: preferredEngine,
             scope: scope,
             scopeWasExplicit: scopeWasExplicit,
             replyConstraint: replyConstraint,
@@ -125,6 +122,84 @@ final class QueryInterpreter: QueryInterpreting {
             parseConfidence: confidence,
             unsupportedFragments: Array(Set(unsupportedFragments)).sorted()
         )
+    }
+
+    private func inferFamily(normalized: String, replyConstraint: ReplyConstraint) -> QueryFamily {
+        if replyConstraint == .pipelineOnMeOnly {
+            return .replyQueue
+        }
+
+        let summarySignals = [
+            "summarize", "summary", "summarise", "recap",
+            "what did we decide", "what happened", "what did i discuss",
+            "what have we discussed", "latest context", "catch me up"
+        ]
+        if containsAny(summarySignals, in: normalized) {
+            return .summary
+        }
+
+        let crmSignals = [
+            "stale", "inactive", "most active", "top contacts", "top people",
+            "warm leads", "investors", "builders", "community", "vendors",
+            "friends", "acquaintance", "who do i talk to most"
+        ]
+        if containsAny(crmSignals, in: normalized) {
+            return .relationship
+        }
+
+        let exactLookupSignals = [
+            "where did i share", "where i shared", "where did i send", "where i sent",
+            "where did i paste", "where i pasted", "find message with", "find messages with",
+            "show messages with", "show message with", "which chat has", "find the message",
+            "find this link", "find this url", "where did i post", "where i posted"
+        ]
+        let exactEntitySignals = [
+            "wallet address", "contract address", "tx hash", "transaction hash",
+            "email address", "telegram username", "twitter handle", "discord handle",
+            "link", "url", "domain", "ca ", "contract"
+        ]
+        let hasStructuredToken = regexMatches(#"\b0x[a-f0-9]{6,}\b"#, in: normalized)
+            || regexMatches(#"\b[1-9A-HJ-NP-Za-km-z]{24,64}\b"#, in: normalized)
+            || regexMatches(#"https?://"#, in: normalized)
+            || regexMatches(#"@[a-z0-9_]{3,}"#, in: normalized)
+
+        if containsAny(exactLookupSignals, in: normalized)
+            || containsAny(exactEntitySignals, in: normalized)
+            || hasStructuredToken {
+            return .exactLookup
+        }
+
+        return .topicSearch
+    }
+
+    private func preferredEngine(for family: QueryFamily) -> QueryEngine {
+        switch family {
+        case .exactLookup:
+            return .messageLookup
+        case .topicSearch:
+            return .semanticRetrieval
+        case .replyQueue:
+            return .replyTriage
+        case .relationship:
+            return .graphCRM
+        case .summary:
+            return .summarize
+        }
+    }
+
+    private func runtimeMode(for family: QueryFamily, preferredEngine: QueryEngine) -> QueryIntent {
+        switch preferredEngine {
+        case .messageLookup:
+            return .messageSearch
+        case .semanticRetrieval:
+            return .semanticSearch
+        case .summarize:
+            return .summarySearch
+        case .replyTriage:
+            return .agenticSearch
+        case .graphCRM:
+            return .unsupported
+        }
     }
 
     private func normalize(_ query: String) -> String {

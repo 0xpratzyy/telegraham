@@ -1,5 +1,13 @@
 import SwiftUI
 
+private struct QueryRoutingDebugSnapshot: Identifiable {
+    let query: String
+    let spec: QuerySpec
+    let runtimeIntent: QueryIntent
+
+    var id: String { query }
+}
+
 struct SettingsView: View {
     private enum SettingsTab: Hashable {
         case credentials
@@ -28,8 +36,23 @@ struct SettingsView: View {
     @State private var isLoadingUsage = false
     @State private var graphDebugSummary: GraphBuilder.DebugSummary = .empty
     @State private var isLoadingGraphDebug = false
+    @State private var routingDebugQuery = "who do I need to reply to"
+    @State private var routingDebugSnapshot: QueryRoutingDebugSnapshot?
+    @State private var routingSampleSnapshots: [QueryRoutingDebugSnapshot] = []
+    @State private var isLoadingRoutingDebug = false
     @StateObject private var indexingProgress = IndexScheduler.shared.progress
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
+
+    private let routingSampleQueries: [String] = [
+        "where I shared wallet address",
+        "find message with contract address",
+        "first dollar",
+        "partnership discussions",
+        "who do I need to reply to",
+        "who haven't I replied to from last week",
+        "stale investors",
+        "summarize my chats with Akhil"
+    ]
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -69,6 +92,7 @@ struct SettingsView: View {
             loadAIConfig()
             Task { await refreshUsageOverview() }
             Task { await refreshGraphDebugSummary() }
+            Task { await refreshRoutingDebug() }
         }
         .onChange(of: selectedTab) { _, newValue in
             switch newValue {
@@ -76,6 +100,7 @@ struct SettingsView: View {
                 Task { await refreshUsageOverview() }
             case .debug:
                 Task { await refreshGraphDebugSummary() }
+                Task { await refreshRoutingDebug() }
             default:
                 break
             }
@@ -423,27 +448,34 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
             } else if !graphDebugSummary.hasData {
-                VStack(spacing: 14) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 34, weight: .semibold))
-                        .foregroundColor(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(spacing: 14) {
+                            Image(systemName: "point.3.connected.trianglepath.dotted")
+                                .font(.system(size: 34, weight: .semibold))
+                                .foregroundColor(.secondary)
 
-                    Text("No graph data yet")
-                        .font(.system(size: 18, weight: .semibold))
+                            Text("No graph data yet")
+                                .font(.system(size: 18, weight: .semibold))
 
-                    Text("Once the graph builder runs, node counts, edge counts, and top contacts will appear here.")
-                        .font(.system(size: 13))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 320)
+                            Text("Once the graph builder runs, node counts, edge counts, and top contacts will appear here.")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 320)
 
-                    Button("Refresh") {
-                        Task { await refreshGraphDebugSummary(rebuild: true) }
+                            Button("Refresh") {
+                                Task { await refreshGraphDebugSummary(rebuild: true) }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+
+                        routingDebugSection
                     }
-                    .buttonStyle(.bordered)
+                    .padding(16)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(24)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -526,6 +558,7 @@ struct SettingsView: View {
                         debugBreakdownSection(title: "Nodes By Type", rows: graphDebugSummary.nodeCounts)
                         debugBreakdownSection(title: "Edges By Type", rows: graphDebugSummary.edgeCounts)
                         debugTopContactsSection
+                        routingDebugSection
                     }
                     .padding(16)
                 }
@@ -693,6 +726,66 @@ struct SettingsView: View {
         }
         graphDebugSummary = await GraphBuilder.shared.debugSummary()
         isLoadingGraphDebug = false
+    }
+
+    @MainActor
+    private func refreshRoutingDebug() async {
+        guard !isLoadingRoutingDebug else { return }
+        isLoadingRoutingDebug = true
+
+        let interpreter = QueryInterpreter()
+        let now = Date()
+        let timezone = TimeZone.current
+
+        let trimmedQuery = routingDebugQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty {
+            let spec = interpreter.parse(
+                query: trimmedQuery,
+                now: now,
+                timezone: timezone,
+                activeFilter: .all
+            )
+            let runtimeIntent = await aiService.queryRouter.route(
+                query: trimmedQuery,
+                querySpec: spec,
+                activeFilter: spec.scope,
+                timezone: timezone,
+                now: now
+            )
+            routingDebugSnapshot = QueryRoutingDebugSnapshot(
+                query: trimmedQuery,
+                spec: spec,
+                runtimeIntent: runtimeIntent
+            )
+        } else {
+            routingDebugSnapshot = nil
+        }
+
+        var samples: [QueryRoutingDebugSnapshot] = []
+        for query in routingSampleQueries {
+            let spec = interpreter.parse(
+                query: query,
+                now: now,
+                timezone: timezone,
+                activeFilter: .all
+            )
+            let runtimeIntent = await aiService.queryRouter.route(
+                query: query,
+                querySpec: spec,
+                activeFilter: spec.scope,
+                timezone: timezone,
+                now: now
+            )
+            samples.append(
+                QueryRoutingDebugSnapshot(
+                    query: query,
+                    spec: spec,
+                    runtimeIntent: runtimeIntent
+                )
+            )
+        }
+        routingSampleSnapshots = samples
+        isLoadingRoutingDebug = false
     }
 
     private var authStateDescription: String {
@@ -965,6 +1058,109 @@ struct SettingsView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
+    }
+
+    private var routingDebugSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Query Routing Debug")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Use this to verify which query family and engine a search will hit.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                if isLoadingRoutingDebug {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Button("Refresh") {
+                    Task { await refreshRoutingDebug() }
+                }
+                .buttonStyle(.bordered)
+            }
+
+            TextField("Try a query", text: $routingDebugQuery)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit {
+                    Task { await refreshRoutingDebug() }
+                }
+
+            if let snapshot = routingDebugSnapshot {
+                routingDebugCard(snapshot, title: "Live Query")
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Sample Queries")
+                    .font(.system(size: 12, weight: .semibold))
+
+                ForEach(routingSampleSnapshots) { snapshot in
+                    routingDebugCard(snapshot, title: nil)
+
+                    if snapshot.id != routingSampleSnapshots.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+    }
+
+    private func routingDebugCard(_ snapshot: QueryRoutingDebugSnapshot, title: String?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let title {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+
+            Text(snapshot.query)
+                .font(.system(size: 13, weight: .medium))
+
+            VStack(alignment: .leading, spacing: 4) {
+                routingDebugLine("Family", snapshot.spec.family.rawValue)
+                routingDebugLine("Preferred Engine", snapshot.spec.preferredEngine.rawValue)
+                routingDebugLine("Runtime Route", snapshot.runtimeIntent.rawValue)
+                routingDebugLine("Mode", snapshot.spec.mode.rawValue)
+                routingDebugLine("Scope", snapshot.spec.scope.rawValue)
+                routingDebugLine("Reply Constraint", snapshot.spec.replyConstraint.rawValue)
+                routingDebugLine("Confidence", String(format: "%.2f", snapshot.spec.parseConfidence))
+                if !snapshot.spec.unsupportedFragments.isEmpty {
+                    routingDebugLine("Unsupported", snapshot.spec.unsupportedFragments.joined(separator: " • "))
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Use Query") {
+                    routingDebugQuery = snapshot.query
+                    Task { await refreshRoutingDebug() }
+                }
+                .buttonStyle(.link)
+            }
+        }
+    }
+
+    private func routingDebugLine(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 110, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11))
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
     }
 
     private func costLabel(for metrics: AIUsageMetrics) -> String {

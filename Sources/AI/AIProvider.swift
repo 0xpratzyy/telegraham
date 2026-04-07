@@ -21,6 +21,13 @@ protocol AIProvider {
         candidates: [AgenticCandidateDTO]
     ) async throws -> [AgenticSearchResultDTO]
 
+    /// Reply queue triage: classify many chats at once into on_me / on_them / quiet / need_more.
+    func triageReplyQueue(
+        query: String,
+        scope: QueryScope,
+        candidates: [ReplyQueueCandidateDTO]
+    ) async throws -> [ReplyQueueTriageResultDTO]
+
     /// Generate a follow-up suggestion for a single chat conversation.
     /// Returns (isRelevant, suggestedAction). If not relevant, the chat should be removed from pipeline.
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String)
@@ -153,6 +160,16 @@ struct AgenticCandidateDTO: Codable {
     let messages: [MessageSnippet]
 }
 
+struct ReplyQueueCandidateDTO: Codable {
+    let chatId: Int64
+    let chatName: String
+    let chatType: String
+    let unreadCount: Int
+    let memberCount: Int?
+    let localSignal: String
+    let messages: [MessageSnippet]
+}
+
 /// Query constraints that must be respected by agentic ranking.
 struct AgenticSearchConstraintsDTO: Codable {
     let scope: String
@@ -237,6 +254,91 @@ enum AgenticSearchResultParser {
             return envelope.results
         }
         let bareArray: [AgenticSearchResultDTO] = try JSONExtractor.parseJSON(response)
+        return bareArray
+    }
+}
+
+struct ReplyQueueTriageResultDTO: Codable {
+    let chatId: Int64
+    let classification: String
+    let urgency: String
+    let reason: String
+    let suggestedAction: String
+    let confidence: Double
+    let supportingMessageIds: [Int64]
+
+    init(
+        chatId: Int64,
+        classification: String,
+        urgency: String,
+        reason: String,
+        suggestedAction: String,
+        confidence: Double,
+        supportingMessageIds: [Int64]
+    ) {
+        self.chatId = chatId
+        self.classification = classification
+        self.urgency = urgency
+        self.reason = reason
+        self.suggestedAction = suggestedAction
+        self.confidence = confidence
+        self.supportingMessageIds = supportingMessageIds
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case chatId
+        case classification
+        case urgency
+        case reason
+        case suggestedAction
+        case confidence
+        case supportingMessageIds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let numericId = try? container.decode(Int64.self, forKey: .chatId) {
+            chatId = numericId
+        } else {
+            let rawId = try container.decode(String.self, forKey: .chatId)
+            guard let numericId = Int64(rawId) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .chatId,
+                    in: container,
+                    debugDescription: "chatId must decode to an Int64"
+                )
+            }
+            chatId = numericId
+        }
+
+        classification = try container.decode(String.self, forKey: .classification)
+        urgency = try container.decode(String.self, forKey: .urgency)
+        reason = try container.decode(String.self, forKey: .reason)
+        suggestedAction = try container.decode(String.self, forKey: .suggestedAction)
+        confidence = try container.decodeIfPresent(Double.self, forKey: .confidence) ?? 0
+
+        let rawIds = try? container.decodeIfPresent([String].self, forKey: .supportingMessageIds)
+        if let rawIds {
+            supportingMessageIds = rawIds.compactMap(Int64.init)
+        } else if let numericIds = try? container.decode([Int64].self, forKey: .supportingMessageIds) {
+            supportingMessageIds = numericIds
+        } else {
+            supportingMessageIds = []
+        }
+    }
+}
+
+struct ReplyQueueTriageResultsEnvelope: Codable {
+    let results: [ReplyQueueTriageResultDTO]
+}
+
+enum ReplyQueueTriageResultParser {
+    static func parse(_ response: String) throws -> [ReplyQueueTriageResultDTO] {
+        if let envelope: ReplyQueueTriageResultsEnvelope = try? JSONExtractor.parseJSON(response) {
+            return envelope.results
+        }
+        let bareArray: [ReplyQueueTriageResultDTO] = try JSONExtractor.parseJSON(response)
         return bareArray
     }
 }

@@ -5,6 +5,7 @@ enum AIRequestKind: String, Codable, CaseIterable {
     case agenticSearch
     case followUpSuggestion
     case pipelineTriage
+    case replyQueueTriage
     case summary
 
     var label: String {
@@ -17,6 +18,8 @@ enum AIRequestKind: String, Codable, CaseIterable {
             return "Follow-Up Suggestion"
         case .pipelineTriage:
             return "Pipeline Triage"
+        case .replyQueueTriage:
+            return "Reply Queue Triage"
         case .summary:
             return "Summary"
         }

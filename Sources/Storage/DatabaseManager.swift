@@ -430,6 +430,58 @@ actor DatabaseManager {
         }
     }
 
+    func loadSearchableMessages(chatIds: [Int64]? = nil, limit: Int = 10_000) async -> [MessageRecord] {
+        guard limit > 0 else { return [] }
+        if let chatIds, chatIds.isEmpty { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                let rows: [Row]
+                if let chatIds {
+                    let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
+                    var arguments = StatementArguments()
+                    for chatId in chatIds {
+                        arguments += [chatId]
+                    }
+                    arguments += [limit]
+
+                    rows = try Row.fetchAll(
+                        db,
+                        sql: """
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            FROM messages
+                            WHERE text_content IS NOT NULL
+                              AND length(trim(text_content)) > 0
+                              AND chat_id IN (\(placeholders))
+                            ORDER BY date DESC, id DESC
+                            LIMIT ?
+                            """,
+                        arguments: arguments
+                    )
+                } else {
+                    rows = try Row.fetchAll(
+                        db,
+                        sql: """
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            FROM messages
+                            WHERE text_content IS NOT NULL
+                              AND length(trim(text_content)) > 0
+                            ORDER BY date DESC, id DESC
+                            LIMIT ?
+                            """,
+                        arguments: [limit]
+                    )
+                }
+
+                return rows.map(Self.messageRecord(from:))
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load searchable messages: \(error)")
+            return []
+        }
+    }
+
     func loadMessages(keys: [MessageLookupKey]) async -> [MessageRecord] {
         guard !keys.isEmpty else { return [] }
         guard let pool = await ensureDatabase() else { return [] }

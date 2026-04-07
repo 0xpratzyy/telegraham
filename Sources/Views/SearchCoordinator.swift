@@ -5,11 +5,15 @@ import TDLibKit
 enum AISearchResult: Identifiable {
     case semanticResult(SemanticSearchResult)
     case agenticResult(AgenticSearchResult)
+    case patternResult(PatternSearchResult)
+    case replyQueueResult(ReplyQueueResult)
 
     var id: String {
         switch self {
         case .semanticResult(let result): return "sem-\(result.id)"
         case .agenticResult(let result): return "ag-\(result.id)"
+        case .patternResult(let result): return "pattern-\(result.id)"
+        case .replyQueueResult(let result): return "reply-\(result.id)"
         }
     }
 
@@ -18,6 +22,11 @@ enum AISearchResult: Identifiable {
         case .semanticResult(let result):
             return chats.first(where: { $0.id == result.chatId })
         case .agenticResult(let result):
+            return chats.first(where: { $0.id == result.chatId })
+        case .patternResult(let result):
+            if let chat = result.chat { return chat }
+            return chats.first(where: { $0.id == result.message.chatId })
+        case .replyQueueResult(let result):
             return chats.first(where: { $0.id == result.chatId })
         }
     }
@@ -46,14 +55,18 @@ final class SearchCoordinator: ObservableObject {
     @Published var isSearching = false
     @Published var aiResults: [AISearchResult] = []
     @Published var aiSearchMode: QueryIntent? = nil
+    @Published var routedQueryIntent: QueryIntent? = nil
+    @Published var routingSnapshot: SearchRoutingSnapshot?
     @Published var isAISearching = false
     @Published var aiSearchError: String?
     @Published var currentQuerySpec: QuerySpec?
     @Published var agenticDebugInfo: AgenticDebugInfo?
+    @Published var summaryOutput: SummarySearchOutput?
     @Published var semanticMatchedChats: Int = 0
     @Published var totalChatsToScan: Int = 0
 
     private var searchTask: Task<Void, Never>?
+    var activeSearchRunID = UUID()
     let queryInterpreter: QueryInterpreting
 
     init(queryInterpreter: QueryInterpreting = QueryInterpreter()) {
@@ -79,10 +92,13 @@ final class SearchCoordinator: ObservableObject {
     func clearAIState() {
         aiResults = []
         aiSearchMode = nil
+        routedQueryIntent = nil
+        routingSnapshot = nil
         isAISearching = false
         aiSearchError = nil
         currentQuerySpec = nil
         agenticDebugInfo = nil
+        summaryOutput = nil
         semanticMatchedChats = 0
         totalChatsToScan = 0
     }
@@ -113,16 +129,30 @@ final class SearchCoordinator: ObservableObject {
             return
         }
 
-        searchTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
+        let parsedSpec = queryInterpreter.parse(
+            query: query,
+            now: Date(),
+            timezone: .current,
+            activeFilter: activeScope
+        )
 
-            let parsedSpec = queryInterpreter.parse(
-                query: query,
-                now: Date(),
-                timezone: .current,
-                activeFilter: activeScope
-            )
+        currentQuerySpec = parsedSpec
+        let searchRunID = UUID()
+        activeSearchRunID = searchRunID
+        routedQueryIntent = nil
+        routingSnapshot = nil
+        aiSearchMode = nil
+        aiResults = []
+        aiSearchError = nil
+        agenticDebugInfo = nil
+        summaryOutput = nil
+        semanticMatchedChats = 0
+        totalChatsToScan = 0
+        searchResultChatIds = []
+        isSearching = false
+        isAISearching = false
+
+        searchTask = Task { @MainActor in
             let intent = await aiService.queryRouter.route(
                 query: query,
                 querySpec: parsedSpec,
@@ -132,82 +162,54 @@ final class SearchCoordinator: ObservableObject {
             )
             guard !Task.isCancelled else { return }
 
-            let shouldUseAIResultsPath =
-                intent == .semanticSearch || (intent == .agenticSearch && aiService.isConfigured)
+            routedQueryIntent = intent
+            routingSnapshot = SearchRoutingSnapshot(
+                query: query,
+                spec: parsedSpec,
+                runtimeIntent: intent
+            )
 
-            if shouldUseAIResultsPath {
-                aiSearchMode = intent
-                isAISearching = true
-                aiSearchError = nil
-                currentQuerySpec = parsedSpec
-                searchResultChatIds = []
-
-                do {
-                    let results = try await executeAISearch(
-                        intent: intent,
-                        query: query,
-                        querySpec: parsedSpec,
-                        activeScope: activeScope,
-                        aiSearchSourceChats: aiSearchSourceChats,
-                        scopedAISearchSourceChats: scopedAISearchSourceChats,
-                        includeBotsInAISearch: includeBotsInAISearch,
-                        telegramService: telegramService,
-                        aiService: aiService,
-                        pipelineCategoryProvider: pipelineCategoryProvider,
-                        pipelineHintProvider: pipelineHintProvider
-                    )
-                    guard !Task.isCancelled else { return }
-                    aiResults = results
-                    isAISearching = false
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    aiSearchError = error.localizedDescription
-                    isAISearching = false
-                }
-            } else {
+            if intent == .unsupported || parsedSpec.preferredEngine == .graphCRM {
                 aiSearchMode = nil
                 aiResults = []
-                aiSearchError = nil
-                currentQuerySpec = nil
-                agenticDebugInfo = nil
-                isSearching = true
+                summaryOutput = nil
+                aiSearchError = "Relationship / CRM queries are recognized, but the dedicated engine is not part of the MVP yet."
+                isAISearching = false
+                return
+            }
 
-                do {
-                    let scopedChats = scopedChats(from: visibleChats, scope: activeScope)
-                    let scopedChatIds = Set(scopedChats.map(\.id))
-                    let localMessages = await telegramService.localSearch(
-                        query: query,
-                        chatIds: scopedChats.map(\.id),
-                        limit: 50
-                    )
-                    let unindexedChatIds = await DatabaseManager.shared.unindexedChatIds(in: scopedChats.map(\.id))
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
 
-                    var mergedMessages = Dictionary(
-                        uniqueKeysWithValues: localMessages.map { message in
-                            ("\(message.chatId):\(message.id)", message)
-                        }
-                    )
+            aiSearchMode = intent
+            isAISearching = true
+            aiSearchError = nil
+            currentQuerySpec = parsedSpec
+            summaryOutput = nil
+            searchResultChatIds = []
 
-                    if !unindexedChatIds.isEmpty {
-                        let fallbackMessages = try await telegramService.searchMessages(
-                            query: query,
-                            limit: 50,
-                            chatTypeFilter: keywordFallbackChatTypeFilter(for: activeScope)
-                        )
-
-                        for message in fallbackMessages
-                        where scopedChatIds.contains(message.chatId) && unindexedChatIds.contains(message.chatId) {
-                            mergedMessages["\(message.chatId):\(message.id)"] = message
-                        }
-                    }
-
-                    guard !Task.isCancelled else { return }
-                    searchResultChatIds = Set(mergedMessages.values.map(\.chatId))
-                    isSearching = false
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    isSearching = false
-                }
+            do {
+                let results = try await executeAISearch(
+                    intent: intent,
+                    query: query,
+                    querySpec: parsedSpec,
+                    searchRunID: searchRunID,
+                    activeScope: activeScope,
+                    aiSearchSourceChats: aiSearchSourceChats,
+                    scopedAISearchSourceChats: scopedAISearchSourceChats,
+                    includeBotsInAISearch: includeBotsInAISearch,
+                    telegramService: telegramService,
+                    aiService: aiService,
+                    pipelineCategoryProvider: pipelineCategoryProvider,
+                    pipelineHintProvider: pipelineHintProvider
+                )
+                guard !Task.isCancelled else { return }
+                aiResults = results
+                isAISearching = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                aiSearchError = error.localizedDescription
+                isAISearching = false
             }
         }
     }
@@ -216,6 +218,7 @@ final class SearchCoordinator: ObservableObject {
         intent: QueryIntent,
         query: String,
         querySpec: QuerySpec?,
+        searchRunID: UUID,
         activeScope: QueryScope,
         aiSearchSourceChats: [TGChat],
         scopedAISearchSourceChats: [TGChat],
@@ -225,8 +228,22 @@ final class SearchCoordinator: ObservableObject {
         pipelineCategoryProvider: @escaping (Int64) -> FollowUpItem.Category?,
         pipelineHintProvider: @escaping (Int64) async -> String
     ) async throws -> [AISearchResult] {
-        switch intent {
-        case .semanticSearch:
+        let resolvedQuerySpec = querySpec ?? queryInterpreter.parse(
+            query: query,
+            now: Date(),
+            timezone: .current,
+            activeFilter: activeScope
+        )
+
+        switch resolvedQuerySpec.preferredEngine {
+        case .messageLookup:
+            return await executePatternSearch(
+                querySpec: resolvedQuerySpec,
+                activeScope: activeScope,
+                scopedChats: scopedAISearchSourceChats,
+                telegramService: telegramService
+            )
+        case .semanticRetrieval:
             return await executeLocalSemanticSearch(
                 query: query,
                 activeScope: activeScope,
@@ -234,10 +251,11 @@ final class SearchCoordinator: ObservableObject {
                 telegramService: telegramService,
                 aiService: aiService
             )
-        case .agenticSearch:
+        case .replyTriage:
             return try await executeAgenticSearch(
                 query: query,
-                querySpec: querySpec,
+                querySpec: resolvedQuerySpec,
+                searchRunID: searchRunID,
                 activeScope: activeScope,
                 aiSearchSourceChats: aiSearchSourceChats,
                 includeBotsInAISearch: includeBotsInAISearch,
@@ -246,9 +264,54 @@ final class SearchCoordinator: ObservableObject {
                 pipelineCategoryProvider: pipelineCategoryProvider,
                 pipelineHintProvider: pipelineHintProvider
             )
-        case .messageSearch:
+        case .summarize:
+            return await executeSummarySearch(
+                querySpec: resolvedQuerySpec,
+                activeScope: activeScope,
+                scopedChats: scopedAISearchSourceChats,
+                telegramService: telegramService,
+                aiService: aiService
+            )
+        case .graphCRM:
             return []
         }
+    }
+
+    private func executePatternSearch(
+        querySpec: QuerySpec,
+        activeScope: QueryScope,
+        scopedChats: [TGChat],
+        telegramService: TelegramService
+    ) async -> [AISearchResult] {
+        let results = await PatternSearchEngine.shared.search(
+            query: querySpec,
+            scope: activeScope,
+            scopedChats: scopedChats,
+            telegramService: telegramService
+        )
+        totalChatsToScan = 0
+        semanticMatchedChats = 0
+        return results.map { .patternResult($0) }
+    }
+
+    private func executeSummarySearch(
+        querySpec: QuerySpec,
+        activeScope: QueryScope,
+        scopedChats: [TGChat],
+        telegramService: TelegramService,
+        aiService: AIService
+    ) async -> [AISearchResult] {
+        let execution = await SummaryEngine.shared.search(
+            query: querySpec,
+            scope: activeScope,
+            scopedChats: scopedChats,
+            telegramService: telegramService,
+            aiService: aiService
+        )
+        summaryOutput = execution.output
+        totalChatsToScan = execution.results.count
+        semanticMatchedChats = execution.results.count
+        return execution.results.map { .semanticResult($0) }
     }
 
     private func executeLocalSemanticSearch(

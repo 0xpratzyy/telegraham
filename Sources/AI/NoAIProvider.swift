@@ -26,6 +26,14 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
+    func triageReplyQueue(
+        query: String,
+        scope: QueryScope,
+        candidates: [ReplyQueueCandidateDTO]
+    ) async throws -> [ReplyQueueTriageResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
         return (true, "")
     }
