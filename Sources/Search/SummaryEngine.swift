@@ -48,7 +48,10 @@ final class SummaryEngine {
             limit: constants.vectorTopMessages
         )
 
-        let merged = merge(ftsHits: ftsHits, vectorHits: vectorHits)
+        let merged = applyTimeRange(
+            merge(ftsHits: ftsHits, vectorHits: vectorHits),
+            timeRange: querySpec.timeRange
+        )
         let candidates = buildCandidates(from: merged, chatsById: chatById)
             .sorted { lhs, rhs in
                 if lhs.score != rhs.score { return lhs.score > rhs.score }
@@ -72,13 +75,19 @@ final class SummaryEngine {
 
         let focusMessages = await loadSummaryMessages(
             for: focus.chat,
+            timeRange: querySpec.timeRange,
             telegramService: telegramService
         )
-        let boundedMessages = Array(
-            focusMessages
-                .sorted { $0.date < $1.date }
-                .suffix(AppConstants.Search.Summary.summaryMessageLimit)
-        )
+        let boundedMessages: [TGMessage]
+        if focusMessages.isEmpty, let bestMessage = focus.bestMessage {
+            boundedMessages = [bestMessage]
+        } else {
+            boundedMessages = Array(
+                focusMessages
+                    .sorted { $0.date < $1.date }
+                    .suffix(AppConstants.Search.Summary.summaryMessageLimit)
+            )
+        }
 
         let summaryText = await summarize(
             query: querySpec.rawQuery,
@@ -196,15 +205,23 @@ final class SummaryEngine {
 
     private func loadSummaryMessages(
         for chat: TGChat,
+        timeRange: TimeRangeConstraint?,
         telegramService: TelegramService
     ) async -> [TGMessage] {
         if let cached = await MessageCacheService.shared.getMessages(chatId: chat.id), !cached.isEmpty {
-            return cached
+            let filteredCached = applyTimeRange(cached, timeRange: timeRange)
+            if !filteredCached.isEmpty || timeRange == nil {
+                return filteredCached
+            }
         }
-        return (try? await telegramService.getChatHistory(
+        let fetchLimit = timeRange == nil
+            ? AppConstants.Search.Summary.summaryMessageLimit
+            : AppConstants.Search.Summary.summaryMessageLimit * 3
+        let fetched = (try? await telegramService.getChatHistory(
             chatId: chat.id,
-            limit: AppConstants.Search.Summary.summaryMessageLimit
+            limit: fetchLimit
         )) ?? []
+        return applyTimeRange(fetched, timeRange: timeRange)
     }
 
     private func summaryTitle(for query: String, chatTitle: String) -> String {
@@ -217,6 +234,16 @@ final class SummaryEngine {
     private func normalize(score: Double, maxScore: Double) -> Double {
         guard maxScore > 0 else { return 0 }
         return min(1, max(0, score / maxScore))
+    }
+
+    private func applyTimeRange(_ hits: [LocalHit], timeRange: TimeRangeConstraint?) -> [LocalHit] {
+        guard let timeRange else { return hits }
+        return hits.filter { timeRange.contains($0.message.date) }
+    }
+
+    private func applyTimeRange(_ messages: [TGMessage], timeRange: TimeRangeConstraint?) -> [TGMessage] {
+        guard let timeRange else { return messages }
+        return messages.filter { timeRange.contains($0.date) }
     }
 
     private func snippet(from text: String) -> String {

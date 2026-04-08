@@ -74,7 +74,14 @@ final class ClaudeProvider: AIProvider {
                 requestKind: .agenticSearch
             )
         }
-        return try AgenticSearchResultParser.parse(response)
+        let parsed = try AgenticSearchResultParser.parse(response)
+        try validateCardinality(
+            parsedCount: parsed.count,
+            returnedIds: Set(parsed.map(\.chatId)),
+            expectedIds: Set(candidates.map(\.chatId)),
+            kind: "agentic"
+        )
+        return parsed
     }
 
     func triageReplyQueue(
@@ -95,13 +102,12 @@ final class ClaudeProvider: AIProvider {
             )
         }
         let parsed = try ReplyQueueTriageResultParser.parse(response)
-        let expectedIds = Set(candidates.map(\.chatId))
-        let returnedIds = Set(parsed.map(\.chatId))
-        guard parsed.count == candidates.count, returnedIds == expectedIds else {
-            throw AIError.parsingError(
-                "reply queue response cardinality mismatch: expected \(candidates.count) candidates but got \(parsed.count)"
-            )
-        }
+        try validateCardinality(
+            parsedCount: parsed.count,
+            returnedIds: Set(parsed.map(\.chatId)),
+            expectedIds: Set(candidates.map(\.chatId)),
+            kind: "reply queue"
+        )
         return parsed
     }
 
@@ -207,6 +213,19 @@ final class ClaudeProvider: AIProvider {
             return Int(string)
         default:
             return nil
+        }
+    }
+
+    private func validateCardinality(
+        parsedCount: Int,
+        returnedIds: Set<Int64>,
+        expectedIds: Set<Int64>,
+        kind: String
+    ) throws {
+        guard parsedCount == expectedIds.count, returnedIds == expectedIds else {
+            throw AIError.parsingError(
+                "\(kind) response cardinality mismatch: expected \(expectedIds.count) candidates but got \(parsedCount)"
+            )
         }
     }
 }

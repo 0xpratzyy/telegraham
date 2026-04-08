@@ -234,20 +234,27 @@ final class SearchCoordinator: ObservableObject {
             timezone: .current,
             activeFilter: activeScope
         )
+        let resolvedScope = resolvedQuerySpec.scope
+        let resolvedScopedChats: [TGChat]
+        if resolvedScope == activeScope {
+            resolvedScopedChats = scopedAISearchSourceChats
+        } else {
+            resolvedScopedChats = scopedChats(from: aiSearchSourceChats, scope: resolvedScope)
+        }
 
         switch resolvedQuerySpec.preferredEngine {
         case .messageLookup:
             return await executePatternSearch(
                 querySpec: resolvedQuerySpec,
-                activeScope: activeScope,
-                scopedChats: scopedAISearchSourceChats,
+                scope: resolvedScope,
+                scopedChats: resolvedScopedChats,
                 telegramService: telegramService
             )
         case .semanticRetrieval:
             return await executeLocalSemanticSearch(
                 query: query,
-                activeScope: activeScope,
-                scopedChats: scopedAISearchSourceChats,
+                scope: resolvedScope,
+                scopedChats: resolvedScopedChats,
                 telegramService: telegramService,
                 aiService: aiService
             )
@@ -267,8 +274,8 @@ final class SearchCoordinator: ObservableObject {
         case .summarize:
             return await executeSummarySearch(
                 querySpec: resolvedQuerySpec,
-                activeScope: activeScope,
-                scopedChats: scopedAISearchSourceChats,
+                scope: resolvedScope,
+                scopedChats: resolvedScopedChats,
                 telegramService: telegramService,
                 aiService: aiService
             )
@@ -279,13 +286,13 @@ final class SearchCoordinator: ObservableObject {
 
     private func executePatternSearch(
         querySpec: QuerySpec,
-        activeScope: QueryScope,
+        scope: QueryScope,
         scopedChats: [TGChat],
         telegramService: TelegramService
     ) async -> [AISearchResult] {
         let results = await PatternSearchEngine.shared.search(
             query: querySpec,
-            scope: activeScope,
+            scope: scope,
             scopedChats: scopedChats,
             telegramService: telegramService
         )
@@ -296,14 +303,14 @@ final class SearchCoordinator: ObservableObject {
 
     private func executeSummarySearch(
         querySpec: QuerySpec,
-        activeScope: QueryScope,
+        scope: QueryScope,
         scopedChats: [TGChat],
         telegramService: TelegramService,
         aiService: AIService
     ) async -> [AISearchResult] {
         let execution = await SummaryEngine.shared.search(
             query: querySpec,
-            scope: activeScope,
+            scope: scope,
             scopedChats: scopedChats,
             telegramService: telegramService,
             aiService: aiService
@@ -316,7 +323,7 @@ final class SearchCoordinator: ObservableObject {
 
     private func executeLocalSemanticSearch(
         query: String,
-        activeScope: QueryScope,
+        scope: QueryScope,
         scopedChats: [TGChat],
         telegramService: TelegramService,
         aiService: AIService
@@ -356,7 +363,7 @@ final class SearchCoordinator: ObservableObject {
            let fallbackMessages = try? await telegramService.searchMessages(
                 query: query,
                 limit: constants.fallbackTopMessages,
-                chatTypeFilter: keywordFallbackChatTypeFilter(for: activeScope)
+                chatTypeFilter: keywordFallbackChatTypeFilter(for: scope)
            ) {
             mergeFallbackSemanticCandidates(
                 messages: fallbackMessages.filter { unindexedChatIds.contains($0.chatId) },

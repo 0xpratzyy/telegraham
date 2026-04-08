@@ -1,7 +1,7 @@
 import Foundation
 
-/// Event-driven message cache. Kept fresh via TDLib real-time updates — no TTL/expiry.
-/// Two-tier: in-memory dictionary + SQLite read-through persistence.
+/// Event-driven hot cache. Kept fresh via TDLib real-time updates — no TTL/expiry.
+/// Two-tier: in-memory recent window + durable SQLite history read-through.
 actor MessageCacheService {
     static let shared = MessageCacheService()
 
@@ -93,19 +93,11 @@ actor MessageCacheService {
         )
         memoryCache[chatId] = entry
 
-        if append {
-            await DatabaseManager.shared.mergeMessages(
-                chatId: chatId,
-                messages: newCachedMessages.map { $0.toDatabaseRecord() },
-                limit: maxMessages
-            )
-        } else {
-            await DatabaseManager.shared.replaceMessages(
-                chatId: chatId,
-                messages: entry.messages.map { $0.toDatabaseRecord() },
-                limit: maxMessages
-            )
-        }
+        let recordsToPersist = append ? newCachedMessages : entry.messages
+        await DatabaseManager.shared.upsertLiveMessages(
+            chatId: chatId,
+            messages: recordsToPersist.map { $0.toDatabaseRecord() }
+        )
     }
 
     /// Append a single message from a real-time update.
@@ -130,10 +122,9 @@ actor MessageCacheService {
             )
         }
 
-        await DatabaseManager.shared.mergeMessages(
+        await DatabaseManager.shared.upsertLiveMessages(
             chatId: chatId,
-            messages: [cachedMessage.toDatabaseRecord()],
-            limit: AppConstants.Cache.maxCachedMessagesPerChat
+            messages: [cachedMessage.toDatabaseRecord()]
         )
     }
 
@@ -173,22 +164,23 @@ actor MessageCacheService {
     /// No-op if the chat isn't currently cached in memory or SQLite.
     func deleteMessages(chatId: Int64, messageIds: [Int64]) async {
         guard !messageIds.isEmpty else { return }
-        guard var existing = await loadCachedEntry(chatId: chatId) else { return }
-
         let toDelete = Set(messageIds)
-        let originalCount = existing.messages.count
-        existing.messages.removeAll { toDelete.contains($0.id) }
-        guard existing.messages.count != originalCount else { return }
+        if var existing = await loadCachedEntry(chatId: chatId) {
+            existing.messages.removeAll { toDelete.contains($0.id) }
 
-        if existing.messages.isEmpty {
-            memoryCache.removeValue(forKey: chatId)
-            await DatabaseManager.shared.deleteMessages(for: chatId)
-            return
+            if existing.messages.isEmpty {
+                memoryCache.removeValue(forKey: chatId)
+            } else {
+                existing.oldestMessageId = existing.messages.last?.id
+                memoryCache[chatId] = existing
+            }
         }
 
-        existing.oldestMessageId = existing.messages.last?.id
-        memoryCache[chatId] = existing
         await DatabaseManager.shared.deleteMessages(chatId: chatId, messageIds: messageIds)
+
+        if memoryCache[chatId] == nil {
+            await reloadMemoryCacheFromDisk(chatId: chatId)
+        }
     }
 
     // MARK: - Pipeline Category Cache
@@ -259,12 +251,10 @@ actor MessageCacheService {
 
     func invalidate(chatId: Int64) async {
         memoryCache.removeValue(forKey: chatId)
-        await DatabaseManager.shared.deleteMessages(for: chatId)
     }
 
     func invalidateAll() async {
         memoryCache.removeAll()
-        await DatabaseManager.shared.clearMessageCache()
     }
 
     // MARK: - Flush
@@ -292,6 +282,24 @@ actor MessageCacheService {
         )
         memoryCache[chatId] = cached
         return cached
+    }
+
+    private func reloadMemoryCacheFromDisk(chatId: Int64) async {
+        let records = await DatabaseManager.shared.loadMessages(
+            chatId: chatId,
+            limit: AppConstants.Cache.maxCachedMessagesPerChat
+        )
+
+        guard !records.isEmpty else {
+            memoryCache.removeValue(forKey: chatId)
+            return
+        }
+
+        memoryCache[chatId] = CachedChatMessages(
+            chatId: chatId,
+            messages: records.map { CachedMessage.from($0) },
+            oldestMessageId: records.last?.id
+        )
     }
 
     private static func sortMessagesDescending(lhs: CachedMessage, rhs: CachedMessage) -> Bool {

@@ -135,6 +135,7 @@ enum AppConstants {
         static let minEmbeddingTextLength = 10
         static let embeddingPreviewCharacterLimit = 160
         static let embeddingBackfillBatchSize = 128
+        static let embeddingBackfillEveryIndexedChats = 8
     }
 
     enum Search {

@@ -571,7 +571,7 @@ final class ReplyQueueEngine {
             reason: reason,
             suggestedAction: fallbackSuggestedAction(for: pending, myUserId: myUserId),
             confidence: classification == ReplyQueueResult.Classification.onMe.rawValue ? 0.58 : 0.42,
-            supportingMessageIds: supportingMessageIds(for: pending.messages, myUserId: myUserId)
+            supportingMessageIds: supportingMessageIds(for: pending, myUserId: myUserId)
         )
     }
 
@@ -727,19 +727,10 @@ final class ReplyQueueEngine {
         return "Review the latest group ask and reply only if it is clearly on you."
     }
 
-    private func supportingMessageIds(for messages: [TGMessage], myUserId: Int64) -> [Int64] {
+    private func supportingMessageIds(for pending: PendingChat, myUserId: Int64) -> [Int64] {
+        let messages = pending.messages
         if let latest = ConversationReplyHeuristics.latestInboundRequiringReply(
-            chat: TGChat(
-                id: messages.first?.chatId ?? 0,
-                title: messages.first?.chatTitle ?? "Chat",
-                chatType: .basicGroup(groupId: 0),
-                unreadCount: 0,
-                lastMessage: messages.sorted(by: { $0.date > $1.date }).first,
-                memberCount: nil,
-                order: 0,
-                isInMainList: true,
-                smallPhotoFileId: nil
-            ),
+            chat: pending.chat,
             messages: messages,
             myUserId: myUserId
         ) {

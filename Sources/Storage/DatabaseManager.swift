@@ -120,35 +120,16 @@ actor DatabaseManager {
         hasInitialized = false
     }
 
-    func replaceMessages(chatId: Int64, messages: [MessageRecord], limit: Int) async {
-        guard let pool = await ensureDatabase() else { return }
-        let trimmedMessages = Array(messages.sorted(by: Self.sortMessagesDescending).prefix(limit))
-
-        do {
-            try await pool.write { db in
-                try db.execute(
-                    sql: "DELETE FROM messages WHERE chat_id = ?",
-                    arguments: [chatId]
-                )
-                try Self.insertMessages(trimmedMessages, into: db)
-                try Self.refreshSyncState(in: db, chatId: chatId)
-            }
-        } catch {
-            print("[DatabaseManager] Failed to replace messages for chat \(chatId): \(error)")
-        }
-    }
-
-    func mergeMessages(chatId: Int64, messages: [MessageRecord], limit: Int) async {
+    func upsertLiveMessages(chatId: Int64, messages: [MessageRecord]) async {
+        guard !messages.isEmpty else { return }
         guard let pool = await ensureDatabase() else { return }
 
         do {
             try await pool.write { db in
                 try Self.insertMessages(messages, into: db)
-                try Self.trimMessages(in: db, chatId: chatId, limit: limit)
-                try Self.refreshSyncState(in: db, chatId: chatId)
             }
         } catch {
-            print("[DatabaseManager] Failed to merge messages for chat \(chatId): \(error)")
+            print("[DatabaseManager] Failed to upsert live messages for chat \(chatId): \(error)")
         }
     }
 
@@ -214,11 +195,20 @@ actor DatabaseManager {
 
         do {
             try await pool.write { db in
+                let existingState = try Self.syncStateRecord(in: db, chatId: chatId)
+                try Self.deleteEmbeddings(in: db, chatId: chatId, messageIds: messageIds)
                 try db.execute(
                     sql: "DELETE FROM messages WHERE chat_id = ? AND id IN (\(placeholders))",
                     arguments: deleteArguments
                 )
-                try Self.refreshSyncState(in: db, chatId: chatId)
+                if let existingState {
+                    try Self.refreshSyncState(
+                        in: db,
+                        chatId: chatId,
+                        preferredOldestMessageId: existingState.lastIndexedMessageId,
+                        isSearchReady: existingState.isSearchReady
+                    )
+                }
             }
         } catch {
             print("[DatabaseManager] Failed to delete messages for chat \(chatId): \(error)")
@@ -230,6 +220,10 @@ actor DatabaseManager {
 
         do {
             try await pool.write { db in
+                try db.execute(
+                    sql: "DELETE FROM embeddings WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
                 try db.execute(
                     sql: "DELETE FROM messages WHERE chat_id = ?",
                     arguments: [chatId]
@@ -338,6 +332,7 @@ actor DatabaseManager {
 
         do {
             try await pool.write { db in
+                try db.execute(sql: "DELETE FROM embeddings")
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM sync_state WHERE chat_id >= 0")
             }
@@ -352,6 +347,7 @@ actor DatabaseManager {
 
         do {
             try await pool.write { db in
+                try db.execute(sql: "DELETE FROM embeddings")
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM pipeline_cache")
                 try db.execute(sql: "DELETE FROM sync_state")
@@ -806,29 +802,22 @@ actor DatabaseManager {
         }
     }
 
-    private static func trimMessages(in db: Database, chatId: Int64, limit: Int) throws {
-        let rowsToDelete = try Int64.fetchAll(
-            db,
-            sql: """
-                SELECT id
-                FROM messages
-                WHERE chat_id = ?
-                ORDER BY date DESC, id DESC
-                LIMIT -1 OFFSET ?
-                """,
-            arguments: [chatId, limit]
-        )
-        guard !rowsToDelete.isEmpty else { return }
+    private static func deleteEmbeddings(
+        in db: Database,
+        chatId: Int64,
+        messageIds: [Int64]
+    ) throws {
+        guard !messageIds.isEmpty else { return }
 
-        let placeholders = Array(repeating: "?", count: rowsToDelete.count).joined(separator: ", ")
+        let placeholders = Array(repeating: "?", count: messageIds.count).joined(separator: ", ")
         var arguments = StatementArguments()
         arguments += [chatId]
-        for messageId in rowsToDelete {
+        for messageId in messageIds {
             arguments += [messageId]
         }
 
         try db.execute(
-            sql: "DELETE FROM messages WHERE chat_id = ? AND id IN (\(placeholders))",
+            sql: "DELETE FROM embeddings WHERE chat_id = ? AND message_id IN (\(placeholders))",
             arguments: arguments
         )
     }

@@ -162,6 +162,43 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v5_storage_hygiene") { db in
+            try db.execute(sql: """
+                CREATE INDEX idx_messages_sender
+                ON messages(sender_user_id)
+                """)
+
+            try db.execute(sql: """
+                ALTER TABLE embeddings RENAME TO embeddings_legacy
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE embeddings (
+                    message_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    text_preview TEXT,
+                    PRIMARY KEY (message_id, chat_id),
+                    FOREIGN KEY (message_id, chat_id) REFERENCES messages(id, chat_id) ON DELETE CASCADE
+                )
+                """)
+
+            try db.execute(sql: """
+                INSERT INTO embeddings (message_id, chat_id, vector, text_preview)
+                SELECT message_id, chat_id, vector, text_preview
+                FROM embeddings_legacy
+                """)
+
+            try db.execute(sql: """
+                DROP TABLE embeddings_legacy
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_embeddings_chat
+                ON embeddings(chat_id)
+                """)
+        }
+
         return migrator
     }
 }

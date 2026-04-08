@@ -23,6 +23,7 @@ actor IndexScheduler {
     private var processingTask: Task<Void, Never>?
     private var isPaused = false
     private var prioritizedChatIds: [Int64] = []
+    private var indexedChatsSinceEmbeddingBackfill = 0
 
     func start(using telegramService: TelegramService) async {
         self.telegramService = telegramService
@@ -43,6 +44,7 @@ actor IndexScheduler {
         processingTask = nil
         telegramService = nil
         prioritizedChatIds.removeAll()
+        indexedChatsSinceEmbeddingBackfill = 0
         isPaused = false
         await updateProgress(indexed: 0, total: 0, currentChat: nil, isPaused: false)
     }
@@ -101,6 +103,11 @@ actor IndexScheduler {
             let pendingChats = orderedChats.filter { !readyChatIds.contains($0.id) }
 
             guard let nextChat = pendingChats.first else {
+                let backfilled = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
+                if backfilled > 0 {
+                    indexedChatsSinceEmbeddingBackfill = 0
+                    continue
+                }
                 await updateProgress(
                     indexed: readyChatIds.count,
                     total: orderedChats.count,
@@ -119,7 +126,11 @@ actor IndexScheduler {
             )
 
             await index(chat: nextChat, currentUserId: snapshot.currentUserId, using: telegramService)
-            _ = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
+            indexedChatsSinceEmbeddingBackfill += 1
+            if indexedChatsSinceEmbeddingBackfill >= AppConstants.Indexing.embeddingBackfillEveryIndexedChats {
+                _ = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
+                indexedChatsSinceEmbeddingBackfill = 0
+            }
             try? await Task.sleep(for: .milliseconds(Int(AppConstants.Indexing.interBatchDelayMilliseconds)))
         }
     }
