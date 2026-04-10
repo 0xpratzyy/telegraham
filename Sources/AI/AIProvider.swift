@@ -160,13 +160,17 @@ struct AgenticCandidateDTO: Codable {
     let messages: [MessageSnippet]
 }
 
-struct ReplyQueueCandidateDTO: Codable {
+struct ReplyQueueCandidateDTO: Codable, Sendable {
     let chatId: Int64
     let chatName: String
     let chatType: String
     let unreadCount: Int
     let memberCount: Int?
     let localSignal: String
+    let pipelineHint: String
+    let replyOwed: Bool
+    let strictReplySignal: Bool
+    let effectiveGroupReplySignal: Bool
     let messages: [MessageSnippet]
 }
 
@@ -258,7 +262,7 @@ enum AgenticSearchResultParser {
     }
 }
 
-struct ReplyQueueTriageResultDTO: Codable {
+struct ReplyQueueTriageResultDTO: Codable, Sendable {
     let chatId: Int64
     let classification: String
     let urgency: String

@@ -15,6 +15,7 @@ enum ReplyQueueTriagePrompt {
 
     Key judgment rules:
     - Prefer concrete unresolved asks over vague warmth.
+    - The sender label "[ME]" means the current user sent that message.
     - In groups, do NOT mark "on_me" if the ask is clearly aimed at someone else.
     - Treat acknowledgements, reactions, celebrations, and thread-closing chatter as "quiet" unless a new ask appears.
     - A previous ask that has already been answered or superseded by later messages should not remain "on_me".
@@ -48,6 +49,7 @@ enum ReplyQueueTriagePrompt {
         var text = "User query: \"\(query)\"\n"
         text += "Scope: \(scope.rawValue)\n"
         text += "Return one result for every candidate chatId.\n"
+        text += "Each candidate includes a compact local digest and only the most relevant recent snippets.\n"
         text += "\nCandidate chats:\n"
 
         for candidate in candidates {
@@ -60,13 +62,34 @@ enum ReplyQueueTriagePrompt {
                 text += "memberCount: \(memberCount)\n"
             }
             text += "localSignal: \(candidate.localSignal)\n"
-            text += "Messages (oldest first):\n"
+            text += "pipelineHint: \(candidate.pipelineHint)\n"
+            text += "replyOwed: \(candidate.replyOwed)\n"
+            text += "strictReplySignal: \(candidate.strictReplySignal)\n"
+            text += "effectiveGroupReplySignal: \(candidate.effectiveGroupReplySignal)\n"
+            text += "Key snippets:\n"
 
-            for message in candidate.messages {
+            for message in compactSnippets(from: candidate.messages) {
                 text += "[messageId: \(message.messageId)] [\(message.relativeTimestamp)] \(message.senderFirstName): \(message.text)\n"
             }
         }
 
         return text
+    }
+
+    private static func compactSnippets(from messages: [MessageSnippet]) -> [MessageSnippet] {
+        guard !messages.isEmpty else { return [] }
+
+        let latest = messages.last
+        let inbound = messages.last { $0.senderFirstName != "[ME]" }
+        let outbound = messages.last { $0.senderFirstName == "[ME]" }
+
+        var picked: [MessageSnippet] = []
+        var seen: Set<Int64> = []
+        for message in [latest, inbound, outbound].compactMap({ $0 }) {
+            if seen.insert(message.messageId).inserted {
+                picked.append(message)
+            }
+        }
+        return picked
     }
 }

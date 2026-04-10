@@ -5,6 +5,12 @@ import SwiftUI
 /// and exposes high-level AI operations that combine TelegramService data with AI.
 @MainActor
 final class AIService: ObservableObject {
+    struct ReplyQueueExecutionConfig: Sendable {
+        let providerType: AIProviderConfig.ProviderType
+        let apiKey: String
+        let model: String
+    }
+
     struct PipelineTriageResult {
         enum Status: Equatable {
             case decision
@@ -30,6 +36,7 @@ final class AIService: ObservableObject {
     @Published private(set) var providerModel: String = ""
     private(set) var provider: AIProvider = NoAIProvider()
     let queryRouter: QueryRouter
+    private var configuredAPIKey: String = ""
 
     init() {
         self.queryRouter = QueryRouter(aiProvider: NoAIProvider())
@@ -57,6 +64,7 @@ final class AIService: ObservableObject {
         queryRouter.updateProvider(provider)
         providerType = type
         providerModel = resolvedModel
+        configuredAPIKey = apiKey
         isConfigured = type != .none && !apiKey.isEmpty
         saveConfiguration(type: type, apiKey: apiKey, model: resolvedModel)
     }
@@ -273,6 +281,28 @@ final class AIService: ObservableObject {
         await AIUsageStore.shared.loadOverview()
     }
 
+    func replyQueueExecutionConfig() -> ReplyQueueExecutionConfig? {
+        guard isConfigured, providerType != .none, !configuredAPIKey.isEmpty else {
+            return nil
+        }
+
+        let resolvedModel: String
+        switch providerType {
+        case .openai:
+            resolvedModel = AppConstants.AI.replyQueueOpenAIModel
+        case .claude:
+            resolvedModel = providerModel
+        case .none:
+            return nil
+        }
+
+        return ReplyQueueExecutionConfig(
+            providerType: providerType,
+            apiKey: configuredAPIKey,
+            model: resolvedModel
+        )
+    }
+
     // MARK: - Persistence
 
     private func loadConfiguration() {
@@ -294,17 +324,7 @@ final class AIService: ObservableObject {
     }
 
     private func normalizedModel(type: AIProviderConfig.ProviderType, model: String) -> String {
-        switch type {
-        case .openai:
-            switch model.lowercased() {
-            case "gpt-5.4-mini":
-                return "gpt-5-mini"
-            default:
-                return model
-            }
-        default:
-            return model
-        }
+        model
     }
 
     func clearConfigurationState() {
@@ -312,6 +332,7 @@ final class AIService: ObservableObject {
         queryRouter.updateProvider(provider)
         providerType = .none
         providerModel = ""
+        configuredAPIKey = ""
         isConfigured = false
     }
 }

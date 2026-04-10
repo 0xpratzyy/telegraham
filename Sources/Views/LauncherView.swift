@@ -54,6 +54,8 @@ struct LauncherView: View {
     private var summaryOutput: SummarySearchOutput? { searchCoordinator.summaryOutput }
     private var semanticMatchedChats: Int { searchCoordinator.semanticMatchedChats }
     private var totalChatsToScan: Int { searchCoordinator.totalChatsToScan }
+    private var searchStartedAt: Foundation.Date? { searchCoordinator.searchStartedAt }
+    private var lastSearchDuration: TimeInterval? { searchCoordinator.lastSearchDuration }
     private var agenticUsedLocalFallback: Bool {
         agenticDebugInfo?.stopReason.contains("using local fallback") == true
     }
@@ -325,16 +327,24 @@ struct LauncherView: View {
 
     private func aiModeBanner(intent: QueryIntent) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+            TimelineView(.periodic(from: .now, by: 0.1)) { context in
+                HStack(spacing: 5) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
 
-                Text(aiModeLabel(intent: intent))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    Text(aiModeLabel(intent: intent))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
 
-                Spacer()
+                    Spacer()
+
+                    if let duration = searchDurationText(at: context.date) {
+                        Text(duration)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             if intent == .agenticSearch,
@@ -360,6 +370,24 @@ struct LauncherView: View {
         .padding(.vertical, 5)
     }
 
+    private func searchDurationText(at now: Foundation.Date) -> String? {
+        if isAISearching, let startedAt = searchStartedAt {
+            return formatDuration(now.timeIntervalSince(startedAt))
+        }
+        if let lastSearchDuration {
+            return formatDuration(lastSearchDuration)
+        }
+        return nil
+    }
+
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        let clamped = max(0, duration)
+        if clamped < 10 {
+            return String(format: "%.1fs", clamped)
+        }
+        return String(format: "%.0fs", clamped)
+    }
+
     private func aiModeLabel(intent: QueryIntent) -> String {
         switch intent {
         case .semanticSearch:
@@ -376,9 +404,15 @@ struct LauncherView: View {
         case .agenticSearch:
             if isAISearching {
                 if !aiResults.isEmpty {
+                    if agenticUsedLocalFallback {
+                        return "Showing \(aiResults.count) likely chats • degraded mode • still scanning \(semanticMatchedChats) of \(totalChatsToScan)"
+                    }
                     return "Showing \(aiResults.count) confident chats • still scanning \(semanticMatchedChats) of \(totalChatsToScan)"
                 }
                 if totalChatsToScan > 0 {
+                    if agenticUsedLocalFallback {
+                        return "Using limited local fallback • scanning \(semanticMatchedChats) of \(totalChatsToScan)"
+                    }
                     return "Scanning \(semanticMatchedChats) of \(totalChatsToScan), ranking intent..."
                 }
                 return "Ranking warm, reply-ready chats..."
@@ -527,7 +561,8 @@ struct LauncherView: View {
             }
         }
         lines.append(contentsOf: [
-            "scoped \(debug.scopedChats) • scanCap \(debug.maxScanChats) • scanned \(debug.scannedChats)",
+            "scoped \(debug.scopedChats) • eligibleDMs \(debug.eligiblePrivateChats) • eligibleGroups \(debug.eligibleGroupChats)",
+            "scanCap \(debug.maxScanChats) • cappedDMs \(debug.cappedPrivateChats) • cappedGroups \(debug.cappedGroupChats) • scanned \(debug.scannedChats)",
             "inRange \(debug.inRangeChats) • replyOwed \(debug.replyOwedChats) • queryMatch \(debug.matchedChats)",
             "matchedDMs \(debug.matchedPrivateChats) • matchedGroups \(debug.matchedGroupChats) • finalDMs \(debug.finalPrivateChats) • finalGroups \(debug.finalGroupChats)",
             "toAI \(debug.candidatesSentToAI) • aiReturned \(debug.aiReturned) • ranked \(debug.rankedBeforeValidation)",

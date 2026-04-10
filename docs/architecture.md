@@ -1,6 +1,6 @@
 # Pidgy Architecture
 
-Last updated: 2026-04-08
+Last updated: 2026-04-09
 
 This is a living architecture doc for the launcher-first MVP.
 
@@ -178,7 +178,11 @@ Purpose:
 Current behavior:
 
 - coarse local eligibility filter first
-- batch AI triage across eligible chats
+- local-only first pass from memory/SQLite
+- capped candidate set of 48 chats
+- compact deterministic per-chat digests, not raw full chat payloads
+- dedicated OpenAI reply-queue model path uses `gpt-5.4-mini`
+- AI triage runs in 4 parallel batches of 12 chats
 - progressive rendering of confident results while scanning continues
 - recent-first ordering
 
@@ -221,6 +225,7 @@ Design principle:
 
 - AI should be used for judgment and synthesis
 - local retrieval should do as much work as possible before AI is invoked
+- reply queue uses a dedicated model path when needed, instead of inheriting the generic OpenAI default model blindly
 
 ## 5. Launcher UI
 
@@ -254,10 +259,12 @@ Development/debug support exists, but normal launcher UI should stay focused on 
 
 ## Known Architectural Gaps
 
-1. reply queue still needs tighter batching and budgeting rules at scale
-2. summary is still single-focus and not true cross-chat synthesis
-3. graph/CRM execution is deferred to post-MVP
-4. automated coverage for launcher/search/storage paths is still missing
+1. reply queue still leans too hard on local group heuristics in final validation, which can block AI from rescuing true group obligations
+2. compact reply-queue digests can over-compress context and hide the original actionable ask in some threads
+3. local-only reply triage can miss cold chats if recent updates have not been flushed locally yet
+4. summary is still single-focus and not true cross-chat synthesis
+5. graph/CRM execution is deferred to post-MVP
+6. automated coverage for launcher/search/storage paths is still missing
 
 ## Recent Changes
 

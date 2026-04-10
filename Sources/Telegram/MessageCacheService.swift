@@ -5,6 +5,12 @@ import Foundation
 actor MessageCacheService {
     static let shared = MessageCacheService()
 
+    enum MessageLoadSource: String, Sendable, Codable {
+        case memory
+        case sqlite
+        case empty
+    }
+
     private var memoryCache: [Int64: CachedChatMessages] = [:]
     private var pipelineCache: [Int64: CachedPipelineCategory] = [:]
 
@@ -50,6 +56,28 @@ actor MessageCacheService {
             return nil
         }
         return cached.messages.map { $0.toTGMessage() }
+    }
+
+    func getMessagesWithSource(chatId: Int64) async -> (messages: [TGMessage], source: MessageLoadSource) {
+        if let cached = memoryCache[chatId], !cached.messages.isEmpty {
+            return (cached.messages.map { $0.toTGMessage() }, .memory)
+        }
+
+        let records = await DatabaseManager.shared.loadMessages(
+            chatId: chatId,
+            limit: AppConstants.Cache.maxCachedMessagesPerChat
+        )
+        guard !records.isEmpty else {
+            return ([], .empty)
+        }
+
+        let cached = CachedChatMessages(
+            chatId: chatId,
+            messages: records.map { CachedMessage.from($0) },
+            oldestMessageId: records.last?.id
+        )
+        memoryCache[chatId] = cached
+        return (cached.messages.map { $0.toTGMessage() }, .sqlite)
     }
 
     func getOldestMessageId(chatId: Int64) async -> Int64? {

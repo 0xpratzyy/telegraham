@@ -8,11 +8,34 @@ struct AgenticDebugExclusionBucket: Identifiable, Codable {
     var id: String { reason }
 }
 
+struct AgenticDebugWaveTiming: Identifiable, Codable {
+    let wave: Int
+    let chatCount: Int
+    let localPrepMs: Int
+    let aiMs: Int
+    let provisionalCount: Int
+
+    var id: Int { wave }
+}
+
+struct AgenticDebugBatchTiming: Identifiable, Codable {
+    let label: String
+    let size: Int
+    let durationMs: Int
+    let resultCount: Int
+
+    var id: String { label }
+}
+
 struct AgenticDebugInfo: Codable {
     var scopedChats: Int
     var maxScanChats: Int
     var providerName: String = ""
     var providerModel: String = ""
+    var eligiblePrivateChats: Int = 0
+    var eligibleGroupChats: Int = 0
+    var cappedPrivateChats: Int = 0
+    var cappedGroupChats: Int = 0
     var scannedChats: Int = 0
     var inRangeChats: Int = 0
     var replyOwedChats: Int = 0
@@ -26,8 +49,22 @@ struct AgenticDebugInfo: Codable {
     var finalCount: Int = 0
     var finalPrivateChats: Int = 0
     var finalGroupChats: Int = 0
+    var totalDurationMs: Int = 0
+    var candidateCollectionMs: Int = 0
+    var prioritizationMs: Int = 0
+    var localPrepMs: Int = 0
+    var aiMs: Int = 0
+    var needMoreMs: Int = 0
+    var finalizationMs: Int = 0
+    var memoryHitChats: Int = 0
+    var sqliteHitChats: Int = 0
+    var emptyLocalChats: Int = 0
+    var aiBatchCount: Int = 0
+    var needMoreCount: Int = 0
     var stopReason: String = "unknown"
     var exclusionBuckets: [AgenticDebugExclusionBucket] = []
+    var waveTimings: [AgenticDebugWaveTiming] = []
+    var batchTimings: [AgenticDebugBatchTiming] = []
 
     mutating func recordExclusion(_ reason: String, chatTitle: String) {
         if let index = exclusionBuckets.firstIndex(where: { $0.reason == reason }) {
@@ -147,7 +184,7 @@ extension SearchCoordinator {
                 pipelineHintProvider: pipelineHintProvider,
                 onProgress: { [weak self] partial in
                     guard let self, self.activeSearchRunID == searchRunID else { return }
-                    self.totalChatsToScan = partial.debug.scopedChats
+                    self.totalChatsToScan = partial.debug.maxScanChats
                     self.semanticMatchedChats = partial.debug.scannedChats
                     self.aiResults = partial.results.map { .replyQueueResult($0) }
                     self.publishAgenticDebugInfo(
@@ -158,7 +195,7 @@ extension SearchCoordinator {
                     )
                 }
             )
-            totalChatsToScan = execution.debug.scopedChats
+            totalChatsToScan = execution.debug.maxScanChats
             semanticMatchedChats = execution.debug.scannedChats
             publishAgenticDebugInfo(
                 execution.debug,
@@ -646,11 +683,16 @@ extension SearchCoordinator {
                 }
                 lines.append("")
                 lines.append("provider \(snapshot.debug.providerName) • model \(snapshot.debug.providerModel)")
-                lines.append("scoped \(snapshot.debug.scopedChats) • scanCap \(snapshot.debug.maxScanChats) • scanned \(snapshot.debug.scannedChats)")
+                lines.append("scoped \(snapshot.debug.scopedChats) • eligibleDMs \(snapshot.debug.eligiblePrivateChats) • eligibleGroups \(snapshot.debug.eligibleGroupChats)")
+                lines.append("scanCap \(snapshot.debug.maxScanChats) • cappedDMs \(snapshot.debug.cappedPrivateChats) • cappedGroups \(snapshot.debug.cappedGroupChats) • scanned \(snapshot.debug.scannedChats)")
                 lines.append("inRange \(snapshot.debug.inRangeChats) • replyOwed \(snapshot.debug.replyOwedChats) • queryMatch \(snapshot.debug.matchedChats)")
                 lines.append("matchedDMs \(snapshot.debug.matchedPrivateChats) • matchedGroups \(snapshot.debug.matchedGroupChats) • finalDMs \(snapshot.debug.finalPrivateChats) • finalGroups \(snapshot.debug.finalGroupChats)")
                 lines.append("toAI \(snapshot.debug.candidatesSentToAI) • aiReturned \(snapshot.debug.aiReturned) • ranked \(snapshot.debug.rankedBeforeValidation)")
                 lines.append("dropped \(snapshot.debug.droppedByValidation) • final \(snapshot.debug.finalCount) • reason \(snapshot.debug.stopReason)")
+                if snapshot.debug.totalDurationMs > 0 {
+                    lines.append("timing total \(snapshot.debug.totalDurationMs)ms • collect \(snapshot.debug.candidateCollectionMs)ms • prioritize \(snapshot.debug.prioritizationMs)ms • prep \(snapshot.debug.localPrepMs)ms • ai \(snapshot.debug.aiMs)ms • needMore \(snapshot.debug.needMoreMs)ms • finalize \(snapshot.debug.finalizationMs)ms")
+                    lines.append("localSource memory \(snapshot.debug.memoryHitChats) • sqlite \(snapshot.debug.sqliteHitChats) • empty \(snapshot.debug.emptyLocalChats) • aiBatches \(snapshot.debug.aiBatchCount) • needMore \(snapshot.debug.needMoreCount)")
+                }
 
                 if !snapshot.debug.exclusionBuckets.isEmpty {
                     lines.append("")
@@ -679,6 +721,33 @@ extension SearchCoordinator {
                 }
 
                 try lines.joined(separator: "\n").write(to: textURL, atomically: true, encoding: .utf8)
+
+                if snapshot.querySpec?.family == .replyQueue {
+                    let timingJSONURL = debugDirectory.appendingPathComponent("last_reply_queue_timing.json", isDirectory: false)
+                    let timingTextURL = debugDirectory.appendingPathComponent("last_reply_queue_timing.txt", isDirectory: false)
+                    try jsonData.write(to: timingJSONURL, options: .atomic)
+                    let timingLines = [
+                        "query: \(snapshot.query)",
+                        "capturedAt: \(formatter.string(from: snapshot.capturedAt))",
+                        "totalMs: \(snapshot.debug.totalDurationMs)",
+                        "candidateCollectionMs: \(snapshot.debug.candidateCollectionMs)",
+                        "prioritizationMs: \(snapshot.debug.prioritizationMs)",
+                        "localPrepMs: \(snapshot.debug.localPrepMs)",
+                        "aiMs: \(snapshot.debug.aiMs)",
+                        "needMoreMs: \(snapshot.debug.needMoreMs)",
+                        "finalizationMs: \(snapshot.debug.finalizationMs)",
+                        "memoryHitChats: \(snapshot.debug.memoryHitChats)",
+                        "sqliteHitChats: \(snapshot.debug.sqliteHitChats)",
+                        "emptyLocalChats: \(snapshot.debug.emptyLocalChats)",
+                        "aiBatchCount: \(snapshot.debug.aiBatchCount)",
+                        "needMoreCount: \(snapshot.debug.needMoreCount)"
+                    ] + snapshot.debug.waveTimings.map {
+                        "wave \($0.wave): chats=\($0.chatCount) prepMs=\($0.localPrepMs) aiMs=\($0.aiMs) provisional=\($0.provisionalCount)"
+                    } + snapshot.debug.batchTimings.map {
+                        "batch \($0.label): size=\($0.size) durationMs=\($0.durationMs) resultCount=\($0.resultCount)"
+                    }
+                    try timingLines.joined(separator: "\n").write(to: timingTextURL, atomically: true, encoding: .utf8)
+                }
             } catch {
                 print("[AgenticDebug] Failed to persist debug snapshot: \(error)")
             }

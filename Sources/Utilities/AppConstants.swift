@@ -29,6 +29,7 @@ enum AppConstants {
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
         static let defaultOpenAIModel = "gpt-5-mini"
+        static let replyQueueOpenAIModel = "gpt-5.4-mini"
         static let followUpClaudeModel = "claude-3-5-haiku-20241022"
         static let followUpOpenAIModel = "gpt-5-mini"
         static let maxResponseTokens = 4096
@@ -156,11 +157,20 @@ enum AppConstants {
 
         enum ReplyQueue {
             static let aiBatchSize = 12
-            static let initialMessagesPerChat = 8
-            static let additionalMessagesForNeedMore = 12
-            static let maxMessagesPerChat = 20
+            static let scanWaveSize = 48
+            static let maxScannedChats = 48
+            static let minimumConfidentResultsForEarlyStop = 5
+            static let stableGrowthThreshold = 1
+            static let minimumWaveCountBeforeEarlyStop = 1
+            static let initialPrivateMessagesPerChat = 6
+            static let initialGroupMessagesPerChat = 4
+            static let additionalMessagesForNeedMore = 8
+            static let maxMessagesPerChat = 16
             static let maxRenderedResults = 15
+            static let maxFallbackRenderedResults = 6
             static let progressiveConfidenceThreshold = 0.72
+            static let preferredFreshResultAgeSeconds: TimeInterval = 5 * 86_400
+            static let minimumFreshResultsBeforeDroppingStale = 8
         }
     }
 

@@ -64,6 +64,8 @@ final class SearchCoordinator: ObservableObject {
     @Published var summaryOutput: SummarySearchOutput?
     @Published var semanticMatchedChats: Int = 0
     @Published var totalChatsToScan: Int = 0
+    @Published var searchStartedAt: Foundation.Date?
+    @Published var lastSearchDuration: TimeInterval?
 
     private var searchTask: Task<Void, Never>?
     var activeSearchRunID = UUID()
@@ -101,6 +103,8 @@ final class SearchCoordinator: ObservableObject {
         summaryOutput = nil
         semanticMatchedChats = 0
         totalChatsToScan = 0
+        searchStartedAt = nil
+        lastSearchDuration = nil
     }
 
     func triggerSearch(
@@ -148,6 +152,8 @@ final class SearchCoordinator: ObservableObject {
         summaryOutput = nil
         semanticMatchedChats = 0
         totalChatsToScan = 0
+        searchStartedAt = nil
+        lastSearchDuration = nil
         searchResultChatIds = []
         isSearching = false
         isAISearching = false
@@ -181,6 +187,8 @@ final class SearchCoordinator: ObservableObject {
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
 
+            searchStartedAt = Foundation.Date()
+            lastSearchDuration = nil
             aiSearchMode = intent
             isAISearching = true
             aiSearchError = nil
@@ -206,12 +214,21 @@ final class SearchCoordinator: ObservableObject {
                 guard !Task.isCancelled else { return }
                 aiResults = results
                 isAISearching = false
+                markSearchFinished()
             } catch {
                 guard !Task.isCancelled else { return }
                 aiSearchError = error.localizedDescription
                 isAISearching = false
+                markSearchFinished()
             }
         }
+    }
+
+    private func markSearchFinished() {
+        if let startedAt = searchStartedAt {
+            lastSearchDuration = max(0, Foundation.Date().timeIntervalSince(startedAt))
+        }
+        searchStartedAt = nil
     }
 
     private func executeAISearch(

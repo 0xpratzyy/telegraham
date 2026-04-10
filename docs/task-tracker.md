@@ -1,6 +1,6 @@
 # Pidgy Task Tracker
 
-Last updated: 2026-04-08
+Last updated: 2026-04-09
 
 This is the living delivery tracker for the current launcher-first MVP.
 
@@ -46,6 +46,9 @@ This is the living delivery tracker for the current launcher-first MVP.
 - `done` reply queue can render actionable rows
 - `done` reply queue now shows confident rows progressively while scan continues
 - `done` reply queue now sorts recent-first instead of confidence-first
+- `done` reply queue now uses compact deterministic chat digests instead of raw full chat payloads
+- `done` reply queue now uses dedicated `gpt-5.4-mini` model routing for OpenAI
+- `done` reply queue AI batching now runs as 4 parallel x 12 batches over the capped candidate set
 
 ### Product docs
 
@@ -62,6 +65,10 @@ This is the living delivery tracker for the current launcher-first MVP.
 - `in_progress` improve precision for group reply detection
 - `in_progress` keep latency under control as eligible chat counts grow
 - `in_progress` tune batched triage prompt/provider behavior
+- `in_progress` reduce over-compression in compact chat digests so actionable asks are not dropped
+- `in_progress` loosen heuristic hard-rejects where they block AI from rescuing true group obligations
+- `in_progress` verify local-only first pass does not miss cold but recent chats
+- `in_progress` fix timing/debug accounting for parallel AI batches
 
 ### Exact lookup quality
 
@@ -75,7 +82,7 @@ This is the living delivery tracker for the current launcher-first MVP.
 
 ## Next
 
-1. `next` add reply-queue batching/budget guardrails so large scans stay fast
+1. `next` tighten reply-queue output quality, especially group-targeting precision
 2. `next` improve exact lookup ranking for wallets, links, domains, and handles
 3. `next` add explicit `Draft reply` action for summary/reply-prep states
 4. `next` add minimal automated tests for routing, summary time windows, and durable-history preservation

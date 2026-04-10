@@ -169,16 +169,16 @@ actor IndexScheduler {
                 return lhsPriority < rhsPriority
             }
 
-            let lhsBucket = bucket(for: lhs)
-            let rhsBucket = bucket(for: rhs)
-            if lhsBucket != rhsBucket {
-                return lhsBucket < rhsBucket
-            }
-
             let lhsDate = lhs.lastActivityDate ?? .distantPast
             let rhsDate = rhs.lastActivityDate ?? .distantPast
             if lhsDate != rhsDate {
                 return lhsDate > rhsDate
+            }
+
+            let lhsBucket = bucket(for: lhs)
+            let rhsBucket = bucket(for: rhs)
+            if lhsBucket != rhsBucket {
+                return lhsBucket < rhsBucket
             }
 
             if lhs.order != rhs.order {

@@ -6,7 +6,7 @@ import SwiftUI
 /// A privacy-filtered message snippet safe to send to AI providers.
 /// Contains only message ID, first name, text, relative timestamp, chat ID, and chat name.
 /// Never includes phone numbers, user IDs, session tokens, or media files.
-struct MessageSnippet: Codable {
+struct MessageSnippet: Codable, Sendable {
     let messageId: Int64
     let senderFirstName: String
     let text: String
@@ -51,7 +51,7 @@ struct MessageSnippet: Codable {
 
 // MARK: - Query Intent
 
-enum QueryIntent: String, Codable {
+enum QueryIntent: String, Codable, Sendable {
     case messageSearch = "message_search"
     case semanticSearch = "semantic_search"
     case agenticSearch = "agentic_search"
@@ -59,7 +59,7 @@ enum QueryIntent: String, Codable {
     case unsupported = "unsupported"
 }
 
-enum QueryFamily: String, Codable {
+enum QueryFamily: String, Codable, Sendable {
     case exactLookup = "exact_lookup"
     case topicSearch = "topic_search"
     case replyQueue = "reply_queue"
@@ -67,7 +67,7 @@ enum QueryFamily: String, Codable {
     case summary = "summary"
 }
 
-enum QueryEngine: String, Codable {
+enum QueryEngine: String, Codable, Sendable {
     case messageLookup = "message_lookup"
     case semanticRetrieval = "semantic_retrieval"
     case replyTriage = "reply_triage"
@@ -75,7 +75,7 @@ enum QueryEngine: String, Codable {
     case summarize = "summarize"
 }
 
-enum QueryScope: String, Codable {
+enum QueryScope: String, Codable, Sendable {
     case all
     case dms
     case groups
@@ -89,7 +89,7 @@ enum QueryScope: String, Codable {
     }
 }
 
-enum ReplyConstraint: String, Codable {
+enum ReplyConstraint: String, Codable, Sendable {
     case none
     case pipelineOnMeOnly = "pipeline_on_me_only"
 }
@@ -218,7 +218,7 @@ struct AIProviderConfig {
     let apiKey: String
     let model: String
 
-    enum ProviderType: String, CaseIterable {
+    enum ProviderType: String, CaseIterable, Sendable {
         case claude = "Claude"
         case openai = "OpenAI"
         case none = "None"
