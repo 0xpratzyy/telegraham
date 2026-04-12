@@ -45,6 +45,12 @@ actor DatabaseManager {
         let isSearchReady: Bool
     }
 
+    struct RecentSyncStateRecord: Sendable, Equatable {
+        let chatId: Int64
+        let latestSyncedMessageId: Int64
+        let lastRecentSyncAt: Date?
+    }
+
     private struct LegacyCachedChatMessages: Decodable {
         let chatId: Int64
         let messages: [LegacyCachedMessage]
@@ -73,6 +79,7 @@ actor DatabaseManager {
     private let fileManager = FileManager.default
     private var databasePool: DatabasePool?
     private var hasInitialized = false
+    private var databaseURLOverride: URL?
 
     private var appSupportDirectory: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -80,7 +87,10 @@ actor DatabaseManager {
     }
 
     private var databaseURL: URL {
-        appSupportDirectory.appendingPathComponent(AppConstants.Storage.databaseFileName, isDirectory: false)
+        databaseURLOverride ?? appSupportDirectory.appendingPathComponent(
+            AppConstants.Storage.databaseFileName,
+            isDirectory: false
+        )
     }
 
     private var legacyMessageCacheDirectory: URL {
@@ -96,6 +106,10 @@ actor DatabaseManager {
 
         do {
             try fileManager.createDirectory(at: appSupportDirectory, withIntermediateDirectories: true)
+            try fileManager.createDirectory(
+                at: databaseURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
 
             var configuration = Configuration()
             configuration.prepareDatabase { db in
@@ -120,13 +134,29 @@ actor DatabaseManager {
         hasInitialized = false
     }
 
+    func configureForTesting(databaseURLOverride: URL?) async {
+        databasePool = nil
+        hasInitialized = false
+        self.databaseURLOverride = databaseURLOverride
+    }
+
     func upsertLiveMessages(chatId: Int64, messages: [MessageRecord]) async {
         guard !messages.isEmpty else { return }
         guard let pool = await ensureDatabase() else { return }
+        let latestMessageId = messages
+            .sorted(by: Self.sortMessagesDescending)
+            .first?
+            .id ?? 0
 
         do {
             try await pool.write { db in
                 try Self.insertMessages(messages, into: db)
+                try Self.refreshRecentSyncState(
+                    in: db,
+                    chatId: chatId,
+                    preferredLatestMessageId: latestMessageId,
+                    syncedAt: Date()
+                )
             }
         } catch {
             print("[DatabaseManager] Failed to upsert live messages for chat \(chatId): \(error)")
@@ -153,6 +183,44 @@ actor DatabaseManager {
             }
         } catch {
             print("[DatabaseManager] Failed to load messages for chat \(chatId): \(error)")
+            return []
+        }
+    }
+
+    func loadMessages(
+        chatId: Int64,
+        startDate: Date?,
+        endDate: Date?,
+        limit: Int
+    ) async -> [MessageRecord] {
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        FROM messages
+                        WHERE chat_id = ?
+                          AND (? IS NULL OR date >= ?)
+                          AND (? IS NULL OR date <= ?)
+                        ORDER BY date DESC, id DESC
+                        LIMIT ?
+                        """,
+                    arguments: [
+                        chatId,
+                        startDate?.timeIntervalSince1970,
+                        startDate?.timeIntervalSince1970,
+                        endDate?.timeIntervalSince1970,
+                        endDate?.timeIntervalSince1970,
+                        limit
+                    ]
+                )
+                return rows.map(Self.messageRecord(from:))
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load ranged messages for chat \(chatId): \(error)")
             return []
         }
     }
@@ -196,6 +264,7 @@ actor DatabaseManager {
         do {
             try await pool.write { db in
                 let existingState = try Self.syncStateRecord(in: db, chatId: chatId)
+                let existingRecentSyncState = try Self.recentSyncStateRecord(in: db, chatId: chatId)
                 try Self.deleteEmbeddings(in: db, chatId: chatId, messageIds: messageIds)
                 try db.execute(
                     sql: "DELETE FROM messages WHERE chat_id = ? AND id IN (\(placeholders))",
@@ -209,6 +278,11 @@ actor DatabaseManager {
                         isSearchReady: existingState.isSearchReady
                     )
                 }
+                try Self.refreshRecentSyncState(
+                    in: db,
+                    chatId: chatId,
+                    syncedAt: existingRecentSyncState?.lastRecentSyncAt
+                )
             }
         } catch {
             print("[DatabaseManager] Failed to delete messages for chat \(chatId): \(error)")
@@ -232,9 +306,85 @@ actor DatabaseManager {
                     sql: "DELETE FROM sync_state WHERE chat_id = ?",
                     arguments: [chatId]
                 )
+                try db.execute(
+                    sql: "DELETE FROM recent_sync_state WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
             }
         } catch {
             print("[DatabaseManager] Failed to delete cached messages for chat \(chatId): \(error)")
+        }
+    }
+
+    func loadRecentSyncState(chatId: Int64) async -> RecentSyncStateRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+
+        do {
+            return try await pool.read { db in
+                try Self.recentSyncStateRecord(in: db, chatId: chatId)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load recent sync state for chat \(chatId): \(error)")
+            return nil
+        }
+    }
+
+    func loadRecentSyncStates(in chatIds: [Int64]) async -> [Int64: RecentSyncStateRecord] {
+        guard !chatIds.isEmpty else { return [:] }
+        guard let pool = await ensureDatabase() else { return [:] }
+
+        do {
+            return try await pool.read { db in
+                let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
+                var arguments = StatementArguments()
+                for chatId in chatIds {
+                    arguments += [chatId]
+                }
+
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT chat_id, latest_synced_message_id, last_recent_sync_at
+                        FROM recent_sync_state
+                        WHERE chat_id IN (\(placeholders))
+                        """,
+                    arguments: arguments
+                )
+
+                return Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+                    let syncedAtSeconds: Double? = row["last_recent_sync_at"]
+                    let record = RecentSyncStateRecord(
+                        chatId: row["chat_id"],
+                        latestSyncedMessageId: row["latest_synced_message_id"],
+                        lastRecentSyncAt: syncedAtSeconds.map(Date.init(timeIntervalSince1970:))
+                    )
+                    return (record.chatId, record)
+                })
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load recent sync states: \(error)")
+            return [:]
+        }
+    }
+
+    func saveRecentSyncState(
+        chatId: Int64,
+        latestSyncedMessageId: Int64,
+        syncedAt: Date
+    ) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try Self.saveRecentSyncState(
+                    in: db,
+                    chatId: chatId,
+                    latestSyncedMessageId: latestSyncedMessageId,
+                    syncedAt: syncedAt
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to save recent sync state for chat \(chatId): \(error)")
         }
     }
 
@@ -335,6 +485,7 @@ actor DatabaseManager {
                 try db.execute(sql: "DELETE FROM embeddings")
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM sync_state WHERE chat_id >= 0")
+                try db.execute(sql: "DELETE FROM recent_sync_state WHERE chat_id >= 0")
             }
             removeLegacyMessageCacheDirectory()
         } catch {
@@ -351,6 +502,7 @@ actor DatabaseManager {
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM pipeline_cache")
                 try db.execute(sql: "DELETE FROM sync_state")
+                try db.execute(sql: "DELETE FROM recent_sync_state")
             }
             removeLegacyMessageCacheDirectory()
             removeLegacyPipelineCacheDirectory()
@@ -879,6 +1031,66 @@ actor DatabaseManager {
         )
     }
 
+    private static func saveRecentSyncState(
+        in db: Database,
+        chatId: Int64,
+        latestSyncedMessageId: Int64,
+        syncedAt: Date
+    ) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO recent_sync_state (chat_id, latest_synced_message_id, last_recent_sync_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    latest_synced_message_id = excluded.latest_synced_message_id,
+                    last_recent_sync_at = excluded.last_recent_sync_at
+                """,
+            arguments: [
+                chatId,
+                latestSyncedMessageId,
+                syncedAt.timeIntervalSince1970
+            ]
+        )
+    }
+
+    private static func refreshRecentSyncState(
+        in db: Database,
+        chatId: Int64,
+        preferredLatestMessageId: Int64? = nil,
+        syncedAt: Date? = nil
+    ) throws {
+        let latestMessageId: Int64? = if let preferredLatestMessageId {
+            preferredLatestMessageId
+        } else {
+            try Int64.fetchOne(
+                db,
+                sql: """
+                    SELECT id
+                    FROM messages
+                    WHERE chat_id = ?
+                    ORDER BY date DESC, id DESC
+                    LIMIT 1
+                    """,
+                arguments: [chatId]
+            )
+        }
+
+        guard let latestMessageId else {
+            try db.execute(
+                sql: "DELETE FROM recent_sync_state WHERE chat_id = ?",
+                arguments: [chatId]
+            )
+            return
+        }
+
+        try saveRecentSyncState(
+            in: db,
+            chatId: chatId,
+            latestSyncedMessageId: latestMessageId,
+            syncedAt: syncedAt ?? Date()
+        )
+    }
+
     private static func syncStateRecord(in db: Database, chatId: Int64) throws -> SyncStateRecord? {
         guard let row = try Row.fetchOne(
             db,
@@ -900,6 +1112,30 @@ actor DatabaseManager {
             lastIndexedAt: lastIndexedAtSeconds.map(Date.init(timeIntervalSince1970:)),
             totalMessagesIndexed: row["total_messages_indexed"],
             isSearchReady: isSearchReadyValue != 0
+        )
+    }
+
+    private static func recentSyncStateRecord(
+        in db: Database,
+        chatId: Int64
+    ) throws -> RecentSyncStateRecord? {
+        guard let row = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT chat_id, latest_synced_message_id, last_recent_sync_at
+                FROM recent_sync_state
+                WHERE chat_id = ?
+                """,
+            arguments: [chatId]
+        ) else {
+            return nil
+        }
+
+        let lastRecentSyncAtSeconds: Double? = row["last_recent_sync_at"]
+        return RecentSyncStateRecord(
+            chatId: row["chat_id"],
+            latestSyncedMessageId: row["latest_synced_message_id"],
+            lastRecentSyncAt: lastRecentSyncAtSeconds.map(Date.init(timeIntervalSince1970:))
         )
     }
 

@@ -15,8 +15,10 @@ enum QuerySummaryPrompt {
 
         Rules:
         - Be concrete and concise.
-        - Prefer decisions, asks, blockers, and next actions over general chatter.
+        - Prefer decisions, asks, blockers, next actions, rankings, options, feedback, and product gaps over general chatter.
+        - Stay tightly grounded in the provided messages and reuse exact facts when possible.
         - If the messages are sparse, say that clearly.
+        - If the provided messages do not contain strong local context for the query, say "No clear local summary context found."
         - Do not invent facts that are not in the provided messages.
         - Respond with plain text only, no markdown heading.
         """

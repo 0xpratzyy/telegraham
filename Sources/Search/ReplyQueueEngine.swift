@@ -227,6 +227,7 @@ final class ReplyQueueEngine {
 
             processedPending.append(contentsOf: wavePending)
             let pendingByChatId = Dictionary(uniqueKeysWithValues: wavePending.map { ($0.chat.id, $0) })
+            let waveAIStartedAt = Date()
             let outcomes = await runParallelAIBatches(
                 labelPrefix: "wave\(waveIndex + 1)-batch",
                 query: query,
@@ -235,10 +236,11 @@ final class ReplyQueueEngine {
                 providerConfig: replyQueueConfig,
                 myUserId: myUserId
             )
+            let waveAIDurationMs = elapsedMs(since: waveAIStartedAt)
+            waveAIMs += waveAIDurationMs
+            debug.aiMs += waveAIDurationMs
 
             for completed in outcomes {
-                waveAIMs += completed.durationMs
-                debug.aiMs += completed.durationMs
                 debug.aiBatchCount += 1
                 debug.batchTimings.append(
                     AgenticDebugBatchTiming(
@@ -363,6 +365,7 @@ final class ReplyQueueEngine {
             )
             debug.needMoreMs += elapsedMs(since: needMoreStartedAt)
             let expandedByChatId = Dictionary(uniqueKeysWithValues: expanded.map { ($0.chat.id, $0) })
+            let needMoreAIStartedAt = Date()
             let outcomes = await runParallelAIBatches(
                 labelPrefix: "need-more-batch",
                 query: query,
@@ -371,8 +374,8 @@ final class ReplyQueueEngine {
                 providerConfig: replyQueueConfig,
                 myUserId: myUserId
             )
+            debug.aiMs += elapsedMs(since: needMoreAIStartedAt)
             for completed in outcomes {
-                debug.aiMs += completed.durationMs
                 debug.aiBatchCount += 1
                 debug.batchTimings.append(
                     AgenticDebugBatchTiming(
@@ -1120,6 +1123,12 @@ final class ReplyQueueEngine {
         pending: [PendingChat],
         myUserId: Int64
     ) {
+        guard UserDefaults.standard.bool(
+            forKey: AppConstants.Preferences.persistReplyQueueCandidateSnapshotsKey
+        ) else {
+            return
+        }
+
         let snapshot = PersistedReplyQueueCandidateSnapshot(
             query: query,
             scope: scope,

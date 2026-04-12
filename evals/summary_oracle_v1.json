@@ -1,0 +1,175 @@
+{
+  "name": "summary_oracle_v1",
+  "notes": "Grounded summary benchmark over real local Telegram messages. Focuses on single-chat recap quality, time windows, supporting-message retrieval, and one no-result trap.",
+  "entries": [
+    {
+      "id": "summary_hit_01",
+      "query": "What happened with Inaara after the call?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5146948443],
+      "supportingMessageIds": [446520360960, 446567546880, 446618927104, 446619975680],
+      "retrievalHints": ["@Inaaralakhani", "call", "first dollar", "bounty", "whitelisted"],
+      "timeRange": {
+        "start": 1774500000,
+        "end": 1774532000
+      },
+      "requiredFactGroups": [
+        ["first dollar", "platform"],
+        ["docs.firstdollar.money", "docs"],
+        ["made an account", "waitlist"],
+        ["put bounty", "whitelisted", "happy to help"]
+      ],
+      "forbiddenPhrases": [
+        "asal",
+        "rwa marketplace"
+      ],
+      "why": "Good relationship-follow-up recap with a clear call, links sent, account/waitlist update, and next step."
+    },
+    {
+      "id": "summary_hit_02",
+      "query": "What did we discuss about the builder program with Jack and Emma?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5217898121],
+      "supportingMessageIds": [446994317312, 446995365888, 446998511616, 449216249856, 452273897472],
+      "retrievalHints": ["jack", "emma", "builder program", "hackathon", "proposal", "@jackdishman", "@emma_neynar"],
+      "timeRange": {
+        "start": 1774516000,
+        "end": 1775577000
+      },
+      "requiredFactGroups": [
+        ["hackathon", "examples", "bags hackathon"],
+        ["proposal", "ideas", "send something by tomorrow"],
+        ["builder program", "doc", "how we can run this"],
+        ["jackdishman", "emma_neynar", "bumping this"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "A clean external-collaboration thread with questions, proposal intent, shared doc, and later bump."
+    },
+    {
+      "id": "summary_hit_03",
+      "query": "What did we conclude about Huddle01?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "supportingMessageIds": [450055110656, 450057207808, 450059304960, 450061402112],
+      "retrievalHints": ["huddle01", "product hunt", "hetzner", "cloud"],
+      "timeRange": {
+        "start": 1775027800,
+        "end": 1775032600
+      },
+      "requiredFactGroups": [
+        ["decentralized zoom", "pivoted hard into cloud", "cloud infrastructure"],
+        ["hetzner", "more expensive", "3.5x"],
+        ["cheap dev", "staging", "no soc2", "no compliance", "no sla"]
+      ],
+      "forbiddenPhrases": [
+        "camillenvargas",
+        "celsius"
+      ],
+      "why": "A strong analytical recap with product conclusion, pricing comparison, and operational caveats."
+    },
+    {
+      "id": "summary_hit_04",
+      "query": "Summarize First Dollar for the last week of March.",
+      "expectedKind": "hit",
+      "expectedChatIds": [8509073799],
+      "supportingMessageIds": [446382997504, 447104417792, 447522799616, 447877218304, 448485392384, 449458470912, 449999536128],
+      "retrievalHints": ["firstdollar", "lineardigest", "radar room", "wallet transaction bug", "creator flow", "export option"],
+      "timeRange": {
+        "start": 1774450000,
+        "end": 1775049999
+      },
+      "requiredFactGroups": [
+        ["radar room", "fixes", "main focus", "8 radar room issues", "6 radar room fixes"],
+        ["wallet transaction bug", "fir-102"],
+        ["creator flow", "fir-173"],
+        ["summary", "export option", "fir-127", "fir-129"]
+      ],
+      "forbiddenPhrases": [
+        "paperclip service 96%",
+        "notion keys",
+        "horoscope"
+      ],
+      "why": "A good bounded summary case: one chat, clear time window, recurring digest format, and easy stale-noise traps."
+    },
+    {
+      "id": "summary_hit_05",
+      "query": "What did we decide about Inner Circle budget and office?",
+      "expectedKind": "hit",
+      "expectedChatIds": [865924605],
+      "supportingMessageIds": [445915332608, 445919526912, 445920575488, 445923721216],
+      "retrievalHints": ["budget", "inner circle", "office", "salary", "october", "roi"],
+      "timeRange": {
+        "start": 1774459000,
+        "end": 1774469000
+      },
+      "requiredFactGroups": [
+        ["170k", "next year"],
+        ["office", "70k", "80k", "roi"],
+        ["10k", "15k", "kpi"],
+        ["october", "take a call", "continue if progress"]
+      ],
+      "forbiddenPhrases": [
+        "auraderm",
+        "password leak"
+      ],
+      "why": "Decision-heavy planning recap with explicit budget, office, KPI, and reassessment details."
+    },
+    {
+      "id": "summary_hit_06",
+      "query": "Why did we decide not to hire a BD person right now?",
+      "expectedKind": "hit",
+      "expectedChatIds": [1341384985],
+      "supportingMessageIds": [445147774976],
+      "retrievalHints": ["bd person", "product better", "rajanshee", "2 weeks", "clarity"],
+      "requiredFactGroups": [
+        ["decided not to go forward", "not to hire", "bd person"],
+        ["product better", "make our product better"],
+        ["pay for 2 weeks", "reach out again", "clarity"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "A crisp single-message decision recap that should be easy to get right."
+    },
+    {
+      "id": "summary_hit_07",
+      "query": "Give me a quick summary of First Dollar.",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5177680185],
+      "supportingMessageIds": [454040748032],
+      "retrievalHints": ["first dollar", "ugc", "bounties", "radar room", "base native talent network"],
+      "requiredFactGroups": [
+        ["base native talent network", "talent network"],
+        ["ugc campaigns", "dev/design bounties"],
+        ["radar room", "founders get users", "share feedback"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "A concise overview/pitch summary benchmark."
+    },
+    {
+      "id": "summary_hit_08",
+      "query": "What are the main gaps in the Radar Room / bounties platform?",
+      "expectedKind": "hit",
+      "expectedChatIds": [7842808520],
+      "supportingMessageIds": [454082691072],
+      "retrievalHints": ["radar room", "gaps", "bounties", "jobs boards", "discovery", "reputation", "notifications", "mobile"],
+      "requiredFactGroups": [
+        ["discovery", "filtering depth"],
+        ["profile", "reputation layer", "track record"],
+        ["telegram", "native feed", "threading"],
+        ["notification system", "mobile app"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "A product-gap recap with several concrete missing pieces."
+    },
+    {
+      "id": "summary_none_01",
+      "query": "Summarize my chats with Rahul about wallet addresses.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "supportingMessageIds": [],
+      "retrievalHints": ["rahul", "wallet", "address"],
+      "requiredFactGroups": [],
+      "forbiddenPhrases": [],
+      "why": "Useful no-result trap: there is Rahul chatter and wallet chatter locally, but not a clean summary-worthy overlap."
+    }
+  ]
+}

@@ -306,25 +306,51 @@ final class AIService: ObservableObject {
     // MARK: - Persistence
 
     private func loadConfiguration() {
-        guard let typeStr = try? KeychainManager.retrieve(for: .aiProviderType),
-              let type = AIProviderConfig.ProviderType(rawValue: typeStr),
-              let apiKey = try? KeychainManager.retrieve(for: .aiApiKey),
-              !apiKey.isEmpty else {
+        let storedType = ((try? KeychainManager.retrieve(for: .aiProviderType)) ?? nil)
+        let storedApiKey = ((try? KeychainManager.retrieve(for: .aiApiKey)) ?? nil)
+
+        guard let providerType = storedType,
+              let type = AIProviderConfig.ProviderType(rawValue: providerType),
+              let rawApiKey = storedApiKey else {
             return
         }
 
-        let model = try? KeychainManager.retrieve(for: .aiModel)
+        let apiKey = rawApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else { return }
+
+        let model = ((try? KeychainManager.retrieve(for: .aiModel)) ?? nil)
         configure(type: type, apiKey: apiKey, model: model)
     }
 
     private func saveConfiguration(type: AIProviderConfig.ProviderType, apiKey: String, model: String) {
         try? KeychainManager.save(type.rawValue, for: .aiProviderType)
-        try? KeychainManager.save(apiKey, for: .aiApiKey)
-        try? KeychainManager.save(model, for: .aiModel)
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if type == .none {
+            try? KeychainManager.delete(for: .aiApiKey)
+            try? KeychainManager.delete(for: .aiModel)
+            return
+        }
+
+        if !trimmedKey.isEmpty {
+            try? KeychainManager.save(trimmedKey, for: .aiApiKey)
+        }
+
+        if !model.isEmpty {
+            try? KeychainManager.save(model, for: .aiModel)
+        }
     }
 
     private func normalizedModel(type: AIProviderConfig.ProviderType, model: String) -> String {
-        model
+        switch type {
+        case .openai:
+            if model == "gpt-5-mini" {
+                return AppConstants.AI.defaultOpenAIModel
+            }
+            return model
+        case .claude, .none:
+            return model
+        }
     }
 
     func clearConfigurationState() {

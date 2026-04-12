@@ -1,6 +1,6 @@
 # Pidgy Architecture
 
-Last updated: 2026-04-09
+Last updated: 2026-04-11
 
 This is a living architecture doc for the launcher-first MVP.
 
@@ -41,6 +41,7 @@ Key local stores:
 
 - `messages`
 - `sync_state`
+- `recent_sync_state`
 - FTS tables
 - `embeddings`
 - graph tables (`nodes`, `edges`)
@@ -51,6 +52,7 @@ Current storage semantics:
 - recent hot-cache behavior lives in memory inside [MessageCacheService.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/MessageCacheService.swift)
 - recent disk fallback comes from `SELECT ... FROM messages ORDER BY date DESC LIMIT N`
 - `sync_state` is owned by deep indexing, not by normal cache refreshes
+- `recent_sync_state` is owned by recent-sync freshness, not by deep indexing
 
 At a high level:
 
@@ -58,18 +60,29 @@ At a high level:
 flowchart TD
     A["TDLib live updates"] --> B["MessageCacheService memory cache (latest window)"]
     A --> C["messages table (durable upserts)"]
-    D["IndexScheduler deep history"] --> C
-    D --> E["sync_state"]
-    C --> F["PatternSearchEngine"]
-    C --> G["Semantic retrieval"]
-    C --> H["SummaryEngine"]
-    C --> I["ReplyQueueEngine"]
-    C --> J["Recent fallback reads"]
+    D["RecentSyncCoordinator"] --> C
+    D --> E["recent_sync_state"]
+    F["IndexScheduler deep history"] --> C
+    F --> G["sync_state"]
+    C --> H["PatternSearchEngine"]
+    C --> I["Semantic retrieval"]
+    C --> J["SummaryEngine"]
+    C --> K["ReplyQueueEngine"]
+    C --> L["Recent fallback reads"]
 ```
 
 ### Indexing
 
-Background indexing builds local retrieval quality over time:
+Pidgy now treats freshness and deep indexing as separate background concerns.
+
+Fresh recent sync:
+
+- [RecentSyncCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/RecentSyncCoordinator.swift)
+- keeps the latest message window for active/indexable chats fresh in SQLite
+- runs on app startup readiness, app foreground, and explicit chat prioritization
+- never mutates `sync_state.is_search_ready`
+
+Deep indexing:
 
 - [IndexScheduler.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/IndexScheduler.swift)
 - [EmbeddingService.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/EmbeddingService.swift)
@@ -77,8 +90,17 @@ Background indexing builds local retrieval quality over time:
 
 The current safe default is:
 
-- prioritize DMs and smaller groups
-- skip channels by default for deep indexing
+- recent sync prioritizes explicit chat priorities, then newest `lastActivityDate`, with DM/group as a tiebreaker
+- deep indexing prioritizes explicit chat priorities, then newest `lastActivityDate`, then DM/group bucket
+- deep indexing runs with up to 2 concurrent chat workers
+- embedding backfill runs only when the indexing queue is idle, not every N chats in the hot loop
+- channels are skipped by default for deep indexing
+- both schedulers now publish live progress state into Debug UI so we can see:
+  - stale visible chats vs total visible chats
+  - active recent-sync refreshes
+  - pending deep-index chats
+  - active deep-index workers
+  - session-level throughput and the last meaningful progress event
 
 ### Graph foundation
 
@@ -115,6 +137,10 @@ Current engines:
 - `graph_crm`
 - `summarize`
 
+Current routing state:
+
+- the app-side router now reflects the script-first `product_coverage_v2` winner, so broader real-user phrasings for reply queue, summary, relationship, and exact lookup resolve more consistently before any engine logic runs
+
 ## 3. Search Engines
 
 ### PatternSearchEngine
@@ -133,6 +159,11 @@ Current behavior:
 - cheap local retrieval first
 - regex/entity verification second
 - outgoing bias when query implies `I shared / I sent / I pasted`
+- exact structured-token lookups now prefer true token matches over nested/generic fallthroughs
+- full URL queries no longer degrade into domain-only matches
+- person-scoped artifact queries now require both the artifact evidence and the recipient context, so `wallet I sent to Rahul` prefers the actual Rahul wallet message over generic Rahul chatter
+- artifact-transfer phrasings like `wallet I sent to Rahul` now route into `PatternSearchEngine` instead of falling back to topic search
+- exact emails, Google Meet codes, platform-specific links, and guarded no-result cases now follow the same verified-artifact rules that won the script-side exact-lookup benchmark
 
 Current supported entity classes:
 
@@ -162,7 +193,7 @@ Current behavior:
 
 - FTS + vector merge
 - title evidence
-- Telegram fallback for not-yet-indexed chats
+- local-only at query time: memory cache + durable SQLite
 - optional rerank
 
 ### ReplyQueueEngine
@@ -206,6 +237,8 @@ Current behavior:
 - generate one bounded summary card
 - render supporting result hits underneath
 - time-range filtering is now applied before summary synthesis
+- stronger focus gating now prefers the chat that actually contains the recap/decision context instead of generic mention noise
+- person-plus-topic summary queries now require a real joint anchor in the same chat, which prevents fake overlaps like `Sophia` in one thread and `wallet addresses` in another from synthesizing into a bad summary
 
 ## 4. AI Layer
 
@@ -226,6 +259,7 @@ Design principle:
 - AI should be used for judgment and synthesis
 - local retrieval should do as much work as possible before AI is invoked
 - reply queue uses a dedicated model path when needed, instead of inheriting the generic OpenAI default model blindly
+- launcher search-time networking is an anti-goal; freshness belongs to sync-time, not query-time
 
 ## 5. Launcher UI
 
@@ -261,12 +295,24 @@ Development/debug support exists, but normal launcher UI should stay focused on 
 
 1. reply queue still leans too hard on local group heuristics in final validation, which can block AI from rescuing true group obligations
 2. compact reply-queue digests can over-compress context and hide the original actionable ask in some threads
-3. local-only reply triage can miss cold chats if recent updates have not been flushed locally yet
+3. recent sync still needs stronger reconnect/network-recovery triggers beyond startup, foreground, and explicit chat prioritization
 4. summary is still single-focus and not true cross-chat synthesis
 5. graph/CRM execution is deferred to post-MVP
-6. automated coverage for launcher/search/storage paths is still missing
+6. automated coverage now exists for the core regressions, but still needs expansion for recent sync coordinator behavior and reply-queue group-vs-DM fixtures
 
 ## Recent Changes
+
+### 2026-04-11
+
+- added `recent_sync_state` to track freshness separately from `sync_state`
+- added `RecentSyncCoordinator` to keep active/indexable chats fresh in durable SQLite
+- removed search-time Telegram fallbacks from semantic search, exact lookup, and summary paths
+- changed deep indexing to use up to 2 concurrent chat workers
+- moved embedding backfill off the hot indexing loop and into idle-time work
+- improved reply-queue compact digests to preserve latest actionable ask and closure signals
+- fixed reply-queue timing accounting for parallel batches
+- gated reply-queue candidate snapshot persistence behind an explicit debug preference
+- added a small XCTest target covering durable history, recent-sync readiness preservation, query routing, and summary time windows
 
 ### 2026-04-08
 

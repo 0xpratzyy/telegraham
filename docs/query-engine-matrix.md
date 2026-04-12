@@ -1,6 +1,6 @@
 # Query Engine Matrix
 
-Last updated: 2026-04-08
+Last updated: 2026-04-11
 
 Pidgy should not force every query through one retrieval path. The product works best when we parse the user query into a **family**, then route it to the right **engine**.
 
@@ -42,7 +42,9 @@ All current engines assume:
 
 - `messages` is durable local history
 - hot recent-message caching is memory-first
+- `recent_sync_state` tracks freshness separately from deep indexing
 - normal cache refreshes must not trim SQLite history or reset `sync_state`
+- launcher queries should read from memory + SQLite, not fetch Telegram history inline
 
 ## Current Runtime Mapping
 
@@ -60,5 +62,6 @@ Until every engine is implemented, the runtime still falls back to the closest e
 
 1. Improve `PatternSearchEngine` ranking and entity quality.
 2. Tighten `ReplyQueueEngine` latency, batching, and quality.
-3. Add graph-backed CRM execution for `relationship`.
-4. Improve time-range-aware retrieval and summary quality.
+3. Expand recent-sync freshness coverage on reconnect/network recovery.
+4. Add graph-backed CRM execution for `relationship`.
+5. Improve time-range-aware retrieval and summary quality.

@@ -76,13 +76,51 @@ final class QueryInterpreter: QueryInterpreting {
             "who do i have to reply",
             "waiting on me",
             "haven't responded",
-            "have not responded"
+            "have not responded",
+            "need my reply",
+            "need my response",
+            "needs my response",
+            "needs my reply",
+            "pending my reply",
+            "pending my response",
+            "owe a reply",
+            "owe reply",
+            "owe a response",
+            "still on me",
+            "follow-up from me",
+            "follow up from me",
+            "pending follow-up",
+            "pending follow up",
+            "pending follow-ups",
+            "pending follow ups",
+            "need response from me",
+            "supposed to respond",
+            "waiting on my reply",
+            "open dms that need a reply",
+            "open dms that need my reply",
+            "responsible for answering",
+            "promise to get back to",
+            "promised to get back to",
+            "what is on me"
+        ]
+        let replyPatterns = [
+            #"\bneed(?:s)?\b.*\b(my|a)\s+(reply|response)\b"#,
+            #"\b(pending|owe|owed)\b.*\b(reply|response)\b"#,
+            #"\bfollow[\s-]?up\b.*\bfrom me\b"#,
+            #"\b(still|what(?:'s| is)?)\b.*\bon me\b"#,
+            #"\bowe\b.*\brepl(?:y|ies)\b"#,
+            #"\brespond\b.*\bto\b"#,
+            #"\bresponsible\b.*\b(answering|responding)\b"#,
+            #"\bpromis(?:e|ed)\b.*\bget back\b"#,
+            #"\bwaiting\b.*\bmy reply\b"#,
+            #"\bopen dms?\b.*\bneed(?:s)?\b.*\breply\b"#
         ]
         let inferredReplyIntent =
             containsAny(replySignals, in: normalized)
             || regexMatches(#"\bhaven'?t\b.*\brepl(?:y|ied)\b"#, in: normalized)
             || regexMatches(#"\bwho\b.*\brepl(?:y|ied)\b"#, in: normalized)
             || regexMatches(#"\brespond(?:ed|ing)?\b"#, in: normalized) && normalized.contains("who")
+            || regexMatchesAny(replyPatterns, in: normalized)
         let replyConstraint: ReplyConstraint = inferredReplyIntent ? .pipelineOnMeOnly : .none
 
         let timeRange = parseTimeRange(in: normalized, now: now, timezone: timezone)
@@ -125,6 +163,14 @@ final class QueryInterpreter: QueryInterpreting {
     }
 
     private func inferFamily(normalized: String, replyConstraint: ReplyConstraint) -> QueryFamily {
+        let crmOverridePatterns = [
+            #"\bcontacts?\b.*\bhaven'?t replied\b.*\bin a while\b"#,
+            #"\bwho\b.*\bhaven'?t replied\b.*\bin a while\b"#
+        ]
+        if regexMatchesAny(crmOverridePatterns, in: normalized) {
+            return .relationship
+        }
+
         if replyConstraint == .pipelineOnMeOnly {
             return .replyQueue
         }
@@ -132,7 +178,8 @@ final class QueryInterpreter: QueryInterpreting {
         let summarySignals = [
             "summarize", "summary", "summarise", "recap",
             "what did we decide", "what happened", "what did i discuss",
-            "what have we discussed", "latest context", "catch me up"
+            "what have we discussed", "latest context", "catch me up",
+            "key takeaways", "takeaways from"
         ]
         if containsAny(summarySignals, in: normalized) {
             return .summary
@@ -140,10 +187,23 @@ final class QueryInterpreter: QueryInterpreting {
 
         let crmSignals = [
             "stale", "inactive", "most active", "top contacts", "top people",
-            "warm leads", "investors", "builders", "community", "vendors",
-            "friends", "acquaintance", "who do i talk to most"
+            "warm leads", "investors", "builders", "vendors",
+            "friends", "acquaintance", "who do i talk to most",
+            "warmest contacts", "strongest investor relationships", "best leads",
+            "relationship strength", "relationship with", "warm but not active",
+            "talked to most this month", "top contacts by relationship",
+            "state of my relationship"
         ]
-        if containsAny(crmSignals, in: normalized) {
+        let crmPatterns = [
+            #"\bwho are my warmest contacts\b"#,
+            #"\bwhich people have i talked to most\b"#,
+            #"\bstrongest\b.*\brelationships\b"#,
+            #"\bbest leads\b.*\bnetwork\b"#,
+            #"\brelationships?\b.*\bwarm\b.*\bnot active\b"#,
+            #"\bstate of my relationship\b"#,
+            #"\btop people\b.*\brelationship strength\b"#
+        ]
+        if containsAny(crmSignals, in: normalized) || regexMatchesAny(crmPatterns, in: normalized) {
             return .relationship
         }
 
@@ -158,14 +218,26 @@ final class QueryInterpreter: QueryInterpreting {
             "email address", "telegram username", "twitter handle", "discord handle",
             "link", "url", "domain", "ca ", "contract"
         ]
+        let artifactSignals = [
+            "wallet", "address", "contract", "hash", "link", "url", "domain", "handle", "username"
+        ]
+        let transferLookupSignals = [
+            "i sent", "i shared", "i pasted", "i posted",
+            "sent to", "shared to", "shared with", "posted to", "pasted to",
+            "find", "show", "where"
+        ]
         let hasStructuredToken = regexMatches(#"\b0x[a-f0-9]{6,}\b"#, in: normalized)
             || regexMatches(#"\b[1-9A-HJ-NP-Za-km-z]{24,64}\b"#, in: normalized)
             || regexMatches(#"https?://"#, in: normalized)
             || regexMatches(#"@[a-z0-9_]{3,}"#, in: normalized)
+            || regexMatches(#"\b[a-z0-9-]+\.(?:com|io|co|ai|org|net|app|dev|xyz|gg|finance|me|so|money|site)\b"#, in: normalized)
+        let hasArtifactTransferIntent =
+            containsAny(artifactSignals, in: normalized) && containsAny(transferLookupSignals, in: normalized)
 
         if containsAny(exactLookupSignals, in: normalized)
             || containsAny(exactEntitySignals, in: normalized)
-            || hasStructuredToken {
+            || hasStructuredToken
+            || hasArtifactTransferIntent {
             return .exactLookup
         }
 
@@ -219,6 +291,10 @@ final class QueryInterpreter: QueryInterpreting {
         }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    private func regexMatchesAny(_ patterns: [String], in text: String) -> Bool {
+        patterns.contains { regexMatches($0, in: text) }
     }
 
     private func parseTimeRange(in normalized: String, now: Date, timezone: TimeZone) -> TimeRangeConstraint? {

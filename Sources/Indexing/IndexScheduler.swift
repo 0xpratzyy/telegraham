@@ -4,6 +4,29 @@ import Combine
 actor IndexScheduler {
     static let shared = IndexScheduler()
 
+    private struct IndexOutcome: Sendable {
+        let chatId: Int64
+        let chatTitle: String
+        let indexedMessageCount: Int
+        let reachedHistoryStart: Bool
+    }
+
+    private struct ProgressSnapshot {
+        let indexed: Int
+        let total: Int
+        let pendingChats: Int
+        let currentChat: String?
+        let activeWorkers: Int
+        let isPaused: Bool
+        let sessionStartedAt: Date?
+        let sessionIndexedMessages: Int
+        let sessionCompletedChats: Int
+        let lastIndexedChat: String?
+        let lastIndexedAt: Date?
+        let lastBatchMessageCount: Int
+        let lastBackfillCount: Int
+    }
+
     private struct GroupBatchParticipant {
         var count: Int
         var lastActiveAt: Date?
@@ -13,8 +36,17 @@ actor IndexScheduler {
     final class ProgressState: ObservableObject {
         @Published var indexed = 0
         @Published var total = 0
+        @Published var pendingChats = 0
         @Published var currentChat: String?
+        @Published var activeWorkers = 0
         @Published var isPaused = false
+        @Published var sessionStartedAt: Date?
+        @Published var sessionIndexedMessages = 0
+        @Published var sessionCompletedChats = 0
+        @Published var lastIndexedChat: String?
+        @Published var lastIndexedAt: Date?
+        @Published var lastBatchMessageCount = 0
+        @Published var lastBackfillCount = 0
     }
 
     nonisolated let progress = ProgressState()
@@ -23,7 +55,14 @@ actor IndexScheduler {
     private var processingTask: Task<Void, Never>?
     private var isPaused = false
     private var prioritizedChatIds: [Int64] = []
-    private var indexedChatsSinceEmbeddingBackfill = 0
+    private var sessionStartedAt: Date?
+    private var sessionIndexedMessages = 0
+    private var sessionCompletedChats = 0
+    private var lastIndexedChat: String?
+    private var lastIndexedAt: Date?
+    private var lastBatchMessageCount = 0
+    private var lastBackfillCount = 0
+    private var activeWorkers = 0
 
     func start(using telegramService: TelegramService) async {
         self.telegramService = telegramService
@@ -31,6 +70,15 @@ actor IndexScheduler {
             await refreshProgress()
             return
         }
+
+        sessionStartedAt = Date()
+        sessionIndexedMessages = 0
+        sessionCompletedChats = 0
+        lastIndexedChat = nil
+        lastIndexedAt = nil
+        lastBatchMessageCount = 0
+        lastBackfillCount = 0
+        activeWorkers = 0
 
         let task = Task {
             await self.runLoop()
@@ -44,9 +92,22 @@ actor IndexScheduler {
         processingTask = nil
         telegramService = nil
         prioritizedChatIds.removeAll()
-        indexedChatsSinceEmbeddingBackfill = 0
         isPaused = false
-        await updateProgress(indexed: 0, total: 0, currentChat: nil, isPaused: false)
+        sessionStartedAt = nil
+        sessionIndexedMessages = 0
+        sessionCompletedChats = 0
+        lastIndexedChat = nil
+        lastIndexedAt = nil
+        lastBatchMessageCount = 0
+        lastBackfillCount = 0
+        activeWorkers = 0
+        await publishProgress(
+            indexed: 0,
+            total: 0,
+            pendingChats: 0,
+            currentChat: nil,
+            isPaused: false
+        )
     }
 
     func pause() async {
@@ -81,9 +142,11 @@ actor IndexScheduler {
             if isPaused {
                 let pausedSnapshot = await snapshot(using: telegramService)
                 let readyChatIds = await DatabaseManager.shared.searchReadyChatIds(in: pausedSnapshot.chats.map(\.id))
-                await updateProgress(
+                activeWorkers = 0
+                await publishProgress(
                     indexed: readyChatIds.count,
                     total: pausedSnapshot.chats.count,
+                    pendingChats: max(pausedSnapshot.chats.count - readyChatIds.count, 0),
                     currentChat: nil,
                     isPaused: true
                 )
@@ -93,7 +156,14 @@ actor IndexScheduler {
 
             let snapshot = await snapshot(using: telegramService)
             guard !snapshot.chats.isEmpty else {
-                await updateProgress(indexed: 0, total: 0, currentChat: nil, isPaused: isPaused)
+                activeWorkers = 0
+                await publishProgress(
+                    indexed: 0,
+                    total: 0,
+                    pendingChats: 0,
+                    currentChat: nil,
+                    isPaused: isPaused
+                )
                 try? await Task.sleep(for: .milliseconds(Int(AppConstants.Indexing.idlePollIntervalMilliseconds)))
                 continue
             }
@@ -102,15 +172,27 @@ actor IndexScheduler {
             let readyChatIds = await DatabaseManager.shared.searchReadyChatIds(in: orderedChats.map(\.id))
             let pendingChats = orderedChats.filter { !readyChatIds.contains($0.id) }
 
-            guard let nextChat = pendingChats.first else {
+            guard !pendingChats.isEmpty else {
                 let backfilled = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
                 if backfilled > 0 {
-                    indexedChatsSinceEmbeddingBackfill = 0
+                    lastBackfillCount = backfilled
+                    lastIndexedAt = Date()
+                    lastIndexedChat = "Embedding backfill"
+                    activeWorkers = 0
+                    await publishProgress(
+                        indexed: readyChatIds.count,
+                        total: orderedChats.count,
+                        pendingChats: 0,
+                        currentChat: nil,
+                        isPaused: isPaused
+                    )
                     continue
                 }
-                await updateProgress(
+                activeWorkers = 0
+                await publishProgress(
                     indexed: readyChatIds.count,
                     total: orderedChats.count,
+                    pendingChats: 0,
                     currentChat: nil,
                     isPaused: isPaused
                 )
@@ -118,19 +200,71 @@ actor IndexScheduler {
                 continue
             }
 
-            await updateProgress(
+            let nextChats = Array(pendingChats.prefix(AppConstants.Indexing.maxConcurrentChatWorkers))
+            let progressLabel: String?
+            if nextChats.count <= 1 {
+                progressLabel = nextChats.first?.title
+            } else if let firstChat = nextChats.first {
+                progressLabel = "\(firstChat.title) +\(nextChats.count - 1) more"
+            } else {
+                progressLabel = nil
+            }
+
+            activeWorkers = nextChats.count
+            await publishProgress(
                 indexed: readyChatIds.count,
                 total: orderedChats.count,
-                currentChat: nextChat.title,
+                pendingChats: pendingChats.count,
+                currentChat: progressLabel,
                 isPaused: isPaused
             )
 
-            await index(chat: nextChat, currentUserId: snapshot.currentUserId, using: telegramService)
-            indexedChatsSinceEmbeddingBackfill += 1
-            if indexedChatsSinceEmbeddingBackfill >= AppConstants.Indexing.embeddingBackfillEveryIndexedChats {
-                _ = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
-                indexedChatsSinceEmbeddingBackfill = 0
+            let outcomes = await withTaskGroup(of: IndexOutcome.self) { group in
+                for chat in nextChats {
+                    group.addTask {
+                        await Self.indexChat(
+                            chat: chat,
+                            currentUserId: snapshot.currentUserId,
+                            using: telegramService
+                        )
+                    }
+                }
+
+                var completed: [IndexOutcome] = []
+                for await outcome in group {
+                    completed.append(outcome)
+                }
+                return completed
             }
+
+            let completedChatIds = outcomes
+                .filter(\.reachedHistoryStart)
+                .map(\.chatId)
+            if !completedChatIds.isEmpty {
+                prioritizedChatIds.removeAll { completedChatIds.contains($0) }
+            }
+
+            let indexedMessageCount = outcomes.reduce(0) { $0 + $1.indexedMessageCount }
+            if indexedMessageCount > 0 {
+                sessionIndexedMessages += indexedMessageCount
+                lastIndexedAt = Date()
+                lastBatchMessageCount = indexedMessageCount
+                lastBackfillCount = 0
+                if outcomes.count == 1, let outcome = outcomes.first {
+                    lastIndexedChat = outcome.chatTitle
+                } else if let progressLabel, !progressLabel.isEmpty {
+                    lastIndexedChat = progressLabel
+                }
+            }
+
+            let completedChatCount = outcomes.filter(\.reachedHistoryStart).count
+            if completedChatCount > 0 {
+                sessionCompletedChats += completedChatCount
+            }
+
+            activeWorkers = 0
+
+            await refreshProgress(currentChat: progressLabel)
             try? await Task.sleep(for: .milliseconds(Int(AppConstants.Indexing.interBatchDelayMilliseconds)))
         }
     }
@@ -195,9 +329,15 @@ actor IndexScheduler {
         return 3
     }
 
-    private func index(chat: TGChat, currentUserId: Int64?, using telegramService: TelegramService) async {
+    private static func indexChat(
+        chat: TGChat,
+        currentUserId: Int64?,
+        using telegramService: TelegramService
+    ) async -> IndexOutcome {
         let syncState = await DatabaseManager.shared.loadSyncState(chatId: chat.id)
         let cursor = syncState?.lastIndexedMessageId ?? 0
+        var reachedHistoryStart = false
+        var indexedMessageCount = 0
 
         do {
             let batch = try await telegramService.getChatHistory(
@@ -227,9 +367,10 @@ actor IndexScheduler {
                     isOutgoing: message.isOutgoing
                 )
             }
+            indexedMessageCount = batchRecords.count
 
             let didAdvanceCursor = oldestBatchMessageId.map { $0 != cursor } ?? false
-            let reachedHistoryStart = batch.isEmpty
+            reachedHistoryStart = batch.isEmpty
                 || batch.count < AppConstants.Indexing.batchSize
                 || (cursor != 0 && !didAdvanceCursor)
             if !batchRecords.isEmpty {
@@ -248,18 +389,19 @@ actor IndexScheduler {
                     preferredOldestMessageId: syncState?.lastIndexedMessageId
                 )
             }
-
-            if reachedHistoryStart {
-                prioritizedChatIds.removeAll { $0 == chat.id }
-            }
         } catch {
             print("[IndexScheduler] Failed to index chat \(chat.id) (\(chat.title)): \(error)")
         }
 
-        await refreshProgress()
+        return IndexOutcome(
+            chatId: chat.id,
+            chatTitle: chat.title,
+            indexedMessageCount: indexedMessageCount,
+            reachedHistoryStart: reachedHistoryStart
+        )
     }
 
-    private func ingestIntoGraph(messages: [TGMessage], chat: TGChat, currentUserId: Int64?) async {
+    private static func ingestIntoGraph(messages: [TGMessage], chat: TGChat, currentUserId: Int64?) async {
         guard let currentUserId else { return }
 
         switch chat.chatType {
@@ -343,7 +485,7 @@ actor IndexScheduler {
         }
     }
 
-    private func updateEmbeddings(for messages: [TGMessage]) async {
+    private static func updateEmbeddings(for messages: [TGMessage]) async {
         let eligibleMessages = messages.compactMap { message -> (message: TGMessage, text: String)? in
             guard let text = message.textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
                   text.count >= AppConstants.Indexing.minEmbeddingTextLength else {
@@ -414,20 +556,52 @@ actor IndexScheduler {
         } else {
             progressChat = await MainActor.run { progress.currentChat }
         }
-        await updateProgress(
+        await publishProgress(
             indexed: readyChatIds.count,
             total: snapshot.chats.count,
+            pendingChats: max(snapshot.chats.count - readyChatIds.count, 0),
             currentChat: progressChat,
             isPaused: isPaused
         )
     }
 
-    private func updateProgress(indexed: Int, total: Int, currentChat: String?, isPaused: Bool) async {
+    private func publishProgress(
+        indexed: Int,
+        total: Int,
+        pendingChats: Int,
+        currentChat: String?,
+        isPaused: Bool
+    ) async {
+        let snapshot = ProgressSnapshot(
+            indexed: indexed,
+            total: total,
+            pendingChats: pendingChats,
+            currentChat: currentChat,
+            activeWorkers: activeWorkers,
+            isPaused: isPaused,
+            sessionStartedAt: sessionStartedAt,
+            sessionIndexedMessages: sessionIndexedMessages,
+            sessionCompletedChats: sessionCompletedChats,
+            lastIndexedChat: lastIndexedChat,
+            lastIndexedAt: lastIndexedAt,
+            lastBatchMessageCount: lastBatchMessageCount,
+            lastBackfillCount: lastBackfillCount
+        )
+
         await MainActor.run {
-            progress.indexed = indexed
-            progress.total = total
-            progress.currentChat = currentChat
-            progress.isPaused = isPaused
+            progress.indexed = snapshot.indexed
+            progress.total = snapshot.total
+            progress.pendingChats = snapshot.pendingChats
+            progress.currentChat = snapshot.currentChat
+            progress.activeWorkers = snapshot.activeWorkers
+            progress.isPaused = snapshot.isPaused
+            progress.sessionStartedAt = snapshot.sessionStartedAt
+            progress.sessionIndexedMessages = snapshot.sessionIndexedMessages
+            progress.sessionCompletedChats = snapshot.sessionCompletedChats
+            progress.lastIndexedChat = snapshot.lastIndexedChat
+            progress.lastIndexedAt = snapshot.lastIndexedAt
+            progress.lastBatchMessageCount = snapshot.lastBatchMessageCount
+            progress.lastBackfillCount = snapshot.lastBackfillCount
         }
     }
 }

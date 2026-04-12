@@ -355,7 +355,6 @@ final class SearchCoordinator: ObservableObject {
 
         let scopedChatIds = scopedChats.map(\.id)
         let chatById = Dictionary(uniqueKeysWithValues: scopedChats.map { ($0.id, $0) })
-        let unindexedChatIds = await DatabaseManager.shared.unindexedChatIds(in: scopedChatIds)
 
         let ftsHits = await telegramService.localScoredSearch(
             query: query,
@@ -375,19 +374,6 @@ final class SearchCoordinator: ObservableObject {
             chats: scopedChats,
             candidatesByChatId: &candidatesByChatId
         )
-
-        if !unindexedChatIds.isEmpty,
-           let fallbackMessages = try? await telegramService.searchMessages(
-                query: query,
-                limit: constants.fallbackTopMessages,
-                chatTypeFilter: keywordFallbackChatTypeFilter(for: scope)
-           ) {
-            mergeFallbackSemanticCandidates(
-                messages: fallbackMessages.filter { unindexedChatIds.contains($0.chatId) },
-                chatsById: chatById,
-                candidatesByChatId: &candidatesByChatId
-            )
-        }
 
         let candidates = Array(candidatesByChatId.values).sorted { (lhs: LocalSemanticChatCandidate, rhs: LocalSemanticChatCandidate) in
             let leftScore = semanticCandidateScore(lhs)
@@ -572,49 +558,6 @@ final class SearchCoordinator: ObservableObject {
         }
     }
 
-    private func mergeFallbackSemanticCandidates(
-        messages: [TGMessage],
-        chatsById: [Int64: TGChat],
-        candidatesByChatId: inout [Int64: LocalSemanticChatCandidate]
-    ) {
-        guard !messages.isEmpty else { return }
-
-        let denominator = Double(max(1, messages.count - 1))
-        for (index, message) in messages.enumerated() {
-            guard let chat = chatsById[message.chatId] else { continue }
-
-            let normalizedRankScore = denominator == 0
-                ? 1
-                : max(0.1, 1 - (Double(index) / denominator))
-
-            let fallbackCandidate = LocalSemanticChatCandidate(
-                chat: chat,
-                bestMessage: message,
-                bestSnippet: semanticSnippet(from: message.textContent ?? message.displayText),
-                sortDate: message.date,
-                ftsScore: 0,
-                vectorScore: 0,
-                titleScore: 0,
-                fallbackScore: normalizedRankScore
-            )
-
-            if let existing = candidatesByChatId[chat.id] {
-                var merged = existing
-                merged.fallbackScore = max(existing.fallbackScore, normalizedRankScore)
-                if semanticCandidateScore(fallbackCandidate) > semanticCandidateScore(existing) {
-                    merged.bestMessage = fallbackCandidate.bestMessage
-                    merged.bestSnippet = fallbackCandidate.bestSnippet
-                    merged.sortDate = fallbackCandidate.sortDate
-                } else if fallbackCandidate.sortDate > merged.sortDate {
-                    merged.sortDate = fallbackCandidate.sortDate
-                }
-                candidatesByChatId[chat.id] = merged
-            } else {
-                candidatesByChatId[chat.id] = fallbackCandidate
-            }
-        }
-    }
-
     private func betterSemanticCandidate(
         _ existing: LocalSemanticChatCandidate,
         _ incoming: LocalSemanticChatCandidate
@@ -795,14 +738,4 @@ final class SearchCoordinator: ObservableObject {
         }
     }
 
-    private func keywordFallbackChatTypeFilter(for scope: QueryScope) -> SearchMessagesChatTypeFilter? {
-        switch scope {
-        case .all:
-            return nil
-        case .dms:
-            return .searchMessagesChatTypeFilterPrivate
-        case .groups:
-            return .searchMessagesChatTypeFilterGroup
-        }
-    }
 }

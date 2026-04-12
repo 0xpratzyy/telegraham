@@ -1,0 +1,316 @@
+{
+  "name": "summary_oracle_v2",
+  "notes": "Broader grounded summary benchmark over real local Telegram messages. Expands v1 with more recap-note, blocker, ranking, and no-result cases while staying script-only.",
+  "entries": [
+    {
+      "id": "summary_hit_01",
+      "query": "What happened with Inaara after the call?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5146948443],
+      "supportingMessageIds": [446520360960, 446567546880, 446618927104, 446619975680],
+      "retrievalHints": ["@Inaaralakhani", "call", "first dollar", "bounty", "whitelisted"],
+      "timeRange": {
+        "start": 1774500000,
+        "end": 1774532000
+      },
+      "requiredFactGroups": [
+        ["first dollar", "platform"],
+        ["docs.firstdollar.money", "docs"],
+        ["made an account", "waitlist"],
+        ["put bounty", "whitelisted", "happy to help"]
+      ],
+      "forbiddenPhrases": ["asal", "rwa marketplace"],
+      "why": "Relationship follow-up recap with a clear call, links sent, account/waitlist update, and next step."
+    },
+    {
+      "id": "summary_hit_02",
+      "query": "What did we discuss about the builder program with Jack and Emma?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5217898121],
+      "supportingMessageIds": [446994317312, 446995365888, 446998511616, 449216249856, 452273897472],
+      "retrievalHints": ["jack", "emma", "builder program", "hackathon", "proposal", "@jackdishman", "@emma_neynar"],
+      "timeRange": {
+        "start": 1774516000,
+        "end": 1775577000
+      },
+      "requiredFactGroups": [
+        ["hackathon", "examples", "bags hackathon"],
+        ["proposal", "ideas", "send something by tomorrow"],
+        ["builder program", "doc", "how we can run this"],
+        ["jackdishman", "emma_neynar", "bumping this"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "External collaboration thread with questions, proposal intent, shared doc, and later bump."
+    },
+    {
+      "id": "summary_hit_03",
+      "query": "What did we conclude about Huddle01?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "supportingMessageIds": [450055110656, 450057207808, 450059304960, 450061402112],
+      "retrievalHints": ["huddle01", "product hunt", "hetzner", "cloud"],
+      "timeRange": {
+        "start": 1775027800,
+        "end": 1775032600
+      },
+      "requiredFactGroups": [
+        ["decentralized zoom", "pivoted hard into cloud", "cloud infrastructure"],
+        ["hetzner", "more expensive", "3.5x"],
+        ["cheap dev", "staging", "no soc2", "no compliance", "no sla"]
+      ],
+      "forbiddenPhrases": ["camillenvargas", "celsius"],
+      "why": "Analytical recap with product conclusion, pricing comparison, and operational caveats."
+    },
+    {
+      "id": "summary_hit_04",
+      "query": "Summarize First Dollar for the last week of March.",
+      "expectedKind": "hit",
+      "expectedChatIds": [8509073799],
+      "supportingMessageIds": [446382997504, 447104417792, 447522799616, 447877218304, 448485392384, 449458470912, 449999536128],
+      "retrievalHints": ["firstdollar", "lineardigest", "radar room", "wallet transaction bug", "creator flow", "export option"],
+      "timeRange": {
+        "start": 1774450000,
+        "end": 1775049999
+      },
+      "requiredFactGroups": [
+        ["radar room", "fixes", "main focus", "8 radar room issues", "6 radar room fixes"],
+        ["wallet transaction bug", "fir-102"],
+        ["creator flow", "fir-173"],
+        ["summary", "export option", "fir-127", "fir-129"]
+      ],
+      "forbiddenPhrases": ["paperclip service 96%", "notion keys", "horoscope"],
+      "why": "Bounded weekly project summary with clear stale-noise traps."
+    },
+    {
+      "id": "summary_hit_05",
+      "query": "What did we decide about Inner Circle budget and office?",
+      "expectedKind": "hit",
+      "expectedChatIds": [865924605],
+      "supportingMessageIds": [445915332608, 445919526912, 445920575488, 445923721216],
+      "retrievalHints": ["budget", "inner circle", "office", "salary", "october", "roi"],
+      "timeRange": {
+        "start": 1774459000,
+        "end": 1774469000
+      },
+      "requiredFactGroups": [
+        ["170k", "next year"],
+        ["office", "70k", "80k", "roi"],
+        ["10k", "15k", "kpi"],
+        ["october", "take a call", "continue if progress"]
+      ],
+      "forbiddenPhrases": ["auraderm", "password leak"],
+      "why": "Decision-heavy planning recap with explicit budget, office, KPI, and reassessment details."
+    },
+    {
+      "id": "summary_hit_06",
+      "query": "Why did we decide not to hire a BD person right now?",
+      "expectedKind": "hit",
+      "expectedChatIds": [1341384985],
+      "supportingMessageIds": [445147774976],
+      "retrievalHints": ["bd person", "product better", "rajanshee", "2 weeks", "clarity"],
+      "requiredFactGroups": [
+        ["decided not to go forward", "not to hire", "bd person"],
+        ["product better", "make our product better"],
+        ["pay for 2 weeks", "reach out again", "clarity"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "Crisp single-message decision recap."
+    },
+    {
+      "id": "summary_hit_07",
+      "query": "Give me a quick summary of First Dollar.",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5177680185],
+      "supportingMessageIds": [454040748032],
+      "retrievalHints": ["first dollar", "ugc", "bounties", "radar room", "base native talent network"],
+      "requiredFactGroups": [
+        ["base native talent network", "talent network"],
+        ["ugc campaigns", "dev/design bounties"],
+        ["radar room", "founders get users", "share feedback"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "Concise one-message product overview benchmark."
+    },
+    {
+      "id": "summary_hit_08",
+      "query": "What are the main gaps in the Radar Room / bounties platform?",
+      "expectedKind": "hit",
+      "expectedChatIds": [7842808520],
+      "supportingMessageIds": [454082691072],
+      "retrievalHints": ["radar room", "gaps", "bounties", "jobs boards", "discovery", "reputation", "notifications", "mobile"],
+      "requiredFactGroups": [
+        ["discovery", "filtering depth"],
+        ["profile", "reputation layer", "track record"],
+        ["telegram", "native feed", "threading"],
+        ["notification system", "mobile app"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "Product-gap recap with several concrete missing pieces."
+    },
+    {
+      "id": "summary_hit_09",
+      "query": "What was in the X/Twitter data options note?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "supportingMessageIds": [445344907264],
+      "retrievalHints": ["twitter data options", "twikit", "twitter api", "xai api", "yt-dlp"],
+      "timeRange": {
+        "start": 1774431840,
+        "end": 1774431865
+      },
+      "requiredFactGroups": [
+        ["yt-dlp", "media downloads"],
+        ["twikit", "tweet reading", "search"],
+        ["twitter api", "$200/mo", "expensive"],
+        ["xai api", "specific tweet data", "grok"]
+      ],
+      "forbiddenPhrases": ["uid.today", "claim page"],
+      "why": "Tooling-options recap with explicit recommendation and cost tradeoffs."
+    },
+    {
+      "id": "summary_hit_10",
+      "query": "Why was Skate blocked even though the MVP was built?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "supportingMessageIds": [442459226112],
+      "retrievalHints": ["skate", "vercel", "railway", "database_url", "auth_url"],
+      "timeRange": {
+        "start": 1774250475,
+        "end": 1774250500
+      },
+      "requiredFactGroups": [
+        ["mvp is built", "landing page is live"],
+        ["database_url", "postgres.railway.internal", "unreachable from vercel"],
+        ["auth_url", "localhost:4000"],
+        ["config fix", "not a code fix"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "Blocker-note recap with a clear root cause and fix direction."
+    },
+    {
+      "id": "summary_hit_11",
+      "query": "What was the final hackathon ranking?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "supportingMessageIds": [442949959680],
+      "retrievalHints": ["hackathon review", "full rankings", "eigenstate", "hunteros", "upstart"],
+      "timeRange": {
+        "start": 1774262020,
+        "end": 1774262040
+      },
+      "requiredFactGroups": [
+        ["eigenstate", "9/10"],
+        ["hunteros", "8/10"],
+        ["upstart", "7/10"]
+      ],
+      "forbiddenPhrases": ["duo debate demo video", "google drive submission"],
+      "why": "Ranked-comparison recap with a clear top three."
+    },
+    {
+      "id": "summary_hit_12",
+      "query": "What was the Paperclip team status in the Mar 24 team brief?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "supportingMessageIds": [444433694720],
+      "retrievalHints": ["paperclip team brief", "marketing sprint", "ske-38", "ske-39"],
+      "timeRange": {
+        "start": 1774364415,
+        "end": 1774364440
+      },
+      "requiredFactGroups": [
+        ["mvp shipped", "product is built and deployed"],
+        ["ske-23", "marketing sprint"],
+        ["ske-38", "social launch"],
+        ["ske-39", "design partner outreach"],
+        ["marketing execution is the bottleneck", "bottom line"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "Internal team-status recap with done, in-progress, blocked, and bottleneck state."
+    },
+    {
+      "id": "summary_hit_13",
+      "query": "What did offchaingirl send about the First Dollar marketplace?",
+      "expectedKind": "hit",
+      "expectedChatIds": [5068640359],
+      "supportingMessageIds": [448791576576],
+      "retrievalHints": ["first dollar marketplace", "overview", "launch campaign", "web3 portfolio"],
+      "timeRange": {
+        "start": 1774865255,
+        "end": 1774865290
+      },
+      "requiredFactGroups": [
+        ["overview", "proof of skill system"],
+        ["new first dollar marketplace", "glow up"],
+        ["sample launch campaign"],
+        ["web3 portfolio"],
+        ["scope + comp", "scope", "comp"]
+      ],
+      "forbiddenPhrases": [],
+      "why": "Marketplace strategy note with linked overview, campaign, and portfolio."
+    },
+    {
+      "id": "summary_hit_14",
+      "query": "What was the positive feedback on balance transfer and withdrawals?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-1003345930730],
+      "supportingMessageIds": [3415212032],
+      "retrievalHints": ["balance transfer", "withdrawal", "under two minutes", "no bugs"],
+      "timeRange": {
+        "start": 1775642255,
+        "end": 1775642275
+      },
+      "requiredFactGroups": [
+        ["smoothness and efficiency", "smoothness"],
+        ["under two minutes", "exceptional speed"],
+        ["absence of transaction fees", "no fees"],
+        ["no bugs", "no inconsistencies", "reliable, efficient, and well-optimized"]
+      ],
+      "forbiddenPhrases": ["minimum withdrawal set to 5 usdc"],
+      "why": "Positive QA-style recap with clear workflow outcome and speed detail."
+    },
+    {
+      "id": "summary_none_01",
+      "query": "Summarize my chats with Rahul about wallet addresses.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "supportingMessageIds": [],
+      "retrievalHints": ["rahul", "wallet", "address"],
+      "requiredFactGroups": [],
+      "forbiddenPhrases": [],
+      "why": "There is Rahul chatter and wallet chatter locally, but not a clean summary-worthy overlap."
+    },
+    {
+      "id": "summary_none_02",
+      "query": "Summarize my chats with Rupam about whitelisting bounties.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "supportingMessageIds": [],
+      "retrievalHints": ["rupam", "whitelisted", "bounty"],
+      "requiredFactGroups": [],
+      "forbiddenPhrases": [],
+      "why": "Useful no-result trap where the name and action words exist separately but not as one grounded summary thread."
+    },
+    {
+      "id": "summary_none_03",
+      "query": "Summarize my chats with Jack about mobile app gaps.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "supportingMessageIds": [],
+      "retrievalHints": ["jack", "mobile app", "notification system"],
+      "requiredFactGroups": [],
+      "forbiddenPhrases": [],
+      "why": "Another no-result trap where the person and product-gap concepts exist locally but not as a real shared thread."
+    },
+    {
+      "id": "summary_none_04",
+      "query": "Summarize my chats with Sophia about wallet addresses.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "supportingMessageIds": [],
+      "retrievalHints": ["sophia", "wallet", "address"],
+      "requiredFactGroups": [],
+      "forbiddenPhrases": [],
+      "why": "Name-specific no-result trap that should stay empty instead of gluing unrelated wallet chatter together."
+    }
+  ]
+}

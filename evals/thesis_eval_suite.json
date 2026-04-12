@@ -1,0 +1,74 @@
+{
+  "name": "pidgy-mvp-thesis-suite",
+  "prompt_coverage": {
+    "exact_lookup": [
+      "Where did I share my wallet address with Rahul?",
+      "Find the link I sent for the deck last week",
+      "Which chat did I drop firstdollar.com in?",
+      "Where did I paste the @akhil_bvs handle?",
+      "Locate the contract address I shared with the builder group",
+      "Find the tx hash I sent to the team",
+      "Where did I send that 0x wallet for onboarding?",
+      "Show me the message where I shared the Google Doc link",
+      "Find the invite link I shared in support yesterday",
+      "Which group did I post this URL in: https://example.com/docs/onboarding?"
+    ],
+    "topic_search": [
+      "first dollar partnerships",
+      "messages about integrating with Stripe",
+      "discussions about onboarding new users for the beta",
+      "feedback on the product demo",
+      "fundraising or investor updates",
+      "conversations about hiring a growth lead",
+      "integration ideas with Notion or Slack",
+      "project Apollo launch planning",
+      "community partnerships",
+      "product-market fit and positioning"
+    ],
+    "reply_queue": [
+      "Who do I owe a reply to right now?",
+      "What is on me today?",
+      "Show me my pending follow-ups.",
+      "Who is waiting on me?",
+      "What unread chats need a response from me?",
+      "Which messages am I responsible for answering?",
+      "Give me my open DMs that need a reply.",
+      "Show only group chats where I still owe a response.",
+      "Who did I promise to get back to?",
+      "What is still sitting unread and waiting on my reply?"
+    ],
+    "summary": [
+      "Can you recap what I missed in the Rahul chat?",
+      "What did we decide with Maaz?",
+      "Catch me up on the First Dollar thread.",
+      "Summarize the latest context from the Deeksha conversation.",
+      "Give me a quick recap of my chats with Akhil.",
+      "What are the key takeaways from the last week with Piyush?",
+      "Summarize my chats with Rahul from yesterday.",
+      "Give me the latest context on the launch planning thread.",
+      "What did we decide in the partnership chat last Friday?",
+      "What’s the latest context on the onboarding project?"
+    ],
+    "relationship": [
+      "Who are my warmest contacts right now?",
+      "Show me stale contacts I should revive.",
+      "Which people have I talked to most this month?",
+      "Who are my strongest investor relationships?",
+      "Which builders have gone inactive lately?",
+      "What are my top people by relationship strength?",
+      "Which contacts haven’t replied in a while?",
+      "Who are the best leads in my network right now?",
+      "Which relationships are currently warm but not active?",
+      "What is the current state of my relationship with Rahul?"
+    ]
+  },
+  "reply_queue": {
+    "enabled": true,
+    "variants": [
+      "baseline_compact_v1_4x12",
+      "field_aware_groups_v3_private_recall_v2_digest_v5_digest_v5_4x12"
+    ],
+    "trials": 1,
+    "batch_size": 12
+  }
+}

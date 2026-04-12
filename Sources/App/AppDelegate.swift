@@ -10,6 +10,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var hotkeyManager: HotkeyManager?
     private var settingsWindow: NSWindow?
     private var graphBuildTask: Task<Void, Never>?
+    private var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panelManager = PanelManager(telegramService: telegramService, aiService: aiService)
@@ -28,6 +31,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task {
             await DatabaseManager.shared.initialize()
 
+            guard !isRunningTests else { return }
+
             // Start TDLib if credentials exist
             if let apiIdStr = try? KeychainManager.retrieve(for: .apiId),
                let apiHash = try? KeychainManager.retrieve(for: .apiHash),
@@ -36,13 +41,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
+        guard !isRunningTests else { return }
+
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
             await waitForGraphBuildReadiness()
             guard !Task.isCancelled else { return }
+            await RecentSyncCoordinator.shared.start(using: telegramService)
+            guard !Task.isCancelled else { return }
             await GraphBuilder.shared.buildIfNeeded(using: telegramService)
             guard !Task.isCancelled else { return }
             await IndexScheduler.shared.start(using: telegramService)
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Task {
+            await RecentSyncCoordinator.shared.refreshNow()
         }
     }
 
@@ -51,6 +66,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildTask?.cancel()
         telegramService.stop()
         Task.detached {
+            await RecentSyncCoordinator.shared.stop()
             await IndexScheduler.shared.stop()
             await DatabaseManager.shared.close()
         }

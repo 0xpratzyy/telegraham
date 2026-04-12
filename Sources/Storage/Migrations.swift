@@ -199,6 +199,16 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v6_recent_sync_state") { db in
+            try db.execute(sql: """
+                CREATE TABLE recent_sync_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    latest_synced_message_id INTEGER NOT NULL DEFAULT 0,
+                    last_recent_sync_at REAL NOT NULL DEFAULT 0
+                )
+                """)
+        }
+
         return migrator
     }
 }

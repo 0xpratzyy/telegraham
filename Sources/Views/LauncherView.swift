@@ -1752,6 +1752,7 @@ struct LauncherView: View {
         Task { @MainActor in
             Task {
                 await IndexScheduler.shared.prioritize(chatId: chat.id)
+                await RecentSyncCoordinator.shared.prioritize(chatId: chat.id)
             }
             let hints = await telegramService.getDeepLinkHints(for: chat)
             let opened = DeepLinkGenerator.openChat(

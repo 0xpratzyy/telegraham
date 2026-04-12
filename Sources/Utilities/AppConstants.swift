@@ -28,10 +28,10 @@ enum AppConstants {
         static let openAIBaseURL = URL(string: "https://api.openai.com/v1/chat/completions")!
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
-        static let defaultOpenAIModel = "gpt-5-mini"
+        static let defaultOpenAIModel = "gpt-5.4-mini"
         static let replyQueueOpenAIModel = "gpt-5.4-mini"
         static let followUpClaudeModel = "claude-3-5-haiku-20241022"
-        static let followUpOpenAIModel = "gpt-5-mini"
+        static let followUpOpenAIModel = "gpt-5.4-mini"
         static let maxResponseTokens = 4096
         static let maxTokenBudgetChars = 16000
         static let requestTimeoutSeconds: TimeInterval = 90
@@ -132,11 +132,20 @@ enum AppConstants {
         static let idlePollIntervalMilliseconds: UInt64 = 1500
         static let pausedPollIntervalMilliseconds: UInt64 = 350
         static let maxPrioritizedChats = 32
+        static let maxConcurrentChatWorkers = 2
         static let maxIndexedGroupMembers = 20
         static let minEmbeddingTextLength = 10
         static let embeddingPreviewCharacterLimit = 160
         static let embeddingBackfillBatchSize = 128
-        static let embeddingBackfillEveryIndexedChats = 8
+    }
+
+    enum RecentSync {
+        static let latestWindowPerChat = 50
+        static let maxChatsPerPass = 12
+        static let maxConcurrentChatFetches = 4
+        static let idlePollIntervalMilliseconds: UInt64 = 2_000
+        static let activePollIntervalMilliseconds: UInt64 = 500
+        static let staleRefreshAgeSeconds: TimeInterval = 10 * 60
     }
 
     enum Search {
@@ -180,5 +189,6 @@ enum AppConstants {
 
     enum Preferences {
         static let includeBotsInAISearchKey = "includeBotsInAISearch"
+        static let persistReplyQueueCandidateSnapshotsKey = "persistReplyQueueCandidateSnapshots"
     }
 }

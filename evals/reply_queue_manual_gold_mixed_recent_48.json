@@ -1,0 +1,162 @@
+{
+  "name": "reply_queue_manual_gold_mixed_recent_48",
+  "snapshot": "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots/mixed_recent_48.json",
+  "query": "who do I need to reply to",
+  "notes": [
+    "This is a manual gold set for offline reply-queue evaluation.",
+    "It is intentionally strongest on group-targeting precision, because that is the current product weakness.",
+    "Labels are assistant-authored and should be revised when the benchmark dataset changes materially."
+  ],
+  "labels": {
+    "1405656673": {
+      "chatName": "Brijesh",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Strong private follow-up candidate."
+    },
+    "1580996262": {
+      "chatName": "Vibhu R",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Strong private follow-up candidate."
+    },
+    "1815100363": {
+      "chatName": "Swarnava",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Strong private follow-up candidate."
+    },
+    "5713947591": {
+      "chatName": "Maaz",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Strong private follow-up candidate."
+    },
+    "6040400539": {
+      "chatName": "Rajesh C",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Strong private follow-up candidate."
+    },
+    "7063264193": {
+      "chatName": "James.ETH(🧡💙)",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Strong private follow-up candidate."
+    },
+    "7783954199": {
+      "chatName": "Sheila Brennan",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Strong private follow-up candidate."
+    },
+    "5547204396": {
+      "chatName": "Victor Ekoh",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "Historically over-triggered; current context does not justify a clear owed reply."
+    },
+    "5908773262": {
+      "chatName": "skiv",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "Historically over-triggered; current context does not justify a clear owed reply."
+    },
+    "-5212516832": {
+      "chatName": "Bhavyam <> First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Thread already looks resolved by someone else."
+    },
+    "-1003542166929": {
+      "chatName": "AI Weekends <> Inner Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Ambient coordination chatter with no clear ownership on you."
+    },
+    "-1001613656434": {
+      "chatName": "Inner Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Another participant already took ownership."
+    },
+    "-4207340164": {
+      "chatName": "Core(EANSG)",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Looks like ongoing discussion, not a direct owed reply from you."
+    },
+    "-4950167182": {
+      "chatName": "MENA<>First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Latest message is your acknowledgement, not an open obligation."
+    },
+    "-5214411753": {
+      "chatName": "Tomorrow <> pratzyy",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Your latest message already closes the loop."
+    },
+    "-5040366323": {
+      "chatName": "Banko",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "No clear ask directed at you in the latest visible context."
+    },
+    "-1003345930730": {
+      "chatName": "Radar Room",
+      "chatType": "group",
+      "label": "maybe",
+      "reason": "Could warrant a follow-up, but ownership is not clearly on you from the visible snippet."
+    },
+    "-5185718774": {
+      "chatName": "Munify <> First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Your latest message already advances the thread."
+    },
+    "-1003535235718": {
+      "chatName": "First Dollar",
+      "chatType": "group",
+      "label": "maybe",
+      "reason": "A newcomer asks a group question; could deserve a team response, but ownership is not explicit."
+    },
+    "-1003851081733": {
+      "chatName": "Base Culture Council",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "No fresh direct ask on you in the visible snippet."
+    },
+    "-1003421960754": {
+      "chatName": "BullBit <> First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The explicit ask is directed at someone else."
+    },
+    "-1002123394767": {
+      "chatName": "Onchain Rookies",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Ambient chatter; no clear reply obligation."
+    },
+    "-4836182133": {
+      "chatName": "Privy Dev Help",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The visible ask is directed at someone else."
+    },
+    "-1003888922172": {
+      "chatName": "Based Games",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "No visible direct ask requiring your reply."
+    },
+    "-1003802691492": {
+      "chatName": "Nasheele Agents",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Latest visible messages are ambient banter, not a reply obligation."
+    }
+  }
+}

@@ -1,0 +1,302 @@
+{
+  "name": "exact_lookup_oracle_v2",
+  "notes": "Expanded exact-lookup answer benchmark grounded in real local SQLite message evidence across docs, repos, X links, meeting links, handles, emails, and exact addresses.",
+  "entries": [
+    {
+      "id": "exact_hit_01",
+      "query": "Where did I share the First Dollar case studies link?",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [454040748032, 450223931392, 450206105600],
+      "acceptableChatIds": [-5177680185, 443881199, 1079636447],
+      "why": "These messages contain the exact docs.firstdollar.money/case-studies link, either standalone or inside a richer explanatory message."
+    },
+    {
+      "id": "exact_hit_02",
+      "query": "Find the builder program Notion doc I shared",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [449216249856, 449139703808, 449135509504, 449130266624],
+      "acceptableChatIds": [-5217898121, 1236681349, 5068640359, 865924605],
+      "why": "These are the grounded Notion links for the First Dollar x Clanker builder program."
+    },
+    {
+      "id": "exact_hit_03",
+      "query": "Show me where I sent app.firstdollar.money after the call with @Inaaralakhani",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [446520360960],
+      "acceptableChatIds": [-5146948443],
+      "why": "This message contains both the Inaaralakhani context and the app.firstdollar.money/docs.firstdollar.money links."
+    },
+    {
+      "id": "exact_hit_04",
+      "query": "Where did I tag @jackdishman?",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [452273897472],
+      "acceptableChatIds": [-5217898121],
+      "why": "A clean exact-handle lookup."
+    },
+    {
+      "id": "exact_hit_05",
+      "query": "Find the wallet address 0xbC7B5142e390BBaABF8826dAE7E1ef9C609Df327 I sent with send 400 only",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [450495512576],
+      "acceptableChatIds": [905971339],
+      "why": "This message contains the exact address plus the disambiguating phrase 'send 400 only ser'."
+    },
+    {
+      "id": "exact_hit_06",
+      "query": "Find the gstack GitHub link I sent",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [451901652992],
+      "acceptableChatIds": [8546323714],
+      "why": "A unique GitHub repository URL."
+    },
+    {
+      "id": "exact_hit_07",
+      "query": "Find the Karpathy gist I shared",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [451929964544],
+      "acceptableChatIds": [8546323714],
+      "why": "A unique gist.github.com URL with Karpathy in the path."
+    },
+    {
+      "id": "exact_hit_08",
+      "query": "Where did I send the OpenClaw X link?",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [452077813760],
+      "acceptableChatIds": [8546323714],
+      "why": "A unique x.com/openclaw URL."
+    },
+    {
+      "id": "exact_hit_09",
+      "query": "Show me the Google Meet link mhf-stnj-uuv",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [454293454848],
+      "acceptableChatIds": [6040400539],
+      "why": "A unique meet.google.com code."
+    },
+    {
+      "id": "exact_hit_10",
+      "query": "Find the docs.firstdollar.money radar winners link",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [452208885760],
+      "acceptableChatIds": [-5293575324],
+      "why": "A specific docs.firstdollar.money/radar-winners URL."
+    },
+    {
+      "id": "exact_hit_11",
+      "query": "Where did I share the First Dollar admin leaderboard link?",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [449683914752, 449670283264],
+      "acceptableChatIds": [1079636447, 5068640359],
+      "why": "Both messages contain the app.firstdollar.money/admin/leaderboard URL."
+    },
+    {
+      "id": "exact_hit_12",
+      "query": "Find the Huddle01 Product Hunt link I sent",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [450055110656],
+      "acceptableChatIds": [8286929323],
+      "why": "A unique Huddle01 URL referenced alongside Product Hunt."
+    },
+    {
+      "id": "exact_hit_13",
+      "query": "Find the First Dollar docs link I shared",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [446520360960, 437393555456, 454040748032],
+      "acceptableChatIds": [-5146948443, 1079636447, -5177680185],
+      "why": "These messages contain the docs.firstdollar.money root link in different contexts."
+    },
+    {
+      "id": "exact_hit_14",
+      "query": "Where did I send the radar room applications link?",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [449195278336],
+      "acceptableChatIds": [1079636447],
+      "why": "A unique app.firstdollar.money/admin/radar-room-applications URL."
+    },
+    {
+      "id": "exact_hit_15",
+      "query": "Find the Agentation Relay product spec Notion doc",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [445169795072, 445168746496, 445167697920],
+      "acceptableChatIds": [909260483],
+      "why": "These messages contain the Agentation Relay product spec Notion link, often paired with the meet link."
+    },
+    {
+      "id": "exact_hit_16",
+      "query": "Find the VisionClaw GitHub repo link",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [445247389696],
+      "acceptableChatIds": [7021558594],
+      "why": "A unique GitHub repository link for VisionClaw."
+    },
+    {
+      "id": "exact_hit_17",
+      "query": "Find the UX UI agent skills GitHub link",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [448164528128],
+      "acceptableChatIds": [8286929323],
+      "why": "A unique GitHub repository URL with strong UX/UI cue words."
+    },
+    {
+      "id": "exact_hit_18",
+      "query": "Find the skatehq skate repo link",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [445034528768],
+      "acceptableChatIds": [8286929323],
+      "why": "A unique GitHub repo URL ending in skate.git."
+    },
+    {
+      "id": "exact_hit_19",
+      "query": "Show me the Karpathy X link I shared",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [451921575936],
+      "acceptableChatIds": [8546323714],
+      "why": "A unique x.com/karpathy status link."
+    },
+    {
+      "id": "exact_hit_20",
+      "query": "Find the Camilla Vargas X link",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [450096005120, 450088665088],
+      "acceptableChatIds": [8286929323, 5068640359],
+      "why": "Both messages contain the same x.com/camillenvargas status link."
+    },
+    {
+      "id": "exact_hit_21",
+      "query": "Show me the Google Meet link kjb-risp-qdi",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [450157871104],
+      "acceptableChatIds": [865924605],
+      "why": "A unique meet.google.com code with authuser in the query string."
+    },
+    {
+      "id": "exact_hit_22",
+      "query": "Show me the Google Meet link uzw-ehxj-xms",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [449500413952, 448355368960, 445170843648, 431720759296, 445169795072, 445168746496, 445167697920],
+      "acceptableChatIds": [871826940, 7021558594, 909260483],
+      "why": "The same meet.google.com code appears across several messages and chats, including standalone and paired-with-Notion forms."
+    },
+    {
+      "id": "exact_hit_23",
+      "query": "Show me the Google Meet link gyg-vxig-vbw",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [448754876416],
+      "acceptableChatIds": [1236681349],
+      "why": "A unique meet.google.com code."
+    },
+    {
+      "id": "exact_hit_24",
+      "query": "Find the Varun Mayya YouTube videos link",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [443977564160],
+      "acceptableChatIds": [1580996262],
+      "why": "A unique YouTube channel videos link."
+    },
+    {
+      "id": "exact_hit_25",
+      "query": "Find the BaseScan tx link I shared",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [338777079808],
+      "acceptableChatIds": [5068640359],
+      "why": "A unique basescan.org transaction URL."
+    },
+    {
+      "id": "exact_hit_26",
+      "query": "Find the Moxie vesting contracts doc",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [185023332352],
+      "acceptableChatIds": [865924605],
+      "why": "This message contains the Moxie Token Vesting Contracts Notion doc along with setup context."
+    },
+    {
+      "id": "exact_hit_27",
+      "query": "Find the final collection CA for @gopalagopala1",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [147385745408],
+      "acceptableChatIds": [-4244820874],
+      "why": "This message contains both the exact contract address and the @gopalagopala1 cue."
+    },
+    {
+      "id": "exact_hit_28",
+      "query": "Where did I say @Saxenasaheb raised final invoice on zip?",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [452142825472],
+      "acceptableChatIds": [-4207340164],
+      "why": "A clean exact-handle plus phrase lookup."
+    },
+    {
+      "id": "exact_hit_29",
+      "query": "Find the chat handoff message for @abhitejsingh",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [450173599744],
+      "acceptableChatIds": [-5072846231],
+      "why": "This is the exact 'moving our chat here' handoff message."
+    },
+    {
+      "id": "exact_hit_30",
+      "query": "Where did I tell @Inaaralakhani I was running 5 min late?",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [446497292288],
+      "acceptableChatIds": [-5146948443],
+      "why": "A clean exact-handle plus phrase lookup."
+    },
+    {
+      "id": "exact_hit_31",
+      "query": "Find the mehtab@cypherblocks.xyz whitelist message",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [389162205184],
+      "acceptableChatIds": [1079636447],
+      "why": "This message contains the exact email plus the distinctive whitelist phrase."
+    },
+    {
+      "id": "exact_hit_32",
+      "query": "Find the team@firstdollar.money email tracking message",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [390233849856],
+      "acceptableChatIds": [8509073799],
+      "why": "This message contains the exact email plus the tracking/automation instruction."
+    },
+    {
+      "id": "exact_hit_33",
+      "query": "Find the prisha@0xfbi.com OTP forwarding message",
+      "expectedKind": "hit",
+      "acceptableMessageIds": [396893356032],
+      "acceptableChatIds": [8509073799],
+      "why": "This message contains the exact email plus the OTP forwarding instruction."
+    },
+    {
+      "id": "exact_none_01",
+      "query": "Where did I share my wallet address with Rahul?",
+      "expectedKind": "no_result",
+      "acceptableMessageIds": [],
+      "acceptableChatIds": [],
+      "why": "No clean local exact message currently ties a wallet/address share to Rahul context."
+    },
+    {
+      "id": "exact_none_02",
+      "query": "Which group did I post this URL in: https://example.com/docs/onboarding?",
+      "expectedKind": "no_result",
+      "acceptableMessageIds": [],
+      "acceptableChatIds": [],
+      "why": "Synthetic URL should not falsely match local traffic."
+    },
+    {
+      "id": "exact_none_03",
+      "query": "Find the GitHub link github.com/nonexistent/repo that I sent",
+      "expectedKind": "no_result",
+      "acceptableMessageIds": [],
+      "acceptableChatIds": [],
+      "why": "Synthetic GitHub repository should not leak into nearby GitHub chatter."
+    },
+    {
+      "id": "exact_none_04",
+      "query": "Show me the Google Meet link abc-defg-hij",
+      "expectedKind": "no_result",
+      "acceptableMessageIds": [],
+      "acceptableChatIds": [],
+      "why": "Synthetic meet code should not match other Google Meet traffic."
+    }
+  ]
+}

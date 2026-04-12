@@ -41,6 +41,7 @@ struct SettingsView: View {
     @State private var routingSampleSnapshots: [QueryRoutingDebugSnapshot] = []
     @State private var isLoadingRoutingDebug = false
     @StateObject private var indexingProgress = IndexScheduler.shared.progress
+    @StateObject private var recentSyncProgress = RecentSyncCoordinator.shared.progress
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
 
     private let routingSampleQueries: [String] = [
@@ -200,16 +201,23 @@ struct SettingsView: View {
 
     private var aiTab: some View {
         Form {
-            Section {
-                Picker("Provider", selection: $selectedAIProvider) {
-                    Text("None").tag(AIProviderConfig.ProviderType.none)
-                    Text("Claude (Anthropic)").tag(AIProviderConfig.ProviderType.claude)
-                    Text("OpenAI").tag(AIProviderConfig.ProviderType.openai)
-                }
+                Section {
+                    Picker("Provider", selection: $selectedAIProvider) {
+                        Text("None").tag(AIProviderConfig.ProviderType.none)
+                        Text("Claude (Anthropic)").tag(AIProviderConfig.ProviderType.claude)
+                        Text("OpenAI").tag(AIProviderConfig.ProviderType.openai)
+                    }
+                    .onChange(of: selectedAIProvider) { oldValue, newValue in
+                        guard oldValue != newValue else { return }
+                        aiApiKey = ""
+                        aiModel = ""
+                        aiSaveStatus = nil
+                        testConnectionResult = nil
+                    }
 
-                if selectedAIProvider != .none {
-                    SecureField("API Key", text: $aiApiKey)
-                        .textFieldStyle(.roundedBorder)
+                    if selectedAIProvider != .none {
+                        SecureField("API Key", text: $aiApiKey)
+                            .textFieldStyle(.roundedBorder)
 
                     TextField("Model (optional, uses default if empty)", text: $aiModel)
                         .textFieldStyle(.roundedBorder)
@@ -503,22 +511,82 @@ struct SettingsView: View {
 
                         LazyVGrid(columns: usageGridColumns, spacing: 12) {
                             usageMetricCard(
+                                title: "Recent Sync",
+                                value: recentSyncStatusLabel,
+                                caption: recentSyncStatusCaption,
+                                accent: recentSyncStatusAccent
+                            )
+                            usageMetricCard(
+                                title: "Stale Visible Chats",
+                                value: recentSyncStaleLabel,
+                                caption: "Visible chats still waiting on a fresh local window",
+                                accent: recentSyncProgress.staleVisibleChats == 0 ? .green : .orange
+                            )
+                            usageMetricCard(
+                                title: "Last Recent Sync",
+                                value: recentSyncLastLabel,
+                                caption: recentSyncLastCaption,
+                                accent: .cyan
+                            )
+                            usageMetricCard(
+                                title: "Recent Sync Session",
+                                value: recentSyncSessionLabel,
+                                caption: recentSyncSessionCaption,
+                                accent: .mint
+                            )
+                        }
+
+                        LazyVGrid(columns: usageGridColumns, spacing: 12) {
+                            usageMetricCard(
                                 title: "Search-Ready Chats",
                                 value: "\(integerString(indexingProgress.indexed)) / \(integerString(indexingProgress.total))",
                                 caption: "Indexable chats fully deep-indexed for local search",
                                 accent: indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total ? .green : .orange
                             )
                             usageMetricCard(
-                                title: "Indexer Status",
-                                value: indexingStatusLabel,
-                                caption: indexingStatusCaption,
-                                accent: indexingStatusAccent
+                                title: "Pending Deep Index",
+                                value: integerString(indexingProgress.pendingChats),
+                                caption: "Visible chats still missing deep local history",
+                                accent: indexingProgress.pendingChats == 0 ? .green : .orange
                             )
                             usageMetricCard(
-                                title: "Current Chat",
+                                title: "Active Workers",
+                                value: indexingWorkerLabel,
+                                caption: indexingWorkerCaption,
+                                accent: indexingWorkerAccent
+                            )
+                            usageMetricCard(
+                                title: "Indexer Focus",
                                 value: indexingCurrentChatLabel,
-                                caption: "Chat currently being indexed",
+                                caption: "Current or last deep-index target",
                                 accent: .teal
+                            )
+                        }
+
+                        LazyVGrid(columns: usageGridColumns, spacing: 12) {
+                            usageMetricCard(
+                                title: "Last Index Progress",
+                                value: lastIndexProgressLabel,
+                                caption: lastIndexProgressCaption,
+                                accent: lastIndexProgressAccent
+                            )
+                            usageMetricCard(
+                                title: "Deep Index ETA",
+                                value: deepIndexETALabel,
+                                caption: deepIndexETACaption,
+                                accent: deepIndexETAAccent
+                            )
+                            usageMetricCard(
+                                title: "Indexed This Session",
+                                value: compactNumberString(indexingProgress.sessionIndexedMessages),
+                                caption: "Durable history messages written this run",
+                                accent: .blue
+                            )
+                            usageMetricCard(
+                                title: "Chats Completed",
+                                value: integerString(indexingProgress.sessionCompletedChats),
+                                caption: "Chats that reached full search-ready coverage",
+                                accent: .purple
                             )
                             usageMetricCard(
                                 title: "Index Coverage",
@@ -631,12 +699,28 @@ struct SettingsView: View {
 
     private func loadAIConfig() {
         selectedAIProvider = aiService.providerType
-        aiApiKey = (try? KeychainManager.retrieve(for: .aiApiKey)) ?? ""
-        aiModel = (try? KeychainManager.retrieve(for: .aiModel)) ?? ""
+        aiApiKey = ((try? KeychainManager.retrieve(for: .aiApiKey)) ?? nil) ?? ""
+        aiModel = ((try? KeychainManager.retrieve(for: .aiModel)) ?? nil) ?? ""
     }
 
     private func saveAIConfig() {
-        aiService.configure(type: selectedAIProvider, apiKey: aiApiKey, model: aiModel.isEmpty ? nil : aiModel)
+        let trimmedKey = aiApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedKey: String
+
+        if selectedAIProvider == .none {
+            resolvedKey = ""
+        } else if !trimmedKey.isEmpty {
+            resolvedKey = trimmedKey
+            aiApiKey = trimmedKey
+        } else {
+            aiSaveStatus = "Error: API key required"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                aiSaveStatus = nil
+            }
+            return
+        }
+
+        aiService.configure(type: selectedAIProvider, apiKey: resolvedKey, model: aiModel.isEmpty ? nil : aiModel)
         aiSaveStatus = "Saved"
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             aiSaveStatus = nil
@@ -823,39 +907,12 @@ struct SettingsView: View {
         return min(max(Double(indexingProgress.indexed) / Double(indexingProgress.total), 0), 1)
     }
 
-    private var indexingStatusLabel: String {
-        if indexingProgress.isPaused {
-            return "Paused"
-        }
-        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
-            return "Idle"
-        }
-        return "Running"
-    }
-
-    private var indexingStatusCaption: String {
-        if indexingProgress.isPaused {
-            return "Indexer yields while you actively search"
-        }
-        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
-            return "All visible chats are currently search-ready"
-        }
-        return "Background deep indexing is active"
-    }
-
-    private var indexingStatusAccent: Color {
-        if indexingProgress.isPaused {
-            return .orange
-        }
-        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
-            return .green
-        }
-        return .blue
-    }
-
     private var indexingCurrentChatLabel: String {
         if let currentChat = indexingProgress.currentChat, !currentChat.isEmpty {
             return currentChat
+        }
+        if let lastIndexedChat = indexingProgress.lastIndexedChat, !lastIndexedChat.isEmpty {
+            return lastIndexedChat
         }
         if indexingProgress.isPaused {
             return "Search active"
@@ -864,6 +921,184 @@ struct SettingsView: View {
             return "Up to date"
         }
         return "Waiting"
+    }
+
+    private var indexingWorkerLabel: String {
+        if indexingProgress.isPaused {
+            return "Yielding"
+        }
+        if indexingProgress.activeWorkers > 0 {
+            return "\(indexingProgress.activeWorkers)"
+        }
+        if indexingProgress.pendingChats == 0 && indexingProgress.total > 0 {
+            return "Idle"
+        }
+        return "Waiting"
+    }
+
+    private var indexingWorkerCaption: String {
+        if indexingProgress.isPaused {
+            return "Deep index yields while you actively search"
+        }
+        if indexingProgress.activeWorkers > 0 {
+            return "Concurrent deep-index workers live now"
+        }
+        if indexingProgress.pendingChats == 0 && indexingProgress.total > 0 {
+            return "No pending visible chats left to deep-index"
+        }
+        return "Workers are ready for the next visible backlog pass"
+    }
+
+    private var indexingWorkerAccent: Color {
+        if indexingProgress.isPaused {
+            return .orange
+        }
+        if indexingProgress.activeWorkers > 0 {
+            return .blue
+        }
+        return indexingProgress.pendingChats == 0 ? .green : .secondary
+    }
+
+    private var lastIndexProgressLabel: String {
+        if indexingProgress.lastBatchMessageCount > 0 {
+            return "\(compactNumberString(indexingProgress.lastBatchMessageCount)) msgs"
+        }
+        if indexingProgress.lastBackfillCount > 0 {
+            return "\(compactNumberString(indexingProgress.lastBackfillCount)) emb"
+        }
+        if let lastIndexedAt = indexingProgress.lastIndexedAt {
+            return relativeTimeString(lastIndexedAt)
+        }
+        return "No batches yet"
+    }
+
+    private var lastIndexProgressCaption: String {
+        let subject = indexingProgress.lastIndexedChat ?? "Deep index"
+        if let lastIndexedAt = indexingProgress.lastIndexedAt {
+            return "\(subject) moved \(relativeTimeString(lastIndexedAt))"
+        }
+        if indexingProgress.pendingChats > 0 {
+            return "Waiting for the first visible deep-index batch"
+        }
+        return "All visible chats are currently covered"
+    }
+
+    private var lastIndexProgressAccent: Color {
+        if indexingProgress.lastIndexedAt != nil {
+            return .green
+        }
+        return indexingProgress.pendingChats > 0 ? .orange : .secondary
+    }
+
+    private var deepIndexETASeconds: TimeInterval? {
+        guard indexingProgress.pendingChats > 0 else { return 0 }
+        guard let sessionStartedAt = indexingProgress.sessionStartedAt else { return nil }
+        guard indexingProgress.sessionCompletedChats > 0 else { return nil }
+
+        let elapsed = Date().timeIntervalSince(sessionStartedAt)
+        guard elapsed >= 60 else { return nil }
+
+        let chatsPerSecond = Double(indexingProgress.sessionCompletedChats) / elapsed
+        guard chatsPerSecond > 0 else { return nil }
+
+        return Double(indexingProgress.pendingChats) / chatsPerSecond
+    }
+
+    private var deepIndexETALabel: String {
+        guard indexingProgress.pendingChats > 0 else { return "Done" }
+        guard let etaSeconds = deepIndexETASeconds else { return "Estimating…" }
+        return durationString(etaSeconds)
+    }
+
+    private var deepIndexETACaption: String {
+        guard indexingProgress.pendingChats > 0 else {
+            return "Visible backlog is fully covered right now"
+        }
+        guard let sessionStartedAt = indexingProgress.sessionStartedAt else {
+            return "Waiting for this session to establish a pace"
+        }
+        let elapsed = Date().timeIntervalSince(sessionStartedAt)
+        guard indexingProgress.sessionCompletedChats > 0, elapsed >= 60 else {
+            return "Need a bit more completed-chat data before the estimate settles"
+        }
+        return "Estimated from \(integerString(indexingProgress.sessionCompletedChats)) completed chats this run"
+    }
+
+    private var deepIndexETAAccent: Color {
+        if indexingProgress.pendingChats == 0 {
+            return .green
+        }
+        if deepIndexETASeconds != nil {
+            return .indigo
+        }
+        return .orange
+    }
+
+    private var recentSyncStatusLabel: String {
+        if recentSyncProgress.activeRefreshes > 0 {
+            return "Refreshing"
+        }
+        if recentSyncProgress.isRefreshQueued {
+            return "Queued"
+        }
+        if recentSyncProgress.totalVisibleChats > 0 && recentSyncProgress.staleVisibleChats == 0 {
+            return "Fresh"
+        }
+        return "Watching"
+    }
+
+    private var recentSyncStatusCaption: String {
+        if recentSyncProgress.activeRefreshes > 0 {
+            return "Recent windows are being pulled into SQLite now"
+        }
+        if recentSyncProgress.isRefreshQueued {
+            return "A startup, foreground, or priority refresh is queued"
+        }
+        if recentSyncProgress.totalVisibleChats > 0 && recentSyncProgress.staleVisibleChats == 0 {
+            return "Visible chats are locally fresh for launcher search"
+        }
+        return "Monitoring visible chats for freshness drift"
+    }
+
+    private var recentSyncStatusAccent: Color {
+        if recentSyncProgress.activeRefreshes > 0 {
+            return .blue
+        }
+        if recentSyncProgress.isRefreshQueued {
+            return .orange
+        }
+        if recentSyncProgress.totalVisibleChats > 0 && recentSyncProgress.staleVisibleChats == 0 {
+            return .green
+        }
+        return .secondary
+    }
+
+    private var recentSyncStaleLabel: String {
+        "\(integerString(recentSyncProgress.staleVisibleChats)) / \(integerString(recentSyncProgress.totalVisibleChats))"
+    }
+
+    private var recentSyncLastLabel: String {
+        guard let lastSyncAt = recentSyncProgress.lastSyncAt else { return "No refresh yet" }
+        return relativeTimeString(lastSyncAt)
+    }
+
+    private var recentSyncLastCaption: String {
+        if let lastSyncedChat = recentSyncProgress.lastSyncedChat, !lastSyncedChat.isEmpty {
+            return lastSyncedChat
+        }
+        return "Most recently refreshed visible chat"
+    }
+
+    private var recentSyncSessionLabel: String {
+        "\(integerString(recentSyncProgress.sessionRefreshedChats)) chats"
+    }
+
+    private var recentSyncSessionCaption: String {
+        let messageSummary = "\(compactNumberString(recentSyncProgress.sessionRefreshedMessages)) msgs"
+        if recentSyncProgress.prioritizedChats > 0 {
+            return "\(messageSummary) • \(integerString(recentSyncProgress.prioritizedChats)) priority"
+        }
+        return "\(messageSummary) this session"
     }
 
     private var usageInfoCard: some View {
@@ -1203,5 +1438,30 @@ struct SettingsView: View {
     private func percentString(_ value: Double) -> String {
         let normalized = min(max(value, 0), 1)
         return "\(Int((normalized * 100).rounded()))%"
+    }
+
+    private func relativeTimeString(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private func durationString(_ interval: TimeInterval) -> String {
+        let totalSeconds = max(Int(interval.rounded()), 0)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+
+        if hours > 0 {
+            if minutes > 0 {
+                return "\(hours)h \(minutes)m"
+            }
+            return "\(hours)h"
+        }
+
+        if minutes > 0 {
+            return "\(minutes)m"
+        }
+
+        return "<1m"
     }
 }

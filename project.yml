@@ -37,3 +37,20 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: false
         GENERATE_INFOPLIST_FILE: true
+
+  PidgyTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Pidgy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pidgy.app.tests
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_VERSION: "5.10"
+        PRODUCT_NAME: PidgyTests
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: false
