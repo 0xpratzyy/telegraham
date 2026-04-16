@@ -847,6 +847,9 @@ struct LauncherView: View {
 
                     // AI semantic/agentic results
                     ForEach(Array(aiResults.enumerated()), id: \.element.id) { index, result in
+                        if let sectionTitle = replyQueueSectionHeaderTitle(for: result, at: index) {
+                            replyQueueSectionHeader(title: sectionTitle)
+                        }
                         aiResultRow(result: result, index: index)
                             .id(result.id)
                     }
@@ -887,6 +890,28 @@ struct LauncherView: View {
         case .replyQueueResult(let result):
             replyQueueResultRow(result: result, index: index)
         }
+    }
+
+    private func replyQueueSectionHeaderTitle(for result: AISearchResult, at index: Int) -> String? {
+        guard case .replyQueueResult(let replyResult) = result,
+              replyResult.classification == .worthChecking else {
+            return nil
+        }
+        guard index > 0 else { return "Worth checking" }
+        guard case .replyQueueResult(let previousResult) = aiResults[index - 1] else {
+            return "Worth checking"
+        }
+        return previousResult.classification == .worthChecking ? nil : "Worth checking"
+    }
+
+    private func replyQueueSectionHeader(title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
     }
 
     private func chatForSemanticResult(_ result: SemanticSearchResult) -> TGChat? {

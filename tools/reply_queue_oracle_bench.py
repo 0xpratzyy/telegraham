@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from reply_queue_gold_eval import evaluate, load_gold
+from reply_queue_gold_eval import evaluate, extract_prediction_sets, load_gold
 from reply_queue_harness import leaderboard_rows, summarize_variant
 from reply_queue_variant_bench import DEFAULT_API_KEY_PATH, VARIANT_RUNS, load_api_key, run_variant
 
@@ -69,8 +69,14 @@ def main() -> int:
             snapshot = json.loads(snapshot_path.read_text())
             for trial_index in range(args.trials):
                 payload = run_variant(api_key, snapshot, variant, args.batch_size)
-                predicted = {int(chat_id) for chat_id in payload.get("on_me_chat_ids", [])}
-                report = evaluate(f"{variant.name}:{snapshot_path.name}:trial_{trial_index+1}", predicted, labels)
+                prediction_sets = extract_prediction_sets(payload)
+                report = evaluate(
+                    f"{variant.name}:{snapshot_path.name}:trial_{trial_index+1}",
+                    prediction_sets["on_me"],
+                    labels,
+                    predicted_surfaced=prediction_sets["surfaced"],
+                    predicted_worth_checking=prediction_sets["worth_checking"],
+                )
                 payload["evaluation"] = report
                 payload["snapshotPath"] = str(snapshot_path)
                 payload["trialIndex"] = trial_index + 1

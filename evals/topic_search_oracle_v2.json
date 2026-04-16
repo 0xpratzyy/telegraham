@@ -1,0 +1,138 @@
+{
+  "name": "topic-search-oracle-v2",
+  "notes": "Grounded chat-first topic-search oracle seeded from real local corpus topic clusters mined from recent high-volume chats, plus no-result traps that prevent cross-chat glue.",
+  "entries": [
+    {
+      "id": "topic_v2_hit_01",
+      "query": "What's latest with First Dollar case studies?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8509073799, 8286929323, 1079636447, -5177680185, 5068640359],
+      "retrievalHints": ["first dollar", "case study", "case studies", "study website"],
+      "requiredSnippetTerms": ["case", "study"]
+    },
+    {
+      "id": "topic_v2_hit_02",
+      "query": "Show me discussions about Radar Room.",
+      "expectedKind": "hit",
+      "expectedChatIds": [1079636447, 5068640359, 8286929323, 7842808520, 5246659298, 865924605],
+      "retrievalHints": ["radar room"],
+      "requiredSnippetTerms": ["radar", "room"]
+    },
+    {
+      "id": "topic_v2_hit_03",
+      "query": "What's latest with sub agents?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323, 8546323714],
+      "retrievalHints": ["sub agent", "sub agents"],
+      "requiredSnippetTerms": ["sub", "agent"]
+    },
+    {
+      "id": "topic_v2_hit_04",
+      "query": "Show me discussions about Claude Code.",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5206575016, 1079636447, 865924605, 8286929323, 8546323714],
+      "retrievalHints": ["claude code"],
+      "requiredSnippetTerms": ["claude", "code"]
+    },
+    {
+      "id": "topic_v2_hit_05",
+      "query": "What's latest with OpenClaw gateway?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323, 865924605, 8546323714],
+      "retrievalHints": ["openclaw gateway", "gateway token", "openclaw"],
+      "requiredSnippetTerms": ["openclaw", "gateway"]
+    },
+    {
+      "id": "topic_v2_hit_06",
+      "query": "What's latest with Inner Circle?",
+      "expectedKind": "hit",
+      "expectedChatIds": [865924605, 1405656673, 1079636447, 5068640359, -1001613656434, -1003542166929],
+      "retrievalHints": ["inner circle"],
+      "requiredSnippetTerms": ["inner", "circle"]
+    },
+    {
+      "id": "topic_v2_hit_07",
+      "query": "Show me discussions about office space.",
+      "expectedKind": "hit",
+      "expectedChatIds": [865924605, -4207340164],
+      "retrievalHints": ["office space"],
+      "requiredSnippetTerms": ["office", "space"]
+    },
+    {
+      "id": "topic_v2_hit_08",
+      "query": "Show me discussions about smart contracts.",
+      "expectedKind": "hit",
+      "expectedChatIds": [1079636447, 1604144143, 865924605],
+      "retrievalHints": ["smart contract", "smart contracts"],
+      "requiredSnippetTerms": ["smart", "contract"]
+    },
+    {
+      "id": "topic_v2_hit_09",
+      "query": "What's latest with proxy swap?",
+      "expectedKind": "hit",
+      "expectedChatIds": [865924605, 1604144143, -4244820874],
+      "retrievalHints": ["proxy swap"],
+      "requiredSnippetTerms": ["proxy", "swap"]
+    },
+    {
+      "id": "topic_v2_hit_10",
+      "query": "What's latest with tweet ideas?",
+      "expectedKind": "hit",
+      "expectedChatIds": [8509073799, 865924605],
+      "retrievalHints": ["tweet ideas"],
+      "requiredSnippetTerms": ["tweet", "ideas"]
+    },
+    {
+      "id": "topic_v2_hit_11",
+      "query": "Show me discussions about talent protocol.",
+      "expectedKind": "hit",
+      "expectedChatIds": [865924605, -4244820874, -4892647548],
+      "retrievalHints": ["talent protocol"],
+      "requiredSnippetTerms": ["talent", "protocol"]
+    },
+    {
+      "id": "topic_v2_hit_12",
+      "query": "What's latest with screenshots and recordings?",
+      "expectedKind": "hit",
+      "expectedChatIds": [5068640359],
+      "retrievalHints": ["screenshots recordings", "screenshots", "recordings"],
+      "requiredSnippetTerms": ["screenshots", "recordings"]
+    },
+    {
+      "id": "topic_v2_hit_13",
+      "query": "What's latest with API keys?",
+      "expectedKind": "hit",
+      "expectedChatIds": [1604144143, 8286929323, 865924605],
+      "retrievalHints": ["api keys", "anthropic api", "api key"],
+      "requiredSnippetTerms": ["api", "keys"]
+    },
+    {
+      "id": "topic_v2_no_result_01",
+      "query": "Summarize my chats with Rahul about wallet addresses.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["rahul", "wallet", "address"]
+    },
+    {
+      "id": "topic_v2_no_result_02",
+      "query": "Summarize my chats with Rupam about whitelisting bounties.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["rupam", "whitelisted", "bounty"]
+    },
+    {
+      "id": "topic_v2_no_result_03",
+      "query": "Summarize my chats with Jack about mobile app gaps.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["jack", "mobile app", "notification system"]
+    },
+    {
+      "id": "topic_v2_no_result_04",
+      "query": "Summarize my chats with Sophia about wallet addresses.",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["sophia", "wallet", "address"]
+    }
+  ]
+}

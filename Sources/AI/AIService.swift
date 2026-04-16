@@ -133,6 +133,7 @@ final class AIService: ObservableObject {
                 let replyability: AgenticSearchResult.Replyability
                 switch dto.replyability.lowercased() {
                 case "reply_now": replyability = .replyNow
+                case "worth_checking": replyability = .worthChecking
                 case "waiting_on_them": replyability = .waitingOnThem
                 default: replyability = .unclear
                 }
@@ -303,41 +304,105 @@ final class AIService: ObservableObject {
         )
     }
 
+    func persistedConfiguration(for type: AIProviderConfig.ProviderType) -> AIProviderConfig? {
+        guard type != .none else { return nil }
+        guard let apiKeyKey = apiKeyStorageKey(for: type),
+              let modelKey = modelStorageKey(for: type) else {
+            return nil
+        }
+
+        let apiKey = (((try? KeychainManager.retrieve(for: apiKeyKey)) ?? nil) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else { return nil }
+
+        let storedModel = (((try? KeychainManager.retrieve(for: modelKey)) ?? nil) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = normalizedModel(
+            type: type,
+            model: storedModel.isEmpty ? type.defaultModel : storedModel
+        )
+
+        return AIProviderConfig(providerType: type, apiKey: apiKey, model: model)
+    }
+
     // MARK: - Persistence
 
     private func loadConfiguration() {
-        let storedType = ((try? KeychainManager.retrieve(for: .aiProviderType)) ?? nil)
-        let storedApiKey = ((try? KeychainManager.retrieve(for: .aiApiKey)) ?? nil)
+        let storedType = ((try? KeychainManager.retrieve(for: .aiProviderType)) ?? nil)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard let providerType = storedType,
-              let type = AIProviderConfig.ProviderType(rawValue: providerType),
-              let rawApiKey = storedApiKey else {
+              let type = AIProviderConfig.ProviderType(rawValue: providerType) else {
             return
         }
 
-        let apiKey = rawApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !apiKey.isEmpty else { return }
+        guard type != .none else {
+            clearConfigurationState()
+            return
+        }
 
-        let model = ((try? KeychainManager.retrieve(for: .aiModel)) ?? nil)
-        configure(type: type, apiKey: apiKey, model: model)
+        if let persisted = persistedConfiguration(for: type) {
+            configure(type: type, apiKey: persisted.apiKey, model: persisted.model)
+            return
+        }
+
+        // One-time migration path from the old shared AI key slots.
+        let legacyApiKey = (((try? KeychainManager.retrieve(for: .aiApiKey)) ?? nil) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !legacyApiKey.isEmpty else { return }
+
+        let legacyModel = (((try? KeychainManager.retrieve(for: .aiModel)) ?? nil) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedLegacyModel = normalizedModel(
+            type: type,
+            model: legacyModel.isEmpty ? type.defaultModel : legacyModel
+        )
+        configure(type: type, apiKey: legacyApiKey, model: normalizedLegacyModel)
     }
 
     private func saveConfiguration(type: AIProviderConfig.ProviderType, apiKey: String, model: String) {
         try? KeychainManager.save(type.rawValue, for: .aiProviderType)
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if type == .none {
-            try? KeychainManager.delete(for: .aiApiKey)
-            try? KeychainManager.delete(for: .aiModel)
             return
         }
 
-        if !trimmedKey.isEmpty {
-            try? KeychainManager.save(trimmedKey, for: .aiApiKey)
+        if let apiKeyKey = apiKeyStorageKey(for: type) {
+            if !trimmedKey.isEmpty {
+                try? KeychainManager.save(trimmedKey, for: apiKeyKey)
+            }
         }
 
-        if !model.isEmpty {
-            try? KeychainManager.save(model, for: .aiModel)
+        if let modelKey = modelStorageKey(for: type) {
+            if !trimmedModel.isEmpty {
+                try? KeychainManager.save(trimmedModel, for: modelKey)
+            } else {
+                try? KeychainManager.delete(for: modelKey)
+            }
+        }
+    }
+
+    private func apiKeyStorageKey(for type: AIProviderConfig.ProviderType) -> KeychainManager.Key? {
+        switch type {
+        case .openai:
+            return .aiApiKeyOpenAI
+        case .claude:
+            return .aiApiKeyClaude
+        case .none:
+            return nil
+        }
+    }
+
+    private func modelStorageKey(for type: AIProviderConfig.ProviderType) -> KeychainManager.Key? {
+        switch type {
+        case .openai:
+            return .aiModelOpenAI
+        case .claude:
+            return .aiModelClaude
+        case .none:
+            return nil
         }
     }
 

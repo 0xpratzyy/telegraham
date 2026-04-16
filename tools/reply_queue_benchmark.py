@@ -16,6 +16,11 @@ APP_SUPPORT = Path.home() / "Library" / "Application Support" / "Pidgy"
 DEFAULT_CANDIDATES_PATH = APP_SUPPORT / "debug" / "last_reply_queue_candidates.json"
 DEFAULT_RESULTS_PATH = APP_SUPPORT / "debug" / "last_reply_queue_benchmark_results.json"
 DEFAULT_API_KEY_PATH = APP_SUPPORT / "credentials" / "com.pidgy.aiApiKey"
+LEGACY_API_KEY_PATH = APP_SUPPORT / "credentials" / "com.tgsearch.aiApiKey"
+PROVIDER_SCOPED_API_KEY_PATHS = [
+    APP_SUPPORT / "credentials" / "com.pidgy.aiApiKey.openai",
+    APP_SUPPORT / "credentials" / "com.pidgy.aiApiKey.claude",
+]
 
 # Standard and projected priority rates as of 2026-04-09 from official OpenAI docs/pricing.
 PRICING = {
@@ -342,7 +347,14 @@ def call_openai(
 def load_api_key(path: Path) -> str:
     if os.environ.get("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"]
-    return path.read_text().strip()
+    candidate_paths = [path, *PROVIDER_SCOPED_API_KEY_PATHS, LEGACY_API_KEY_PATH]
+    for candidate_path in candidate_paths:
+        if not candidate_path.exists():
+            continue
+        value = candidate_path.read_text().strip()
+        if value:
+            return value
+    return ""
 
 
 def default_scenarios(default_model: str) -> list[Scenario]:

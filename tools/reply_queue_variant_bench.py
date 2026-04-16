@@ -18,6 +18,10 @@ DEFAULT_SNAPSHOT_PATH = APP_SUPPORT / "debug" / "reply_queue_candidate_snapshots
 DEFAULT_OUT_DIR = APP_SUPPORT / "debug" / "group_precision_bench"
 DEFAULT_API_KEY_PATH = APP_SUPPORT / "credentials" / "com.pidgy.aiApiKey"
 LEGACY_API_KEY_PATH = APP_SUPPORT / "credentials" / "com.tgsearch.aiApiKey"
+PROVIDER_SCOPED_API_KEY_PATHS = [
+    APP_SUPPORT / "credentials" / "com.pidgy.aiApiKey.openai",
+    APP_SUPPORT / "credentials" / "com.pidgy.aiApiKey.claude",
+]
 
 
 PRICING = {
@@ -65,6 +69,47 @@ Return exactly one JSON object:
 }
 
 Valid classification values: "on_me", "on_them", "quiet", "need_more"
+Valid urgency values: "high", "medium", "low"
+""".strip()
+
+
+TIERED_BASE_SYSTEM_PROMPT = """
+You triage Telegram chats for a BD/community operator.
+Your job is to decide whether the user currently owes a reply in each candidate chat.
+
+You will receive many candidate chats at once. Return exactly one result for every candidate chatId.
+
+Classification rules:
+- "on_me": the user clearly owes a reply or follow-up now.
+- "worth_checking": there is a real open loop worth surfacing in a secondary bucket, but it is not strong or fresh enough to claim as a primary reply-now item.
+- "on_them": the other side owns the next step, or the user already replied and is waiting.
+- "quiet": no active obligation right now.
+- "need_more": only use when the provided context is genuinely insufficient to tell.
+
+Key judgment rules:
+- Use "worth_checking" for stale or diluted open loops: someone did ask the user something, but later discussion, age, or ambiguous ownership makes it too weak for "on_me".
+- In groups, prefer "worth_checking" over "on_me" when an older request is still somewhat relevant but there is no fresh direct ask on the user now.
+- Treat acknowledgements, reactions, celebrations, and thread-closing chatter as "quiet" unless a new ask appears.
+- If the other side clearly owns the next step, use "on_them", not "worth_checking".
+- Use supportingMessageIds to point at the messages that justify the decision.
+- suggestedAction should be short and practical.
+
+Return exactly one JSON object:
+{
+  "results": [
+    {
+      "chatId": 123,
+      "classification": "worth_checking",
+      "urgency": "medium",
+      "reason": "There was an earlier request for your input, but it is no longer fresh enough to count as reply-now.",
+      "suggestedAction": "Review the thread and decide if a follow-up is still useful.",
+      "confidence": 0.74,
+      "supportingMessageIds": [111, 112]
+    }
+  ]
+}
+
+Valid classification values: "on_me", "worth_checking", "on_them", "quiet", "need_more"
 Valid urgency values: "high", "medium", "low"
 """.strip()
 
@@ -156,6 +201,45 @@ Use the structured digest fields carefully:
 - For private chats, `privateReplySignal` helps recover short follow-ups and operational asks even when the latest inbound is casual.
 - Use the wider private snippet window to judge whether the conversation is still operationally open; do not require a formal question mark.
 """.strip(),
+    "field_aware_groups_v4_contextual_recovery_v1": BASE_SYSTEM_PROMPT + "\n\n" + STRICT_GROUPS_APPENDIX + "\n\n" + """
+Use the structured digest fields carefully:
+- Treat `groupOwnershipHint` as the main ownership signal for groups, but do not over-trust raw handle mentions by themselves.
+- `explicitSecondPersonLatestActionable` is the only second-person field you should trust. Ignore bare `you` phrasing inside explanations or clarifications.
+- If `latestActionableLooksExplanatory` is true in a group, default to `quiet` unless there is a separate explicit ask, direct mention, or a clearly unresolved user commitment.
+- If `groupOwnershipHint` is `mentioned_other_handle` only because `ccStyleHandleMentions` is true, do not automatically reject `on_me`. Treat cc-style mentions as informational unless another field clearly shows the task moved elsewhere.
+- If `earlierRequestForInputExists` is true and later snippets look like implementation notes, bug reports, or task lists from the same thread, the chat can still be `on_me` even when the latest actionable snippet is not phrased as a direct question.
+- If someone else later says `got it`, `fixing that right now`, `on it`, `working on it`, or similar, prefer `quiet` or `on_them` even when there was an earlier request for your input.
+- For private chats, use `privateOwnershipHint` as a strong cue. `private_direct_follow_up` usually means `on_me`, `private_waiting_on_them` usually means `on_them`, and `private_closed` usually means `quiet`.
+- For private chats, `privateReplySignal` helps recover short follow-ups and operational asks even when the latest inbound is casual.
+""".strip(),
+    "field_aware_groups_v5_tiered_review_v1": TIERED_BASE_SYSTEM_PROMPT + "\n\n" + STRICT_GROUPS_APPENDIX + "\n\n" + """
+Use the structured digest fields carefully:
+- Treat `groupOwnershipHint` as the main ownership signal for groups.
+- If `latestActionableLooksExplanatory` is true in a group, default to `quiet` unless another field shows a separate explicit ask.
+- If `earlierRequestForInputExists` is true but the later context is more of a task dump, status list, or cc-style update than a fresh direct ask, prefer `worth_checking` over `on_me`.
+- If `groupOwnershipHint` is `mentioned_other_handle` only because `ccStyleHandleMentions` is true, that is weak negative evidence, not an automatic rejection.
+- If a newer direct ask clearly lands on the user, use `on_me`, not `worth_checking`.
+- If the loop is obviously stale, diffuse, or buried under later discussion but still plausibly relevant, use `worth_checking`.
+- If someone else later says `got it`, `fixing that right now`, `on it`, `working on it`, or similar, prefer `quiet` or `on_them`, not `worth_checking`.
+- For private chats, use `privateOwnershipHint` as a strong cue. Use `worth_checking` for older private follow-ups that still matter but are no longer strong enough for reply-now.
+""".strip(),
+    "field_aware_groups_v6_tiered_review_v2": TIERED_BASE_SYSTEM_PROMPT + "\n\n" + STRICT_GROUPS_APPENDIX + "\n\n" + """
+Use the structured digest fields carefully:
+- Treat `groupOwnershipHint` as the main ownership signal for groups.
+- `worth_checking` is a narrow bucket. In groups, use it only when there was a specific earlier ask or request for the user and that loop still looks unresolved, but the evidence is too stale or diluted for `on_me`.
+- If `groupOwnershipHint` is `possible_user_owned_group_follow_up` by itself, that is not enough for `worth_checking`. You still need a concrete earlier ask, follow-up, or commitment that plausibly lands on the user.
+- If `latestActionableLooksExplanatory` is true in a group, default to `quiet` unless another field shows a separate explicit ask.
+- If `earlierRequestForInputExists` is true and the later context is still the same implementation or review thread, but there is no fresh direct ask, prefer `worth_checking`, not `on_me`.
+- If the only evidence is an older request for input plus a later task dump, checklist, or cc-style update, keep it at `worth_checking` unless a newer explicit ask clearly lands on the user.
+- If `earlierRequestForInputExists` is true but a later message shows someone else already acted or took ownership, prefer `quiet` or `on_them`, not `worth_checking`.
+- If `groupOwnershipHint` is `mentioned_other_handle` only because `ccStyleHandleMentions` is true, that is weak negative evidence, not an automatic rejection.
+- Treat recurring accountability groups, habit trackers, weekly scoreboards, check-in ledgers, and self-reported task lists as `quiet` unless there is a fresh direct ask aimed at the user.
+- If `latestClosureText` or later snippets say `already added`, `done`, `done for the week`, `thank you`, `got it`, `on it`, `working on it`, `fixing that right now`, or similar, prefer `quiet` or `on_them`, not `worth_checking`.
+- If a newer direct ask clearly lands on the user, use `on_me`, not `worth_checking`.
+- For private chats, treat `private_waiting_on_them` as `on_them` and `private_closed` as `quiet` unless the other side clearly reopens the loop afterward.
+- If the user's later private reply redirects the person to another owner or says someone else should handle it, prefer `on_them` or `quiet`, not `on_me`, unless there is a newer reopen after that redirect.
+- For private chats, use `worth_checking` only for older private follow-ups that still matter but are no longer strong enough for reply-now.
+""".strip(),
 }
 
 
@@ -179,6 +263,10 @@ BASE_VARIANT_TUPLES = [
     ("field_aware_groups_v2_private_recall_v1_digest_v3", "digest_v3"),
     ("field_aware_groups_v3_private_recall_v1_digest_v4", "digest_v4"),
     ("field_aware_groups_v3_private_recall_v2_digest_v5", "digest_v5"),
+    ("field_aware_groups_v3_private_recall_v2_digest_v5", "digest_v6"),
+    ("field_aware_groups_v4_contextual_recovery_v1", "digest_v6"),
+    ("field_aware_groups_v5_tiered_review_v1", "digest_v6"),
+    ("field_aware_groups_v6_tiered_review_v2", "digest_v6"),
 ]
 
 ROBUST_MATRIX_TUPLES = [
@@ -256,6 +344,34 @@ def looks_actionable(text: str) -> bool:
     return any(signal in compact for signal in signals)
 
 
+def looks_group_task_dump_follow_up(text: str) -> bool:
+    compact = normalize(text)
+    if not compact:
+        return False
+    task_signals = [
+        "need to", "needs to", "changes", "fixes", "todo", "to do",
+        "pending", "remaining", "review comments", "figma", "feedback",
+    ]
+    ownership_signals = [
+        looks_cc_style_mentions(text),
+        "input" in compact,
+        "feedback" in compact,
+        "review" in compact,
+    ]
+    return any(signal in compact for signal in task_signals) and any(ownership_signals)
+
+
+def is_digest_actionable_inbound(message: dict[str, Any], chat_type: str) -> bool:
+    if message.get("senderFirstName") == "[ME]":
+        return False
+    text = message.get("text", "")
+    if looks_actionable(text):
+        return True
+    if chat_type == "group" and looks_group_task_dump_follow_up(text):
+        return True
+    return False
+
+
 def looks_like_closure(text: str, from_me: bool) -> bool:
     compact = normalize(text)
     if not compact:
@@ -263,6 +379,7 @@ def looks_like_closure(text: str, from_me: bool) -> bool:
     closure_signals = [
         "done", "thanks", "thank you", "got it", "noted", "sounds good",
         "perfect", "resolved", "on it", "will do", "will share", "will send",
+        "already added", "added it", "handled", "taken care of",
     ]
     if from_me:
         return any(compact == signal or signal in compact for signal in closure_signals)
@@ -288,14 +405,15 @@ def inbound_message_implies_contact_owns_next_step(text: str) -> bool:
     exact_signals = {
         "on it", "will do", "i will", "i ll", "working on it",
         "let me do it", "let me check", "will share", "will send",
-        "done", "completed", "fixing that right now",
+        "done", "completed", "fixing that right now", "already added", "added it",
     }
     if compact in exact_signals:
         return True
     phrase_signals = [
         "on it", "will do", "i will", "i ll", "working on",
         "let me", "will share", "will send", "sending", "share soon",
-        "taking a look", "fixing that", "i got this",
+        "taking a look", "take a look", "fixing that", "i got this",
+        "already added", "added it", "handled", "taken care of",
     ]
     return any(signal in compact for signal in phrase_signals)
 
@@ -316,8 +434,41 @@ def looks_direct_second_person_ask(text: str) -> bool:
     compact = normalize(text)
     if not compact:
         return False
-    direct_signals = ["can you", "could you", "would you", "please", "let me know", "you", "your"]
+    direct_signals = [
+        "can you", "could you", "would you", "will you", "please", "let me know",
+        "do you", "are you", "you should", "you need to", "kindly",
+    ]
     return any(signal in compact for signal in direct_signals)
+
+
+def looks_request_for_input(text: str) -> bool:
+    compact = normalize(text)
+    if not compact:
+        return False
+    signals = [
+        "give more input", "gib more input", "need input", "your input",
+        "share feedback", "feedback", "thoughts", "what do you think",
+        "let me know", "check once", "review this", "take a look",
+    ]
+    return any(signal in compact for signal in signals)
+
+
+def looks_explanatory_group_reply(text: str) -> bool:
+    compact = normalize(text)
+    if not compact:
+        return False
+    explanatory_starts = [
+        "you mean", "it means", "its too", "it's too", "you can just",
+        "you can", "basically", "i think", "this means", "even if you try",
+    ]
+    return any(compact.startswith(prefix) for prefix in explanatory_starts)
+
+
+def looks_cc_style_mentions(text: str) -> bool:
+    compact = normalize(text)
+    if not compact or "@" not in compact:
+        return False
+    return bool(re.search(r"\bcc\b\s+(@\w+[\s,]*)+$", compact))
 
 
 def extract_handle_mentions(text: str) -> list[str]:
@@ -374,7 +525,7 @@ def digest_v2_user_message(query: str, scope: str, candidates: list[dict[str, An
             (
                 message
                 for message in reversed(messages)
-                if message.get("senderFirstName") != "[ME]" and looks_actionable(message.get("text", ""))
+                if is_digest_actionable_inbound(message, candidate.get("chatType", ""))
             ),
             None,
         )
@@ -473,6 +624,68 @@ def group_ownership_hint(
     return "possible_user_owned_group_follow_up"
 
 
+def latest_earlier_request_for_input(messages: list[dict[str, Any]], actionable_index: Optional[int]) -> Optional[dict[str, Any]]:
+    if actionable_index is None:
+        return None
+    for index in range(actionable_index - 1, -1, -1):
+        message = messages[index]
+        if message.get("senderFirstName") == "[ME]":
+            continue
+        if looks_request_for_input(message.get("text", "")):
+            return message
+    return None
+
+
+def pick_digest_v6_group_snippets(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = candidate.get("messages", [])
+    if not messages:
+        return []
+
+    latest = messages[-1]
+    latest_inbound = next((message for message in reversed(messages) if message.get("senderFirstName") != "[ME]"), None)
+    latest_outbound = next((message for message in reversed(messages) if message.get("senderFirstName") == "[ME]"), None)
+    actionable_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if is_digest_actionable_inbound(messages[index], "group")
+        ),
+        None,
+    )
+    latest_actionable = messages[actionable_index] if actionable_index is not None else None
+    earlier_request_for_input = latest_earlier_request_for_input(messages, actionable_index)
+    context_before = []
+    if actionable_index is not None:
+        start = max(0, actionable_index - 3)
+        context_before = messages[start:actionable_index]
+    latest_commitment = next(
+        (
+            message
+            for message in reversed(messages)
+            if message.get("senderFirstName") == "[ME]" and looks_like_commitment_from_me(message.get("text", ""))
+        ),
+        None,
+    )
+    latest_closure = next(
+        (
+            message
+            for message in reversed(messages)
+            if looks_like_closure(message.get("text", ""), from_me=message.get("senderFirstName") == "[ME]")
+            or inbound_message_implies_contact_owns_next_step(message.get("text", ""))
+        ),
+        None,
+    )
+
+    picked: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    ordered = [latest, latest_actionable, earlier_request_for_input, *reversed(context_before), latest_commitment, latest_inbound, latest_outbound, latest_closure]
+    for message in ordered:
+        if message and message["messageId"] not in seen:
+            seen.add(message["messageId"])
+            picked.append(message)
+    return picked
+
+
 def digest_v3_user_message(query: str, scope: str, candidates: list[dict[str, Any]]) -> str:
     lines = [
         f'User query: "{query}"',
@@ -492,7 +705,7 @@ def digest_v3_user_message(query: str, scope: str, candidates: list[dict[str, An
             (
                 message
                 for message in reversed(messages)
-                if message.get("senderFirstName") != "[ME]" and looks_actionable(message.get("text", ""))
+                if is_digest_actionable_inbound(message, candidate.get("chatType", ""))
             ),
             None,
         )
@@ -592,7 +805,7 @@ def digest_v4_user_message(query: str, scope: str, candidates: list[dict[str, An
             (
                 message
                 for message in reversed(messages)
-                if message.get("senderFirstName") != "[ME]" and looks_actionable(message.get("text", ""))
+                if is_digest_actionable_inbound(message, candidate.get("chatType", ""))
             ),
             None,
         )
@@ -711,7 +924,7 @@ def pick_digest_v5_snippets(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         (
             index
             for index in range(len(messages) - 1, -1, -1)
-            if messages[index].get("senderFirstName") != "[ME]" and looks_actionable(messages[index].get("text", ""))
+            if is_digest_actionable_inbound(messages[index], candidate.get("chatType", ""))
         ),
         None,
     )
@@ -754,7 +967,7 @@ def digest_v5_user_message(query: str, scope: str, candidates: list[dict[str, An
             (
                 message
                 for message in reversed(messages)
-                if message.get("senderFirstName") != "[ME]" and looks_actionable(message.get("text", ""))
+                if is_digest_actionable_inbound(message, candidate.get("chatType", ""))
             ),
             None,
         )
@@ -854,6 +1067,138 @@ def digest_v5_user_message(query: str, scope: str, candidates: list[dict[str, An
     return "\n".join(lines)
 
 
+def digest_v6_user_message(query: str, scope: str, candidates: list[dict[str, Any]]) -> str:
+    lines = [
+        f'User query: "{query}"',
+        f"Scope: {scope}",
+        "Return one result for every candidate chatId.",
+        "Each candidate includes structured ownership fields plus a wider group context window to separate ambient technical discussion from real reply obligations.",
+        "",
+        "Candidate chats:",
+    ]
+
+    for candidate in candidates:
+        messages = candidate.get("messages", [])
+        latest = messages[-1] if messages else None
+        latest_inbound = next((message for message in reversed(messages) if message.get("senderFirstName") != "[ME]"), None)
+        latest_outbound = next((message for message in reversed(messages) if message.get("senderFirstName") == "[ME]"), None)
+        actionable_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if is_digest_actionable_inbound(messages[index], candidate.get("chatType", ""))
+            ),
+            None,
+        )
+        latest_actionable_inbound = messages[actionable_index] if actionable_index is not None else None
+        latest_closure = next(
+            (
+                message
+                for message in reversed(messages)
+                if looks_like_closure(message.get("text", ""), from_me=message.get("senderFirstName") == "[ME]")
+                or inbound_message_implies_contact_owns_next_step(message.get("text", ""))
+            ),
+            None,
+        )
+        latest_commitment = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.get("senderFirstName") == "[ME]" and looks_like_commitment_from_me(message.get("text", ""))
+            ),
+            None,
+        )
+        last_actionable_mentions = extract_handle_mentions(latest_actionable_inbound.get("text", "") if latest_actionable_inbound else "")
+        unresolved_after_me = bool(
+            latest_actionable_inbound
+            and (not latest_outbound or latest_actionable_inbound["messageId"] > latest_outbound["messageId"])
+        )
+        closure_after_actionable = bool(
+            latest_actionable_inbound
+            and latest_closure
+            and latest_closure["messageId"] > latest_actionable_inbound["messageId"]
+        )
+        ownership_hint = group_ownership_hint(
+            candidate,
+            latest_actionable_inbound,
+            latest_commitment,
+            latest_closure,
+            latest_outbound,
+            closure_after_actionable,
+            unresolved_after_me,
+            last_actionable_mentions,
+        )
+        private_hint = private_ownership_hint(
+            latest_actionable_inbound,
+            latest_commitment,
+            latest_closure,
+            latest_outbound,
+            closure_after_actionable,
+            unresolved_after_me,
+        )
+        latest_actionable_text = latest_actionable_inbound.get("text", "") if latest_actionable_inbound else ""
+        earlier_request_for_input = latest_earlier_request_for_input(messages, actionable_index)
+
+        lines.append("")
+        lines.append("---")
+        lines.append(f"chatId: {candidate['chatId']}")
+        lines.append(f"chatName: {candidate['chatName']}")
+        lines.append(f"chatType: {candidate['chatType']}")
+        lines.append(f"unreadCount: {candidate['unreadCount']}")
+        if candidate.get("memberCount") is not None:
+            lines.append(f"memberCount: {candidate['memberCount']}")
+        lines.append(
+            "weakLocalHeuristic: "
+            f"localSignal={candidate['localSignal']} "
+            f"pipelineHint={candidate.get('pipelineHint', 'uncategorized')} "
+            f"replyOwed={candidate.get('replyOwed')} "
+            f"strictReplySignal={candidate.get('strictReplySignal')} "
+            f"effectiveGroupReplySignal={candidate.get('effectiveGroupReplySignal')}"
+        )
+        lines.append(f"groupOwnershipHint: {ownership_hint}")
+        if candidate.get("chatType") != "group":
+            lines.append(f"privateOwnershipHint: {private_hint}")
+            lines.append(
+                "privateReplySignal: "
+                f"localSignal={candidate['localSignal']} "
+                f"replyOwed={candidate.get('replyOwed')} "
+                f"strictReplySignal={candidate.get('strictReplySignal')}"
+            )
+        lines.append(f"latestSpeaker: {latest['senderFirstName'] if latest else 'none'}")
+        lines.append(f"latestInboundSpeaker: {latest_inbound['senderFirstName'] if latest_inbound else 'none'}")
+        lines.append(f"latestOutboundExists: {latest_outbound is not None}")
+        lines.append(f"latestActionableInboundSpeaker: {latest_actionable_inbound['senderFirstName'] if latest_actionable_inbound else 'none'}")
+        lines.append(f"latestActionableInboundMentionsHandles: {', '.join(last_actionable_mentions) if last_actionable_mentions else 'none'}")
+        if candidate.get("chatType") == "group":
+            lines.append(f"broadcastStyleLatestActionable: {looks_broadcast_group_ask(latest_actionable_text)}")
+            lines.append(f"directSecondPersonLatestActionable: {looks_direct_second_person_ask(latest_actionable_text)}")
+            lines.append(f"explicitSecondPersonLatestActionable: {looks_direct_second_person_ask(latest_actionable_text)}")
+            lines.append(f"latestActionableLooksExplanatory: {looks_explanatory_group_reply(latest_actionable_text)}")
+            lines.append(f"ccStyleHandleMentions: {looks_cc_style_mentions(latest_actionable_text)}")
+            lines.append(f"earlierRequestForInputExists: {earlier_request_for_input is not None}")
+        lines.append(f"latestCommitmentFromMe: {latest_commitment is not None}")
+        lines.append(f"latestInboundOwnsNextStep: {bool(latest_closure and inbound_message_implies_contact_owns_next_step(latest_closure.get('text', '')))}")
+        lines.append(f"closureAfterLatestActionable: {closure_after_actionable}")
+        lines.append(f"latestActionableStillAfterMyReply: {unresolved_after_me}")
+        if candidate.get("chatType") == "group" and earlier_request_for_input:
+            lines.append(f"earlierRequestForInputText: {earlier_request_for_input['text']}")
+        if latest_actionable_inbound:
+            lines.append(f"latestActionableInboundText: {latest_actionable_inbound['text']}")
+        if latest_commitment:
+            lines.append(f"latestCommitmentText: {latest_commitment['text']}")
+        if latest_closure:
+            lines.append(f"latestClosureText: {latest_closure['text']}")
+        lines.append("Key snippets:")
+        if candidate.get("chatType") == "group":
+            snippets = pick_digest_v6_group_snippets(candidate)
+        else:
+            snippets = pick_digest_v5_snippets(candidate)
+        for message in snippets:
+            lines.append(format_message(message))
+
+    return "\n".join(lines)
+
+
 def format_message(message: dict[str, Any]) -> str:
     return (
         f"[messageId: {message['messageId']}] "
@@ -873,7 +1218,7 @@ def pick_compact_snippets(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         (
             message
             for message in reversed(messages)
-            if message.get("senderFirstName") != "[ME]" and looks_actionable(message.get("text", ""))
+            if is_digest_actionable_inbound(message, candidate.get("chatType", ""))
         ),
         None,
     )
@@ -906,7 +1251,7 @@ def pick_digest_v2_snippets(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         (
             message
             for message in reversed(messages)
-            if message.get("senderFirstName") != "[ME]" and looks_actionable(message.get("text", ""))
+            if is_digest_actionable_inbound(message, candidate.get("chatType", ""))
         ),
         None,
     )
@@ -948,7 +1293,7 @@ def pick_digest_v3_snippets(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         (
             index
             for index in range(len(messages) - 1, -1, -1)
-            if messages[index].get("senderFirstName") != "[ME]" and looks_actionable(messages[index].get("text", ""))
+            if is_digest_actionable_inbound(messages[index], candidate.get("chatType", ""))
         ),
         None,
     )
@@ -991,11 +1336,20 @@ def build_user_message(query: str, scope: str, candidates: list[dict[str, Any]],
         return digest_v4_user_message(query, scope, candidates)
     if payload_variant == "digest_v5":
         return digest_v5_user_message(query, scope, candidates)
+    if payload_variant == "digest_v6":
+        return digest_v6_user_message(query, scope, candidates)
     return compact_v1_user_message(query, scope, candidates)
 
 
-def response_format_for_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+def classification_values_for_prompt_variant(prompt_variant: str) -> list[str]:
+    if "tiered_review" in prompt_variant:
+        return ["on_me", "worth_checking", "on_them", "quiet", "need_more"]
+    return ["on_me", "on_them", "quiet", "need_more"]
+
+
+def response_format_for_candidates(candidates: list[dict[str, Any]], prompt_variant: str) -> dict[str, Any]:
     candidate_ids = [candidate["chatId"] for candidate in candidates]
+    classification_values = classification_values_for_prompt_variant(prompt_variant)
     return {
         "type": "json_schema",
         "json_schema": {
@@ -1012,7 +1366,7 @@ def response_format_for_candidates(candidates: list[dict[str, Any]]) -> dict[str
                             "type": "object",
                             "properties": {
                                 "chatId": {"type": "integer", "enum": candidate_ids},
-                                "classification": {"type": "string", "enum": ["on_me", "on_them", "quiet", "need_more"]},
+                                "classification": {"type": "string", "enum": classification_values},
                                 "urgency": {"type": "string", "enum": ["high", "medium", "low"]},
                                 "reason": {"type": "string"},
                                 "suggestedAction": {"type": "string"},
@@ -1084,13 +1438,14 @@ def estimate_cost(usage: dict[str, int], tier: str) -> Optional[float]:
 def load_api_key(path: Path) -> str:
     if os.environ.get("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"]
-    primary = path.read_text().strip() if path.exists() else ""
-    if primary:
-        return primary
-    legacy = LEGACY_API_KEY_PATH.read_text().strip() if LEGACY_API_KEY_PATH.exists() else ""
-    if legacy:
-        return legacy
-    return primary
+    candidate_paths = [path, *PROVIDER_SCOPED_API_KEY_PATHS, LEGACY_API_KEY_PATH]
+    for candidate_path in candidate_paths:
+        if not candidate_path.exists():
+            continue
+        value = candidate_path.read_text().strip()
+        if value:
+            return value
+    return ""
 
 
 def call_openai(
@@ -1108,7 +1463,7 @@ def call_openai(
             {"role": "system", "content": PROMPT_VARIANTS[prompt_variant]},
             {"role": "user", "content": build_user_message(query, scope, candidates, payload_variant)},
         ],
-        "response_format": response_format_for_candidates(candidates),
+        "response_format": response_format_for_candidates(candidates, prompt_variant),
         "prompt_cache_key": f"reply-queue-{prompt_variant}-{payload_variant}",
     }
 
@@ -1206,6 +1561,8 @@ def run_variant(api_key: str, snapshot: dict[str, Any], variant: VariantRun, bat
         "estimated_standard_cost_usd": estimate_cost(total_usage, "standard"),
         "total_usage": total_usage,
         "on_me_chat_ids": sorted(item["chatId"] for item in flat_results if item["classification"] == "on_me"),
+        "worth_checking_chat_ids": sorted(item["chatId"] for item in flat_results if item["classification"] == "worth_checking"),
+        "surfaced_chat_ids": sorted(item["chatId"] for item in flat_results if item["classification"] in {"on_me", "worth_checking"}),
         "need_more_chat_ids": sorted(item["chatId"] for item in flat_results if item["classification"] == "need_more"),
         "results": flat_results,
         "batches": [
@@ -1215,6 +1572,7 @@ def run_variant(api_key: str, snapshot: dict[str, Any], variant: VariantRun, bat
                 "size": batch["size"],
                 "usage": batch["usage"],
                 "on_me_chat_ids": sorted(item["chatId"] for item in batch["results"] if item["classification"] == "on_me"),
+                "worth_checking_chat_ids": sorted(item["chatId"] for item in batch["results"] if item["classification"] == "worth_checking"),
                 "need_more_chat_ids": sorted(item["chatId"] for item in batch["results"] if item["classification"] == "need_more"),
             }
             for batch in batch_outputs

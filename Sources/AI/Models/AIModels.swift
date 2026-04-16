@@ -190,12 +190,14 @@ struct AgenticSearchResult: Identifiable {
 
     enum Replyability: String {
         case replyNow = "reply_now"
+        case worthChecking = "worth_checking"
         case waitingOnThem = "waiting_on_them"
         case unclear
 
         var label: String {
             switch self {
             case .replyNow: return "REPLY NOW"
+            case .worthChecking: return "CHECK"
             case .waitingOnThem: return "WAITING"
             case .unclear: return "UNCLEAR"
             }
@@ -204,6 +206,7 @@ struct AgenticSearchResult: Identifiable {
         var color: Color {
             switch self {
             case .replyNow: return .green
+            case .worthChecking: return .orange
             case .waitingOnThem: return .blue
             case .unclear: return .gray
             }

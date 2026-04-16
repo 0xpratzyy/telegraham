@@ -1257,6 +1257,12 @@ extension SearchCoordinator {
                 } else {
                     suggestedAction = "Send a quick reply and lock in the next step."
                 }
+            case .worthChecking:
+                if !inboundSnippet.isEmpty {
+                    suggestedAction = "Review whether \"\(inboundSnippet)\" still needs a follow-up from you."
+                } else {
+                    suggestedAction = "Review the latest context before deciding whether to re-open this thread."
+                }
             case .waitingOnThem:
                 if !outboundSnippet.isEmpty, let latestOutboundText {
                     suggestedAction = "You already replied (\(latestOutboundText.relativeDate)); nudge only if \"\(outboundSnippet)\" is urgent."

@@ -21,6 +21,10 @@ enum AppConstants {
         static let chatListLimit = 100
         static let chatHistoryLimit = 50
         static let searchLimit = 50
+        static let backgroundChatDiscoveryLimit = 100
+        static let backgroundChatDiscoverySettleDelayMilliseconds: UInt64 = 700
+        static let backgroundChatDiscoveryInterPassDelayMilliseconds: UInt64 = 350
+        static let maxStagnantBackgroundChatDiscoveryPasses = 2
     }
 
     enum AI {
@@ -176,6 +180,7 @@ enum AppConstants {
             static let additionalMessagesForNeedMore = 8
             static let maxMessagesPerChat = 16
             static let maxRenderedResults = 15
+            static let maxRenderedWorthCheckingResults = 5
             static let maxFallbackRenderedResults = 6
             static let progressiveConfidenceThreshold = 0.72
             static let preferredFreshResultAgeSeconds: TimeInterval = 5 * 86_400

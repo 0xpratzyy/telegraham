@@ -112,15 +112,29 @@ def summarize_variant(
     standard_costs = [float(trial["estimated_standard_cost_usd"] or 0.0) for trial in trials]
 
     vote_counts: dict[int, int] = {}
+    surfaced_vote_counts: dict[int, int] = {}
+    worth_checking_vote_counts: dict[int, int] = {}
     for trial in trials:
         for chat_id in trial.get("on_me_chat_ids", []):
             vote_counts[int(chat_id)] = vote_counts.get(int(chat_id), 0) + 1
+        for chat_id in trial.get("surfaced_chat_ids", trial.get("on_me_chat_ids", [])):
+            surfaced_vote_counts[int(chat_id)] = surfaced_vote_counts.get(int(chat_id), 0) + 1
+        for chat_id in trial.get("worth_checking_chat_ids", []):
+            worth_checking_vote_counts[int(chat_id)] = worth_checking_vote_counts.get(int(chat_id), 0) + 1
 
     majority_threshold = math.ceil(len(trials) / 2)
     stable_on_me = {chat_id for chat_id, count in vote_counts.items() if count == len(trials)}
     majority_on_me = {chat_id for chat_id, count in vote_counts.items() if count >= majority_threshold}
+    majority_surfaced = {chat_id for chat_id, count in surfaced_vote_counts.items() if count >= majority_threshold}
+    majority_worth_checking = {chat_id for chat_id, count in worth_checking_vote_counts.items() if count >= majority_threshold}
 
-    majority_report = evaluate(f"{variant.name}_majority_vote", majority_on_me, labels)
+    majority_report = evaluate(
+        f"{variant.name}_majority_vote",
+        majority_on_me,
+        labels,
+        predicted_surfaced=majority_surfaced,
+        predicted_worth_checking=majority_worth_checking,
+    )
     best_trial_index = max(
         range(len(reports)),
         key=lambda index: (
@@ -133,6 +147,7 @@ def summarize_variant(
     strict_f1s = [metric_value(report, "overall_strict.f1") for report in reports]
     lenient_f1s = [metric_value(report, "overall_lenient.f1") for report in reports]
     group_lenient_f1s = [metric_value(report, "groups_lenient.f1") for report in reports]
+    worth_checking_f1s = [metric_value(report, "worth_checking_only.f1") for report in reports]
     strict_precisions = [metric_value(report, "overall_strict.precision") for report in reports]
     strict_recalls = [metric_value(report, "overall_strict.recall") for report in reports]
     group_fp_counts = [len(report["groups_lenient"]["fp_ids"]) for report in reports]
@@ -157,6 +172,7 @@ def summarize_variant(
             "avg_overall_strict_f1": average(strict_f1s),
             "avg_overall_lenient_f1": average(lenient_f1s),
             "avg_group_lenient_f1": average(group_lenient_f1s),
+            "avg_worth_checking_f1": average(worth_checking_f1s),
             "median_overall_strict_f1": float(statistics.median(strict_f1s)),
             "min_overall_strict_f1": min(strict_f1s),
             "median_overall_lenient_f1": float(statistics.median(lenient_f1s)),
@@ -197,6 +213,10 @@ def summarize_variant(
             label_name(chat_id, labels)
             for chat_id in majority_report["groups_lenient"]["fn_ids"]
         ],
+        "worth_checking_majority": [
+            label_name(chat_id, labels)
+            for chat_id in majority_report["worth_checking_only"]["tp_ids"]
+        ],
     }
 
 
@@ -205,6 +225,7 @@ def leaderboard_rows(aggregates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         aggregates,
         key=lambda item: (
             -item["metrics"]["median_overall_strict_f1"],
+            -item["metrics"]["median_overall_lenient_f1"],
             -item["metrics"]["min_overall_strict_f1"],
             -item["stability"]["average_pairwise_jaccard"],
             -item["metrics"]["majority_vote"]["overall_strict"]["f1"],

@@ -1,6 +1,6 @@
 # Pidgy Architecture
 
-Last updated: 2026-04-11
+Last updated: 2026-04-12
 
 This is a living architecture doc for the launcher-first MVP.
 
@@ -194,6 +194,10 @@ Current behavior:
 - FTS + vector merge
 - title evidence
 - local-only at query time: memory cache + durable SQLite
+- clue-aware topical scoring from the promoted `topic_guarded_v3` script winner
+- phrase and anchor coverage guards so topic chats need real local evidence, not just nearby generic terms
+- weak title-only topical matches are suppressed unless the title match is effectively exact
+- split-evidence false positives are rejected when person clues and topic clues only appear in different chats
 - optional rerank
 
 ### ReplyQueueEngine

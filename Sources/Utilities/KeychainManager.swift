@@ -8,6 +8,10 @@ enum KeychainManager {
         case apiId = "com.pidgy.apiId"
         case apiHash = "com.pidgy.apiHash"
         case aiProviderType = "com.pidgy.aiProviderType"
+        case aiApiKeyOpenAI = "com.pidgy.aiApiKey.openai"
+        case aiApiKeyClaude = "com.pidgy.aiApiKey.claude"
+        case aiModelOpenAI = "com.pidgy.aiModel.openai"
+        case aiModelClaude = "com.pidgy.aiModel.claude"
         case aiApiKey = "com.pidgy.aiApiKey"
         case aiModel = "com.pidgy.aiModel"
     }
@@ -28,10 +32,16 @@ enum KeychainManager {
         }
     }
 
-    private static let storageDir: URL = {
+    private static let defaultStorageDir: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("Pidgy", isDirectory: true).appendingPathComponent("credentials", isDirectory: true)
     }()
+
+    private static var storageDirOverride: URL?
+
+    private static var storageDir: URL {
+        storageDirOverride ?? defaultStorageDir
+    }
 
     private static func ensureDirectory() throws {
         try FileManager.default.createDirectory(at: storageDir, withIntermediateDirectories: true)
@@ -73,4 +83,10 @@ enum KeychainManager {
         let apiHash = try? retrieve(for: .apiHash)
         return apiId != nil && apiHash != nil
     }
+
+    #if DEBUG
+    static func configureForTesting(storageDirectoryOverride: URL?) {
+        self.storageDirOverride = storageDirectoryOverride
+    }
+    #endif
 }

@@ -225,6 +225,79 @@ actor DatabaseManager {
         }
     }
 
+    func loadMessagesMatchingSenderTerms(
+        chatIds: [Int64]? = nil,
+        senderTerms: [String],
+        startDate: Date?,
+        endDate: Date?,
+        limit: Int
+    ) async -> [MessageRecord] {
+        let normalizedTerms = senderTerms
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !normalizedTerms.isEmpty, limit > 0 else { return [] }
+        if let chatIds, chatIds.isEmpty { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                let senderClauses = Array(repeating: "lower(coalesce(sender_name, '')) LIKE ?", count: normalizedTerms.count)
+                    .joined(separator: " OR ")
+                var arguments = StatementArguments()
+                for term in normalizedTerms {
+                    arguments += ["%\(term)%"]
+                }
+                arguments += [startDate?.timeIntervalSince1970]
+                arguments += [startDate?.timeIntervalSince1970]
+                arguments += [endDate?.timeIntervalSince1970]
+                arguments += [endDate?.timeIntervalSince1970]
+
+                let rows: [Row]
+                if let chatIds {
+                    let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
+                    for chatId in chatIds {
+                        arguments += [chatId]
+                    }
+                    arguments += [limit]
+                    rows = try Row.fetchAll(
+                        db,
+                        sql: """
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            FROM messages
+                            WHERE (\(senderClauses))
+                              AND (? IS NULL OR date >= ?)
+                              AND (? IS NULL OR date <= ?)
+                              AND chat_id IN (\(placeholders))
+                            ORDER BY date DESC, id DESC
+                            LIMIT ?
+                            """,
+                        arguments: arguments
+                    )
+                } else {
+                    arguments += [limit]
+                    rows = try Row.fetchAll(
+                        db,
+                        sql: """
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            FROM messages
+                            WHERE (\(senderClauses))
+                              AND (? IS NULL OR date >= ?)
+                              AND (? IS NULL OR date <= ?)
+                            ORDER BY date DESC, id DESC
+                            LIMIT ?
+                            """,
+                        arguments: arguments
+                    )
+                }
+
+                return rows.map(Self.messageRecord(from:))
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load sender-matched messages: \(error)")
+            return []
+        }
+    }
+
     func updateMessageContent(
         chatId: Int64,
         messageId: Int64,
@@ -770,24 +843,40 @@ actor DatabaseManager {
         preferredOldestMessageId: Int64?,
         isSearchReady: Bool
     ) async {
-        guard let pool = await ensureDatabase() else { return }
-
         do {
-            try await pool.write { db in
-                if !messages.isEmpty {
-                    try Self.insertMessages(messages, into: db)
-                }
-
-                let existingState = try Self.syncStateRecord(in: db, chatId: chatId)
-                try Self.refreshSyncState(
-                    in: db,
-                    chatId: chatId,
-                    preferredOldestMessageId: preferredOldestMessageId ?? existingState?.lastIndexedMessageId,
-                    isSearchReady: isSearchReady || (existingState?.isSearchReady ?? false)
-                )
-            }
+            try await upsertIndexedMessagesThrowing(
+                chatId: chatId,
+                messages: messages,
+                preferredOldestMessageId: preferredOldestMessageId,
+                isSearchReady: isSearchReady
+            )
         } catch {
             print("[DatabaseManager] Failed to upsert indexed messages for chat \(chatId): \(error)")
+        }
+    }
+
+    func upsertIndexedMessagesThrowing(
+        chatId: Int64,
+        messages: [MessageRecord],
+        preferredOldestMessageId: Int64?,
+        isSearchReady: Bool
+    ) async throws {
+        guard let pool = await ensureDatabase() else {
+            throw DatabaseManagerError.unavailable
+        }
+
+        try await pool.write { db in
+            if !messages.isEmpty {
+                try Self.insertMessages(messages, into: db)
+            }
+
+            let existingState = try Self.syncStateRecord(in: db, chatId: chatId)
+            try Self.refreshSyncState(
+                in: db,
+                chatId: chatId,
+                preferredOldestMessageId: preferredOldestMessageId ?? existingState?.lastIndexedMessageId,
+                isSearchReady: isSearchReady || (existingState?.isSearchReady ?? false)
+            )
         }
     }
 

@@ -4,7 +4,7 @@ import glob
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 DEFAULT_GOLD_PATH = Path("/Users/pratyushrungta/telegraham/evals/reply_queue_manual_gold_mixed_recent_48.json")
@@ -19,6 +19,13 @@ class GoldLabel:
     reason: str
 
 
+def normalize_label(label: str) -> str:
+    compact = (label or "").strip()
+    if compact == "maybe":
+        return "worth_checking"
+    return compact
+
+
 def load_gold(path: Path) -> dict[int, GoldLabel]:
     payload = json.loads(path.read_text())
     labels: dict[int, GoldLabel] = {}
@@ -27,38 +34,63 @@ def load_gold(path: Path) -> dict[int, GoldLabel]:
             chat_id=int(chat_id),
             chat_name=item["chatName"],
             chat_type=item["chatType"],
-            label=item["label"],
+            label=normalize_label(item["label"]),
             reason=item["reason"],
         )
     return labels
 
 
-def extract_on_me_chat_ids(payload: dict[str, Any]) -> set[int]:
-    ids: set[int] = set()
+def extract_prediction_sets(payload: dict[str, Any]) -> dict[str, set[int]]:
+    on_me_ids: set[int] = set()
+    worth_checking_ids: set[int] = set()
 
     if "results" in payload and isinstance(payload["results"], list):
         first = payload["results"][0] if payload["results"] else None
         if isinstance(first, dict) and "on_me_chat_ids" in first:
             for result in payload["results"]:
-                ids.update(int(chat_id) for chat_id in result.get("on_me_chat_ids", []))
-            return ids
+                on_me_ids.update(int(chat_id) for chat_id in result.get("on_me_chat_ids", []))
+                worth_checking_ids.update(int(chat_id) for chat_id in result.get("worth_checking_chat_ids", []))
+            return {
+                "on_me": on_me_ids,
+                "worth_checking": worth_checking_ids,
+                "surfaced": on_me_ids | worth_checking_ids,
+            }
 
         for result in payload["results"]:
-            if isinstance(result, dict) and result.get("classification") == "on_me" and "chatId" in result:
-                ids.add(int(result["chatId"]))
-        if ids:
-            return ids
+            if not isinstance(result, dict) or "chatId" not in result:
+                continue
+            chat_id = int(result["chatId"])
+            classification = result.get("classification")
+            if classification == "on_me":
+                on_me_ids.add(chat_id)
+            elif classification == "worth_checking":
+                worth_checking_ids.add(chat_id)
+        if on_me_ids or worth_checking_ids:
+            return {
+                "on_me": on_me_ids,
+                "worth_checking": worth_checking_ids,
+                "surfaced": on_me_ids | worth_checking_ids,
+            }
 
     output = payload.get("output")
     if isinstance(output, dict):
-        return extract_on_me_chat_ids(output)
+        return extract_prediction_sets(output)
 
     batches = payload.get("batches")
     if isinstance(batches, list):
         for batch in batches:
-            ids.update(int(chat_id) for chat_id in batch.get("on_me_chat_ids", []))
+            on_me_ids.update(int(chat_id) for chat_id in batch.get("on_me_chat_ids", []))
+            worth_checking_ids.update(int(chat_id) for chat_id in batch.get("worth_checking_chat_ids", []))
 
-    return ids
+    return {
+        "on_me": on_me_ids,
+        "worth_checking": worth_checking_ids,
+        "surfaced": on_me_ids | worth_checking_ids,
+    }
+
+
+def extract_on_me_chat_ids(payload: dict[str, Any]) -> set[int]:
+    return extract_prediction_sets(payload)["on_me"]
 
 
 def precision(tp: int, fp: int) -> float:
@@ -73,13 +105,17 @@ def f1(p: float, r: float) -> float:
     return (2 * p * r / (p + r)) if (p + r) else 0.0
 
 
-def metric_block(predicted: set[int], labels: dict[int, GoldLabel], group_only: bool, lenient: bool) -> dict[str, Any]:
+def metric_block(
+    predicted: set[int],
+    labels: dict[int, GoldLabel],
+    group_only: bool,
+    positive_labels: set[str],
+) -> dict[str, Any]:
     scope_labels = {
         chat_id: label
         for chat_id, label in labels.items()
         if (not group_only or label.chat_type == "group")
     }
-    positive_labels = {"on_me", "maybe"} if lenient else {"on_me"}
 
     positives = {chat_id for chat_id, label in scope_labels.items() if label.label in positive_labels}
     predicted_scoped = {chat_id for chat_id in predicted if chat_id in scope_labels}
@@ -108,20 +144,32 @@ def label_name(chat_id: int, labels: dict[int, GoldLabel]) -> str:
     return f"{label.chat_name} ({label.label})"
 
 
-def evaluate(name: str, predicted: set[int], labels: dict[int, GoldLabel]) -> dict[str, Any]:
+def evaluate(
+    name: str,
+    predicted_on_me: set[int],
+    labels: dict[int, GoldLabel],
+    predicted_surfaced: Optional[set[int]] = None,
+    predicted_worth_checking: Optional[set[int]] = None,
+) -> dict[str, Any]:
+    surfaced = predicted_surfaced if predicted_surfaced is not None else set(predicted_on_me)
+    worth_checking = predicted_worth_checking if predicted_worth_checking is not None else set()
     return {
         "name": name,
-        "predicted_on_me": sorted(predicted),
-        "overall_strict": metric_block(predicted, labels, group_only=False, lenient=False),
-        "overall_lenient": metric_block(predicted, labels, group_only=False, lenient=True),
-        "groups_strict": metric_block(predicted, labels, group_only=True, lenient=False),
-        "groups_lenient": metric_block(predicted, labels, group_only=True, lenient=True),
+        "predicted_on_me": sorted(predicted_on_me),
+        "predicted_surfaced": sorted(surfaced),
+        "predicted_worth_checking": sorted(worth_checking),
+        "overall_strict": metric_block(predicted_on_me, labels, group_only=False, positive_labels={"on_me"}),
+        "overall_lenient": metric_block(surfaced, labels, group_only=False, positive_labels={"on_me", "worth_checking"}),
+        "groups_strict": metric_block(predicted_on_me, labels, group_only=True, positive_labels={"on_me"}),
+        "groups_lenient": metric_block(surfaced, labels, group_only=True, positive_labels={"on_me", "worth_checking"}),
+        "worth_checking_only": metric_block(worth_checking, labels, group_only=False, positive_labels={"worth_checking"}),
+        "groups_worth_checking_only": metric_block(worth_checking, labels, group_only=True, positive_labels={"worth_checking"}),
     }
 
 
 def print_report(report: dict[str, Any], labels: dict[int, GoldLabel]) -> None:
     print(f"\n=== {report['name']} ===")
-    for key in ("overall_strict", "overall_lenient", "groups_strict", "groups_lenient"):
+    for key in ("overall_strict", "overall_lenient", "groups_strict", "groups_lenient", "worth_checking_only", "groups_worth_checking_only"):
         block = report[key]
         print(
             f"{key}: "
@@ -179,12 +227,23 @@ def main() -> int:
 
     reports: list[dict[str, Any]] = []
     for name, files in sorted(grouped_files.items()):
-        predicted: set[int] = set()
+        predicted_on_me: set[int] = set()
+        predicted_surfaced: set[int] = set()
+        predicted_worth_checking: set[int] = set()
         for file_path in files:
             payload = json.loads(file_path.read_text())
-            predicted.update(extract_on_me_chat_ids(payload))
+            prediction_sets = extract_prediction_sets(payload)
+            predicted_on_me.update(prediction_sets["on_me"])
+            predicted_surfaced.update(prediction_sets["surfaced"])
+            predicted_worth_checking.update(prediction_sets["worth_checking"])
 
-        report = evaluate(name, predicted, labels)
+        report = evaluate(
+            name,
+            predicted_on_me,
+            labels,
+            predicted_surfaced=predicted_surfaced,
+            predicted_worth_checking=predicted_worth_checking,
+        )
         reports.append(report)
         print_report(report, labels)
 

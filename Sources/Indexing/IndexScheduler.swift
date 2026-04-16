@@ -367,27 +367,29 @@ actor IndexScheduler {
                     isOutgoing: message.isOutgoing
                 )
             }
-            indexedMessageCount = batchRecords.count
 
             let didAdvanceCursor = oldestBatchMessageId.map { $0 != cursor } ?? false
-            reachedHistoryStart = batch.isEmpty
+            let candidateReachedHistoryStart = batch.isEmpty
                 || batch.count < AppConstants.Indexing.batchSize
                 || (cursor != 0 && !didAdvanceCursor)
             if !batchRecords.isEmpty {
-                await DatabaseManager.shared.upsertIndexedMessages(
+                try await DatabaseManager.shared.upsertIndexedMessagesThrowing(
                     chatId: chat.id,
                     messages: batchRecords,
                     preferredOldestMessageId: oldestBatchMessageId ?? syncState?.lastIndexedMessageId,
-                    isSearchReady: reachedHistoryStart
+                    isSearchReady: candidateReachedHistoryStart
                 )
 
-                await updateEmbeddings(for: batch)
+                try await updateEmbeddings(for: batch)
                 await ingestIntoGraph(messages: batch, chat: chat, currentUserId: currentUserId)
-            } else if reachedHistoryStart {
+                indexedMessageCount = batchRecords.count
+                reachedHistoryStart = candidateReachedHistoryStart
+            } else if candidateReachedHistoryStart {
                 await DatabaseManager.shared.markChatSearchReady(
                     chatId: chat.id,
                     preferredOldestMessageId: syncState?.lastIndexedMessageId
                 )
+                reachedHistoryStart = true
             }
         } catch {
             print("[IndexScheduler] Failed to index chat \(chat.id) (\(chat.title)): \(error)")
@@ -485,7 +487,7 @@ actor IndexScheduler {
         }
     }
 
-    private static func updateEmbeddings(for messages: [TGMessage]) async {
+    private static func updateEmbeddings(for messages: [TGMessage]) async throws {
         let eligibleMessages = messages.compactMap { message -> (message: TGMessage, text: String)? in
             guard let text = message.textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
                   text.count >= AppConstants.Indexing.minEmbeddingTextLength else {
@@ -510,7 +512,7 @@ actor IndexScheduler {
         }
 
         guard !records.isEmpty else { return }
-        await VectorStore.shared.storeBatch(records)
+        try await VectorStore.shared.storeBatchThrowing(records)
     }
 
     private func backfillExistingEmbeddings(limit: Int) async -> Int {

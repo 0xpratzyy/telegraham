@@ -51,6 +51,7 @@ struct PatternSearchResult: Identifiable, Sendable, Equatable {
 struct ReplyQueueResult: Identifiable, Sendable, Equatable {
     enum Classification: String, Codable, Sendable {
         case onMe = "on_me"
+        case worthChecking = "worth_checking"
         case onThem = "on_them"
         case quiet = "quiet"
         case needMore = "need_more"
@@ -87,6 +88,7 @@ struct ReplyQueueResult: Identifiable, Sendable, Equatable {
     var replyability: AgenticSearchResult.Replyability {
         switch classification {
         case .onMe: return .replyNow
+        case .worthChecking: return .worthChecking
         case .onThem: return .waitingOnThem
         case .quiet, .needMore: return .unclear
         }

@@ -18,6 +18,7 @@ final class SummaryEngine {
         let topicTerms: [String]
         let cluePhrases: [String]
         let requiresJointAnchor: Bool
+        let retrievalQuery: String
     }
 
     private struct Candidate {
@@ -50,20 +51,28 @@ final class SummaryEngine {
         let chatById = Dictionary(uniqueKeysWithValues: scopedChats.map { ($0.id, $0) })
         let constants = AppConstants.AI.SemanticSearch.self
         let queryContext = buildQueryContext(querySpec.rawQuery)
+        let retrievalQuery = queryContext.retrievalQuery.isEmpty ? querySpec.rawQuery : queryContext.retrievalQuery
 
         let ftsHits = await telegramService.localScoredSearch(
-            query: querySpec.rawQuery,
+            query: retrievalQuery,
             chatIds: scopedChatIds,
             limit: constants.ftsTopMessages
         )
         let vectorHits = await telegramService.localVectorSearch(
-            query: querySpec.rawQuery,
+            query: retrievalQuery,
             chatIds: scopedChatIds,
             limit: constants.vectorTopMessages
         )
+        let senderFallbackHits = await scopedSenderFallbackHits(
+            queryContext: queryContext,
+            scopedChatIds: scopedChatIds,
+            timeRange: querySpec.timeRange,
+            fallbackLimit: constants.fallbackTopMessages,
+            chatsById: chatById
+        )
 
         let merged = applyTimeRange(
-            merge(ftsHits: ftsHits, vectorHits: vectorHits),
+            merge(ftsHits: ftsHits, vectorHits: vectorHits, fallbackHits: senderFallbackHits),
             timeRange: querySpec.timeRange
         )
         let candidates = buildCandidates(
@@ -129,7 +138,8 @@ final class SummaryEngine {
 
     private func merge(
         ftsHits: [TelegramService.LocalMessageSearchHit],
-        vectorHits: [TelegramService.LocalMessageSearchHit]
+        vectorHits: [TelegramService.LocalMessageSearchHit],
+        fallbackHits: [LocalHit]
     ) -> [LocalHit] {
         let maxFTS = ftsHits.map(\.score).max() ?? 0
         let maxVector = vectorHits.map(\.score).max() ?? 0
@@ -157,6 +167,17 @@ final class SummaryEngine {
             }
         }
 
+        for hit in fallbackHits {
+            let key = "\(hit.message.chatId):\(hit.message.id)"
+            if var existing = byKey[key] {
+                existing.ftsScore = max(existing.ftsScore, hit.ftsScore)
+                existing.vectorScore = max(existing.vectorScore, hit.vectorScore)
+                byKey[key] = existing
+            } else {
+                byKey[key] = hit
+            }
+        }
+
         return Array(byKey.values)
     }
 
@@ -177,6 +198,7 @@ final class SummaryEngine {
             let jointAnchor: Bool
             let summaryAnchor: Bool
             let inTimeRange: Bool
+            let hasSubstantiveBodyText: Bool
         }
 
         var grouped: [Int64: [RankedHit]] = [:]
@@ -188,7 +210,7 @@ final class SummaryEngine {
                 (hit.vectorScore * AppConstants.AI.SemanticSearch.vectorWeight) +
                 (chat.chatType.isPrivate ? 0.08 : 0)
 
-            let normalizedText = normalize(hit.message.displayText)
+            let normalizedText = normalize(searchableText(for: hit.message))
             let normalizedTitle = normalize(chat.title)
             let matchedQueryTerms = Set(queryContext.queryTerms.filter { normalizedText.contains($0) })
             let matchedScopedTerms = Set(queryContext.scopedTerms.filter {
@@ -201,6 +223,7 @@ final class SummaryEngine {
             let titleMatches = queryContext.queryTerms.filter { normalizedTitle.contains($0) }.count
             let jointAnchor = !matchedScopedTerms.isEmpty && !matchedTopicTerms.isEmpty
             let summaryAnchor = isSummaryAnchor(text: normalizedText)
+            let hasSubstantiveBodyText = hasSubstantiveBodyText(hit.message)
 
             let rankedHit = RankedHit(
                 hit: hit,
@@ -212,7 +235,8 @@ final class SummaryEngine {
                 titleMatches: titleMatches,
                 jointAnchor: jointAnchor,
                 summaryAnchor: summaryAnchor,
-                inTimeRange: timeRange?.contains(hit.message.date) ?? true
+                inTimeRange: timeRange?.contains(hit.message.date) ?? true,
+                hasSubstantiveBodyText: hasSubstantiveBodyText
             )
             grouped[chat.id, default: []].append(rankedHit)
         }
@@ -220,6 +244,9 @@ final class SummaryEngine {
         return grouped.compactMap { chatId, rankedHits in
             guard let chat = chatsById[chatId] else { return nil }
             let sortedHits = rankedHits.sorted {
+                if $0.hasSubstantiveBodyText != $1.hasSubstantiveBodyText {
+                    return $0.hasSubstantiveBodyText && !$1.hasSubstantiveBodyText
+                }
                 if $0.baseScore != $1.baseScore { return $0.baseScore > $1.baseScore }
                 return $0.hit.message.date > $1.hit.message.date
             }
@@ -232,6 +259,7 @@ final class SummaryEngine {
             let summaryAnchors = sortedHits.filter(\.summaryAnchor).count
             let jointAnchors = sortedHits.filter(\.jointAnchor).count
             let inRangeHits = sortedHits.filter(\.inTimeRange).count
+            let substantiveBodyHits = sortedHits.filter(\.hasSubstantiveBodyText).count
             let titleMatches = sortedHits.map(\.titleMatches).max() ?? 0
 
             var aggregate = best.baseScore * 3.4
@@ -243,6 +271,7 @@ final class SummaryEngine {
             aggregate += Double(summaryAnchors) * 0.22
             aggregate += Double(jointAnchors) * 1.1
             aggregate += Double(inRangeHits) * 0.12
+            aggregate += Double(min(substantiveBodyHits, 3)) * 0.78
             aggregate += Double(titleMatches) * 0.95
             if chat.chatType.isPrivate { aggregate += 0.08 }
 
@@ -251,6 +280,9 @@ final class SummaryEngine {
             }
             if !queryContext.queryTerms.isEmpty && matchedQueryTerms.count < min(2, queryContext.queryTerms.count) {
                 aggregate -= 0.9
+            }
+            if titleMatches > 0 && substantiveBodyHits == 0 {
+                aggregate -= 1.45
             }
 
             return Candidate(
@@ -304,12 +336,7 @@ final class SummaryEngine {
         anchorMessage: TGMessage?,
         timeRange: TimeRangeConstraint?
     ) async -> [TGMessage] {
-        if let cached = await MessageCacheService.shared.getMessages(chatId: chat.id), !cached.isEmpty {
-            let filteredCached = applyTimeRange(cached, timeRange: timeRange)
-            if !filteredCached.isEmpty || timeRange == nil {
-                return expandedAnchorWindow(in: filteredCached, anchorMessage: anchorMessage)
-            }
-        }
+        let cachedMessages = await MessageCacheService.shared.getMessages(chatId: chat.id) ?? []
 
         let fetchLimit = timeRange == nil
             ? AppConstants.Search.Summary.summaryMessageLimit * 4
@@ -338,10 +365,23 @@ final class SummaryEngine {
                 senderName: record.senderName
             )
         }
+
+        let mergedMessages = mergeSummarySources(cached: cachedMessages, local: localMessages)
         return expandedAnchorWindow(
-            in: applyTimeRange(localMessages, timeRange: timeRange),
+            in: applyTimeRange(mergedMessages, timeRange: timeRange),
             anchorMessage: anchorMessage
         )
+    }
+
+    private func mergeSummarySources(cached: [TGMessage], local: [TGMessage]) -> [TGMessage] {
+        var byMessageId: [Int64: TGMessage] = [:]
+        for message in cached + local {
+            byMessageId[message.id] = message
+        }
+        return byMessageId.values.sorted {
+            if $0.date != $1.date { return $0.date > $1.date }
+            return $0.id > $1.id
+        }
     }
 
     private func summaryTitle(for query: String, chatTitle: String) -> String {
@@ -375,12 +415,20 @@ final class SummaryEngine {
                     && token.count >= 3
             })) as? [String] ?? []
         let scopedTerms = extractScopedTerms(from: normalized)
-        let topicTerms = queryTerms.filter { !scopedTerms.contains($0) }
         let cluePhrases = [
             "what did we decide", "what happened", "key takeaways", "latest context",
             "catch me up", "full rankings", "team brief", "main gaps", "feedback",
             "overview", "full picture"
         ].filter { normalized.contains($0) }
+        let genericSummaryTokens = Set(cluePhrases.flatMap { clue in
+            clue
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+                .filter { !$0.isEmpty }
+        })
+        let topicTerms = queryTerms.filter {
+            !scopedTerms.contains($0) && !genericSummaryTokens.contains($0)
+        }
         return QueryContext(
             raw: rawQuery,
             normalized: normalized,
@@ -388,14 +436,32 @@ final class SummaryEngine {
             scopedTerms: scopedTerms,
             topicTerms: topicTerms,
             cluePhrases: cluePhrases,
-            requiresJointAnchor: !scopedTerms.isEmpty && !topicTerms.isEmpty
+            requiresJointAnchor: !scopedTerms.isEmpty && !topicTerms.isEmpty,
+            retrievalQuery: buildRetrievalQuery(scopedTerms: scopedTerms, topicTerms: topicTerms, fallbackQueryTerms: queryTerms)
         )
     }
 
+    private func buildRetrievalQuery(
+        scopedTerms: [String],
+        topicTerms: [String],
+        fallbackQueryTerms: [String]
+    ) -> String {
+        let preferred = scopedTerms + topicTerms
+        let tokens = preferred.isEmpty ? fallbackQueryTerms : preferred
+        let uniqueTokens = (Array(NSOrderedSet(array: tokens)) as? [String]) ?? tokens
+        return uniqueTokens.joined(separator: " ")
+    }
+
+    #if DEBUG
+    func retrievalQueryForTesting(_ rawQuery: String) -> String {
+        buildQueryContext(rawQuery).retrievalQuery
+    }
+    #endif
+
     private func extractScopedTerms(from normalized: String) -> [String] {
         let patterns = [
-            #"\bwith\s+([a-z0-9@.\- ]+?)(?:\s+(?:from|about|last|this|today|yesterday|thread|chat|conversation|project)\b|$)"#,
-            #"\babout\s+([a-z0-9@.\- ]+?)(?:\s+(?:from|last|this|today|yesterday|thread|chat|conversation|project)\b|$)"#
+            #"\bwith\s+([a-z0-9@.\- ]+?)(?:\s+(?:from|about|last|this|today|yesterday|thread|chat|conversation|project)\b|[?.!]|$)"#,
+            #"\babout\s+([a-z0-9@.\- ]+?)(?:\s+(?:from|last|this|today|yesterday|thread|chat|conversation|project)\b|[?.!]|$)"#
         ]
 
         for pattern in patterns {
@@ -460,7 +526,7 @@ final class SummaryEngine {
     }
 
     private func supportScore(for message: TGMessage, queryContext: QueryContext) -> Double {
-        let text = normalize(message.displayText)
+        let text = normalize(searchableText(for: message))
         var score = Double(queryContext.queryTerms.filter { text.contains($0) }.count) * 2.2
         score += Double(queryContext.scopedTerms.filter { text.contains($0) }.count) * 3.0
         score += Double(queryContext.topicTerms.filter { text.contains($0) }.count) * 2.5
@@ -503,11 +569,65 @@ final class SummaryEngine {
         "me", "my", "our", "about", "give", "quick", "summary", "summarize", "summarise",
         "recap", "last", "week", "month", "from", "this", "that", "right", "now", "after",
         "happened", "discuss", "discussed", "conclude", "concluded", "decide", "decided",
-        "main", "gaps", "chat", "chats", "thread", "conversation"
+        "main", "gaps", "chat", "chats", "thread", "conversation", "are", "is", "was", "were"
     ]
 
     private let shortLowSignalPrefixes = [
         "check ", "tell ", "digging into it", "hetzner se compare", "what's the context",
         "yoo", "whoop", "wispr", "lemme know"
     ]
+
+    private func searchableText(for message: TGMessage) -> String {
+        [message.senderName, message.displayText]
+            .compactMap { $0 }
+            .joined(separator: " ")
+    }
+
+    private func hasSubstantiveBodyText(_ message: TGMessage) -> Bool {
+        guard let text = message.textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return false
+        }
+        return text.count >= 18
+    }
+
+    private func scopedSenderFallbackHits(
+        queryContext: QueryContext,
+        scopedChatIds: [Int64],
+        timeRange: TimeRangeConstraint?,
+        fallbackLimit: Int,
+        chatsById: [Int64: TGChat]
+    ) async -> [LocalHit] {
+        guard !queryContext.scopedTerms.isEmpty, queryContext.topicTerms.isEmpty else {
+            return []
+        }
+
+        let records = await DatabaseManager.shared.loadMessagesMatchingSenderTerms(
+            chatIds: scopedChatIds,
+            senderTerms: queryContext.scopedTerms,
+            startDate: timeRange?.startDate,
+            endDate: timeRange?.endDate,
+            limit: fallbackLimit
+        )
+
+        return records.map { record in
+            let senderId: TGMessage.MessageSenderId = if let senderUserId = record.senderUserId {
+                .user(senderUserId)
+            } else {
+                .chat(record.chatId)
+            }
+            let message = TGMessage(
+                id: record.id,
+                chatId: record.chatId,
+                senderId: senderId,
+                date: record.date,
+                textContent: record.textContent,
+                mediaType: record.mediaTypeRaw.flatMap(TGMessage.MediaType.init(rawValue:)),
+                isOutgoing: record.isOutgoing,
+                chatTitle: chatsById[record.chatId]?.title,
+                senderName: record.senderName
+            )
+            return LocalHit(message: message, ftsScore: 0.55, vectorScore: 0)
+        }
+    }
 }

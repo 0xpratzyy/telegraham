@@ -209,8 +209,7 @@ struct SettingsView: View {
                     }
                     .onChange(of: selectedAIProvider) { oldValue, newValue in
                         guard oldValue != newValue else { return }
-                        aiApiKey = ""
-                        aiModel = ""
+                        loadAIFields(for: newValue)
                         aiSaveStatus = nil
                         testConnectionResult = nil
                     }
@@ -540,13 +539,13 @@ struct SettingsView: View {
                             usageMetricCard(
                                 title: "Search-Ready Chats",
                                 value: "\(integerString(indexingProgress.indexed)) / \(integerString(indexingProgress.total))",
-                                caption: "Indexable chats fully deep-indexed for local search",
+                                caption: "Loaded main-list chats fully deep-indexed for local search",
                                 accent: indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total ? .green : .orange
                             )
                             usageMetricCard(
                                 title: "Pending Deep Index",
                                 value: integerString(indexingProgress.pendingChats),
-                                caption: "Visible chats still missing deep local history",
+                                caption: "Loaded main-list chats still missing deep local history",
                                 accent: indexingProgress.pendingChats == 0 ? .green : .orange
                             )
                             usageMetricCard(
@@ -699,8 +698,7 @@ struct SettingsView: View {
 
     private func loadAIConfig() {
         selectedAIProvider = aiService.providerType
-        aiApiKey = ((try? KeychainManager.retrieve(for: .aiApiKey)) ?? nil) ?? ""
-        aiModel = ((try? KeychainManager.retrieve(for: .aiModel)) ?? nil) ?? ""
+        loadAIFields(for: selectedAIProvider)
     }
 
     private func saveAIConfig() {
@@ -724,6 +722,22 @@ struct SettingsView: View {
         aiSaveStatus = "Saved"
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             aiSaveStatus = nil
+        }
+    }
+
+    private func loadAIFields(for provider: AIProviderConfig.ProviderType) {
+        guard provider != .none else {
+            aiApiKey = ""
+            aiModel = ""
+            return
+        }
+
+        if let persisted = aiService.persistedConfiguration(for: provider) {
+            aiApiKey = persisted.apiKey
+            aiModel = persisted.model == provider.defaultModel ? "" : persisted.model
+        } else {
+            aiApiKey = ""
+            aiModel = ""
         }
     }
 
@@ -752,6 +766,10 @@ struct SettingsView: View {
         try? KeychainManager.delete(for: .apiId)
         try? KeychainManager.delete(for: .apiHash)
         try? KeychainManager.delete(for: .aiProviderType)
+        try? KeychainManager.delete(for: .aiApiKeyOpenAI)
+        try? KeychainManager.delete(for: .aiApiKeyClaude)
+        try? KeychainManager.delete(for: .aiModelOpenAI)
+        try? KeychainManager.delete(for: .aiModelClaude)
         try? KeychainManager.delete(for: .aiApiKey)
         try? KeychainManager.delete(for: .aiModel)
         UserDefaults.standard.removeObject(forKey: AppConstants.Preferences.includeBotsInAISearchKey)
@@ -944,9 +962,9 @@ struct SettingsView: View {
             return "Concurrent deep-index workers live now"
         }
         if indexingProgress.pendingChats == 0 && indexingProgress.total > 0 {
-            return "No pending visible chats left to deep-index"
+            return "No pending loaded main-list chats left to deep-index"
         }
-        return "Workers are ready for the next visible backlog pass"
+        return "Workers are ready for the next loaded-chat backlog pass"
     }
 
     private var indexingWorkerAccent: Color {
@@ -978,9 +996,9 @@ struct SettingsView: View {
             return "\(subject) moved \(relativeTimeString(lastIndexedAt))"
         }
         if indexingProgress.pendingChats > 0 {
-            return "Waiting for the first visible deep-index batch"
+            return "Waiting for the first loaded-chat deep-index batch"
         }
-        return "All visible chats are currently covered"
+        return "All currently loaded main-list chats are covered"
     }
 
     private var lastIndexProgressAccent: Color {
@@ -1012,7 +1030,7 @@ struct SettingsView: View {
 
     private var deepIndexETACaption: String {
         guard indexingProgress.pendingChats > 0 else {
-            return "Visible backlog is fully covered right now"
+            return "Loaded main-list backlog is fully covered right now"
         }
         guard let sessionStartedAt = indexingProgress.sessionStartedAt else {
             return "Waiting for this session to establish a pace"

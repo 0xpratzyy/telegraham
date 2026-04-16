@@ -1,0 +1,141 @@
+{
+  "name": "reply_queue_group_fp_traps_oracle_v1",
+  "notes": "Older multi-snapshot trap oracle focused on stable group false-positive patterns plus a handful of obvious private anchors. This complements the fresher Apr 12 oracle by widening the ambient/technical group negative set without forcing Banko-style labels across older snapshots.",
+  "snapshots": [
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots/mixed_recent_48.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots/mixed_recent_24.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots/recent_first_24.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots/audit_order_24.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots/ai_only_recent_24.json"
+  ],
+  "labels": {
+    "-1003542166929": {
+      "chatName": "AI Weekends <> Inner Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Ambient coordination chatter with no clear ownership on you."
+    },
+    "-1003851081733": {
+      "chatName": "Base Culture Council",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The explicit actionable line is directed at another handle, not you."
+    },
+    "-1003888922172": {
+      "chatName": "Based Games",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The visible context has no clear ask or follow-up on you."
+    },
+    "-5212516832": {
+      "chatName": "Bhavyam <> First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The thread already appears resolved by someone else."
+    },
+    "-1003421960754": {
+      "chatName": "BullBit <> First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The visible ask is aimed at someone else, not the user."
+    },
+    "-4207340164": {
+      "chatName": "Core(EANSG)",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The current thread is active, but the next step sits with others."
+    },
+    "-1001613656434": {
+      "chatName": "Inner Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Ambient technical discussion and lightweight acknowledgements should not reopen the group as on-you."
+    },
+    "-4950167182": {
+      "chatName": "MENA<>First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The visible thread is already acknowledged and not waiting on you."
+    },
+    "-5185718774": {
+      "chatName": "Munify <> First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The other side already advances the thread inside the visible context."
+    },
+    "-1003802691492": {
+      "chatName": "Nasheele Agents",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Ambient links and banter only, with no visible obligation on you."
+    },
+    "-1002123394767": {
+      "chatName": "Onchain Rookies",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "News and social chatter should not surface as a reply-queue item."
+    },
+    "-4836182133": {
+      "chatName": "Privy Dev Help",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The visible technical follow-up explicitly mentions another handle, not you."
+    },
+    "-5214411753": {
+      "chatName": "Tomorrow <> pratzyy",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Your visible latest message already closes the loop."
+    },
+
+    "1405656673": {
+      "chatName": "Brijesh",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Direct private request to log in and help with setup."
+    },
+    "7063264193": {
+      "chatName": "James.ETH(🧡💙)",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Direct private follow-up about an application still under review."
+    },
+    "7783954199": {
+      "chatName": "Sheila Brennan",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Clear outreach DM asking to discuss security needs."
+    },
+    "1815100363": {
+      "chatName": "Swarnava",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "The contact explicitly asks for feedback after sharing the beta."
+    },
+    "1580996262": {
+      "chatName": "Vibhu R",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Direct short follow-up asking you to check Reddit."
+    },
+
+    "5547204396": {
+      "chatName": "Victor Ekoh",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "The latest visible response is acknowledgement and action from the other side."
+    },
+    "5908773262": {
+      "chatName": "skiv",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "The visible update says the other side already started and will post later."
+    },
+    "865924605": {
+      "chatName": "Akhil B",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "The visible thread looks acknowledged and closed for now."
+    }
+  }
+}

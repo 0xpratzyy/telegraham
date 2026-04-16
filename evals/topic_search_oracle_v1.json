@@ -1,0 +1,138 @@
+{
+  "name": "topic-search-oracle-v1",
+  "notes": "Grounded chat-first topic-search oracle seeded from real local topic threads and summary-oracle evidence.",
+  "entries": [
+    {
+      "id": "topic_hit_01",
+      "query": "first dollar weekly updates",
+      "expectedKind": "hit",
+      "expectedChatIds": [8509073799],
+      "retrievalHints": ["firstdollar", "lineardigest", "radar room", "wallet transaction bug", "creator flow", "export option"],
+      "requiredSnippetTerms": ["first dollar", "radar room", "creator"]
+    },
+    {
+      "id": "topic_hit_02",
+      "query": "builder program with jack and emma",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5217898121],
+      "retrievalHints": ["jack", "emma", "builder program", "hackathon", "proposal", "@jackdishman", "@emma_neynar"],
+      "requiredSnippetTerms": ["builder", "jack", "emma"]
+    },
+    {
+      "id": "topic_hit_03",
+      "query": "huddle01 cloud infrastructure",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "retrievalHints": ["huddle01", "product hunt", "hetzner", "cloud"],
+      "requiredSnippetTerms": ["huddle01", "cloud", "hetzner"]
+    },
+    {
+      "id": "topic_hit_04",
+      "query": "inner circle budget office",
+      "expectedKind": "hit",
+      "expectedChatIds": [865924605],
+      "retrievalHints": ["budget", "inner circle", "office", "salary", "october", "roi"],
+      "requiredSnippetTerms": ["budget", "office", "roi"]
+    },
+    {
+      "id": "topic_hit_05",
+      "query": "bd hiring decision",
+      "expectedKind": "hit",
+      "expectedChatIds": [1341384985],
+      "retrievalHints": ["bd person", "product better", "rajanshee", "2 weeks", "clarity"],
+      "requiredSnippetTerms": ["bd", "product", "clarity"]
+    },
+    {
+      "id": "topic_hit_06",
+      "query": "first dollar overview",
+      "expectedKind": "hit",
+      "expectedChatIds": [-5177680185],
+      "retrievalHints": ["first dollar", "ugc", "bounties", "radar room", "base native talent network"],
+      "requiredSnippetTerms": ["first dollar", "bounties", "radar room"]
+    },
+    {
+      "id": "topic_hit_07",
+      "query": "radar room platform gaps",
+      "expectedKind": "hit",
+      "expectedChatIds": [7842808520],
+      "retrievalHints": ["radar room", "gaps", "bounties", "jobs boards", "discovery", "reputation", "notifications", "mobile"],
+      "requiredSnippetTerms": ["radar room", "discovery", "notification"]
+    },
+    {
+      "id": "topic_hit_08",
+      "query": "twitter data options",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "retrievalHints": ["twitter data options", "twikit", "twitter api", "xai api", "yt-dlp"],
+      "requiredSnippetTerms": ["twitter", "api", "twikit"]
+    },
+    {
+      "id": "topic_hit_09",
+      "query": "skate deployment blocker",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "retrievalHints": ["skate", "vercel", "railway", "database_url", "auth_url"],
+      "requiredSnippetTerms": ["skate", "vercel", "database"]
+    },
+    {
+      "id": "topic_hit_10",
+      "query": "hackathon final rankings",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "retrievalHints": ["hackathon review", "full rankings", "eigenstate", "hunteros", "upstart"],
+      "requiredSnippetTerms": ["hackathon", "rankings", "eigenstate"]
+    },
+    {
+      "id": "topic_hit_11",
+      "query": "paperclip team brief",
+      "expectedKind": "hit",
+      "expectedChatIds": [8286929323],
+      "retrievalHints": ["paperclip team brief", "marketing sprint", "ske-38", "ske-39"],
+      "requiredSnippetTerms": ["paperclip", "team brief", "ske-38"]
+    },
+    {
+      "id": "topic_hit_12",
+      "query": "first dollar marketplace strategy",
+      "expectedKind": "hit",
+      "expectedChatIds": [5068640359],
+      "retrievalHints": ["first dollar marketplace", "overview", "launch campaign", "web3 portfolio"],
+      "requiredSnippetTerms": ["marketplace", "launch", "portfolio"]
+    },
+    {
+      "id": "topic_hit_13",
+      "query": "balance transfer withdrawals feedback",
+      "expectedKind": "hit",
+      "expectedChatIds": [-1003345930730],
+      "retrievalHints": ["balance transfer", "withdrawal", "under two minutes", "no bugs"],
+      "requiredSnippetTerms": ["balance transfer", "withdrawal", "minutes"]
+    },
+    {
+      "id": "topic_no_result_01",
+      "query": "rahul wallet addresses",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["rahul", "wallet", "address"]
+    },
+    {
+      "id": "topic_no_result_02",
+      "query": "rupam whitelisting bounties",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["rupam", "whitelisted", "bounty"]
+    },
+    {
+      "id": "topic_no_result_03",
+      "query": "jack mobile app gaps",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["jack", "mobile app", "notification system"]
+    },
+    {
+      "id": "topic_no_result_04",
+      "query": "sophia wallet addresses",
+      "expectedKind": "no_result",
+      "expectedChatIds": [],
+      "retrievalHints": ["sophia", "wallet", "address"]
+    }
+  ]
+}

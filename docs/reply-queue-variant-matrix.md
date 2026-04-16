@@ -1,6 +1,6 @@
 # Reply Queue Variant Matrix
 
-Last updated: 2026-04-12
+Last updated: 2026-04-14
 
 This is the canonical reference for reply-queue prompt variants, digest variants, and how they performed in offline evaluation.
 
@@ -51,6 +51,8 @@ These are the main reasoning styles currently implemented.
 | `strict_groups_v1` | reduce group noise | default groups to `quiet` unless ownership is clearly on the user |
 | `field_aware_groups_v2` | improve group ownership | trust `groupOwnershipHint` and handle mentions more strongly |
 | `field_aware_groups_v3` | improve group precision further | treat ownership hints as primary and local heuristic fields as noisy |
+| `field_aware_groups_v4_contextual_recovery_v1` | recover borderline real group obligations | distinguish explanation-style replies from real asks and let earlier requests-for-input rescue later task dumps |
+| `field_aware_groups_v5_tiered_review_v1` | add a secondary surfaced bucket | allow stale-but-real open loops to surface as `worth_checking` instead of forcing `on_me` vs `quiet` |
 | `private_recall_v1` | recover terse DMs | allow short private operational asks to remain `on_me` |
 | `private_recall_v2` | best DM recovery so far | use explicit private ownership fields and wider private snippets without reopening group spam |
 
@@ -106,6 +108,23 @@ Strongest current DM handling:
 - `private_closed` leans `quiet`
 - `privateReplySignal` helps recover short operational follow-ups without overriding clear closure
 
+#### `field_aware_groups_v4_contextual_recovery_v1`
+
+Adds a narrower recovery rule set on top of the structured ownership approach:
+
+- treat explanatory technical replies in groups as likely `quiet`
+- treat cc-style handle mentions as weaker than real assignment
+- allow an earlier explicit request for input to keep a later task dump alive
+- still preserve the `privateOwnershipHint` rules from `private_recall_v2`
+
+#### `field_aware_groups_v5_tiered_review_v1`
+
+Adds a benchmark-only middle bucket:
+
+- `on_me` means reply-now
+- `worth_checking` means a real but stale/diluted open loop that should surface in a secondary section
+- `quiet` still hides ambient or closed chatter
+
 ## Digest Variants
 
 These are the evidence packages sent per chat.
@@ -117,6 +136,7 @@ These are the evidence packages sent per chat.
 | `digest_v3` | `groupOwnershipHint`, broadcast-vs-direct, inbound owns next step | strong group reasoning |
 | `digest_v4` | reframes local heuristic fields as weak/noisy metadata | cleaner prompt behavior on noisy chats |
 | `digest_v5` | `privateOwnershipHint`, `privateReplySignal`, wider private snippet window | best overall DM + group balance |
+| `digest_v6` | `digest_v5` plus wider group context and targeted group recovery fields | benchmark branch for `Banko`-vs-`Inner Circle` style tradeoffs |
 
 ### Important Fields By Digest
 
@@ -169,6 +189,17 @@ Adds stronger private-chat evidence:
 - `privateReplySignal`
 - wider private snippet selection around the latest actionable private message
 
+#### `digest_v6`
+
+Keeps the private-chat behavior of `digest_v5`, then adds group-specific evidence:
+
+- wider pre-actionable group context window
+- `explicitSecondPersonLatestActionable`
+- `latestActionableLooksExplanatory`
+- `ccStyleHandleMentions`
+- `earlierRequestForInputExists`
+- `earlierRequestForInputText`
+
 ## Best Performing Variants
 
 These are from the main robustness sweep:
@@ -201,6 +232,103 @@ The absolute scores dropped under the broader oracle. That is expected and healt
 - it exposed brittleness across alternate candidate orderings
 - but the same variant still remained the best overall candidate
 
+## Apr 12 Group-Focused Oracle Read
+
+From the fresher Apr 12 snapshot oracle:
+
+- [reply_queue_group_precision_oracle_v1.json](/Users/pratyushrungta/telegraham/evals/reply_queue_group_precision_oracle_v1.json)
+- [20260414-194348 oracle report](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-194348/report.json)
+
+This harsher oracle was built to answer a narrower question:
+
+- are we still reopening obviously closed or ambient group chats on fresher live candidates
+- can we rescue borderline group obligations without bringing the spam back
+
+What it showed:
+
+- `baseline_compact_v1_4x12` is still clearly too noisy
+- `field_aware_groups_v3_private_recall_v2_digest_v5_digest_v5_4x12` still wins overall
+- `field_aware_groups_v3_private_recall_v2_digest_v5_digest_v3_4x12` gets a bit more recall on some snapshots, but it is less stable and peaks at more group false positives
+
+The important new failure pattern is narrower now:
+
+- baseline still revives obvious bad group results like `AI Weekends <> Inner Circle`, `First Dollar`, and `Inner Circle`
+- the top two structured variants mostly converge on the same remaining problem pair:
+  - false positive: `Inner Circle`
+  - lenient miss: `Banko`
+
+That is useful because it means the benchmark frontier has moved:
+
+- we are no longer fighting broad noisy group spam
+- we are now tuning a smaller tradeoff between one recurring false positive and one borderline missed obligation
+
+So the next benchmark target is not “general group precision” in the abstract. It is:
+
+- recover `Banko`-style maybe-on-you groups
+- without reopening `Inner Circle`-style ambient technical chatter
+
+## Follow-up Group Oracle Read
+
+After the first Apr 12 oracle exposed the `Banko` vs `Inner Circle` tradeoff, the next benchmark loop added:
+
+- [reply_queue_group_fp_traps_oracle_v1.json](/Users/pratyushrungta/telegraham/evals/reply_queue_group_fp_traps_oracle_v1.json)
+- `digest_v6`
+- `field_aware_groups_v4_contextual_recovery_v1`
+
+Recent reports:
+
+- [20260414-200619 fresh-group oracle report](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-200619/report.json)
+- [20260414-200826 trap-oracle report](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-200826/report.json)
+- [20260414-203231 broader-oracle comparison](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-203231/report.json)
+
+What changed:
+
+- `digest_v6` now carries the earlier `gib more input` style request into the prompt
+- explanation-style group messages like `you mean to get the code...` are marked separately from real asks
+- cc-style mentions are separated from true task assignment
+
+What the new runs showed:
+
+- `field_aware_groups_v4_contextual_recovery_v1 + digest_v6` wins the fresh Apr 12 oracle and cleanly resolves the original `Banko` vs `Inner Circle` pair
+- that same contextual prompt still overreaches on some broader slices, for example reopening `First Dollar` on the fresh oracle and not winning the older trap oracle
+- `field_aware_groups_v3_private_recall_v2 + digest_v6` is the steadier broad candidate right now:
+  - it wins the older trap oracle
+  - it narrowly beats the current `digest_v5` shipping candidate on the broader multi-snapshot oracle
+  - it does this while keeping zero majority group false positives in those broader runs
+
+So the benchmark result is now split in a useful way:
+
+- `v4 + digest_v6` is the sharper research branch for fresh real group obligations
+- `v3 private_recall_v2 + digest_v6` is the safer next broad candidate if we want one script-side winner to keep testing before product promotion
+
+## Tiered Review Read
+
+The next benchmark loop changed the framing itself:
+
+- [20260414-205455 fresh-group tiered report](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-205455/report.json)
+- [20260414-205622 trap-oracle tiered report](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-205622/report.json)
+- [20260414-213241 fresh-group tiered rerun after closure fixes](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-213241/report.json)
+- [20260414-213248 trap-oracle tiered rerun after closure fixes](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/reply_queue_oracle_bench/20260414-213248/report.json)
+
+What changed:
+
+- the scorer now supports a benchmark-only `worth_checking` surfaced bucket
+- `maybe` labels are normalized into that same secondary bucket during evaluation
+- `Banko` is now modeled as `worth_checking`, not forced into `on_me` vs `not_on_me`
+
+What it showed:
+
+- `field_aware_groups_v5_tiered_review_v1 + digest_v6` is the first variant that consistently surfaces `Banko` as a secondary item while keeping `Inner Circle` quiet
+- after teaching the harness that phrases like `Already added` are real closure/ownership handoff signals, the same tiered branch now suppresses `Bhavyam <> First Dollar` cleanly on the older trap oracle and keeps `Banko` surfaced as `worth_checking`
+- the stricter `field_aware_groups_v6_tiered_review_v2 + digest_v6` experiment removed more trap-side noise but over-corrected on fresh snapshots by reopening cases like `Tom🔥` or `Inner Circle`
+- the main remaining tiered leak is `onchain accountability` on one audit-order snapshot, so the surfaced bucket is much cleaner but not perfectly solved yet
+
+So the benchmark answer is:
+
+- the tiered framing is directionally better for human trust
+- the best current tiered branch is now good enough to keep testing benchmark-side
+- but the `worth_checking` bucket still needs one more precision pass before product promotion
+
 ## Practical Recommendation
 
 ### Best shipping candidate
@@ -214,6 +342,39 @@ Why:
 - zero bad group false positives in the main robustness sweep
 - best stability
 - strong enough DM recall without reopening old group spam
+
+### Best current broad research candidate
+
+- **Prompt**: `field_aware_groups_v3_private_recall_v2`
+- **Digest**: `digest_v6`
+
+Why:
+
+- same private-recall framing as the current shipping candidate
+- better benchmark coverage for explanation-style technical groups and cc-style mentions
+- currently the safer broad winner across the newer trap and broader oracle comparisons
+
+### Best tiered research candidate
+
+- **Prompt**: `field_aware_groups_v5_tiered_review_v1`
+- **Digest**: `digest_v6`
+
+Why:
+
+- best match so far for `show it, but don’t overclaim it`
+- correctly surfaces `Banko` as a secondary review item instead of a forced `on_me`
+- closure-heuristic fixes now suppress older resolved group asks like `Bhavyam <> First Dollar`
+- still not clean enough to ship because the surfaced bucket can reopen stale accountability-style rows on some audit-order snapshots
+
+### Best fresh-group research branch
+
+- **Prompt**: `field_aware_groups_v4_contextual_recovery_v1`
+- **Digest**: `digest_v6`
+
+Why:
+
+- best direct answer so far to the `Banko` vs `Inner Circle` failure pair
+- but still not broad enough or stable enough to call the universal winner
 
 ### Best looser alternative
 
@@ -242,4 +403,3 @@ For reply queue, the current best pattern is:
 - strong ownership-aware prompt
 - rich structured digest
 - skepticism toward noisy local heuristics
-

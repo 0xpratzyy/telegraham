@@ -19,6 +19,7 @@ class TelegramService: ObservableObject {
     private let tdClient = TDLibClientWrapper()
     private let rateLimiter = RateLimiter()
     private var updateTask: Task<Void, Never>?
+    private var chatDiscoveryTask: Task<Void, Never>?
     private var userCache: [Int64: TGUser] = [:]
     private var chatCache: [Int64: TGChat] = [:]
 
@@ -41,6 +42,7 @@ class TelegramService: ObservableObject {
 
     func stop() {
         updateTask?.cancel()
+        chatDiscoveryTask?.cancel()
         tdClient.close()
     }
 
@@ -118,14 +120,77 @@ class TelegramService: ObservableObject {
 
     // MARK: - Chat Operations (read-only)
 
-    func loadChats(limit: Int = 100) async throws {
-        isLoading = true
-        defer { isLoading = false }
+    func loadChats(
+        limit: Int = AppConstants.Fetch.chatListLimit,
+        priority: RateLimiter.Priority = .userInitiated,
+        updatesLoadingState: Bool = true
+    ) async throws {
+        if updatesLoadingState {
+            isLoading = true
+        }
+        defer {
+            if updatesLoadingState {
+                isLoading = false
+            }
+        }
 
-        _ = try await withRateLimitedCall(method: "loadChats") { client in
+        _ = try await withRateLimitedCall(priority: priority, method: "loadChats") { client in
             try await client.loadChats(chatList: .chatListMain, limit: limit)
         }
         // Chats arrive via updateNewChat updates
+    }
+
+    private func startBackgroundChatDiscovery() {
+        chatDiscoveryTask?.cancel()
+        chatDiscoveryTask = Task { [weak self] in
+            guard let self else { return }
+            await self.discoverAdditionalMainListChats()
+        }
+    }
+
+    private func discoverAdditionalMainListChats() async {
+        var stagnantPasses = 0
+        var lastVisibleCount = visibleChats.count
+
+        while !Task.isCancelled && stagnantPasses < AppConstants.Fetch.maxStagnantBackgroundChatDiscoveryPasses {
+            do {
+                try await loadChats(
+                    limit: AppConstants.Fetch.backgroundChatDiscoveryLimit,
+                    priority: .background,
+                    updatesLoadingState: false
+                )
+            } catch let error as TDLibKit.Error {
+                if isMainChatListExhausted(error) {
+                    return
+                }
+
+                print("[TelegramService] Background chat discovery stopped: \(error.code) \(error.message)")
+                return
+            } catch {
+                print("[TelegramService] Background chat discovery stopped: \(error.localizedDescription)")
+                return
+            }
+
+            try? await Task.sleep(
+                for: .milliseconds(Int(AppConstants.Fetch.backgroundChatDiscoverySettleDelayMilliseconds))
+            )
+
+            let currentVisibleCount = visibleChats.count
+            if currentVisibleCount > lastVisibleCount {
+                lastVisibleCount = currentVisibleCount
+                stagnantPasses = 0
+            } else {
+                stagnantPasses += 1
+            }
+
+            try? await Task.sleep(
+                for: .milliseconds(Int(AppConstants.Fetch.backgroundChatDiscoveryInterPassDelayMilliseconds))
+            )
+        }
+    }
+
+    private func isMainChatListExhausted(_ error: TDLibKit.Error) -> Bool {
+        error.code == 404
     }
 
     func getChat(id: Int64) async throws -> TGChat? {
@@ -522,18 +587,22 @@ class TelegramService: ObservableObject {
             authState = .ready
             Task {
                 try? await loadChats()
+                startBackgroundChatDiscovery()
                 if let me = try? await fetchCurrentUser() {
                     currentUser = me
                 }
             }
 
         case .authorizationStateLoggingOut:
+            chatDiscoveryTask?.cancel()
             authState = .loggingOut
 
         case .authorizationStateClosed:
+            chatDiscoveryTask?.cancel()
             authState = .closed
 
         case .authorizationStateClosing:
+            chatDiscoveryTask?.cancel()
             authState = .closing
 
         default:

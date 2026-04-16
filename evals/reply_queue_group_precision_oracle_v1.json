@@ -1,0 +1,182 @@
+{
+  "name": "reply_queue_group_precision_oracle_v1",
+  "notes": "Fresh assistant-authored oracle for the Apr 12 candidate exports. It is intentionally group-heavy and harsher on false-positive group obligations, while keeping a small set of private anchors so strict F1 remains informative.",
+  "snapshots": [
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots_apr12/mixed_recent_48.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots_apr12/mixed_recent_24.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots_apr12/recent_first_24.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots_apr12/audit_order_24.json",
+    "/Users/pratyushrungta/Library/Application Support/Pidgy/debug/reply_queue_candidate_snapshots_apr12/ai_only_recent_24.json"
+  ],
+  "labels": {
+    "-5206575016": {
+      "chatName": "Agent Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Technical chatter continues, but the visible context does not contain a clear fresh ask aimed at you."
+    },
+    "-1003542166929": {
+      "chatName": "AI Weekends <> Inner Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Broad community coordination and strategy chatter; no clean ownership on you from the visible context."
+    },
+    "-5040366323": {
+      "chatName": "Banko",
+      "chatType": "group",
+      "label": "worth_checking",
+      "reason": "There is a real earlier ask for more input, but it is stale and diluted enough that it should surface as a secondary review item rather than a primary reply-now obligation."
+    },
+    "-1003667892771": {
+      "chatName": "BaseCircle.Club - Core",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Celebratory closure messages only; no current reply obligation."
+    },
+    "-1001900086160": {
+      "chatName": "Based Dock",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "No visible text evidence of an actionable ask."
+    },
+    "-1003888922172": {
+      "chatName": "Based Games",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Short ambient messages and media only; nothing visibly on you."
+    },
+    "-4207340164": {
+      "chatName": "Core(EANSG)",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The visible thread is active, but the next step appears to sit with others, not you."
+    },
+    "-1003535235718": {
+      "chatName": "First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Ambient promo / community chatter with no direct ask or open loop on you."
+    },
+    "-5217817481": {
+      "chatName": "Gyndore <> First Dollar",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "The visible question is answered by the other side inside the snippet, so it does not remain on you."
+    },
+    "-1001613656434": {
+      "chatName": "Inner Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Another participant is carrying the technical explanation; your latest visible message is already a lightweight acknowledgement."
+    },
+    "-1003802691492": {
+      "chatName": "Nasheele Agents",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Ambient banter and links, not a visible reply obligation."
+    },
+    "-1002123394767": {
+      "chatName": "Onchain Rookies",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "News and social chatter only; no clear actionable ask aimed at you."
+    },
+    "-5294386608": {
+      "chatName": "onchain accountability",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Check-in style updates, not a thread currently waiting on your response."
+    },
+    "-5179787661": {
+      "chatName": "Opengotchi <> Innercircle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Single celebratory message with no open loop."
+    },
+    "-1003345930730": {
+      "chatName": "Radar Room",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Your visible latest message is 'Done', which closes the loop unless newer context reopens it."
+    },
+    "-1003797156525": {
+      "chatName": "Shoonya <> Inner Circle",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Operational chatter ends with closure-style language and no fresh ask."
+    },
+    "-5214411753": {
+      "chatName": "Tomorrow <> pratzyy",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Your visible latest message already closes the loop for the current scheduling thread."
+    },
+    "-1003636904754": {
+      "chatName": "Why Combinator",
+      "chatType": "group",
+      "label": "not_on_me",
+      "reason": "Event/date chatter is present, but there is no visible direct ask or unresolved obligation on you."
+    },
+
+    "5480939830": {
+      "chatName": "Samanway Baranwal",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Direct private request asking you to test something; strong follow-up obligation."
+    },
+    "1128253670": {
+      "chatName": "Victor Okodi ⚗️",
+      "chatType": "private",
+      "label": "on_me",
+      "reason": "Direct private appeal asking for reinstatement and response."
+    },
+    "1183886217": {
+      "chatName": "Clinton",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "Single acknowledgement with no open loop."
+    },
+    "905971339": {
+      "chatName": "Penguinpecker",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "The visible context is entirely your own outbound messages, so the thread is not waiting on you."
+    },
+    "5082620102": {
+      "chatName": "Piyush Avantis",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "Ongoing conversation, but no clear unresolved ask currently sits on you."
+    },
+    "6040400539": {
+      "chatName": "Rajesh C",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "You already responded with a call link, so the visible next move is no longer clearly yours."
+    },
+    "2014843525": {
+      "chatName": "Rahul Singh Bhadoriya",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "The visible exchange looks completed and acknowledged."
+    },
+    "6213072923": {
+      "chatName": "Soum",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "A thank-you / acknowledgement is not an active reply obligation."
+    },
+    "6743321353": {
+      "chatName": "Tom🔥",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "You already redirected the ask to the appropriate owner and the latest visible reply acknowledges it."
+    },
+    "909260483": {
+      "chatName": "Akshit Verma",
+      "chatType": "private",
+      "label": "not_on_me",
+      "reason": "Lightweight sharing / reactions only; no visible follow-up owed from you."
+    }
+  }
+}

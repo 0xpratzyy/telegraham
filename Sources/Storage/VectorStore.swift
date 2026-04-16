@@ -32,27 +32,33 @@ actor VectorStore {
         guard !records.isEmpty else { return }
 
         do {
-            try await DatabaseManager.shared.write { db in
-                for record in records {
-                    try db.execute(
-                        sql: """
-                            INSERT INTO embeddings (message_id, chat_id, vector, text_preview)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(message_id, chat_id) DO UPDATE SET
-                                vector = excluded.vector,
-                                text_preview = excluded.text_preview
-                            """,
-                        arguments: [
-                            record.messageId,
-                            record.chatId,
-                            Self.encode(record.vector),
-                            record.textPreview
-                        ]
-                    )
-                }
-            }
+            try await storeBatchThrowing(records)
         } catch {
             print("[VectorStore] Failed to store embedding batch: \(error)")
+        }
+    }
+
+    func storeBatchThrowing(_ records: [EmbeddingRecord]) async throws {
+        guard !records.isEmpty else { return }
+
+        try await DatabaseManager.shared.write { db in
+            for record in records {
+                try db.execute(
+                    sql: """
+                        INSERT INTO embeddings (message_id, chat_id, vector, text_preview)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(message_id, chat_id) DO UPDATE SET
+                            vector = excluded.vector,
+                            text_preview = excluded.text_preview
+                        """,
+                    arguments: [
+                        record.messageId,
+                        record.chatId,
+                        Self.encode(record.vector),
+                        record.textPreview
+                    ]
+                )
+            }
         }
     }
 

@@ -269,6 +269,25 @@
       "why": "Positive QA-style recap with clear workflow outcome and speed detail."
     },
     {
+      "id": "summary_hit_15",
+      "query": "What are the key takeaways from the last week with Akhil?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-1003542166929],
+      "supportingMessageIds": [2570059776, 3222274048],
+      "retrievalHints": ["Akhil B"],
+      "timeRange": {
+        "start": 1775650000,
+        "end": 1776195000
+      },
+      "requiredFactGroups": [
+        ["builders", "showcase", "present from our communities"],
+        ["speakers", "agentic summer"],
+        ["lifi", "5k", "confirm their 5k"]
+      ],
+      "forbiddenPhrases": ["save taxes", "mainstream outside of x"],
+      "why": "Recent Akhil recap should focus on event ideas and the pending LiFi sponsorship confirmation, not unrelated scattered mentions."
+    },
+    {
       "id": "summary_none_01",
       "query": "Summarize my chats with Rahul about wallet addresses.",
       "expectedKind": "no_result",

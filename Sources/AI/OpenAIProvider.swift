@@ -307,7 +307,7 @@ final class OpenAIProvider: AIProvider {
                             ],
                             "classification": [
                                 "type": "string",
-                                "enum": ["on_me", "on_them", "quiet", "need_more"]
+                                "enum": ["on_me", "worth_checking", "on_them", "quiet", "need_more"]
                             ],
                             "urgency": [
                                 "type": "string",

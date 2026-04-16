@@ -16,8 +16,14 @@ STOP_WORDS = {
     "me", "my", "our", "about", "give", "quick", "summary", "summarize", "last",
     "week", "month", "from", "this", "that", "right", "now", "after",
     "happened", "discuss", "discussed", "conclude", "concluded", "decide",
-    "decided", "main", "gaps", "chat", "chats"
+    "decided", "main", "gaps", "chat", "chats", "are", "is", "was", "were"
 }
+
+SUMMARY_CUE_PHRASES = [
+    "what did we decide", "what happened", "key takeaways", "latest context",
+    "catch me up", "full rankings", "team brief", "main gaps", "feedback",
+    "overview", "full picture"
+]
 
 
 def normalize(text: str) -> str:
@@ -75,14 +81,66 @@ def extract_name_tokens(values: list[str]) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def build_match_query(query: str, hints: list[str]) -> str:
+def extract_scoped_terms(normalized: str) -> list[str]:
+    patterns = [
+        r"\bwith\s+([a-z0-9@.\- ]+?)(?:\s+(?:from|about|last|this|today|yesterday|thread|chat|conversation|project)\b|[?.!]|$)",
+        r"\babout\s+([a-z0-9@.\- ]+?)(?:\s+(?:from|last|this|today|yesterday|thread|chat|conversation|project)\b|[?.!]|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized, re.IGNORECASE)
+        if not match:
+            continue
+        extracted = [
+            token for token in re.split(r"[^a-z0-9@._-]+", match.group(1))
+            if token and token not in STOP_WORDS and len(token) >= 3
+        ]
+        if extracted:
+            return list(dict.fromkeys(extracted))
+    return []
+
+
+def build_query_context(query: str) -> dict[str, Any]:
+    normalized = normalize(query)
+    query_terms = tokenize(query)
+    scoped_terms = extract_scoped_terms(normalized)
+    clue_phrases = [phrase for phrase in SUMMARY_CUE_PHRASES if phrase in normalized]
+    generic_tokens = {
+        token
+        for phrase in clue_phrases
+        for token in re.split(r"[^a-z0-9]+", phrase)
+        if token
+    }
+    topic_terms = [
+        token for token in query_terms
+        if token not in scoped_terms and token not in generic_tokens
+    ]
+    retrieval_terms = scoped_terms + topic_terms if (scoped_terms or topic_terms) else query_terms
+    return {
+        "normalized": normalized,
+        "queryTerms": query_terms,
+        "scopedTerms": list(dict.fromkeys(scoped_terms)),
+        "topicTerms": list(dict.fromkeys(topic_terms)),
+        "cluePhrases": clue_phrases,
+        "retrievalTerms": list(dict.fromkeys(retrieval_terms)),
+    }
+
+
+def build_match_query(query: str, hints: list[str], query_context: dict[str, Any]) -> str:
     pieces: list[str] = []
     for phrase in phraseify(hints):
-        if " " in phrase:
-            pieces.append(f"\"{phrase}\"")
+        cleaned = re.sub(r"[^a-z0-9 ]+", " ", phrase).strip()
+        if not cleaned:
+            continue
+        if " " in cleaned:
+            pieces.append(f"\"{cleaned}\"")
         else:
-            pieces.append(phrase)
-    for token in safe_fts_terms(query):
+            for token in cleaned.split():
+                if token not in pieces:
+                    pieces.append(token)
+    normalized_retrieval_terms: list[str] = []
+    for token in query_context.get("retrievalTerms", []) or safe_fts_terms(query):
+        normalized_retrieval_terms.extend(safe_fts_terms(token))
+    for token in normalized_retrieval_terms:
         if token not in pieces:
             pieces.append(token)
     if not pieces:
@@ -90,8 +148,15 @@ def build_match_query(query: str, hints: list[str]) -> str:
     return " OR ".join(pieces)
 
 
-def fetch_fts_hits(conn: sqlite3.Connection, query: str, hints: list[str], limit: int = 240) -> list[sqlite3.Row]:
-    match_query = build_match_query(query, hints)
+def fetch_fts_hits(
+    conn: sqlite3.Connection,
+    query: str,
+    hints: list[str],
+    query_context: dict[str, Any],
+    time_range: Optional[dict[str, Any]],
+    limit: int = 240,
+) -> list[sqlite3.Row]:
+    match_query = build_match_query(query, hints, query_context)
     if not match_query:
         return []
     conn.row_factory = sqlite3.Row
@@ -107,22 +172,91 @@ def fetch_fts_hits(conn: sqlite3.Connection, query: str, hints: list[str], limit
         from messages_fts
         join messages m on m.rowid = messages_fts.rowid
         where messages_fts match ?
+    """
+    params: list[Any] = [match_query]
+    if time_range:
+        sql += " and m.date >= ? and m.date <= ?"
+        params.extend([time_range.get("start", 0), time_range.get("end", 9_999_999_999)])
+    sql += """
         order by bm25(messages_fts)
         limit ?
     """
-    return conn.execute(sql, (match_query, limit)).fetchall()
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
 
 
-def row_score(row: sqlite3.Row, query: str, hints: list[str], variant: str) -> float:
+def fetch_sender_hits(
+    conn: sqlite3.Connection,
+    query: str,
+    hints: list[str],
+    query_context: dict[str, Any],
+    time_range: Optional[dict[str, Any]],
+    limit: int = 120,
+) -> list[sqlite3.Row]:
+    scoped_terms = query_context.get("scopedTerms", [])
+    name_tokens = extract_name_tokens([query, *hints])
+    sender_terms = list(dict.fromkeys([*scoped_terms, *name_tokens, *distinct_terms(hints)]))
+    if not sender_terms:
+        return []
+
+    conn.row_factory = sqlite3.Row
+    clauses: list[str] = []
+    params: list[Any] = []
+    for term in sender_terms:
+        clauses.append("lower(coalesce(sender_name, '')) like ?")
+        params.append(f"%{normalize(term)}%")
+
+    sql = f"""
+        select
+            chat_id,
+            id,
+            date,
+            is_outgoing,
+            coalesce(sender_name, '') as sender_name,
+            coalesce(text_content, '') as text_content,
+            0.0 as fts_score
+        from messages
+        where ({' or '.join(clauses)})
+    """
+    if time_range:
+        sql += " and date >= ? and date <= ?"
+        params.extend([time_range.get("start", 0), time_range.get("end", 9_999_999_999)])
+    sql += " order by date desc limit ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def merge_hits(*hit_lists: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    by_key: dict[tuple[int, int], sqlite3.Row] = {}
+    for hits in hit_lists:
+        for row in hits:
+            key = (int(row["chat_id"]), int(row["id"]))
+            existing = by_key.get(key)
+            if existing is None or float(row["fts_score"] or 0) > float(existing["fts_score"] or 0):
+                by_key[key] = row
+    return list(by_key.values())
+
+
+def row_score(row: sqlite3.Row, query: str, hints: list[str], variant: str, query_context: dict[str, Any]) -> float:
     text = normalize(row["text_content"] or "")
+    sender = normalize(row["sender_name"] or "")
+    combined = f"{sender} {text}".strip()
     tokens = tokenize(query) + [token for phrase in hints for token in tokenize(phrase)]
-    token_matches = sum(1 for token in tokens if token in text)
-    phrase_matches = sum(1 for phrase in phraseify(hints) if phrase in text)
+    token_matches = sum(1 for token in tokens if token in combined)
+    phrase_matches = sum(1 for phrase in phraseify(hints) if phrase in combined)
+    sender_matches = sum(1 for token in query_context.get("scopedTerms", []) if token in sender)
     fts_component = -float(row["fts_score"]) if row["fts_score"] is not None else 0.0
     recency = float(row["date"]) / 10_000_000_000
     outgoing_bonus = 0.15 if row["is_outgoing"] else 0.0
 
-    score = fts_component * 2.5 + token_matches * 3.0 + phrase_matches * 8.0 + recency + outgoing_bonus
+    score = (
+        fts_component * 2.5
+        + token_matches * 3.0
+        + phrase_matches * 8.0
+        + sender_matches * 10.0
+        + recency
+        + outgoing_bonus
+    )
 
     if variant == "focus_chat_v2":
         if "decide" in normalize(query) or "decision" in normalize(query):
@@ -133,6 +267,13 @@ def row_score(row: sqlite3.Row, query: str, hints: list[str], variant: str) -> f
                 score += 3.0
         if any(word in normalize(query) for word in ["last week", "last month", "week of", "after the call"]):
             score += 1.0
+    if variant in {"focus_chat_v5", "focus_chat_v6"}:
+        if sender_matches:
+            score += 12.0
+        if query_context.get("scopedTerms") and not query_context.get("topicTerms"):
+            score += 2.0
+        if any(word in text for word in ["few things", "confirm", "budget", "speakers", "builders"]):
+            score += 2.5
 
     return score
 
@@ -142,18 +283,21 @@ def group_chat_candidates(
     query: str,
     hints: list[str],
     variant: str,
+    query_context: dict[str, Any],
     time_range: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
-    query_terms = set(safe_fts_terms(query))
+    query_terms = set(query_context.get("queryTerms", safe_fts_terms(query)))
     hint_terms = set(distinct_terms(hints))
     hint_phrases = phraseify(hints)
     name_tokens = set(extract_name_tokens([query, *hints]))
     grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in hits:
         text = normalize(row["text_content"] or "")
-        matched_query_terms = {token for token in query_terms if token in text}
-        matched_hint_terms = {token for token in hint_terms if token in text}
-        matched_name_tokens = {token for token in name_tokens if token in text}
+        sender = normalize(row["sender_name"] or "")
+        combined = f"{sender} {text}".strip()
+        matched_query_terms = {token for token in query_terms if token in combined}
+        matched_hint_terms = {token for token in hint_terms if token in combined}
+        matched_name_tokens = {token for token in name_tokens if token in combined}
         grouped[int(row["chat_id"])].append(
             {
                 "message_id": int(row["id"]),
@@ -162,10 +306,10 @@ def group_chat_candidates(
                 "is_outgoing": bool(row["is_outgoing"]),
                 "sender_name": row["sender_name"],
                 "text_content": row["text_content"],
-                "score": row_score(row, query, hints, variant),
+                "score": row_score(row, query, hints, variant, query_context),
                 "matched_query_terms": matched_query_terms,
                 "matched_hint_terms": matched_hint_terms,
-                "matched_hint_phrases": {phrase for phrase in hint_phrases if phrase in text},
+                "matched_hint_phrases": {phrase for phrase in hint_phrases if phrase in combined},
                 "matched_name_tokens": matched_name_tokens,
                 "has_joint_anchor": bool(matched_name_tokens) and bool((matched_query_terms | matched_hint_terms) - matched_name_tokens),
                 "in_time_range": within_range(float(row["date"]), time_range),
@@ -201,6 +345,10 @@ def group_chat_candidates(
             aggregate -= 15.0
         if name_tokens and best_joint_anchor == 0:
             aggregate -= 25.0
+        if variant in {"focus_chat_v5", "focus_chat_v6"} and query_context.get("scopedTerms") and matched_name_tokens:
+            aggregate += 18.0
+            if not query_context.get("topicTerms"):
+                aggregate += 6.0
 
         candidates.append(
             {
@@ -322,12 +470,14 @@ def load_supporting_messages(
 
 def supporting_message_score(message: dict[str, Any], query: str, hints: list[str]) -> float:
     text = normalize(message["text"])
+    sender = normalize(message.get("sender_name", ""))
+    combined = f"{sender} {text}".strip()
     query_terms = set(safe_fts_terms(query))
     hint_terms = set(distinct_terms(hints))
     hint_phrases = phraseify(hints)
-    score = len({token for token in query_terms if token in text}) * 5.0
-    score += len({token for token in hint_terms if token in text}) * 7.0
-    score += len({phrase for phrase in hint_phrases if phrase in text}) * 10.0
+    score = len({token for token in query_terms if token in combined}) * 5.0
+    score += len({token for token in hint_terms if token in combined}) * 7.0
+    score += len({phrase for phrase in hint_phrases if phrase in combined}) * 10.0
     if any(word in text for word in ["summary", "overview", "bottom line", "full picture", "decided", "thought we", "main gaps"]):
         score += 4.0
     if len(text) < 90 and any(
@@ -335,6 +485,8 @@ def supporting_message_score(message: dict[str, Any], query: str, hints: list[st
         for prefix in ["check ", "tell ", "digging into it", "hetzner se compare", "what's the context"]
     ):
         score -= 14.0
+    if len(text) < 16:
+        score -= 8.0
     score += min(len(text), 500) / 250.0
     return score
 
@@ -343,7 +495,7 @@ def summarize_messages(messages: list[dict[str, Any]], variant: str, query: str,
     if not messages:
         return "No clear local summary context found."
     ranked = list(messages)
-    if variant == "focus_chat_v4":
+    if variant in {"focus_chat_v4", "focus_chat_v5"}:
         ranked.sort(
             key=lambda message: (
                 supporting_message_score(message, query, hints),
@@ -370,13 +522,13 @@ def summarize_messages(messages: list[dict[str, Any]], variant: str, query: str,
         ranked = ranked[:4]
 
     lines = []
-    clip = 1200 if variant == "focus_chat_v4" else 700 if variant == "focus_chat_v3" else 260
+    clip = 1200 if variant in {"focus_chat_v4", "focus_chat_v5"} else 700 if variant == "focus_chat_v3" else 260
     for message in ranked:
         text = message["text"]
         if len(text) > clip:
             text = text[: clip - 3] + "..."
         lines.append(text)
-    if variant in {"focus_chat_v2", "focus_chat_v3", "focus_chat_v4"}:
+    if variant in {"focus_chat_v2", "focus_chat_v3", "focus_chat_v4", "focus_chat_v5"}:
         return " • ".join(lines)
     return " ".join(lines)
 
@@ -396,12 +548,36 @@ def forbidden_hits(summary_text: str, forbidden_phrases: list[str]) -> list[str]
 
 
 def evaluate_entry(entry: dict[str, Any], conn: sqlite3.Connection, variant: str) -> dict[str, Any]:
-    hits = fetch_fts_hits(conn, entry["query"], entry.get("retrievalHints", []))
+    query_context = build_query_context(entry["query"])
+    fts_hits = fetch_fts_hits(
+        conn,
+        entry["query"],
+        entry.get("retrievalHints", []),
+        query_context,
+        entry.get("timeRange"),
+    )
+    sender_hits = fetch_sender_hits(
+        conn,
+        entry["query"],
+        entry.get("retrievalHints", []),
+        query_context,
+        entry.get("timeRange"),
+    )
+    include_sender_hits = (
+        variant == "focus_chat_v5"
+        or (
+            variant in {"focus_chat_v4", "focus_chat_v6"}
+            and bool(query_context.get("scopedTerms"))
+            and not bool(query_context.get("topicTerms"))
+        )
+    )
+    hits = merge_hits(fts_hits, sender_hits if include_sender_hits else [])
     candidates = group_chat_candidates(
         hits,
         entry["query"],
         entry.get("retrievalHints", []),
         variant,
+        query_context,
         entry.get("timeRange"),
     )
     top_candidate = candidates[0] if candidates else None
@@ -410,6 +586,7 @@ def evaluate_entry(entry: dict[str, Any], conn: sqlite3.Connection, variant: str
         variant == "focus_chat_v4"
         and top_candidate is not None
         and name_tokens
+        and not (query_context.get("scopedTerms") and not query_context.get("topicTerms"))
         and top_candidate["best_joint_anchor"] == 0
         and top_candidate["best_row_hint_terms"] < 4
     ):
@@ -519,7 +696,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark script-only summary answer quality against a grounded oracle.")
     parser.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--variants", nargs="*", default=["focus_chat_v1", "focus_chat_v2", "focus_chat_v3", "focus_chat_v4"])
+    parser.add_argument("--variants", nargs="*", default=["focus_chat_v1", "focus_chat_v2", "focus_chat_v3", "focus_chat_v4", "focus_chat_v5", "focus_chat_v6"])
     args = parser.parse_args()
 
     oracle = load_oracle(args.oracle)

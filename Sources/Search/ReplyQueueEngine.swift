@@ -431,6 +431,7 @@ final class ReplyQueueEngine {
             triageByChatId: triageByChatId,
             triageSourceByChatId: triageSourceByChatId,
             myUserId: myUserId,
+            myUsername: myUsername,
             providerFailed: providerFailed,
             chatAudits: &chatAudits
         )
@@ -477,19 +478,26 @@ final class ReplyQueueEngine {
         triageByChatId: [Int64: ReplyQueueTriageResultDTO],
         triageSourceByChatId: [Int64: String],
         myUserId: Int64,
+        myUsername: String?,
         providerFailed: Bool,
         chatAudits: inout [Int64: AgenticDebugChatAudit]
     ) -> [ReplyQueueResult] {
         let results = pending.compactMap { item -> ReplyQueueResult? in
             guard let triage = triageByChatId[item.chat.id] else { return nil }
+            let classification = ReplyQueueResult.Classification(rawValue: triage.classification) ?? .quiet
 
-            guard triage.classification == ReplyQueueResult.Classification.onMe.rawValue else {
+            guard classification == .onMe || classification == .worthChecking else {
                 return nil
             }
 
             if item.chat.chatType.isGroup,
-               !item.effectiveGroupReplySignal,
-               !item.replyOwed {
+               !passesGroupValidation(
+                pending: item,
+                classification: classification,
+                triage: triage,
+                myUserId: myUserId,
+                myUsername: myUsername
+               ) {
                 if var audit = chatAudits[item.chat.id] {
                     audit.validationFailureReason = "group not clearly directed at you"
                     chatAudits[item.chat.id] = audit
@@ -509,9 +517,39 @@ final class ReplyQueueEngine {
                 source: triageSourceByChatId[item.chat.id] ?? "ai"
             )
         }
-        return limitFallbackResults(
-            pruneStaleResultsIfNeeded(sortReplyQueueResults(results)),
-            providerFailed: providerFailed
+        return limitRenderedResults(
+            limitFallbackResults(
+                pruneStaleResultsIfNeeded(sortReplyQueueResults(results)),
+                providerFailed: providerFailed
+            )
+        )
+    }
+
+    private func passesGroupValidation(
+        pending: PendingChat,
+        classification: ReplyQueueResult.Classification,
+        triage: ReplyQueueTriageResultDTO,
+        myUserId: Int64,
+        myUsername: String?
+    ) -> Bool {
+        guard pending.chat.chatType.isGroup else {
+            return true
+        }
+
+        if pending.effectiveGroupReplySignal || pending.replyOwed {
+            return true
+        }
+
+        guard classification == .worthChecking else {
+            return false
+        }
+
+        return ConversationReplyHeuristics.hasWorthCheckingGroupOpportunity(
+            chat: pending.chat,
+            messages: pending.messages,
+            myUserId: myUserId,
+            myUsername: myUsername,
+            supportingMessageIds: Set(triage.supportingMessageIds)
         )
     }
 
@@ -523,8 +561,11 @@ final class ReplyQueueEngine {
         providerFailed: Bool
     ) -> [ReplyQueueResult] {
         let results = pending.compactMap { item -> ReplyQueueResult? in
-            guard let triage = triageByChatId[item.chat.id],
-                  triage.classification == ReplyQueueResult.Classification.onMe.rawValue else {
+            guard let triage = triageByChatId[item.chat.id] else {
+                return nil
+            }
+            let classification = ReplyQueueResult.Classification(rawValue: triage.classification) ?? .quiet
+            guard classification == .onMe else {
                 return nil
             }
 
@@ -546,12 +587,11 @@ final class ReplyQueueEngine {
             }
             return result
         }
-        return Array(
+        return limitRenderedResults(
             limitFallbackResults(
                 pruneStaleResultsIfNeeded(sortReplyQueueResults(results)),
                 providerFailed: providerFailed
             )
-            .prefix(AppConstants.Search.ReplyQueue.maxRenderedResults)
         )
     }
 
@@ -801,8 +841,19 @@ final class ReplyQueueEngine {
         }
     }
 
+    private func classificationSortWeight(_ classification: ReplyQueueResult.Classification) -> Int {
+        switch classification {
+        case .onMe: return 2
+        case .worthChecking: return 1
+        case .onThem, .quiet, .needMore: return 0
+        }
+    }
+
     private func sortReplyQueueResults(_ results: [ReplyQueueResult]) -> [ReplyQueueResult] {
         results.sorted { lhs, rhs in
+            if lhs.classification != rhs.classification {
+                return classificationSortWeight(lhs.classification) > classificationSortWeight(rhs.classification)
+            }
             if lhs.latestMessageDate != rhs.latestMessageDate { return lhs.latestMessageDate > rhs.latestMessageDate }
             if lhs.urgency != rhs.urgency { return urgencySortWeight(lhs.urgency) > urgencySortWeight(rhs.urgency) }
             return lhs.confidence > rhs.confidence
@@ -835,6 +886,15 @@ final class ReplyQueueEngine {
             .prefix(AppConstants.Search.ReplyQueue.maxFallbackRenderedResults)
 
         return sortReplyQueueResults(aiResults + fallbackResults)
+    }
+
+    private func limitRenderedResults(_ results: [ReplyQueueResult]) -> [ReplyQueueResult] {
+        let sorted = sortReplyQueueResults(results)
+        let primary = sorted.filter { $0.classification == .onMe }
+        let worthChecking = sorted
+            .filter { $0.classification == .worthChecking }
+            .prefix(AppConstants.Search.ReplyQueue.maxRenderedWorthCheckingResults)
+        return Array((primary + worthChecking).prefix(AppConstants.Search.ReplyQueue.maxRenderedResults))
     }
 
     private func localFallback(

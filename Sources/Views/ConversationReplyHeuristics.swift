@@ -24,7 +24,7 @@ enum ConversationReplyHeuristics {
         let exactSignals: Set<String> = [
             "on it", "will do", "i will", "i ll", "working on it",
             "let me do it", "let me check", "will share", "will send",
-            "done", "completed"
+            "done", "completed", "already added", "added it", "handled", "taken care of"
         ]
         if exactSignals.contains(compact) {
             return true
@@ -32,7 +32,8 @@ enum ConversationReplyHeuristics {
 
         let phraseSignals = [
             "on it", "will do", "i will", "i ll", "working on",
-            "let me", "will share", "will send", "sending", "share soon"
+            "let me", "will share", "will send", "sending", "share soon",
+            "already added", "added it", "handled", "taken care of"
         ]
         return phraseSignals.contains(where: { compact.contains($0) })
     }
@@ -209,6 +210,72 @@ enum ConversationReplyHeuristics {
         return trailingSlice.count <= 3 && distinctTrailingSenders.count <= 2
     }
 
+    static func hasWorthCheckingGroupOpportunity(
+        chat: TGChat,
+        messages: [TGMessage],
+        myUserId: Int64,
+        myUsername: String? = nil,
+        supportingMessageIds: Set<Int64> = []
+    ) -> Bool {
+        guard chat.chatType.isGroup else { return false }
+
+        let sorted = messages.sorted {
+            if $0.date != $1.date { return $0.date < $1.date }
+            return $0.id < $1.id
+        }
+        let recentWindow = Array(sorted.suffix(8))
+        let referencedWindow = supportingMessageIds.isEmpty
+            ? recentWindow
+            : recentWindow.filter { supportingMessageIds.contains($0.id) }
+        let inboundReferenced = referencedWindow.filter {
+            !messageIsFromMe($0, myUserId: myUserId)
+                && !normalizedSignalText($0.textContent).isEmpty
+        }
+
+        guard let latestReferenced = inboundReferenced.last else {
+            return false
+        }
+
+        let latestCompact = normalizedSignalText(latestReferenced.textContent)
+        if inboundMessageImpliesContactOwnsNextStep(latestCompact) || looksLikeClosure(latestCompact) {
+            return false
+        }
+        if looksExplanatoryGroupReply(latestCompact) {
+            return false
+        }
+        if messageTargetsSomeoneElse(latestReferenced, myUsername: myUsername),
+           !looksCCStyleMentionUpdate(latestReferenced.textContent) {
+            return false
+        }
+
+        let earlierInbound = Array(inboundReferenced.dropLast())
+        let hasEarlierOwnedAsk = earlierInbound.contains {
+            inboundMessageLikelyNeedsReply($0) && !messageTargetsSomeoneElse($0, myUsername: myUsername)
+        }
+        let hasEarlierInputRequest = earlierInbound.contains {
+            looksRequestForInput($0.textContent)
+        }
+        let latestLooksTaskDump = looksGroupTaskDumpFollowUp(latestReferenced.textContent)
+            || looksCCStyleMentionUpdate(latestReferenced.textContent)
+
+        guard latestLooksTaskDump else {
+            return false
+        }
+
+        let hasLaterClosure = recentWindow.contains {
+            guard $0.id > latestReferenced.id, !messageIsFromMe($0, myUserId: myUserId) else {
+                return false
+            }
+            let compact = normalizedSignalText($0.textContent)
+            return inboundMessageImpliesContactOwnsNextStep(compact) || looksLikeClosure(compact)
+        }
+        guard !hasLaterClosure else {
+            return false
+        }
+
+        return hasEarlierOwnedAsk || hasEarlierInputRequest
+    }
+
     static func resolvePipelineCategory(
         for chat: TGChat,
         hint: String,
@@ -349,6 +416,71 @@ enum ConversationReplyHeuristics {
                 return nil
             }
             return rawText[range].lowercased()
+        })
+    }
+
+    private static func looksRequestForInput(_ rawText: String?) -> Bool {
+        let compact = normalizedSignalText(rawText)
+        guard !compact.isEmpty else { return false }
+
+        let signals = [
+            "give more input", "gib more input", "need input", "your input",
+            "share feedback", "feedback", "thoughts", "what do you think",
+            "let me know", "check once", "review this", "take a look"
+        ]
+        return signals.contains(where: { compact.contains($0) })
+    }
+
+    private static func looksGroupTaskDumpFollowUp(_ rawText: String?) -> Bool {
+        let compact = normalizedSignalText(rawText)
+        guard !compact.isEmpty else { return false }
+
+        let taskSignals = [
+            "need to", "needs to", "changes", "fixes", "todo", "to do",
+            "pending", "remaining", "review comments", "figma", "feedback"
+        ]
+        let ownershipSignals = [
+            looksCCStyleMentionUpdate(rawText),
+            compact.contains("input"),
+            compact.contains("feedback"),
+            compact.contains("review")
+        ]
+        return taskSignals.contains(where: { compact.contains($0) })
+            && ownershipSignals.contains(true)
+    }
+
+    private static func looksCCStyleMentionUpdate(_ rawText: String?) -> Bool {
+        guard let rawText, !rawText.isEmpty else { return false }
+        let compact = rawText
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        guard compact.contains("@") else { return false }
+        return compact.range(of: #"\bcc\b\s+(@\w+[\s,]*)+$"#, options: .regularExpression) != nil
+    }
+
+    private static func looksExplanatoryGroupReply(_ rawText: String?) -> Bool {
+        let compact = normalizedSignalText(rawText)
+        guard !compact.isEmpty else { return false }
+
+        let explanatoryStarts = [
+            "you mean", "it means", "its too", "it s too", "you can just",
+            "you can", "basically", "i think", "this means", "even if you try"
+        ]
+        return explanatoryStarts.contains(where: { compact.hasPrefix($0) })
+    }
+
+    private static func looksLikeClosure(_ compact: String) -> Bool {
+        guard !compact.isEmpty else { return false }
+
+        let closureSignals = [
+            "done", "thanks", "thank you", "got it", "noted", "sounds good",
+            "perfect", "resolved", "on it", "will do", "will share", "will send",
+            "already added", "added it", "handled", "taken care of"
+        ]
+        let passiveSignals = ["works", "all good", "fine", "cool", "great", "awesome"]
+        return (closureSignals + passiveSignals).contains(where: {
+            compact == $0 || compact.contains($0)
         })
     }
 }
