@@ -7,10 +7,16 @@ extension Notification.Name {
 final class MenuBarManager: NSObject {
     private var statusItem: NSStatusItem?
     private let onTogglePanel: () -> Void
+    private let onOpenDashboard: () -> Void
     private let onOpenSettings: () -> Void
 
-    init(onTogglePanel: @escaping () -> Void, onOpenSettings: @escaping () -> Void) {
+    init(
+        onTogglePanel: @escaping () -> Void,
+        onOpenDashboard: @escaping () -> Void,
+        onOpenSettings: @escaping () -> Void
+    ) {
         self.onTogglePanel = onTogglePanel
+        self.onOpenDashboard = onOpenDashboard
         self.onOpenSettings = onOpenSettings
         super.init()
         setup()
@@ -41,6 +47,10 @@ final class MenuBarManager: NSObject {
         let searchItem = NSMenuItem(title: "Search Telegram", action: #selector(togglePanel), keyEquivalent: "")
         searchItem.target = self
         menu.addItem(searchItem)
+
+        let dashboardItem = NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d")
+        dashboardItem.target = self
+        menu.addItem(dashboardItem)
 
         menu.addItem(.separator())
 
@@ -77,6 +87,10 @@ final class MenuBarManager: NSObject {
 
     @objc private func togglePanel() {
         onTogglePanel()
+    }
+
+    @objc private func openDashboard() {
+        onOpenDashboard()
     }
 
     @objc private func openSettings() {

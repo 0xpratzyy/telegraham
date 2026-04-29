@@ -27,9 +27,18 @@ struct TGMessage: Identifiable, Equatable, Sendable {
         case other = "Media"
     }
 
+    var normalizedTextContent: String? {
+        guard let textContent else { return nil }
+        let cleaned = textContent
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
     /// Returns text content or a media type placeholder
     var displayText: String {
-        if let text = textContent, !text.isEmpty {
+        if let text = normalizedTextContent {
             return text
         }
         if let media = mediaType {

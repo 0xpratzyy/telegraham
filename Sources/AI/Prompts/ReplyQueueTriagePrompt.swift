@@ -15,6 +15,8 @@ enum ReplyQueueTriagePrompt {
     - "need_more": only use when the provided context is genuinely insufficient to tell.
 
     Key judgment rules:
+    - Reply Queue is only for conversational replies. If the user's next step is to send or share a pitch deck, deck, doc, file, link, invoice, contract, screenshot, media, or another artifact, classify it as "quiet" because dashboard Tasks should own artifact delivery.
+    - Example: "Bro, can you please send me the pitch deck" is "quiet" for Reply Queue, not "on_me"; it belongs in Tasks.
     - Use "worth_checking" for stale or diluted open loops: someone did ask the user something, but later discussion, age, or ambiguous ownership makes it too weak for "on_me".
     - In groups, prefer "worth_checking" over "on_me" when an older request is still somewhat relevant but there is no fresh direct ask on the user now.
     - Treat acknowledgements, reactions, celebrations, and thread-closing chatter as "quiet" unless a new ask appears.

@@ -31,6 +31,12 @@ enum PipelineCategoryPrompt {
        - Large groups: untargeted questions default quiet.
     5. If ambiguous and more context would resolve it, request more context instead of guessing.
 
+    Product boundary:
+    - This pipeline powers Reply Queue only. on_me means the user owes a conversational reply, not outside-chat work.
+    - Artifact handoffs are not Reply Queue items. If the user's next step is to send or share a pitch deck, deck, doc, file, link, invoice, contract, screenshot, media, or another artifact, category must be quiet with an empty suggestedAction. Dashboard Tasks owns artifact delivery.
+    - Example: "Bro, can you please send me the pitch deck" must be quiet here, even though it is direct, because the action is sending an artifact.
+    - Never use on_me for artifact delivery unless the only requested action is to answer a question about whether the artifact exists.
+
     Chat shape:
     - DM: use last open substantive loop.
     - Small group (<=50): allow multiple threads, trace obligations.

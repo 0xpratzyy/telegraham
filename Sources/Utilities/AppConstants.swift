@@ -81,6 +81,11 @@ enum AppConstants {
             static let smallGroupBonus = 0.04
             static let largeGroupPenalty = 0.08
         }
+
+        enum QueryPlanner {
+            static let minimumPlannerConfidence = 0.72
+            static let lowConfidenceThreshold = 0.60
+        }
     }
 
     enum FollowUp {
@@ -88,7 +93,7 @@ enum AppConstants {
         static let followUpThresholdSeconds: TimeInterval = 86400   // 24h
         static let staleThresholdSeconds: TimeInterval = 259200     // 3 days
         static let maxPipelineAgeSeconds: TimeInterval = 1209600    // 14 days
-        static let maxGroupMembers = 20       // skip groups with KNOWN count > this
+        static let maxGroupMembers = 50       // largest group we still route through AI
         static let maxGroupUnread = 10        // skip groups with > this many unread (community signal)
         static let maxAISuggestions = 15
         static let messagesPerChat = 10       // first pass window
@@ -150,6 +155,8 @@ enum AppConstants {
         static let idlePollIntervalMilliseconds: UInt64 = 2_000
         static let activePollIntervalMilliseconds: UInt64 = 500
         static let staleRefreshAgeSeconds: TimeInterval = 10 * 60
+        static let recoveryRefreshChatLimit = 8
+        static let recoveryRefreshCooldownSeconds: TimeInterval = 90
     }
 
     enum Search {
@@ -166,6 +173,11 @@ enum AppConstants {
             static let supportingResultLimit = 8
             static let summaryMessageLimit = 18
             static let fallbackSnippetLimit = 3
+            static let multiChatCandidateLimit = 3
+            static let implicitRecentRecapLookbackDays = 7
+            static let implicitRecentRecapBestHitBonus = 1.2
+            static let implicitRecentRecapChatActivityBonus = 0.8
+            static let implicitRecentRecapMissingPenalty = 2.6
         }
 
         enum ReplyQueue {
@@ -186,6 +198,16 @@ enum AppConstants {
             static let preferredFreshResultAgeSeconds: TimeInterval = 5 * 86_400
             static let minimumFreshResultsBeforeDroppingStale = 8
         }
+    }
+
+    enum Dashboard {
+        static let maxTopicCount = 6
+        static let taskTriageChatLimit = 48
+        static let taskTriageBatchSize = 12
+        static let taskExtractionMessagesPerChat = 16
+        static let taskRefreshIntervalSeconds: TimeInterval = 8 * 60
+        static let topicDiscoveryMessageLimit = 160
+        static let defaultTaskLimit = 200
     }
 
     enum App {

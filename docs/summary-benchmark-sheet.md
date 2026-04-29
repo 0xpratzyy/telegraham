@@ -1,6 +1,6 @@
 # Summary Benchmark Sheet
 
-Last updated: 2026-04-12
+Last updated: 2026-04-19
 
 This is the grounded final-answer benchmark for summary quality.
 
@@ -8,6 +8,7 @@ Canonical oracles:
 
 - [summary_oracle_v1.json](/Users/pratyushrungta/telegraham/evals/summary_oracle_v1.json)
 - [summary_oracle_v2.json](/Users/pratyushrungta/telegraham/evals/summary_oracle_v2.json)
+- [summary_oracle_v3.json](/Users/pratyushrungta/telegraham/evals/summary_oracle_v3.json)
 
 Comparator script:
 
@@ -15,8 +16,8 @@ Comparator script:
 
 Latest run artifacts:
 
-- [report.json](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/summary_bench/20260412-155311/report.json)
-- [leaderboard.md](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/summary_bench/20260412-155311/leaderboard.md)
+- [report.json](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/summary_bench/20260416-204200/report.json)
+- [report.json](/Users/pratyushrungta/Library/Application%20Support/Pidgy/debug/summary_bench/20260419-171900/report.json)
 
 ## Goal
 
@@ -31,16 +32,19 @@ This benchmark tests:
 
 ## Coverage
 
-We now use two grounded summary oracles:
+We now use three grounded summary oracles:
 
 - `v1`: `9` grounded cases
   - `8` hit cases
   - `1` strict no-result trap
-- `v2`: `18` grounded cases
-  - `14` hit cases
+- `v2`: `23` grounded cases
+  - `19` hit cases
   - `4` strict no-result traps
+- `v3`: `50` grounded cases
+  - `41` hit cases
+  - `9` strict no-result traps
 
-The broader `v2` oracle now covers:
+The broader `v3` oracle now covers:
 
 - relationship follow-up recap after a call
 - external collaboration/program discussion recap
@@ -56,7 +60,11 @@ The broader `v2` oracle now covers:
 - team-status / blocked-work recap
 - marketplace strategy note recap
 - QA feedback recap
+- person-scoped recap prompt-family coverage for Akhil-style phrasings (`with Akhil`, `chat with Akhil`, `catch me up on Akhil`, `what did Akhil and I discuss`)
+- heavier person-scoped recap stability coverage for Akhil-style prompts (`recent Akhil chats`, `latest with Akhil`, `recent Akhil conversation`, `last-week recap for Akhil`)
+- alternate phrasing coverage for grounded hits like Inaara follow-up, Jack/Emma builder program recap, Huddle01 conclusion, First Dollar weekly recap, Inner Circle budget/office decisions, Skate blocker notes, and Paperclip team briefs
 - several strict “should return no local summary” traps
+- stricter person/topic no-result traps like `Sophia and wallet addresses` and `last week with Sophia`
 
 ## How To Run
 
@@ -77,10 +85,14 @@ Current script-only variants:
   - better support-message ranking
   - richer bounded recap assembly
 - `focus_chat_v4`
-  - safest current variant
+  - current strongest overall variant
   - penalizes fake cross-topic overlaps
   - expands around anchor hits to recover nearby decision context
   - uses stricter support-message filtering for the final recap
+- `focus_chat_v5`
+  - adds stronger sender/scoped fallback for person-scoped recap queries
+- `focus_chat_v6`
+  - stricter person-scoped recap experiment
 
 ## What Good Looks Like
 
@@ -96,26 +108,40 @@ That gives us a real “final answer” benchmark before any app-side summary ch
 
 ## Current Script-Only Results
 
-Latest benchmark snapshot on the broader `v2` oracle:
+Latest benchmark snapshot on the harder `v3` oracle:
 
 | Variant | Focus Top-1 | Focus Top-3 | Supporting | Fact Coverage | Clean Output | Strict Pass |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `focus_chat_v4` | `100.0%` | `100.0%` | `100.0%` | `100.0%` | `100.0%` | `100.0%` |
-| `focus_chat_v3` | `77.8%` | `77.8%` | `100.0%` | `83.3%` | `100.0%` | `38.9%` |
-| `focus_chat_v1` | `77.8%` | `77.8%` | `100.0%` | `46.3%` | `100.0%` | `22.2%` |
-| `focus_chat_v2` | `77.8%` | `77.8%` | `100.0%` | `46.3%` | `100.0%` | `22.2%` |
+| `focus_chat_v4` | `70.0%` | `74.0%` | `74.0%` | `74.8%` | `100.0%` | `70.0%` |
+| `focus_chat_v5` | `62.0%` | `74.0%` | `80.0%` | `81.0%` | `100.0%` | `62.0%` |
+| `focus_chat_v3` | `52.0%` | `52.0%` | `70.0%` | `58.5%` | `100.0%` | `24.0%` |
+| `focus_chat_v6` | `60.0%` | `60.0%` | `78.0%` | `39.5%` | `100.0%` | `20.0%` |
+| `focus_chat_v1` | `52.0%` | `52.0%` | `70.0%` | `31.3%` | `100.0%` | `12.0%` |
+| `focus_chat_v2` | `52.0%` | `52.0%` | `70.0%` | `31.3%` | `100.0%` | `12.0%` |
 
 ### Current Recommendation
 
-Use `focus_chat_v4` as the script benchmark winner for summary for now.
+Use `focus_chat_v4` as the current script benchmark winner for summary for now, but treat person-scoped recap focus as an active blocker rather than “solved.”
 
 Why:
 
-- it clears the broader grounded `v2` oracle at `100%` across focus, support, fact coverage, cleanliness, and strict pass rate
-- it fixes the “generic mentions beat the real recap chat” failure mode
+- it is still the strongest overall variant on the harder oracle
+- it keeps clean output while the expanded person-scoped prompt family exposes the remaining ranking hole
 - it recovers nearby decision context instead of only the exact matched row
-- it rejects the current Rahul + wallet no-result trap instead of hallucinating a fake summary thread
+- it still rejects the current Rahul + wallet no-result trap instead of hallucinating a fake summary thread
 
 ### Remaining Work
 
-The current winner now clears `v2`, so summary is in a much better place for product promotion. The next useful step is to keep adding real user recap queries whenever dogfooding exposes a new summary shape or failure mode.
+The new `v3` oracle shows that summary is still brittle for person-scoped recap prompts and a couple of collaboration-thread recaps. The main misses are:
+
+- Akhil-style recap variants like `recent Akhil chats`, `latest with Akhil`, `recent Akhil conversation`, and `what has Akhil and I been talking about lately?`
+- the Jack/Emma builder-program recap family
+- a couple of stricter no-result traps like `Sophia and wallet addresses`
+
+The next useful steps are:
+
+- fix the chat focus ranking so stray group mentions of a person do not beat the real recap chat
+- tighten scoped-person no-result handling so unrelated name matches do not produce fake summaries
+- revisit the Jack/Emma builder-program case, which still collapses onto a strong but wrong project chat
+- keep adding real user recap phrasings whenever dogfooding exposes a new summary shape or failure mode
+- revisit whether person-scoped recap should stay single-chat or become bounded multi-chat synthesis for MVP

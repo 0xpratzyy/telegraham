@@ -68,55 +68,64 @@ final class FloatingPanel: NSPanel {
 // MARK: - Panel Manager
 
 final class PanelManager {
-    private var panel: FloatingPanel?
+    private var launcherWindow: NSWindow?
     private let telegramService: TelegramService
     private let aiService: AIService
+    private let presentationMode: AppLaunchPresentationMode
     var onOpenSettings: (() -> Void)?
+    var onOpenDashboard: (() -> Void)?
 
-    init(telegramService: TelegramService, aiService: AIService) {
+    init(
+        telegramService: TelegramService,
+        aiService: AIService,
+        presentationMode: AppLaunchPresentationMode = .menuBarPanel
+    ) {
         self.telegramService = telegramService
         self.aiService = aiService
-        createPanel()  // Eager: LauncherView lifecycle starts immediately for background pipeline refresh
+        self.presentationMode = presentationMode
+        createLauncherWindow()  // Eager: LauncherView lifecycle starts immediately for background pipeline refresh
     }
 
     func toggle() {
-        if let panel, panel.isVisible {
-            panel.orderOut(nil)
+        if let launcherWindow, launcherWindow.isVisible {
+            launcherWindow.orderOut(nil)
         } else {
             show()
         }
     }
 
+    func showForDebugTesting() {
+        show()
+    }
+
     private func show() {
-        if panel == nil {
-            createPanel()
+        if launcherWindow == nil {
+            createLauncherWindow()
         }
 
-        guard let panel else { return }
+        guard let launcherWindow else { return }
 
-        // Center on the active screen, upper third
-        if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            let panelWidth = AppConstants.Panel.width
-            let panelHeight = AppConstants.Panel.height
-            let x = screenFrame.midX - panelWidth / 2
-            let y = screenFrame.maxY - panelHeight - screenFrame.height * AppConstants.Panel.topOffsetRatio
-            panel.setFrame(NSRect(x: x, y: y, width: panelWidth, height: panelHeight), display: true)
+        switch presentationMode {
+        case .menuBarPanel:
+            if let screen = NSScreen.main {
+                let screenFrame = screen.visibleFrame
+                let panelWidth = AppConstants.Panel.width
+                let panelHeight = AppConstants.Panel.height
+                let x = screenFrame.midX - panelWidth / 2
+                let y = screenFrame.maxY - panelHeight - screenFrame.height * AppConstants.Panel.topOffsetRatio
+                launcherWindow.setFrame(NSRect(x: x, y: y, width: panelWidth, height: panelHeight), display: true)
+            }
+        case .debugWindow:
+            if !launcherWindow.isVisible {
+                launcherWindow.center()
+            }
         }
 
-        panel.makeKeyAndOrderFront(nil)
+        launcherWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func createPanel() {
-        let panel = FloatingPanel(
-            contentRect: NSRect(x: 0, y: 0, width: AppConstants.Panel.width, height: AppConstants.Panel.height),
-            styleMask: [],
-            backing: .buffered,
-            defer: false
-        )
-
-        // Solid dark background — no glassmorphism
+    private func buildContainerView() -> NSView {
         let containerView = NSView()
         containerView.wantsLayer = true
         containerView.layer?.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0).cgColor
@@ -125,6 +134,8 @@ final class PanelManager {
         let hostingView = NSHostingView(
             rootView: LauncherView(onOpenSettings: { [weak self] in
                     self?.onOpenSettings?()
+                }, onOpenDashboard: { [weak self] in
+                    self?.onOpenDashboard?()
                 })
                 .environmentObject(telegramService)
                 .environmentObject(aiService)
@@ -139,7 +150,40 @@ final class PanelManager {
             hostingView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
         ])
 
-        panel.contentView = containerView
-        self.panel = panel
+        return containerView
+    }
+
+    private func createLauncherWindow() {
+        let contentRect = NSRect(
+            x: 0,
+            y: 0,
+            width: AppConstants.Panel.width,
+            height: AppConstants.Panel.height
+        )
+
+        let window: NSWindow
+        switch presentationMode {
+        case .menuBarPanel:
+            window = FloatingPanel(
+                contentRect: contentRect,
+                styleMask: [],
+                backing: .buffered,
+                defer: false
+            )
+        case .debugWindow:
+            let debugWindow = NSWindow(
+                contentRect: contentRect,
+                styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                backing: .buffered,
+                defer: false
+            )
+            debugWindow.title = "Pidgy Debug Launcher"
+            debugWindow.isReleasedWhenClosed = false
+            debugWindow.collectionBehavior = [.moveToActiveSpace]
+            window = debugWindow
+        }
+
+        window.contentView = buildContainerView()
+        self.launcherWindow = window
     }
 }

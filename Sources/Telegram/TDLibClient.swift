@@ -22,28 +22,37 @@ enum TGError: LocalizedError {
 }
 
 /// Low-level TDLib client wrapper using TDLibKit.
-/// Creates a single client instance and provides an AsyncStream of updates.
+/// Creates a single client instance and provides a restartable AsyncStream of updates.
 /// The TDLibKit.TDLibClient is exposed so TelegramService can call its named methods directly.
 final class TDLibClientWrapper {
     private var manager: TDLibClientManager?
     private(set) var client: TDLibKit.TDLibClient?
-    private let updateContinuation: AsyncStream<Update>.Continuation
-    let updates: AsyncStream<Update>
+    private var updateContinuation: AsyncStream<Update>.Continuation?
+    private(set) var updates: AsyncStream<Update>
+#if DEBUG
+    private(set) var updateStreamGenerationForTesting = 0
+#endif
 
     init() {
-        var continuation: AsyncStream<Update>.Continuation!
-        updates = AsyncStream { continuation = $0 }
-        updateContinuation = continuation
+        let stream = Self.makeUpdateStream()
+        updates = stream.updates
+        updateContinuation = stream.continuation
     }
 
     func start(apiId: Int, apiHash: String) {
+        if manager != nil || client != nil {
+            close()
+        } else if updateContinuation == nil {
+            resetUpdateStream()
+        }
+        let activeContinuation = updateContinuation
         manager = TDLibClientManager()
 
         client = manager?.createClient(updateHandler: { [weak self] data, client in
-            guard let self else { return }
+            guard self != nil else { return }
             do {
                 let update = try client.decoder.decode(Update.self, from: data)
-                self.updateContinuation.yield(update)
+                activeContinuation?.yield(update)
             } catch {
                 print("[TDLib] Failed to decode update: \(error)")
             }
@@ -51,10 +60,30 @@ final class TDLibClientWrapper {
     }
 
     func close() {
-        updateContinuation.finish()
+        updateContinuation?.finish()
+        updateContinuation = nil
         manager?.closeClients()
         manager = nil
         client = nil
+        resetUpdateStream()
+    }
+
+    private func resetUpdateStream() {
+        let stream = Self.makeUpdateStream()
+        updates = stream.updates
+        updateContinuation = stream.continuation
+#if DEBUG
+        updateStreamGenerationForTesting += 1
+#endif
+    }
+
+    private static func makeUpdateStream() -> (
+        updates: AsyncStream<Update>,
+        continuation: AsyncStream<Update>.Continuation
+    ) {
+        var continuation: AsyncStream<Update>.Continuation!
+        let updates = AsyncStream<Update> { continuation = $0 }
+        return (updates, continuation)
     }
 
     static func databasePath() -> String {

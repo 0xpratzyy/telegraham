@@ -1,276 +1,218 @@
 # Pidgy Product PRD
 
-Last updated: 2026-04-11
+Last updated: 2026-04-27
 
 ## Product Thesis
 
-Pidgy turns Telegram from raw chat history into usable relationship state.
+Pidgy makes Telegram operational for people whose work already lives there.
 
-The product is not trying to replace Telegram. It is trying to make Telegram operable for people whose work already lives there:
+The product is not trying to replace Telegram or force users into a full CRM. It is trying to answer the operational questions that Telegram alone handles badly:
 
-- BD and partnerships
-- founder outreach
-- community operations
-- support-like follow-ups
-- builder and investor relationship management
-
-The long-term direction is an agentic personal CRM. The MVP is the thinnest useful surface on the way there: a fast launcher that helps the user find context, understand ownership, and act.
-
-## Why This MVP Exists
-
-The user problem is not just "search is bad."
-
-The real problem is that important relationship state is buried inside hundreds of Telegram threads:
-
-- where did I send that wallet, link, or contract?
-- which chat actually needs my reply?
-- what did we decide with this person?
-- is this waiting on me or them?
-
-The MVP exists to make those answers fast enough and trustworthy enough that a heavy CRM workflow is not required.
+- where did I send that exact thing?
+- which chat is on me right now?
+- what happened with this person or topic?
+- what context do I need before replying?
+- what should I handle first today?
 
 ## Product Summary
 
-Pidgy is a launcher-first, local-first Telegram copilot for hybrid BD and community operators.
+Pidgy is a local-first Telegram copilot for BD, partnerships, community, and operator workflows.
 
-The MVP promise is:
+The current MVP promise is:
 
-- find the right message or chat fast
-- know whether a thread is on you
-- prep the next reply with the right context
-
-Pidgy is not a full CRM in MVP. It is the operational layer that sits on top of Telegram before a larger CRM layer exists.
+1. exact lookup for messages and artifacts
+2. topic search across chats
+3. reply queue / ownership triage
+4. quick recap / reply prep summaries
+5. a lightweight dashboard for active work, reply attention, and people context
 
 ## Primary User
 
-### Hybrid BD / Community operator
+Hybrid BD / community operators who:
 
-This user:
-
-- runs partnerships, outreach, follow-ups, and intros
-- also manages groups, builders, support-like asks, and community threads
-- lives inside Telegram all day
-- loses track of open loops across DMs, groups, links, wallets, and stale threads
+- live in Telegram all day
+- manage DMs and groups at the same time
+- lose ownership state across dozens or hundreds of threads
+- need speed and trust more than a heavyweight CRM workflow
 
 ## Core Jobs To Be Done
 
-1. Find the exact message or entity I’m looking for.
-2. Find chats related to a topic, company, or project.
-3. See which conversations are currently on me.
-4. Prepare quickly before replying.
-5. Stay inside one fast launcher instead of switching into a heavy dashboard.
+1. Find the exact message, link, wallet, handle, or contract I need.
+2. Find the chats related to a topic, company, or project.
+3. See which conversations likely need my reply.
+4. Prep quickly before responding.
+5. Start the day with a scannable view of active tasks and relationship attention.
+6. Stay close to Telegram instead of adopting a heavyweight CRM workflow.
 
-## MVP Product Shape
+## Current MVP Surface
 
-Launcher is the primary surface.
+Launcher is the primary query surface. Dashboard is the secondary operating surface.
 
-MVP supports four query families:
-
-1. `exact_lookup`
-2. `topic_search`
-3. `reply_queue`
-4. `summary`
-
-`relationship / graph_crm` queries are recognized by the router, but not shipped as a dedicated end-user engine in MVP.
-
-## Core MVP Experiences
+Supported product experiences:
 
 ### 1. Exact Lookup
 
-Example queries:
+Examples:
 
 - `where I shared wallet address`
 - `find message with contract address`
 - `where did I send this URL`
 
-Expected output:
+Expected behavior:
 
-- message-first results
-- strongest literal/entity match near the top
-- outgoing messages boosted when the query implies `I shared / I sent / I pasted`
-- snippets and timestamps visible immediately
+- message-first ranking
+- exact artifacts near the top
+- strong outgoing bias for `I sent / shared / pasted`
+- safe no-result behavior when the specific artifact is missing
 
 ### 2. Topic Search
 
-Example queries:
+Examples:
 
 - `first dollar`
 - `partnership discussions`
 - `people asking about onboarding`
 
-Expected output:
+Expected behavior:
 
 - chat-first results
-- matched snippets underneath
-- local-first performance using FTS + vectors
-- AI rerank only when it materially improves ordering
+- supporting snippets underneath
+- local-first retrieval from FTS + vector signals
+- rerank only when it meaningfully improves ordering
 
 ### 3. Reply Queue
 
-Example queries:
+Examples:
 
 - `who do I need to reply to`
 - `who is waiting on me`
 - `which chats need my response`
 
-Expected output:
+Expected behavior:
 
-- actionable chat queue
-- clear next-step suggestion
-- recent-first ordering
-- progressive rendering: show confident chats early while the rest is still being triaged
+- actionable queue of chats
+- recent-first usefulness
+- progressive rendering while AI triage continues
+- better trust than generic semantic search for ownership questions
 
-This is the first true CRM primitive in the product. It is the first place where Pidgy converts raw chat history into ownership state.
+Reply queue is the first true CRM primitive in the product.
 
 ### 4. Summary / Reply Prep
 
-Example queries:
+Examples:
 
 - `summarize my chats with Akhil`
 - `what did we decide with Maaz`
 - `what happened in this group last week`
 
-Expected output:
+Expected behavior:
 
-- one bounded summary card
-- supporting chats/messages underneath
-- retrieval-first synthesis, not a giant broad report
+- bounded, retrieval-first recap
+- support messages underneath
+- more trust than a free-form “summarize everything” chat answer
 
-## Why Launcher-First
+### 5. Dashboard
 
-Launcher-first is a product choice, not a temporary UI limitation.
+Dashboard answers: "what needs attention now?"
 
-It keeps the product:
+Current pages:
 
-- fast
-- lightweight
-- query-driven
-- close to Telegram behavior instead of replacing it
+- Dashboard: merged feed of open tasks and reply attention
+- Reply queue: scannable conversations where the user may owe a response
+- Tasks: AI-extracted work items with topic, priority, evidence, and status actions
+- People: top/stale contacts from relationship graph context
 
-The launcher proves whether Pidgy can reliably answer operational questions before a larger CRM surface is added.
+Expected behavior:
 
-## How MVP Leads To Agentic CRM
-
-The bridge is structured relationship state.
-
-Today, the product is learning to derive from chats:
-
-- latest actionable ask
-- likely owner of the next step
-- whether the thread is open, stale, or closed
-- suggested next move
-
-That same structured state can later power:
-
-- `who should I follow up with`
-- `who am I waiting on`
-- `which warm leads went stale`
-- `prep me for this meeting`
-- pipeline stage / relationship health
-- compiled memory for people, chats, and projects
-
-So the direction is:
-
-1. raw messages
-2. launcher retrieval and judgment
-3. structured chat / relationship state
-4. agentic CRM workflows
-5. compiled memory layer
-
-This is one roadmap, not multiple product pivots.
-
-## Explicitly Out Of MVP
-
-Not in MVP now:
-
-- dedicated CRM/relations dashboard
-- proactive alerts / reminders
-- auto-send or message sending
-- full workflow automation
-- polished graph-backed CRM execution engine
-- compiled-memory compiler in the search hot path
-
-These are not rejected forever. They are deferred until the launcher-first operational layer is trusted.
+- lightweight operating view, not a full CRM
+- extracted tasks must cite Telegram message evidence
+- user actions can mark tasks done, snoozed, or ignored
+- manual task state should survive refreshes
+- dashboard extraction should run from local indexed/recent data
+- dashboard cost/freshness should be understandable before launch
 
 ## Product Principles
 
-1. Local-first by default.
-2. Launcher-first before dashboard-first.
-3. Use AI where it improves judgment, not where local retrieval is enough.
-4. Prefer read-only and explicit actions over silent automation.
-5. Different query types should use different engines.
-6. Durable local history should not be thrown away by normal cache refresh behavior.
-7. Search-time networking is an anti-goal; freshness should already be in local SQLite by the time the user searches.
-8. Trust matters more than breadth for responsibility questions like reply queue.
+1. Local-first is the default.
+2. Launcher-first for direct intent, dashboard for operating overview.
+3. Different query families should use different engines.
+4. Use AI for judgment, not for work local retrieval can already do.
+5. Search-time networking is an anti-goal.
+6. Reply / ownership questions must optimize for trust over breadth.
+7. Freshness and deep indexing are background responsibilities, not query-time responsibilities.
+8. Dashboard tasks need evidence and lifecycle behavior, not just nice wording.
 
-## Query Family Rules
+## What Is In Product But Not Primary
 
-### `exact_lookup`
+These exist in the codebase, but are not the core shipped promise:
 
-Use for literal or entity presence:
+- graph foundation and relationship scoring
+- launcher follow-up cache / categorization support paths
+- debug surfaces for routing, indexing, graph state, and usage
+- dashboard topic taxonomy and task extraction internals
 
-- wallet addresses
-- URLs
-- domains
-- handles
-- exact phrases
+These are supporting systems, not the headline MVP experience.
 
-### `topic_search`
+## Explicitly Out Of Scope For This MVP
 
-Use for concept/topic discovery:
+Not part of the current shipped promise:
 
-- companies
-- partnerships
-- onboarding
-- integrations
-
-### `reply_queue`
-
-Use for responsibility / open-loop questions:
-
-- on me
-- waiting on me
-- need response
-
-### `summary`
-
-Use for prep and synthesis after retrieval.
-
-### `relationship`
-
-Recognize it now, defer full execution to post-MVP.
+- full CRM pipeline management
+- proactive reminders / alerts
+- message sending or auto-send
+- workflow automation
+- graph-backed end-user CRM query engine
+- replacing Telegram as the main communication client
 
 ## Success Criteria
 
-Pidgy MVP is successful if a user can:
+Pidgy MVP is working if a user can reliably:
 
-1. find an exact wallet / link / contract message they sent
-2. find topic-related chats quickly
-3. get a useful reply queue without excessive waiting
-4. prepare for a reply using a quick summary
-5. trust that the launcher is routing the query to the right family
-6. trust that fresh local data is already available without search-time Telegram fetches
+1. recover a specific artifact they sent
+2. find relevant topic chats quickly
+3. trust the top of the reply queue often enough to use it daily
+4. get a useful, bounded recap before replying
+5. trust that the launcher routes the query to the right family
+6. open the dashboard and see evidence-backed tasks / attention items without obvious stale noise
 
-## Product Health Metrics
+## Current Product Risks
 
-The most important MVP health signals are:
+The biggest product risks right now are:
 
-- reply queue trust: top rows feel mostly right
-- reply queue latency: useful results appear quickly enough to use daily
-- exact lookup hit quality: correct message is near the top
-- freshness: new Telegram activity lands in local SQLite quickly
-- local coverage: deep indexing keeps making more chats search-ready
+- reply-queue precision in noisy groups
+- summary quality for person-scoped and multi-chat recap prompts
+- dashboard task extraction output quality: titles, suggested actions, priority, and topic labels need dogfooding
+- stale dashboard tasks: currently positive extraction updates are stronger than closed-loop reconciliation
+- dashboard AI cost/freshness expectations because background extraction can run without an explicit query
+- deep-index coverage across larger local histories
+- UI readability as launcher, settings, and dashboard files accumulate page-specific rendering
 
-## Current Known Gaps
+## Launch Scope
 
-- reply queue quality is improving but still needs more group precision tuning
-- reconnect/network-recovery recent-sync coverage still needs strengthening
-- summary is still mostly single-chat synthesis, not full cross-chat rollup
-- relationship queries are recognized but intentionally unsupported in MVP runtime
-- automated regression coverage exists for the core storage/routing/summary slice, but still needs more reply-queue fixtures
+Launch-ready means Pidgy can be trusted as a read-only operating layer over Telegram.
 
-## Related Docs
+Must have before a proper launch:
 
-- [Task Tracker](/Users/pratyushrungta/telegraham/docs/task-tracker.md)
-- [Architecture](/Users/pratyushrungta/telegraham/docs/architecture.md)
-- [Query Engine Matrix](/Users/pratyushrungta/telegraham/docs/query-engine-matrix.md)
+1. Tune dashboard task outputs on real dogfood data.
+2. Add stale/closed task reconciliation so resolved asks do not remain open forever.
+3. Make dashboard refresh/cost behavior obvious, especially for background AI extraction.
+4. Run live QA for launcher search, reply queue, dashboard refresh, task status changes, reset, restart, and Telegram deep links.
+5. Keep launch read-only: no send automation, no proactive reminders, no full CRM pipeline controls.
+
+Nice to have before launch:
+
+1. Split large dashboard/launcher/settings files enough that fixes are easy to review.
+2. Add dashboard-specific eval fixtures for false positives, closed loops, duplicate task fingerprints, and topic drift.
+3. Polish placeholder controls such as dashboard search and re-index wording so the UI does not imply unsupported behavior.
+
+## Current Product Direction
+
+The roadmap is still one continuous line:
+
+1. raw Telegram messages
+2. reliable launcher retrieval and ownership judgment
+3. dashboard-visible operating state
+4. structured relationship state
+5. agentic CRM workflows
+
+The codebase should keep biasing toward trustworthy retrieval, evidence-backed task state, and a lightweight dashboard before becoming a broad CRM product.

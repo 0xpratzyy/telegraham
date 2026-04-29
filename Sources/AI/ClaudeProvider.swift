@@ -41,6 +41,25 @@ final class ClaudeProvider: AIProvider {
         return try JSONExtractor.parseJSON(response)
     }
 
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO {
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: QueryPlanningPrompt.systemPrompt,
+                userMessage: QueryPlanningPrompt.userMessage(
+                    query: query,
+                    activeFilter: activeFilter,
+                    deterministicSpec: deterministicSpec
+                ),
+                requestKind: .queryPlanning
+            )
+        }
+        return try JSONExtractor.parseJSON(response)
+    }
+
     func rerankResults(
         query: String,
         candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
@@ -134,6 +153,59 @@ final class ClaudeProvider: AIProvider {
             )
         }
         return try JSONExtractor.parseJSON(response)
+    }
+
+    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO] {
+        let snippets = Array(messages.prefix(AppConstants.Dashboard.topicDiscoveryMessageLimit))
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: DashboardTopicPrompt.systemPrompt,
+                userMessage: DashboardTopicPrompt.userMessage(snippets: snippets),
+                requestKind: .dashboardTopicDiscovery
+            )
+        }
+        return try DashboardTopicParser.parse(response)
+    }
+
+    func extractDashboardTasks(
+        chat: TGChat,
+        topics: [DashboardTopic],
+        messages: [MessageSnippet]
+    ) async throws -> [DashboardTaskCandidate] {
+        guard !messages.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: DashboardTaskPrompt.systemPrompt,
+                userMessage: DashboardTaskPrompt.userMessage(
+                    chat: chat,
+                    topics: topics,
+                    snippets: messages
+                ),
+                requestKind: .dashboardTaskExtraction
+            )
+        }
+        return try DashboardTaskParser.parse(response)
+    }
+
+    func triageDashboardTaskCandidates(
+        candidates: [DashboardTaskTriageCandidateDTO]
+    ) async throws -> [DashboardTaskTriageResultDTO] {
+        guard !candidates.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: DashboardTaskTriagePrompt.systemPrompt,
+                userMessage: DashboardTaskTriagePrompt.userMessage(candidates: candidates),
+                requestKind: .dashboardTaskTriage
+            )
+        }
+        let parsed = try DashboardTaskTriageParser.parse(response)
+        try validateCardinality(
+            parsedCount: parsed.count,
+            returnedIds: Set(parsed.map(\.chatId)),
+            expectedIds: Set(candidates.map(\.chatId)),
+            kind: "dashboard task triage"
+        )
+        return parsed
     }
 
     func testConnection() async throws -> Bool {

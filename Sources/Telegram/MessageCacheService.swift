@@ -4,6 +4,7 @@ import Foundation
 /// Two-tier: in-memory recent window + durable SQLite history read-through.
 actor MessageCacheService {
     static let shared = MessageCacheService()
+    static let pipelineCacheSchemaVersion = 5
 
     enum MessageLoadSource: String, Sendable, Codable {
         case memory
@@ -22,6 +23,7 @@ actor MessageCacheService {
         let suggestedAction: String
         let lastMessageId: Int64      // staleness key: compared against chat.lastMessage.id
         let analyzedAt: Date
+        let schemaVersion: Int
     }
 
     struct CachedChatMessages: Codable {
@@ -124,7 +126,8 @@ actor MessageCacheService {
         let recordsToPersist = append ? newCachedMessages : entry.messages
         await DatabaseManager.shared.upsertLiveMessages(
             chatId: chatId,
-            messages: recordsToPersist.map { $0.toDatabaseRecord() }
+            messages: recordsToPersist.map { $0.toDatabaseRecord() },
+            updateRecentSyncState: !append
         )
     }
 
@@ -164,22 +167,22 @@ actor MessageCacheService {
         textContent: String?,
         mediaType: TGMessage.MediaType?
     ) async {
-        guard var existing = await loadCachedEntry(chatId: chatId) else { return }
-        guard let index = existing.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        if var existing = await loadCachedEntry(chatId: chatId),
+           let index = existing.messages.firstIndex(where: { $0.id == messageId }) {
+            let old = existing.messages[index]
+            existing.messages[index] = CachedMessage(
+                id: old.id,
+                chatId: old.chatId,
+                senderUserId: old.senderUserId,
+                senderName: old.senderName,
+                date: old.date,
+                textContent: textContent,
+                mediaTypeRaw: mediaType?.rawValue,
+                isOutgoing: old.isOutgoing
+            )
+            memoryCache[chatId] = existing
+        }
 
-        let old = existing.messages[index]
-        existing.messages[index] = CachedMessage(
-            id: old.id,
-            chatId: old.chatId,
-            senderUserId: old.senderUserId,
-            senderName: old.senderName,
-            date: old.date,
-            textContent: textContent,
-            mediaTypeRaw: mediaType?.rawValue,
-            isOutgoing: old.isOutgoing
-        )
-
-        memoryCache[chatId] = existing
         await DatabaseManager.shared.updateMessageContent(
             chatId: chatId,
             messageId: messageId,
@@ -227,8 +230,13 @@ actor MessageCacheService {
             category: record.category,
             suggestedAction: record.suggestedAction,
             lastMessageId: record.lastMessageId,
-            analyzedAt: record.analyzedAt
+            analyzedAt: record.analyzedAt,
+            schemaVersion: record.schemaVersion
         )
+        guard cached.schemaVersion == Self.pipelineCacheSchemaVersion else {
+            await invalidatePipelineCategory(chatId: chatId)
+            return nil
+        }
         pipelineCache[chatId] = cached
         return cached
     }
@@ -244,7 +252,8 @@ actor MessageCacheService {
             category: category,
             suggestedAction: suggestedAction,
             lastMessageId: lastMessageId,
-            analyzedAt: Date()
+            analyzedAt: Date(),
+            schemaVersion: Self.pipelineCacheSchemaVersion
         )
         pipelineCache[chatId] = cached
 
@@ -254,7 +263,8 @@ actor MessageCacheService {
                 category: cached.category,
                 suggestedAction: cached.suggestedAction,
                 lastMessageId: cached.lastMessageId,
-                analyzedAt: cached.analyzedAt
+                analyzedAt: cached.analyzedAt,
+                schemaVersion: cached.schemaVersion
             )
         )
     }

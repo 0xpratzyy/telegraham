@@ -35,6 +35,7 @@ actor DatabaseManager {
         let suggestedAction: String
         let lastMessageId: Int64
         let analyzedAt: Date
+        let schemaVersion: Int
     }
 
     struct SyncStateRecord: Sendable, Equatable {
@@ -49,6 +50,12 @@ actor DatabaseManager {
         let chatId: Int64
         let latestSyncedMessageId: Int64
         let lastRecentSyncAt: Date?
+    }
+
+    struct DashboardTaskSyncStateRecord: Sendable, Equatable {
+        let chatId: Int64
+        let latestMessageId: Int64
+        let lastSyncedAt: Date?
     }
 
     private struct LegacyCachedChatMessages: Decodable {
@@ -80,8 +87,12 @@ actor DatabaseManager {
     private var databasePool: DatabasePool?
     private var hasInitialized = false
     private var databaseURLOverride: URL?
+    private var appSupportDirectoryOverride: URL?
 
     private var appSupportDirectory: URL {
+        if let appSupportDirectoryOverride {
+            return appSupportDirectoryOverride
+        }
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent(AppConstants.Storage.appSupportFolderName, isDirectory: true)
     }
@@ -134,13 +145,21 @@ actor DatabaseManager {
         hasInitialized = false
     }
 
-    func configureForTesting(databaseURLOverride: URL?) async {
+    func configureForTesting(
+        databaseURLOverride: URL?,
+        appSupportDirectoryOverride: URL? = nil
+    ) async {
         databasePool = nil
         hasInitialized = false
         self.databaseURLOverride = databaseURLOverride
+        self.appSupportDirectoryOverride = appSupportDirectoryOverride
     }
 
-    func upsertLiveMessages(chatId: Int64, messages: [MessageRecord]) async {
+    func upsertLiveMessages(
+        chatId: Int64,
+        messages: [MessageRecord],
+        updateRecentSyncState: Bool = true
+    ) async {
         guard !messages.isEmpty else { return }
         guard let pool = await ensureDatabase() else { return }
         let latestMessageId = messages
@@ -151,12 +170,14 @@ actor DatabaseManager {
         do {
             try await pool.write { db in
                 try Self.insertMessages(messages, into: db)
-                try Self.refreshRecentSyncState(
-                    in: db,
-                    chatId: chatId,
-                    preferredLatestMessageId: latestMessageId,
-                    syncedAt: Date()
-                )
+                if updateRecentSyncState {
+                    try Self.refreshRecentSyncState(
+                        in: db,
+                        chatId: chatId,
+                        preferredLatestMessageId: latestMessageId,
+                        syncedAt: Date()
+                    )
+                }
             }
         } catch {
             print("[DatabaseManager] Failed to upsert live messages for chat \(chatId): \(error)")
@@ -308,14 +329,31 @@ actor DatabaseManager {
 
         do {
             try await pool.write { db in
+                let existing = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT text_content, media_type
+                        FROM messages
+                        WHERE chat_id = ? AND id = ?
+                        """,
+                    arguments: [chatId, messageId]
+                )
+                let existingText: String? = existing?["text_content"]
+                let existingMediaType: String? = existing?["media_type"]
+                let contentChanged = existing != nil
+                    && (existingText != textContent || existingMediaType != mediaTypeRaw)
+
                 try db.execute(
                     sql: """
                         UPDATE messages
                         SET text_content = ?, media_type = ?
                         WHERE chat_id = ? AND id = ?
-                        """,
+                    """,
                     arguments: [textContent, mediaTypeRaw, chatId, messageId]
                 )
+                if contentChanged {
+                    try Self.deleteEmbeddings(in: db, chatId: chatId, messageIds: [messageId])
+                }
             }
         } catch {
             print("[DatabaseManager] Failed to update message \(messageId) in chat \(chatId): \(error)")
@@ -469,7 +507,7 @@ actor DatabaseManager {
                 guard let row = try Row.fetchOne(
                     db,
                     sql: """
-                        SELECT chat_id, category, suggested_action, last_message_id, analyzed_at
+                        SELECT chat_id, category, suggested_action, last_message_id, analyzed_at, schema_version
                         FROM pipeline_cache
                         WHERE chat_id = ?
                         """,
@@ -484,7 +522,8 @@ actor DatabaseManager {
                     category: row["category"],
                     suggestedAction: row["suggested_action"],
                     lastMessageId: row["last_message_id"],
-                    analyzedAt: Date(timeIntervalSince1970: analyzedAt)
+                    analyzedAt: Date(timeIntervalSince1970: analyzedAt),
+                    schemaVersion: row["schema_version"]
                 )
             }
         } catch {
@@ -500,20 +539,22 @@ actor DatabaseManager {
             try await pool.write { db in
                 try db.execute(
                     sql: """
-                        INSERT INTO pipeline_cache (chat_id, category, suggested_action, last_message_id, analyzed_at)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO pipeline_cache (chat_id, category, suggested_action, last_message_id, analyzed_at, schema_version)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         ON CONFLICT(chat_id) DO UPDATE SET
                             category = excluded.category,
                             suggested_action = excluded.suggested_action,
                             last_message_id = excluded.last_message_id,
-                            analyzed_at = excluded.analyzed_at
+                            analyzed_at = excluded.analyzed_at,
+                            schema_version = excluded.schema_version
                         """,
                     arguments: [
                         record.chatId,
                         record.category,
                         record.suggestedAction,
                         record.lastMessageId,
-                        record.analyzedAt.timeIntervalSince1970
+                        record.analyzedAt.timeIntervalSince1970,
+                        record.schemaVersion
                     ]
                 )
             }
@@ -651,10 +692,17 @@ actor DatabaseManager {
         }
     }
 
-    func loadSearchableMessages(chatIds: [Int64]? = nil, limit: Int = 10_000) async -> [MessageRecord] {
+    func loadSearchableMessages(
+        chatIds: [Int64]? = nil,
+        limit: Int = 10_000,
+        startDate: Date? = nil,
+        endDate: Date? = nil
+    ) async -> [MessageRecord] {
         guard limit > 0 else { return [] }
         if let chatIds, chatIds.isEmpty { return [] }
         guard let pool = await ensureDatabase() else { return [] }
+        let startTimestamp = startDate?.timeIntervalSince1970
+        let endTimestamp = endDate?.timeIntervalSince1970
 
         do {
             return try await pool.read { db in
@@ -665,6 +713,7 @@ actor DatabaseManager {
                     for chatId in chatIds {
                         arguments += [chatId]
                     }
+                    arguments += [startTimestamp, startTimestamp, endTimestamp, endTimestamp]
                     arguments += [limit]
 
                     rows = try Row.fetchAll(
@@ -675,6 +724,8 @@ actor DatabaseManager {
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0
                               AND chat_id IN (\(placeholders))
+                              AND (? IS NULL OR date >= ?)
+                              AND (? IS NULL OR date <= ?)
                             ORDER BY date DESC, id DESC
                             LIMIT ?
                             """,
@@ -688,10 +739,12 @@ actor DatabaseManager {
                             FROM messages
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0
+                              AND (? IS NULL OR date >= ?)
+                              AND (? IS NULL OR date <= ?)
                             ORDER BY date DESC, id DESC
                             LIMIT ?
                             """,
-                        arguments: [limit]
+                        arguments: [startTimestamp, startTimestamp, endTimestamp, endTimestamp, limit]
                     )
                 }
 
@@ -914,6 +967,413 @@ actor DatabaseManager {
         }
     }
 
+    func upsertDashboardTopics(_ discovered: [DashboardTopicDTO]) async -> [DashboardTopic] {
+        let normalized = Self.normalizedDashboardTopicDTOs(discovered)
+        guard !normalized.isEmpty else {
+            return await loadDashboardTopics()
+        }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.write { db in
+                let now = Date().timeIntervalSince1970
+                for (index, topic) in normalized.enumerated() {
+                    try db.execute(
+                        sql: """
+                            INSERT INTO dashboard_topics (name, rationale, score, rank, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(name) DO UPDATE SET
+                                rationale = excluded.rationale,
+                                score = excluded.score,
+                                rank = excluded.rank,
+                                updated_at = excluded.updated_at
+                            """,
+                        arguments: [
+                            topic.name,
+                            topic.rationale,
+                            topic.score,
+                            index,
+                            now,
+                            now
+                        ]
+                    )
+                }
+
+                return try Self.loadDashboardTopics(in: db, limit: AppConstants.Dashboard.maxTopicCount)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to upsert dashboard topics: \(error)")
+            return []
+        }
+    }
+
+    func loadDashboardTopics(limit: Int = AppConstants.Dashboard.maxTopicCount) async -> [DashboardTopic] {
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                try Self.loadDashboardTopics(in: db, limit: limit)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load dashboard topics: \(error)")
+            return []
+        }
+    }
+
+    func upsertDashboardTasks(_ candidates: [DashboardTaskCandidate]) async -> [DashboardTask] {
+        let normalized = candidates.filter {
+            !$0.stableFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !normalized.isEmpty else { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.write { db in
+                var tasks: [DashboardTask] = []
+                for candidate in normalized {
+                    let topicId = try Self.ensureDashboardTopic(named: candidate.topicName, in: db)
+                    let latestSourceDate = candidate.sourceMessages.map(\.date).max()
+                    let existing = try Row.fetchOne(
+                        db,
+                        sql: """
+                            SELECT id, status, created_at, snoozed_until
+                            FROM dashboard_tasks
+                            WHERE stable_fingerprint = ?
+                            """,
+                        arguments: [candidate.stableFingerprint]
+                    )
+                    let taskId: Int64
+                    let status = (existing?["status"] as String?)
+                        .flatMap(DashboardTaskStatus.init(rawValue:))
+                        ?? candidate.status
+                    let createdAtSeconds: Double = existing?["created_at"] ?? candidate.createdAt.timeIntervalSince1970
+                    let snoozedUntilSeconds: Double? = existing?["snoozed_until"]
+                    let updatedAt = Date().timeIntervalSince1970
+
+                    if let existingId: Int64 = existing?["id"] {
+                        taskId = existingId
+                        try db.execute(
+                            sql: """
+                                UPDATE dashboard_tasks
+                                SET title = ?,
+                                    summary = ?,
+                                    suggested_action = ?,
+                                    owner_name = ?,
+                                    person_name = ?,
+                                    chat_id = ?,
+                                    chat_title = ?,
+                                    topic_id = ?,
+                                    topic_name = ?,
+                                    priority = ?,
+                                    status = ?,
+                                    confidence = ?,
+                                    updated_at = ?,
+                                    due_at = ?,
+                                    snoozed_until = ?,
+                                    latest_source_date = ?
+                                WHERE id = ?
+                                """,
+                            arguments: [
+                                candidate.title,
+                                candidate.summary,
+                                candidate.suggestedAction,
+                                candidate.ownerName,
+                                candidate.personName,
+                                candidate.chatId,
+                                candidate.chatTitle,
+                                topicId,
+                                candidate.topicName,
+                                candidate.priority.rawValue,
+                                status.rawValue,
+                                candidate.confidence,
+                                updatedAt,
+                                candidate.dueAt?.timeIntervalSince1970,
+                                snoozedUntilSeconds,
+                                latestSourceDate?.timeIntervalSince1970,
+                                taskId
+                            ]
+                        )
+                    } else {
+                        try db.execute(
+                            sql: """
+                                INSERT INTO dashboard_tasks (
+                                    stable_fingerprint, title, summary, suggested_action, owner_name, person_name,
+                                    chat_id, chat_title, topic_id, topic_name, priority, status, confidence,
+                                    created_at, updated_at, due_at, snoozed_until, latest_source_date
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                            arguments: [
+                                candidate.stableFingerprint,
+                                candidate.title,
+                                candidate.summary,
+                                candidate.suggestedAction,
+                                candidate.ownerName,
+                                candidate.personName,
+                                candidate.chatId,
+                                candidate.chatTitle,
+                                topicId,
+                                candidate.topicName,
+                                candidate.priority.rawValue,
+                                status.rawValue,
+                                candidate.confidence,
+                                createdAtSeconds,
+                                updatedAt,
+                                candidate.dueAt?.timeIntervalSince1970,
+                                snoozedUntilSeconds,
+                                latestSourceDate?.timeIntervalSince1970
+                            ]
+                        )
+                        taskId = db.lastInsertedRowID
+                    }
+
+                    try db.execute(
+                        sql: "DELETE FROM dashboard_task_sources WHERE task_id = ?",
+                        arguments: [taskId]
+                    )
+                    for source in candidate.sourceMessages {
+                        try db.execute(
+                            sql: """
+                                INSERT INTO dashboard_task_sources (task_id, chat_id, message_id, sender_name, text, date)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(task_id, chat_id, message_id) DO UPDATE SET
+                                    sender_name = excluded.sender_name,
+                                    text = excluded.text,
+                                    date = excluded.date
+                                """,
+                            arguments: [
+                                taskId,
+                                source.chatId,
+                                source.messageId,
+                                source.senderName,
+                                source.text,
+                                source.date.timeIntervalSince1970
+                            ]
+                        )
+                    }
+
+                    if let row = try Row.fetchOne(
+                        db,
+                        sql: Self.dashboardTaskSelectSQL + " WHERE id = ?",
+                        arguments: [taskId]
+                    ) {
+                        tasks.append(Self.dashboardTask(from: row))
+                    }
+                }
+                return tasks.sorted(by: Self.sortDashboardTasks)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to upsert dashboard tasks: \(error)")
+            return []
+        }
+    }
+
+    func loadDashboardTasks(
+        status: DashboardTaskStatus? = nil,
+        limit: Int = AppConstants.Dashboard.defaultTaskLimit
+    ) async -> [DashboardTask] {
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                let rows: [Row]
+                if let status {
+                    rows = try Row.fetchAll(
+                        db,
+                        sql: Self.dashboardTaskSelectSQL + """
+                            WHERE status = ?
+                            ORDER BY
+                                COALESCE(latest_source_date, updated_at) DESC,
+                                id DESC
+                            LIMIT ?
+                            """,
+                        arguments: [status.rawValue, limit]
+                    )
+                } else {
+                    rows = try Row.fetchAll(
+                        db,
+                        sql: Self.dashboardTaskSelectSQL + """
+                            ORDER BY
+                                COALESCE(latest_source_date, updated_at) DESC,
+                                id DESC
+                            LIMIT ?
+                            """,
+                        arguments: [limit]
+                    )
+                }
+                return rows.map(Self.dashboardTask(from:))
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load dashboard tasks: \(error)")
+            return []
+        }
+    }
+
+    func loadDashboardTaskEvidence(taskIds: [Int64]) async -> [Int64: [DashboardTaskSourceMessage]] {
+        guard !taskIds.isEmpty else { return [:] }
+        guard let pool = await ensureDatabase() else { return [:] }
+
+        do {
+            return try await pool.read { db in
+                let placeholders = Array(repeating: "?", count: taskIds.count).joined(separator: ", ")
+                var arguments = StatementArguments()
+                for taskId in taskIds {
+                    arguments += [taskId]
+                }
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT
+                            dts.task_id,
+                            dts.chat_id,
+                            dts.message_id,
+                            COALESCE(m.sender_name, dts.sender_name) AS sender_name,
+                            COALESCE(m.text_content, dts.text) AS text,
+                            COALESCE(m.date, dts.date) AS date
+                        FROM dashboard_task_sources dts
+                        LEFT JOIN messages m
+                            ON m.chat_id = dts.chat_id
+                           AND m.id = dts.message_id
+                        WHERE dts.task_id IN (\(placeholders))
+                        ORDER BY COALESCE(m.date, dts.date) DESC, dts.message_id DESC
+                        """,
+                    arguments: arguments
+                )
+                return rows.reduce(into: [Int64: [DashboardTaskSourceMessage]]()) { grouped, row in
+                    let taskId: Int64 = row["task_id"]
+                    grouped[taskId, default: []].append(Self.dashboardTaskSource(from: row))
+                }
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load dashboard task evidence: \(error)")
+            return [:]
+        }
+    }
+
+    func updateDashboardTaskStatus(
+        taskId: Int64,
+        status: DashboardTaskStatus,
+        snoozedUntil: Date? = nil
+    ) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE dashboard_tasks
+                        SET status = ?,
+                            snoozed_until = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                    arguments: [
+                        status.rawValue,
+                        snoozedUntil?.timeIntervalSince1970,
+                        Date().timeIntervalSince1970,
+                        taskId
+                    ]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to update dashboard task \(taskId) status: \(error)")
+        }
+    }
+
+    func ignoreOpenDashboardTasks(
+        chatId: Int64,
+        matchingSourceMessageIds messageIds: [Int64]
+    ) async {
+        let uniqueMessageIds = Array(Set(messageIds)).filter { $0 > 0 }
+        guard !uniqueMessageIds.isEmpty else { return }
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                let placeholders = Array(repeating: "?", count: uniqueMessageIds.count).joined(separator: ", ")
+                var arguments = StatementArguments()
+                arguments += [DashboardTaskStatus.ignored.rawValue]
+                arguments += [Date().timeIntervalSince1970]
+                arguments += [chatId]
+                for messageId in uniqueMessageIds {
+                    arguments += [messageId]
+                }
+
+                try db.execute(
+                    sql: """
+                        UPDATE dashboard_tasks
+                        SET status = ?,
+                            snoozed_until = NULL,
+                            updated_at = ?
+                        WHERE status = 'open'
+                          AND chat_id = ?
+                          AND EXISTS (
+                              SELECT 1
+                              FROM dashboard_task_sources
+                              WHERE dashboard_task_sources.task_id = dashboard_tasks.id
+                                AND dashboard_task_sources.chat_id = dashboard_tasks.chat_id
+                                AND dashboard_task_sources.message_id IN (\(placeholders))
+                          )
+                        """,
+                    arguments: arguments
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to ignore stale dashboard tasks for chat \(chatId): \(error)")
+        }
+    }
+
+    func loadDashboardTaskSyncState(chatId: Int64) async -> DashboardTaskSyncStateRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+
+        do {
+            return try await pool.read { db in
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT chat_id, latest_message_id, last_synced_at
+                        FROM dashboard_task_sync_state
+                        WHERE chat_id = ?
+                        """,
+                    arguments: [chatId]
+                ) else {
+                    return nil
+                }
+                let lastSyncedAtSeconds: Double? = row["last_synced_at"]
+                return DashboardTaskSyncStateRecord(
+                    chatId: row["chat_id"],
+                    latestMessageId: row["latest_message_id"],
+                    lastSyncedAt: lastSyncedAtSeconds.map(Date.init(timeIntervalSince1970:))
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load dashboard sync state for chat \(chatId): \(error)")
+            return nil
+        }
+    }
+
+    func updateDashboardTaskSyncState(chatId: Int64, latestMessageId: Int64, syncedAt: Date = Date()) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO dashboard_task_sync_state (chat_id, latest_message_id, last_synced_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            latest_message_id = MAX(dashboard_task_sync_state.latest_message_id, excluded.latest_message_id),
+                            last_synced_at = excluded.last_synced_at
+                        """,
+                    arguments: [chatId, latestMessageId, syncedAt.timeIntervalSince1970]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to update dashboard sync state for chat \(chatId): \(error)")
+        }
+    }
+
     func read<T: Sendable>(_ operation: @escaping @Sendable (Database) throws -> T) async throws -> T {
         guard let pool = await ensureDatabase() else {
             throw DatabaseManagerError.unavailable
@@ -969,15 +1429,25 @@ actor DatabaseManager {
                         )
                     }
 
-                    try db.execute(
-                        sql: "DELETE FROM messages WHERE chat_id = ?",
+                    let existingSyncState = try Row.fetchOne(
+                        db,
+                        sql: """
+                            SELECT last_indexed_message_id, is_search_ready
+                            FROM sync_state
+                            WHERE chat_id = ?
+                            """,
                         arguments: [cached.chatId]
                     )
-                    try Self.insertMessages(records, into: db)
+                    let preferredOldestMessageId: Int64? =
+                        existingSyncState?["last_indexed_message_id"] ?? cached.oldestMessageId
+                    let isSearchReady = (existingSyncState?["is_search_ready"] as Int?) == 1
+
+                    try Self.insertMissingMessages(records, into: db)
                     try Self.refreshSyncState(
                         in: db,
                         chatId: cached.chatId,
-                        preferredOldestMessageId: cached.oldestMessageId
+                        preferredOldestMessageId: preferredOldestMessageId,
+                        isSearchReady: isSearchReady
                     )
                 }
             }
@@ -998,20 +1468,22 @@ actor DatabaseManager {
                     let cached = try decoder.decode(LegacyPipelineCacheRecord.self, from: data)
                     try db.execute(
                         sql: """
-                            INSERT INTO pipeline_cache (chat_id, category, suggested_action, last_message_id, analyzed_at)
-                            VALUES (?, ?, ?, ?, ?)
+                            INSERT INTO pipeline_cache (chat_id, category, suggested_action, last_message_id, analyzed_at, schema_version)
+                            VALUES (?, ?, ?, ?, ?, ?)
                             ON CONFLICT(chat_id) DO UPDATE SET
                                 category = excluded.category,
                                 suggested_action = excluded.suggested_action,
                                 last_message_id = excluded.last_message_id,
-                                analyzed_at = excluded.analyzed_at
+                                analyzed_at = excluded.analyzed_at,
+                                schema_version = excluded.schema_version
                             """,
                         arguments: [
                             cached.chatId,
                             cached.category,
                             cached.suggestedAction,
                             cached.lastMessageId,
-                            cached.analyzedAt.timeIntervalSince1970
+                            cached.analyzedAt.timeIntervalSince1970,
+                            1
                         ]
                     )
                 }
@@ -1021,13 +1493,240 @@ actor DatabaseManager {
         }
     }
 
+    private static let dashboardTaskSelectSQL = """
+        SELECT
+            dt.id,
+            dt.stable_fingerprint,
+            dt.title,
+            dt.summary,
+            dt.suggested_action,
+            dt.owner_name,
+            dt.person_name,
+            dt.chat_id,
+            dt.chat_title,
+            dt.topic_id,
+            dt.topic_name,
+            dt.priority,
+            dt.status,
+            dt.confidence,
+            dt.created_at,
+            dt.updated_at,
+            dt.due_at,
+            dt.snoozed_until,
+            COALESCE(
+                (
+                    SELECT MAX(COALESCE(m.date, dts.date))
+                    FROM dashboard_task_sources dts
+                    LEFT JOIN messages m
+                        ON m.chat_id = dts.chat_id
+                       AND m.id = dts.message_id
+                    WHERE dts.task_id = dt.id
+                ),
+                dt.latest_source_date
+            ) AS latest_source_date
+        FROM dashboard_tasks dt
+
+        """
+
+    private static func normalizedDashboardTopicDTOs(_ topics: [DashboardTopicDTO]) -> [DashboardTopicDTO] {
+        var seen = Set<String>()
+        return topics
+            .map { topic in
+                DashboardTopicDTO(
+                    name: topic.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                    rationale: topic.rationale.trimmingCharacters(in: .whitespacesAndNewlines),
+                    score: topic.score
+                )
+            }
+            .filter { !$0.name.isEmpty }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
+                }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            .filter { topic in
+                let key = topic.name.lowercased()
+                guard !seen.contains(key) else { return false }
+                seen.insert(key)
+                return true
+            }
+            .prefix(AppConstants.Dashboard.maxTopicCount)
+            .map { $0 }
+    }
+
+    private static func loadDashboardTopics(in db: Database, limit: Int) throws -> [DashboardTopic] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT id, name, rationale, score, rank, created_at, updated_at
+                FROM dashboard_topics
+                ORDER BY rank ASC, score DESC, name COLLATE NOCASE ASC
+                LIMIT ?
+                """,
+            arguments: [limit]
+        )
+        return rows.map(dashboardTopic(from:))
+    }
+
+    private static func ensureDashboardTopic(named rawName: String?, in db: Database) throws -> Int64? {
+        guard let name = rawName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty,
+              name.lowercased() != "uncategorized" else {
+            return nil
+        }
+
+        if let existingId = try Int64.fetchOne(
+            db,
+            sql: "SELECT id FROM dashboard_topics WHERE name = ? COLLATE NOCASE",
+            arguments: [name]
+        ) {
+            return existingId
+        }
+
+        let now = Date().timeIntervalSince1970
+        try db.execute(
+            sql: """
+                INSERT INTO dashboard_topics (name, rationale, score, rank, created_at, updated_at)
+                VALUES (?, '', 0, ?, ?, ?)
+                """,
+            arguments: [
+                name,
+                AppConstants.Dashboard.maxTopicCount + 100,
+                now,
+                now
+            ]
+        )
+        return db.lastInsertedRowID
+    }
+
+    private static func dashboardTopic(from row: Row) -> DashboardTopic {
+        let createdAtSeconds: Double = row["created_at"]
+        let updatedAtSeconds: Double = row["updated_at"]
+        return DashboardTopic(
+            id: row["id"],
+            name: row["name"],
+            rationale: row["rationale"],
+            score: row["score"],
+            rank: row["rank"],
+            createdAt: Date(timeIntervalSince1970: createdAtSeconds),
+            updatedAt: Date(timeIntervalSince1970: updatedAtSeconds)
+        )
+    }
+
+    private static func dashboardTask(from row: Row) -> DashboardTask {
+        let createdAtSeconds: Double = row["created_at"]
+        let updatedAtSeconds: Double = row["updated_at"]
+        let dueAtSeconds: Double? = row["due_at"]
+        let snoozedUntilSeconds: Double? = row["snoozed_until"]
+        let latestSourceDateSeconds: Double? = row["latest_source_date"]
+        let priority = DashboardTaskPriority(rawValue: (row["priority"] as String).lowercased()) ?? .medium
+        let status = DashboardTaskStatus(rawValue: (row["status"] as String).lowercased()) ?? .open
+
+        return DashboardTask(
+            id: row["id"],
+            stableFingerprint: row["stable_fingerprint"],
+            title: row["title"],
+            summary: row["summary"],
+            suggestedAction: row["suggested_action"],
+            ownerName: row["owner_name"],
+            personName: row["person_name"],
+            chatId: row["chat_id"],
+            chatTitle: row["chat_title"],
+            topicId: row["topic_id"],
+            topicName: row["topic_name"],
+            priority: priority,
+            status: status,
+            confidence: row["confidence"],
+            createdAt: Date(timeIntervalSince1970: createdAtSeconds),
+            updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+            dueAt: dueAtSeconds.map(Date.init(timeIntervalSince1970:)),
+            snoozedUntil: snoozedUntilSeconds.map(Date.init(timeIntervalSince1970:)),
+            latestSourceDate: latestSourceDateSeconds.map(Date.init(timeIntervalSince1970:))
+        )
+    }
+
+    private static func dashboardTaskSource(from row: Row) -> DashboardTaskSourceMessage {
+        let dateSeconds: Double = row["date"]
+        return DashboardTaskSourceMessage(
+            chatId: row["chat_id"],
+            messageId: row["message_id"],
+            senderName: row["sender_name"],
+            text: row["text"],
+            date: Date(timeIntervalSince1970: dateSeconds)
+        )
+    }
+
+    private static func sortDashboardTasks(_ lhs: DashboardTask, _ rhs: DashboardTask) -> Bool {
+        if lhs.status != rhs.status {
+            let order: [DashboardTaskStatus] = [.open, .snoozed, .done, .ignored]
+            return (order.firstIndex(of: lhs.status) ?? order.count) < (order.firstIndex(of: rhs.status) ?? order.count)
+        }
+        if lhs.priority != rhs.priority {
+            return lhs.priority.sortRank < rhs.priority.sortRank
+        }
+        let leftDate = lhs.latestSourceDate ?? lhs.updatedAt
+        let rightDate = rhs.latestSourceDate ?? rhs.updatedAt
+        if leftDate != rightDate {
+            return leftDate > rightDate
+        }
+        return lhs.id > rhs.id
+    }
+
     private static func insertMessages(_ records: [MessageRecord], into db: Database) throws {
+        for record in records {
+            let existing = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT text_content, media_type
+                    FROM messages
+                    WHERE chat_id = ? AND id = ?
+                    """,
+                arguments: [record.chatId, record.id]
+            )
+            let existingText: String? = existing?["text_content"]
+            let existingMediaType: String? = existing?["media_type"]
+            let contentChanged = existing != nil
+                && (existingText != record.textContent || existingMediaType != record.mediaTypeRaw)
+
+            try db.execute(
+                sql: """
+                    INSERT INTO messages
+                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id, chat_id) DO UPDATE SET
+                        sender_user_id = excluded.sender_user_id,
+                        sender_name = excluded.sender_name,
+                        date = excluded.date,
+                        text_content = excluded.text_content,
+                        media_type = excluded.media_type,
+                        is_outgoing = excluded.is_outgoing
+                    """,
+                arguments: [
+                    record.id,
+                    record.chatId,
+                    record.senderUserId,
+                    record.senderName,
+                    record.date.timeIntervalSince1970,
+                    record.textContent,
+                    record.mediaTypeRaw,
+                    record.isOutgoing ? 1 : 0
+                ]
+            )
+            if contentChanged {
+                try deleteEmbeddings(in: db, chatId: record.chatId, messageIds: [record.id])
+            }
+        }
+    }
+
+    private static func insertMissingMessages(_ records: [MessageRecord], into db: Database) throws {
         for record in records {
             try db.execute(
                 sql: """
-                    INSERT OR REPLACE INTO messages
+                    INSERT INTO messages
                     (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id, chat_id) DO NOTHING
                     """,
                 arguments: [
                     record.id,

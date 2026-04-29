@@ -41,6 +41,26 @@ final class OpenAIProvider: AIProvider {
         return try JSONExtractor.parseJSON(response)
     }
 
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO {
+        try await RetryHelper.withRetry {
+            let response = try await self.makeRequest(
+                systemPrompt: QueryPlanningPrompt.systemPrompt,
+                userMessage: QueryPlanningPrompt.userMessage(
+                    query: query,
+                    activeFilter: activeFilter,
+                    deterministicSpec: deterministicSpec
+                ),
+                requestKind: .queryPlanning,
+                responseFormat: self.queryPlanningResponseFormat()
+            )
+            return try JSONExtractor.parseJSON(response)
+        }
+    }
+
     func rerankResults(
         query: String,
         candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
@@ -147,6 +167,62 @@ final class OpenAIProvider: AIProvider {
             )
         }
         return try JSONExtractor.parseJSON(response)
+    }
+
+    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO] {
+        let snippets = Array(messages.prefix(AppConstants.Dashboard.topicDiscoveryMessageLimit))
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: DashboardTopicPrompt.systemPrompt,
+                userMessage: DashboardTopicPrompt.userMessage(snippets: snippets),
+                requestKind: .dashboardTopicDiscovery
+            )
+        }
+        return try DashboardTopicParser.parse(response)
+    }
+
+    func extractDashboardTasks(
+        chat: TGChat,
+        topics: [DashboardTopic],
+        messages: [MessageSnippet]
+    ) async throws -> [DashboardTaskCandidate] {
+        guard !messages.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: DashboardTaskPrompt.systemPrompt,
+                userMessage: DashboardTaskPrompt.userMessage(
+                    chat: chat,
+                    topics: topics,
+                    snippets: messages
+                ),
+                requestKind: .dashboardTaskExtraction
+            )
+        }
+        return try DashboardTaskParser.parse(response)
+    }
+
+    func triageDashboardTaskCandidates(
+        candidates: [DashboardTaskTriageCandidateDTO]
+    ) async throws -> [DashboardTaskTriageResultDTO] {
+        guard !candidates.isEmpty else { return [] }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: DashboardTaskTriagePrompt.systemPrompt,
+                userMessage: DashboardTaskTriagePrompt.userMessage(candidates: candidates),
+                requestKind: .dashboardTaskTriage,
+                responseFormat: self.dashboardTaskTriageResponseFormat(candidates: candidates)
+            )
+        }
+
+        let parsed = try DashboardTaskTriageParser.parse(response)
+        let expectedIds = Set(candidates.map(\.chatId))
+        let returnedIds = Set(parsed.map(\.chatId))
+        guard parsed.count == candidates.count, returnedIds == expectedIds else {
+            throw AIError.parsingError(
+                "dashboard task triage response cardinality mismatch: expected \(candidates.count) candidates but got \(parsed.count)"
+            )
+        }
+        return parsed
     }
 
     func testConnection() async throws -> Bool {
@@ -289,6 +365,50 @@ final class OpenAIProvider: AIProvider {
         ]
     }
 
+    private func queryPlanningResponseFormat() -> [String: Any] {
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "family": [
+                    "type": "string",
+                    "enum": ["summary", "reply_queue", "topic_search", "exact_lookup", "relationship"]
+                ],
+                "scope": [
+                    "type": "string",
+                    "enum": ["inherit", "all", "dms", "groups"]
+                ],
+                "timeRange": [
+                    "type": "string",
+                    "enum": ["inherit", "none", "today", "yesterday", "last_week", "this_week", "last_30_days"]
+                ],
+                "people": [
+                    "type": "array",
+                    "items": ["type": "string"]
+                ],
+                "topicTerms": [
+                    "type": "array",
+                    "items": ["type": "string"]
+                ],
+                "confidence": [
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                ]
+            ],
+            "required": ["family", "scope", "timeRange", "people", "topicTerms", "confidence"],
+            "additionalProperties": false
+        ]
+
+        return [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "query_plan",
+                "schema": schema,
+                "strict": true
+            ]
+        ]
+    }
+
     private func replyQueueTriageResponseFormat(candidates: [ReplyQueueCandidateDTO]) -> [String: Any] {
         let candidateIds: [Any] = candidates.map { NSNumber(value: $0.chatId) }
         let schema: [String: Any] = [
@@ -342,6 +462,58 @@ final class OpenAIProvider: AIProvider {
             "type": "json_schema",
             "json_schema": [
                 "name": "reply_queue_triage_results",
+                "strict": true,
+                "schema": schema
+            ]
+        ]
+    }
+
+    private func dashboardTaskTriageResponseFormat(candidates: [DashboardTaskTriageCandidateDTO]) -> [String: Any] {
+        let candidateIds: [Any] = candidates.map { NSNumber(value: $0.chatId) }
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "decisions": [
+                    "type": "array",
+                    "minItems": candidates.count,
+                    "maxItems": candidates.count,
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "chatId": [
+                                "type": "integer",
+                                "enum": candidateIds
+                            ],
+                            "route": [
+                                "type": "string",
+                                "enum": ["effort_task", "reply_queue", "ignore"]
+                            ],
+                            "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                            "reason": ["type": "string"],
+                            "supportingMessageIds": [
+                                "type": "array",
+                                "items": ["type": "integer"]
+                            ]
+                        ],
+                        "required": [
+                            "chatId",
+                            "route",
+                            "confidence",
+                            "reason",
+                            "supportingMessageIds"
+                        ],
+                        "additionalProperties": false
+                    ]
+                ]
+            ],
+            "required": ["decisions"],
+            "additionalProperties": false
+        ]
+
+        return [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "dashboard_task_triage_results",
                 "strict": true,
                 "schema": schema
             ]

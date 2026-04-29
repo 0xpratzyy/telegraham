@@ -64,4 +64,18 @@ struct TGChat: Identifiable, Equatable, Sendable {
     var colorIndex: Int {
         abs(Int(id % 8))
     }
+
+    func updating(memberCount: Int?) -> TGChat {
+        TGChat(
+            id: id,
+            title: title,
+            chatType: chatType,
+            unreadCount: unreadCount,
+            lastMessage: lastMessage,
+            memberCount: memberCount,
+            order: order,
+            isInMainList: isInMainList,
+            smallPhotoFileId: smallPhotoFileId
+        )
+    }
 }

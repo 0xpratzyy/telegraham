@@ -11,6 +11,14 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO {
+        throw AIError.providerNotConfigured
+    }
+
     func rerankResults(
         query: String,
         candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
@@ -39,6 +47,24 @@ final class NoAIProvider: AIProvider {
     }
 
     func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO {
+        throw AIError.providerNotConfigured
+    }
+
+    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func extractDashboardTasks(
+        chat: TGChat,
+        topics: [DashboardTopic],
+        messages: [MessageSnippet]
+    ) async throws -> [DashboardTaskCandidate] {
+        throw AIError.providerNotConfigured
+    }
+
+    func triageDashboardTaskCandidates(
+        candidates: [DashboardTaskTriageCandidateDTO]
+    ) async throws -> [DashboardTaskTriageResultDTO] {
         throw AIError.providerNotConfigured
     }
 

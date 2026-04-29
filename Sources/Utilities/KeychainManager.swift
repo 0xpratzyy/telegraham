@@ -1,8 +1,12 @@
 import Foundation
+import Security
 
-/// File-based credential storage in ~/Library/Application Support/Pidgy/
-/// Uses POSIX 0600 permissions (user-only read/write). Avoids macOS Keychain
-/// password prompts that occur with ad-hoc signed development builds.
+/// Credential storage for Pidgy.
+///
+/// Debug and test builds stay file-backed by default so local ad-hoc builds
+/// avoid unexpected keychain prompts or writes into a user's production
+/// keychain items. Production builds store AI API keys in the native macOS
+/// Keychain while leaving non-secret config on disk.
 enum KeychainManager {
     enum Key: String {
         case apiId = "com.pidgy.apiId"
@@ -37,10 +41,29 @@ enum KeychainManager {
         return appSupport.appendingPathComponent("Pidgy", isDirectory: true).appendingPathComponent("credentials", isDirectory: true)
     }()
 
+    private enum StorageBackend {
+        case file
+        case nativeKeychain
+    }
+
+    private static let defaultKeychainService = "com.pidgy.credentials"
+    private static let productionNativeKeychainKeys: Set<Key> = [
+        .apiHash,
+        .aiApiKey,
+        .aiApiKeyOpenAI,
+        .aiApiKeyClaude
+    ]
+
     private static var storageDirOverride: URL?
+    private static var keychainServiceOverride: String?
+    private static var nativeKeyOverride: Set<Key>?
 
     private static var storageDir: URL {
         storageDirOverride ?? defaultStorageDir
+    }
+
+    private static var keychainService: String {
+        keychainServiceOverride ?? defaultKeychainService
     }
 
     private static func ensureDirectory() throws {
@@ -54,27 +77,42 @@ enum KeychainManager {
     }
 
     static func save(_ value: String, for key: Key) throws {
-        try ensureDirectory()
-        guard let data = value.data(using: .utf8) else { return }
-        let url = fileURL(for: key)
-        try data.write(to: url, options: [.atomic])
-        // Set file to user-only read/write
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        switch storageBackend(for: key) {
+        case .file:
+            try saveFileValue(value, for: key)
+        case .nativeKeychain:
+            try saveKeychainValue(value, for: key)
+        }
     }
 
     static func retrieve(for key: Key) throws -> String? {
-        let url = fileURL(for: key)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return nil
+        switch storageBackend(for: key) {
+        case .file:
+            return try retrieveFileValue(for: key)
+        case .nativeKeychain:
+            if let nativeValue = try retrieveKeychainValue(for: key) {
+                return nativeValue
+            }
+
+            let legacyValue = try retrieveFileValue(for: key)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let legacyValue, !legacyValue.isEmpty else {
+                return nil
+            }
+
+            try saveKeychainValue(legacyValue, for: key)
+            try deleteFileValue(for: key)
+            return legacyValue
         }
-        let data = try Data(contentsOf: url)
-        return String(data: data, encoding: .utf8)
     }
 
     static func delete(for key: Key) throws {
-        let url = fileURL(for: key)
-        if FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
+        switch storageBackend(for: key) {
+        case .file:
+            try deleteFileValue(for: key)
+        case .nativeKeychain:
+            try deleteKeychainValue(for: key)
+            try deleteFileValue(for: key)
         }
     }
 
@@ -85,8 +123,125 @@ enum KeychainManager {
     }
 
     #if DEBUG
-    static func configureForTesting(storageDirectoryOverride: URL?) {
+    static func configureForTesting(
+        storageDirectoryOverride: URL?,
+        keychainServiceOverride: String? = nil,
+        nativeKeyOverride: Set<Key>? = nil
+    ) {
         self.storageDirOverride = storageDirectoryOverride
+        self.keychainServiceOverride = keychainServiceOverride
+        self.nativeKeyOverride = nativeKeyOverride
+    }
+
+    static func usesNativeKeychainInProductionForTesting(_ key: Key) -> Bool {
+        productionNativeKeychainKeys.contains(key)
     }
     #endif
+
+    private static func storageBackend(for key: Key) -> StorageBackend {
+        #if DEBUG
+        if let nativeKeyOverride {
+            return nativeKeyOverride.contains(key) ? .nativeKeychain : .file
+        }
+        return .file
+        #else
+        return productionNativeKeychainKeys.contains(key) ? .nativeKeychain : .file
+        #endif
+    }
+
+    private static func saveFileValue(_ value: String, for key: Key) throws {
+        try ensureDirectory()
+        guard let data = value.data(using: .utf8) else {
+            throw KeychainError.unexpectedData
+        }
+        let url = fileURL(for: key)
+        try data.write(to: url, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private static func retrieveFileValue(for key: Key) throws -> String? {
+        let url = fileURL(for: key)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+        let data = try Data(contentsOf: url)
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func deleteFileValue(for key: Key) throws {
+        let url = fileURL(for: key)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private static func saveKeychainValue(_ value: String, for key: Key) throws {
+        guard let data = value.data(using: .utf8) else {
+            throw KeychainError.unexpectedData
+        }
+
+        let query = baseKeychainQuery(for: key)
+        let addQuery = query.merging(
+            [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
+            ],
+            uniquingKeysWith: { _, new in new }
+        )
+
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus == errSecDuplicateItem {
+            let updateStatus = SecItemUpdate(
+                query as CFDictionary,
+                [
+                    kSecValueData as String: data,
+                    kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
+                ] as CFDictionary
+            )
+            guard updateStatus == errSecSuccess else {
+                throw KeychainError.saveFailed(updateStatus)
+            }
+            return
+        }
+
+        guard addStatus == errSecSuccess else {
+            throw KeychainError.saveFailed(addStatus)
+        }
+    }
+
+    private static func retrieveKeychainValue(for key: Key) throws -> String? {
+        var query = baseKeychainQuery(for: key)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data,
+                  let string = String(data: data, encoding: .utf8) else {
+                throw KeychainError.unexpectedData
+            }
+            return string
+        case errSecItemNotFound:
+            return nil
+        default:
+            throw KeychainError.readFailed(status)
+        }
+    }
+
+    private static func deleteKeychainValue(for key: Key) throws {
+        let status = SecItemDelete(baseKeychainQuery(for: key) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError.deleteFailed(status)
+        }
+    }
+
+    private static func baseKeychainQuery(for key: Key) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: key.rawValue
+        ]
+    }
 }

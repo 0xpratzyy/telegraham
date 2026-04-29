@@ -1,4 +1,5 @@
 import XCTest
+import GRDB
 @testable import Pidgy
 
 final class PidgyCoreTests: XCTestCase {
@@ -16,6 +17,7 @@ final class PidgyCoreTests: XCTestCase {
 
     override func tearDown() async throws {
         await MessageCacheService.shared.invalidateAll()
+        await MessageCacheService.shared.invalidateAllPipelineCache()
         await DatabaseManager.shared.close()
         await DatabaseManager.shared.configureForTesting(databaseURLOverride: nil)
         KeychainManager.configureForTesting(storageDirectoryOverride: nil)
@@ -93,7 +95,7 @@ final class PidgyCoreTests: XCTestCase {
                 text: "latest recent sync write",
                 date: Date()
             )
-            await MessageCacheService.shared.cacheMessages(chatId: chatId, messages: [recentMessage], append: true)
+            await MessageCacheService.shared.cacheMessages(chatId: chatId, messages: [recentMessage], append: false)
 
             let syncStateAfterRecentWrite = await DatabaseManager.shared.loadSyncState(chatId: chatId)
             XCTAssertEqual(syncStateAfterRecentWrite?.lastIndexedMessageId, 301)
@@ -102,6 +104,1696 @@ final class PidgyCoreTests: XCTestCase {
             let recentSyncState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
             XCTAssertEqual(recentSyncState?.latestSyncedMessageId, 401)
         }
+    }
+
+    func testOlderHistoryAppendDoesNotMoveRecentSyncStateBackward() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 85
+            let recentMessage = makeTGMessage(
+                id: 501,
+                chatId: chatId,
+                text: "latest recent sync write",
+                date: Date()
+            )
+            await MessageCacheService.shared.cacheMessages(chatId: chatId, messages: [recentMessage], append: false)
+
+            let initialRecentSyncState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(initialRecentSyncState?.latestSyncedMessageId, recentMessage.id)
+
+            let olderMessage = makeTGMessage(
+                id: 401,
+                chatId: chatId,
+                text: "older history expansion",
+                date: Date().addingTimeInterval(-2 * 86_400)
+            )
+            await MessageCacheService.shared.cacheMessages(chatId: chatId, messages: [olderMessage], append: true)
+
+            let recentSyncStateAfterAppend = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentSyncStateAfterAppend?.latestSyncedMessageId, recentMessage.id)
+        }
+    }
+
+    func testReupsertingMessagePreservesExistingEmbedding() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 86
+            let message = makeRecord(
+                id: 601,
+                chatId: chatId,
+                text: "durable searchable message",
+                daysAgo: 0
+            )
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: chatId,
+                messages: [message],
+                preferredOldestMessageId: message.id,
+                isSearchReady: true
+            )
+            try await VectorStore.shared.storeBatchThrowing([
+                VectorStore.EmbeddingRecord(
+                    messageId: message.id,
+                    chatId: chatId,
+                    vector: [0.1, 0.2, 0.3],
+                    textPreview: message.textContent ?? ""
+                )
+            ])
+
+            await DatabaseManager.shared.upsertLiveMessages(chatId: chatId, messages: [message])
+
+            let count = try await embeddingCount(chatId: chatId, messageId: message.id)
+            XCTAssertEqual(count, 1)
+        }
+    }
+
+    func testDashboardTopicDiscoveryCapsAndPreservesStableLabels() async throws {
+        try await withTempDatabase { _ in
+            let discovered = (1...8).map { index in
+                DashboardTopicDTO(
+                    name: "Topic \(index)",
+                    rationale: "Observed in chat \(index)",
+                    score: Double(10 - index)
+                )
+            }
+
+            let firstPass = await DatabaseManager.shared.upsertDashboardTopics(discovered)
+            XCTAssertEqual(firstPass.map(\.name), ["Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6"])
+
+            let secondPass = await DatabaseManager.shared.upsertDashboardTopics([
+                DashboardTopicDTO(name: "Topic 1", rationale: "Newer rationale", score: 42),
+                DashboardTopicDTO(name: "Inner Circle", rationale: "High-signal relationship topic", score: 41)
+            ])
+            let reloaded = await DatabaseManager.shared.loadDashboardTopics()
+
+            XCTAssertEqual(secondPass.first(where: { $0.name == "Topic 1" })?.id, firstPass.first?.id)
+            XCTAssertTrue(reloaded.contains { $0.name == "Topic 1" })
+            XCTAssertLessThanOrEqual(reloaded.count, AppConstants.Dashboard.maxTopicCount)
+        }
+    }
+
+    func testDashboardTaskUpsertPreservesManualStateAndChatScopedEvidence() async throws {
+        try await withTempDatabase { _ in
+            let topic = await DatabaseManager.shared.upsertDashboardTopics([
+                DashboardTopicDTO(name: "First Dollar", rationale: "Revenue work", score: 1)
+            ]).first
+            let now = Date()
+
+            let firstCandidate = DashboardTaskCandidate(
+                stableFingerprint: "first-dollar:contract-review",
+                title: "Review the contract diff",
+                summary: "Akhil asked for a contract review before Friday.",
+                suggestedAction: "Reply after checking the diff",
+                ownerName: "Me",
+                personName: "Akhil",
+                chatId: 10,
+                chatTitle: "Akhil",
+                topicName: topic?.name,
+                priority: .high,
+                status: .open,
+                confidence: 0.88,
+                createdAt: now,
+                dueAt: nil,
+                sourceMessages: [
+                    DashboardTaskSourceMessage(
+                        chatId: 10,
+                        messageId: 501,
+                        senderName: "Akhil",
+                        text: "Can you review the contract diff?",
+                        date: now
+                    )
+                ]
+            )
+
+            let inserted = await DatabaseManager.shared.upsertDashboardTasks([firstCandidate])
+            XCTAssertEqual(inserted.count, 1)
+            let taskId = try XCTUnwrap(inserted.first?.id)
+
+            await DatabaseManager.shared.updateDashboardTaskStatus(taskId: taskId, status: .done)
+
+            let refreshedCandidate = DashboardTaskCandidate(
+                stableFingerprint: "first-dollar:contract-review",
+                title: "Review the contract diff today",
+                summary: "Akhil nudged the contract review.",
+                suggestedAction: "Send reviewed notes",
+                ownerName: "Me",
+                personName: "Akhil",
+                chatId: 10,
+                chatTitle: "Akhil",
+                topicName: topic?.name,
+                priority: .medium,
+                status: .open,
+                confidence: 0.92,
+                createdAt: now.addingTimeInterval(60),
+                dueAt: nil,
+                sourceMessages: firstCandidate.sourceMessages
+            )
+
+            let refreshed = await DatabaseManager.shared.upsertDashboardTasks([refreshedCandidate])
+            XCTAssertEqual(refreshed.first?.id, taskId)
+            XCTAssertEqual(refreshed.first?.status, .done)
+            XCTAssertEqual(refreshed.first?.title, "Review the contract diff today")
+
+            let secondChatCandidate = DashboardTaskCandidate(
+                stableFingerprint: "inner-circle:call-notes",
+                title: "Send call notes",
+                summary: "Priya asked for call notes.",
+                suggestedAction: "Share notes in the thread",
+                ownerName: "Me",
+                personName: "Priya",
+                chatId: 11,
+                chatTitle: "Priya",
+                topicName: "Inner Circle",
+                priority: .low,
+                status: .open,
+                confidence: 0.71,
+                createdAt: now,
+                dueAt: nil,
+                sourceMessages: [
+                    DashboardTaskSourceMessage(
+                        chatId: 11,
+                        messageId: 501,
+                        senderName: "Priya",
+                        text: "Can you send the call notes?",
+                        date: now
+                    )
+                ]
+            )
+
+            _ = await DatabaseManager.shared.upsertDashboardTasks([secondChatCandidate])
+            let allTasks = await DatabaseManager.shared.loadDashboardTasks()
+            let allEvidence = await DatabaseManager.shared.loadDashboardTaskEvidence(taskIds: allTasks.map(\.id))
+
+            XCTAssertEqual(allTasks.count, 2)
+            XCTAssertTrue(allEvidence.values.flatMap { $0 }.contains { $0.chatId == 10 && $0.messageId == 501 })
+            XCTAssertTrue(allEvidence.values.flatMap { $0 }.contains { $0.chatId == 11 && $0.messageId == 501 })
+        }
+    }
+
+    func testDashboardTaskFilterMatchesStatusTopicChatAndPerson() {
+        let tasks = [
+            DashboardTask.mock(
+                id: 1,
+                title: "Review grant ask",
+                status: .open,
+                topicId: 10,
+                topicName: "First Dollar",
+                chatId: 100,
+                personName: "Akhil"
+            ),
+            DashboardTask.mock(
+                id: 2,
+                title: "Send intro",
+                status: .done,
+                topicId: 11,
+                topicName: "Inner Circle",
+                chatId: 101,
+                personName: "Priya"
+            )
+        ]
+
+        let filtered = DashboardTaskFilter.apply(
+            tasks,
+            status: .open,
+            topicId: 10,
+            chatId: 100,
+            personQuery: "akh"
+        )
+
+        XCTAssertEqual(filtered.map(\.id), [1])
+    }
+
+    func testDashboardTaskFilterSortsNewestActivityBeforePriority() {
+        let base = Date(timeIntervalSince1970: 1_777_400_000)
+        let tasks = [
+            DashboardTask.mock(
+                id: 1,
+                title: "Older high priority",
+                status: .open,
+                topicId: 10,
+                topicName: "Ops",
+                chatId: 100,
+                personName: "Akhil",
+                priority: .high,
+                latestSourceDate: base.addingTimeInterval(-3_600)
+            ),
+            DashboardTask.mock(
+                id: 2,
+                title: "Newer medium priority",
+                status: .open,
+                topicId: 10,
+                topicName: "Ops",
+                chatId: 101,
+                personName: "Rahul",
+                priority: .medium,
+                latestSourceDate: base
+            )
+        ]
+
+        let filtered = DashboardTaskFilter.apply(tasks, status: .open)
+
+        XCTAssertEqual(filtered.map(\.id), [2, 1])
+    }
+
+    func testDashboardTaskCandidateResolvesSourceDatesFromChatScopedMessages() {
+        let wrongAIDate = Date(timeIntervalSince1970: 1_777_248_840)
+        let actualSourceDate = Date(timeIntervalSince1970: 1_777_402_120)
+        let otherChatDate = Date(timeIntervalSince1970: 1_777_100_000)
+        let candidate = DashboardTaskCandidate(
+            stableFingerprint: "task",
+            title: "Send Dacoit pitch deck",
+            summary: "Rahul asked for the deck.",
+            suggestedAction: "Send the deck.",
+            ownerName: "Me",
+            personName: "Rahul",
+            chatId: 2014843525,
+            chatTitle: "Rahul Singh Bhadoriya",
+            topicName: nil,
+            priority: .medium,
+            status: .open,
+            confidence: 0.95,
+            createdAt: Date(timeIntervalSince1970: 1_777_403_000),
+            dueAt: nil,
+            sourceMessages: [
+                DashboardTaskSourceMessage(
+                    chatId: 2014843525,
+                    messageId: 459099078656,
+                    senderName: "Rahul",
+                    text: "Bro, can you please send me te pitch deck for dacoit",
+                    date: wrongAIDate
+                )
+            ]
+        )
+        let messages = [
+            TGMessage(
+                id: 459099078656,
+                chatId: 999,
+                senderId: .user(1),
+                date: otherChatDate,
+                textContent: "same id different chat",
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "Other",
+                senderName: "Other"
+            ),
+            TGMessage(
+                id: 459099078656,
+                chatId: 2014843525,
+                senderId: .user(2),
+                date: actualSourceDate,
+                textContent: "Bro, can you please send me te pitch deck for dacoit",
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "Rahul Singh Bhadoriya",
+                senderName: "Rahul"
+            )
+        ]
+
+        let resolved = candidate.resolvingSourceDates(from: messages)
+
+        XCTAssertEqual(resolved.sourceMessages.first?.date, actualSourceDate)
+    }
+
+    func testDashboardListTimestampIncludesLocalDateAndTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = Date(timeIntervalSince1970: 1_777_405_020)
+        let sameDay = Date(timeIntervalSince1970: 1_777_402_120)
+        let older = Date(timeIntervalSince1970: 1_777_248_840)
+
+        XCTAssertEqual(
+            DateFormatting.dashboardListTimestamp(from: sameDay, now: now, calendar: calendar),
+            "Today, 6:48 PM"
+        )
+        XCTAssertEqual(
+            DateFormatting.dashboardListTimestamp(from: older, now: now, calendar: calendar),
+            "Apr 27, 12:14 AM"
+        )
+    }
+
+    func testDashboardTaskFilterExcludesBotChatIds() {
+        let tasks = [
+            DashboardTask.mock(
+                id: 1,
+                title: "Approve bot task",
+                status: .open,
+                topicId: 10,
+                topicName: "Payments",
+                chatId: 100,
+                personName: "Bot"
+            ),
+            DashboardTask.mock(
+                id: 2,
+                title: "Reply to person",
+                status: .open,
+                topicId: 11,
+                topicName: "Partnerships",
+                chatId: 101,
+                personName: "Akhil"
+            )
+        ]
+
+        let filtered = DashboardTaskFilter.excludingChatIds(tasks, [100])
+
+        XCTAssertEqual(filtered.map(\.id), [2])
+    }
+
+    func testDashboardTaskRefreshPolicyScansOnlyNewMessages() {
+        XCTAssertFalse(DashboardTaskRefreshPolicy.shouldScan(
+            latestMessageId: nil,
+            syncedLatestMessageId: nil
+        ))
+        XCTAssertTrue(DashboardTaskRefreshPolicy.shouldScan(
+            latestMessageId: 20,
+            syncedLatestMessageId: nil
+        ))
+        XCTAssertFalse(DashboardTaskRefreshPolicy.shouldScan(
+            latestMessageId: 20,
+            syncedLatestMessageId: 20
+        ))
+        XCTAssertTrue(DashboardTaskRefreshPolicy.shouldScan(
+            latestMessageId: 20,
+            syncedLatestMessageId: 20,
+            forceRescan: true
+        ))
+        XCTAssertFalse(DashboardTaskRefreshPolicy.shouldScan(
+            latestMessageId: nil,
+            syncedLatestMessageId: 20,
+            forceRescan: true
+        ))
+        XCTAssertTrue(DashboardTaskRefreshPolicy.shouldScan(
+            latestMessageId: 21,
+            syncedLatestMessageId: 20
+        ))
+    }
+
+    func testDashboardTopicAndTaskParsersAcceptEnvelopeResponses() throws {
+        let topicsJSON = """
+        {
+          "topics": [
+            {"name": "First Dollar", "rationale": "Revenue and early customers", "score": 0.91},
+            {"name": "Inner Circle", "rationale": "Core collaborators", "score": 0.82}
+          ]
+        }
+        """
+        let topics = try DashboardTopicParser.parse(topicsJSON)
+        XCTAssertEqual(topics.map(\.name), ["First Dollar", "Inner Circle"])
+
+        let tasksJSON = """
+        {
+          "tasks": [
+            {
+              "stableFingerprint": "first-dollar:contract",
+              "title": "Review contract",
+              "summary": "Akhil asked for a contract pass.",
+              "suggestedAction": "Reply with reviewed notes",
+              "ownerName": "Me",
+              "personName": "Akhil",
+              "chatId": "10",
+              "chatTitle": "Akhil",
+              "topicName": "First Dollar",
+              "priority": "high",
+              "confidence": 0.9,
+              "dueAtISO8601": null,
+              "sourceMessages": [
+                {
+                  "chatId": "10",
+                  "messageId": "501",
+                  "senderName": "Akhil",
+                  "text": "Can you review this?",
+                  "dateISO8601": "2026-04-24T10:00:00Z"
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let tasks = try DashboardTaskParser.parse(tasksJSON)
+        XCTAssertEqual(tasks.first?.chatId, 10)
+        XCTAssertEqual(tasks.first?.sourceMessages.first?.chatId, 10)
+        XCTAssertEqual(tasks.first?.sourceMessages.first?.messageId, 501)
+    }
+
+    func testDashboardTaskTriageParserAcceptsReplyQueueEffortAndIgnoreRoutes() throws {
+        let json = """
+        {
+          "decisions": [
+            {
+              "chatId": "10",
+              "route": "reply_queue",
+              "confidence": 0.91,
+              "reason": "Only needs a short response.",
+              "supportingMessageIds": ["101"]
+            },
+            {
+              "chatId": 11,
+              "route": "effort_task",
+              "confidence": 0.88,
+              "reason": "Requires non-trivial follow-up work.",
+              "supportingMessageIds": [201]
+            },
+            {
+              "chatId": 12,
+              "route": "ignore",
+              "confidence": 0.82,
+              "reason": "Assigned to someone else.",
+              "supportingMessageIds": []
+            }
+          ]
+        }
+        """
+
+        let decisions = try DashboardTaskTriageParser.parse(json)
+
+        XCTAssertEqual(decisions.map(\.chatId), [10, 11, 12])
+        XCTAssertEqual(decisions.map(\.route), [.replyQueue, .effortTask, .ignore])
+        XCTAssertEqual(decisions[0].supportingMessageIds, [101])
+        XCTAssertEqual(decisions[1].supportingMessageIds, [201])
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorRoutesReplyOnlyToReplyQueueInsteadOfTasks() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let replyChat = makeChat(
+                id: 101,
+                title: "Akhil",
+                chatType: .privateChat(userId: 201),
+                unreadCount: 1,
+                lastMessageDate: now
+            )
+            let taskChat = makeChat(
+                id: 102,
+                title: "Builder Group",
+                chatType: .basicGroup(groupId: 302),
+                unreadCount: 1,
+                lastMessageDate: now.addingTimeInterval(-60),
+                memberCount: 5
+            )
+            let ignoredChat = makeChat(
+                id: 103,
+                title: "Sarv / Opengotchi",
+                chatType: .basicGroup(groupId: 303),
+                unreadCount: 1,
+                lastMessageDate: now.addingTimeInterval(-120),
+                memberCount: 4
+            )
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: replyChat.id,
+                messages: [
+                    makeRecord(id: 10101, chatId: replyChat.id, text: "Can you confirm?", date: now)
+                ]
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: taskChat.id,
+                messages: [
+                    makeRecord(id: 10201, chatId: taskChat.id, text: "Can you prepare the partner brief?", date: now)
+                ]
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: ignoredChat.id,
+                messages: [
+                    makeRecord(id: 10301, chatId: ignoredChat.id, text: "Sarv send UGC example selfie", date: now)
+                ]
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(replyChat.id):confirm:10101",
+                    title: "Confirm with Akhil",
+                    summary: "Akhil asked for a quick confirmation.",
+                    suggestedAction: "Reply with confirmation.",
+                    ownerName: "Me",
+                    personName: "Akhil",
+                    chatId: replyChat.id,
+                    chatTitle: replyChat.title,
+                    topicName: nil,
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.76,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: replyChat.id,
+                            messageId: 10101,
+                            senderName: "Tester",
+                            text: "Can you confirm?",
+                            date: now
+                        )
+                    ]
+                ),
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(ignoredChat.id):ugc-selfie:10301",
+                    title: "Send UGC example selfie",
+                    summary: "Sarv needs a UGC example selfie.",
+                    suggestedAction: "Send Sarv a selfie.",
+                    ownerName: "Me",
+                    personName: "Sarv",
+                    chatId: ignoredChat.id,
+                    chatTitle: ignoredChat.title,
+                    topicName: nil,
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.74,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: ignoredChat.id,
+                            messageId: 10301,
+                            senderName: "Tester",
+                            text: "Sarv send UGC example selfie",
+                            date: now
+                        )
+                    ]
+                )
+            ])
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: replyChat.id,
+                        route: .replyQueue,
+                        confidence: 0.91,
+                        reason: "Only needs a short response.",
+                        supportingMessageIds: [10101]
+                    ),
+                    DashboardTaskTriageResultDTO(
+                        chatId: taskChat.id,
+                        route: .effortTask,
+                        confidence: 0.88,
+                        reason: "Needs real preparation.",
+                        supportingMessageIds: [10201]
+                    ),
+                    DashboardTaskTriageResultDTO(
+                        chatId: ignoredChat.id,
+                        route: .ignore,
+                        confidence: 0.84,
+                        reason: "Assigned to Sarv.",
+                        supportingMessageIds: [10301]
+                    )
+                ],
+                tasksByChatId: [
+                    taskChat.id: DashboardTaskCandidate(
+                        stableFingerprint: "\(taskChat.id):partner-brief:10201",
+                        title: "Prepare partner brief",
+                        summary: "Builder Group asked for a partner brief.",
+                        suggestedAction: "Prepare the brief before replying.",
+                        ownerName: "Me",
+                        personName: "Builder Group",
+                        chatId: taskChat.id,
+                        chatTitle: taskChat.title,
+                        topicName: nil,
+                        priority: .medium,
+                        status: .open,
+                        confidence: 0.88,
+                        createdAt: now,
+                        dueAt: nil,
+                        sourceMessages: [
+                            DashboardTaskSourceMessage(
+                                chatId: taskChat.id,
+                                messageId: 10201,
+                                senderName: "Tester",
+                                text: "Can you prepare the partner brief?",
+                                date: now
+                            )
+                        ]
+                    )
+                ]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [replyChat, taskChat, ignoredChat]
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertEqual(openTasks.map(\.chatId), [taskChat.id])
+            let ignoredTasks = await DatabaseManager.shared.loadDashboardTasks(status: .ignored)
+            XCTAssertEqual(Set(ignoredTasks.map(\.chatId)), Set([replyChat.id, ignoredChat.id]))
+            let extractedChatIds = await recorder.extractedChatIds()
+            XCTAssertEqual(extractedChatIds, [taskChat.id])
+
+            let replySync = await DatabaseManager.shared.loadDashboardTaskSyncState(chatId: replyChat.id)
+            let ignoredSync = await DatabaseManager.shared.loadDashboardTaskSyncState(chatId: ignoredChat.id)
+            XCTAssertEqual(replySync?.latestMessageId, 10101)
+            XCTAssertEqual(ignoredSync?.latestMessageId, 10301)
+        }
+    }
+
+    @MainActor
+    func testAttentionStoreLocksImmediatelyDuringFollowUpLoad() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let chat = makeChat(
+                id: 44_001,
+                title: "Startup Cache Check",
+                chatType: .privateChat(userId: 44_101),
+                unreadCount: 1,
+                lastMessageDate: now
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: chat.lastMessage?.id ?? 1,
+                        chatId: chat.id,
+                        text: "Can you check this?",
+                        date: now
+                    )
+                ]
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: 99,
+                    firstName: "Pratyush",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: [chat.id: [chat.lastMessage].compactMap { $0 }]
+            )
+            telegramService.chats = [chat]
+            let callCounter = PipelineCategorizationCallCounter()
+            let aiService = AIService(
+                testingProvider: CountingPipelineAIProvider(
+                    callCounter: callCounter,
+                    pipelineCategoryResult: PipelineCategoryDTO(
+                        status: "decision",
+                        category: "on_me",
+                        urgency: "high",
+                        suggestedAction: "Reply with confirmation."
+                    )
+                )
+            )
+
+            let store = AttentionStore.shared
+            store.loadFollowUps(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBots: true
+            )
+
+            XCTAssertTrue(store.isFollowUpsLoading)
+
+            for _ in 0..<100 where store.isFollowUpsLoading {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+
+            XCTAssertFalse(store.isFollowUpsLoading)
+            let aiCallCount = await callCounter.currentValue()
+            XCTAssertEqual(aiCallCount, 1)
+        }
+    }
+
+    func testTDLibClientWrapperRecreatesUpdateStreamAfterClose() {
+        let wrapper = TDLibClientWrapper()
+        let initialGeneration = wrapper.updateStreamGenerationForTesting
+
+        wrapper.close()
+
+        XCTAssertGreaterThan(wrapper.updateStreamGenerationForTesting, initialGeneration)
+    }
+
+    func testMessageCacheEditUpdatesOlderSQLiteMessageAndInvalidatesEmbedding() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 86
+            let older = makeRecord(
+                id: 601,
+                chatId: chatId,
+                text: "old indexed wording",
+                date: Date().addingTimeInterval(-60 * 86_400)
+            )
+            let newer = (0..<60).map { offset in
+                makeRecord(
+                    id: Int64(700 + offset),
+                    chatId: chatId,
+                    text: "newer visible message \(offset)",
+                    date: Date().addingTimeInterval(TimeInterval(-offset * 60))
+                )
+            }
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: chatId,
+                messages: [older] + newer,
+                preferredOldestMessageId: older.id,
+                isSearchReady: true
+            )
+            try await VectorStore.shared.storeBatchThrowing([
+                VectorStore.EmbeddingRecord(
+                    messageId: older.id,
+                    chatId: chatId,
+                    vector: [0.1, 0.2, 0.3],
+                    textPreview: older.textContent ?? ""
+                )
+            ])
+            await MessageCacheService.shared.invalidateAll()
+
+            await MessageCacheService.shared.updateMessageContent(
+                chatId: chatId,
+                messageId: older.id,
+                textContent: "edited indexed wording",
+                mediaType: nil
+            )
+
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 100)
+            let invalidatedEmbeddingCount = try await embeddingCount(chatId: chatId, messageId: older.id)
+            XCTAssertEqual(stored.first(where: { $0.id == older.id })?.textContent, "edited indexed wording")
+            XCTAssertEqual(invalidatedEmbeddingCount, 0)
+        }
+    }
+
+    func testRecentSyncRecoveryRefreshOverridesFreshStateForMostRecentVisibleChats() async throws {
+        let coordinator = RecentSyncCoordinator()
+        let now = Date()
+        let chats: [TGChat] = (0..<9).map { index in
+            let chatId = Int64(901 + index)
+            return TGChat(
+                id: chatId,
+                title: "Chat \(index)",
+                chatType: .privateChat(userId: Int64(index + 1)),
+                unreadCount: 0,
+                lastMessage: makeTGMessage(
+                    id: chatId * 10,
+                    chatId: chatId,
+                    text: "latest",
+                    date: now.addingTimeInterval(TimeInterval(-index * 120))
+                ),
+                memberCount: nil,
+                order: Int64(100 - index),
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+        }
+
+        let freshestChat = chats[0]
+        let secondFreshestChat = chats[1]
+        let oldestChat = chats[8]
+
+        await coordinator.scheduleRecoveryRefreshForTesting(chats: chats)
+
+        let freshState = DatabaseManager.RecentSyncStateRecord(
+            chatId: freshestChat.id,
+            latestSyncedMessageId: freshestChat.lastMessage?.id ?? 0,
+            lastRecentSyncAt: now
+        )
+        let secondFreshState = DatabaseManager.RecentSyncStateRecord(
+            chatId: secondFreshestChat.id,
+            latestSyncedMessageId: secondFreshestChat.lastMessage?.id ?? 0,
+            lastRecentSyncAt: now
+        )
+        let oldestFreshState = DatabaseManager.RecentSyncStateRecord(
+            chatId: oldestChat.id,
+            latestSyncedMessageId: oldestChat.lastMessage?.id ?? 0,
+            lastRecentSyncAt: now
+        )
+
+        let freshestShouldRefresh = await coordinator.shouldRefreshForTesting(chat: freshestChat, state: freshState)
+        let secondShouldRefresh = await coordinator.shouldRefreshForTesting(chat: secondFreshestChat, state: secondFreshState)
+        let oldestShouldRefresh = await coordinator.shouldRefreshForTesting(chat: oldestChat, state: oldestFreshState)
+
+        XCTAssertTrue(freshestShouldRefresh)
+        XCTAssertTrue(secondShouldRefresh)
+        XCTAssertFalse(oldestShouldRefresh)
+
+        let recoveryChatIds = await coordinator.recoveryChatIdsForTesting()
+        XCTAssertTrue(recoveryChatIds.contains(freshestChat.id))
+        XCTAssertTrue(recoveryChatIds.contains(secondFreshestChat.id))
+        XCTAssertFalse(recoveryChatIds.contains(oldestChat.id))
+    }
+
+    @MainActor
+    func testIndexingAndRecentSyncResolveUnknownSupergroupMemberCounts() async throws {
+        let smallSupergroup = makeChat(
+            id: 1901,
+            title: "Small Supergroup",
+            chatType: .supergroup(supergroupId: 901, isChannel: false),
+            unreadCount: 0,
+            lastMessageDate: Date(),
+            memberCount: nil
+        )
+        let largeSupergroup = makeChat(
+            id: 1902,
+            title: "Large Supergroup",
+            chatType: .supergroup(supergroupId: 902, isChannel: false),
+            unreadCount: 0,
+            lastMessageDate: Date(),
+            memberCount: nil
+        )
+        let channel = makeChat(
+            id: 1903,
+            title: "Announcement Channel",
+            chatType: .supergroup(supergroupId: 903, isChannel: true),
+            unreadCount: 0,
+            lastMessageDate: Date(),
+            memberCount: nil
+        )
+        let telegramService = PipelineTestTelegramService(
+            currentUser: nil,
+            historyByChatId: [:],
+            resolvedMemberCounts: [
+                smallSupergroup.id: 12,
+                largeSupergroup.id: AppConstants.Indexing.maxIndexedGroupMembers + 1
+            ]
+        )
+        telegramService.chats = [smallSupergroup, largeSupergroup, channel]
+
+        let indexableChats = await IndexScheduler().indexableChatsForTesting(using: telegramService)
+        let recentSyncChats = await RecentSyncCoordinator().indexableChatsForTesting(using: telegramService)
+
+        XCTAssertEqual(indexableChats.map(\.id), [smallSupergroup.id])
+        XCTAssertEqual(indexableChats.first?.memberCount, 12)
+        XCTAssertEqual(recentSyncChats.map(\.id), [smallSupergroup.id])
+        XCTAssertEqual(recentSyncChats.first?.memberCount, 12)
+    }
+
+    func testTelegramServiceReconnectRecoveryTriggerRequiresReadyTransition() {
+        XCTAssertTrue(
+            TelegramService.shouldTriggerRecoveryRefreshForTesting(
+                previousConnectionState: .connectionStateWaitingForNetwork,
+                newConnectionState: .connectionStateReady,
+                authState: .ready
+            )
+        )
+        XCTAssertFalse(
+            TelegramService.shouldTriggerRecoveryRefreshForTesting(
+                previousConnectionState: .connectionStateReady,
+                newConnectionState: .connectionStateReady,
+                authState: .ready
+            )
+        )
+        XCTAssertFalse(
+            TelegramService.shouldTriggerRecoveryRefreshForTesting(
+                previousConnectionState: .connectionStateConnecting,
+                newConnectionState: .connectionStateReady,
+                authState: .waitingForPhoneNumber
+            )
+        )
+    }
+
+    func testSearchChatEligibilityFilterSharesPipelineScopeAgeAndGroupRules() {
+        let now = Date()
+        let recentPrivate = makeChat(
+            id: 1,
+            title: "Recent DM",
+            chatType: .privateChat(userId: 11),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-3_600)
+        )
+        let recentGroup = makeChat(
+            id: 2,
+            title: "Recent Group",
+            chatType: .basicGroup(groupId: 22),
+            unreadCount: 2,
+            lastMessageDate: now.addingTimeInterval(-7_200),
+            memberCount: 8
+        )
+        let midSizeGroup = makeChat(
+            id: 8,
+            title: "Mid Size Group",
+            chatType: .basicGroup(groupId: 88),
+            unreadCount: 1,
+            lastMessageDate: now.addingTimeInterval(-5_400),
+            memberCount: 35
+        )
+        let stalePrivate = makeChat(
+            id: 3,
+            title: "Stale DM",
+            chatType: .privateChat(userId: 33),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-(15 * 86_400))
+        )
+        let noisyGroup = makeChat(
+            id: 4,
+            title: "Noisy Group",
+            chatType: .basicGroup(groupId: 44),
+            unreadCount: AppConstants.FollowUp.maxGroupUnread + 1,
+            lastMessageDate: now.addingTimeInterval(-1_800),
+            memberCount: 8
+        )
+        let hugeGroup = makeChat(
+            id: 5,
+            title: "Huge Group",
+            chatType: .basicGroup(groupId: 55),
+            unreadCount: 1,
+            lastMessageDate: now.addingTimeInterval(-1_800),
+            memberCount: AppConstants.FollowUp.maxGroupMembers + 1
+        )
+        let channel = makeChat(
+            id: 6,
+            title: "Channel",
+            chatType: .supergroup(supergroupId: 66, isChannel: true),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-1_800)
+        )
+
+        let result = SearchChatEligibilityFilter.collectCandidateChats(
+            from: [recentPrivate, recentGroup, midSizeGroup, stalePrivate, noisyGroup, hugeGroup, channel],
+            scope: .all,
+            replyQueueQuery: false,
+            now: now
+        )
+
+        XCTAssertEqual(result.included.map(\.id), [recentPrivate.id, recentGroup.id, midSizeGroup.id])
+        XCTAssertTrue(result.exclusions.contains(.init(reason: "older than 14 days", chatTitle: "Stale DM")))
+        XCTAssertTrue(result.exclusions.contains(.init(reason: "group unread too high", chatTitle: "Noisy Group")))
+        XCTAssertTrue(result.exclusions.contains(.init(reason: "group too large", chatTitle: "Huge Group")))
+        XCTAssertTrue(result.exclusions.contains(.init(reason: "channel skipped", chatTitle: "Channel")))
+    }
+
+    func testSearchChatEligibilityFilterPreservesReplyQueueAgeOverrideAndBotFiltering() async {
+        let now = Date()
+        let staleButEligibleDM = makeChat(
+            id: 7,
+            title: "Old DM",
+            chatType: .privateChat(userId: 77),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-(30 * 86_400))
+        )
+        let botDM = makeChat(
+            id: 8,
+            title: "Reminder Bot",
+            chatType: .privateChat(userId: 88),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-3_600)
+        )
+        let normalDM = makeChat(
+            id: 9,
+            title: "Normal DM",
+            chatType: .privateChat(userId: 99),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-1_800)
+        )
+
+        let base = SearchChatEligibilityFilter.collectCandidateChats(
+            from: [staleButEligibleDM, botDM, normalDM],
+            scope: .dms,
+            replyQueueQuery: true,
+            now: now
+        )
+        XCTAssertEqual(base.included.map(\.id), [staleButEligibleDM.id, botDM.id, normalDM.id])
+
+        let likelyFiltered = SearchChatEligibilityFilter.applyingLikelyBotFilter(
+            to: base,
+            includeBots: false,
+            isLikelyBot: { $0.id == botDM.id }
+        )
+        XCTAssertEqual(likelyFiltered.included.map(\.id), [staleButEligibleDM.id, normalDM.id])
+        XCTAssertTrue(likelyFiltered.exclusions.contains(.init(reason: "bot filtered", chatTitle: "Reminder Bot")))
+
+        let asyncFiltered = await SearchChatEligibilityFilter.applyingBotFilter(
+            to: base,
+            includeBots: false,
+            isBot: { $0.id == botDM.id }
+        )
+        XCTAssertEqual(asyncFiltered.included.map(\.id), [staleButEligibleDM.id, normalDM.id])
+        XCTAssertTrue(asyncFiltered.exclusions.contains(.init(reason: "bot filtered", chatTitle: "Reminder Bot")))
+    }
+
+    func testLauncherVisibleChatsFilterHidesBotChatsWhenDisabled() {
+        let now = Date()
+        let botDM = makeChat(
+            id: 41,
+            title: "Reminder Bot",
+            chatType: .privateChat(userId: 141),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-60)
+        )
+        let normalDM = makeChat(
+            id: 42,
+            title: "Normal DM",
+            chatType: .privateChat(userId: 142),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-120)
+        )
+        let group = makeChat(
+            id: 43,
+            title: "Shipping Group",
+            chatType: .basicGroup(groupId: 143),
+            unreadCount: 1,
+            lastMessageDate: now.addingTimeInterval(-180),
+            memberCount: 6
+        )
+
+        let all = LauncherVisibleChatsFilter.filterChats(
+            from: [botDM, normalDM, group],
+            scope: .all,
+            pipelineMatchingIds: nil,
+            searchText: "",
+            searchResultChatIds: [],
+            includeBots: false,
+            isLikelyBot: { $0.id == botDM.id }
+        )
+        XCTAssertEqual(all.map(\.id), [normalDM.id, group.id])
+
+        let dms = LauncherVisibleChatsFilter.filterChats(
+            from: [botDM, normalDM, group],
+            scope: .dms,
+            pipelineMatchingIds: nil,
+            searchText: "",
+            searchResultChatIds: [],
+            includeBots: false,
+            isLikelyBot: { $0.id == botDM.id }
+        )
+        XCTAssertEqual(dms.map(\.id), [normalDM.id])
+    }
+
+    @MainActor
+    func testTelegramBotFilterDoesNotGuessFromTitleWithoutMetadata() {
+        let service = TelegramService()
+        let chat = makeChat(
+            id: 44,
+            title: "Reminder Bot",
+            chatType: .privateChat(userId: 144),
+            unreadCount: 0,
+            lastMessageDate: Date()
+        )
+
+        XCTAssertFalse(service.isLikelyBotChat(chat))
+    }
+
+    func testRelationGraphStoresTelegramBotMetadataAndFiltersPeopleLists() async throws {
+        try await withTempDatabase { _ in
+            await RelationGraph.shared.upsertNode(
+                entityId: 141,
+                type: AppConstants.Graph.userEntityType,
+                name: "Poke",
+                username: "interaction_poke_bot",
+                isBot: true
+            )
+            await RelationGraph.shared.upsertNode(
+                entityId: 142,
+                type: AppConstants.Graph.userEntityType,
+                name: "Parth",
+                username: nil,
+                isBot: false
+            )
+
+            let bot = await RelationGraph.shared.getNode(entityId: 141)
+            XCTAssertEqual(bot?.isBot, true)
+
+            let human = await RelationGraph.shared.getNode(entityId: 142)
+            XCTAssertEqual(human?.isBot, false)
+
+            let topContacts = await RelationGraph.shared.topContacts(category: nil, limit: 10)
+            XCTAssertEqual(topContacts.map(\.entityId), [142])
+
+            let contactsByCategory = await RelationGraph.shared.contactsByCategory()
+            let groupedContactIds = Set(contactsByCategory.values.flatMap { $0.map(\.entityId) })
+            XCTAssertFalse(groupedContactIds.contains(141))
+            XCTAssertTrue(groupedContactIds.contains(142))
+        }
+    }
+
+    func testRelationGraphPreservesBotMetadataWhenLaterUpsertLacksMetadata() async throws {
+        try await withTempDatabase { _ in
+            await RelationGraph.shared.upsertNode(
+                entityId: 151,
+                type: AppConstants.Graph.userEntityType,
+                name: "Reminder",
+                username: "reminder",
+                isBot: true
+            )
+            await RelationGraph.shared.upsertNode(
+                entityId: 151,
+                type: AppConstants.Graph.userEntityType,
+                name: "Reminder renamed",
+                username: nil
+            )
+
+            let node = await RelationGraph.shared.getNode(entityId: 151)
+            XCTAssertEqual(node?.displayName, "Reminder renamed")
+            XCTAssertEqual(node?.isBot, true)
+        }
+    }
+
+    func testLauncherChatPreviewResolverUsesRecentContextWhenLatestMessageIsOpaqueMedia() {
+        let now = Date()
+        let chatId: Int64 = 4301
+        let currentMessage = makeTGMessage(
+            id: 43011,
+            chatId: chatId,
+            text: nil,
+            date: now,
+            mediaType: .photo
+        )
+        let earlierContext = makeTGMessage(
+            id: 43010,
+            chatId: chatId,
+            text: "Need to lock the invite copy before tonight.",
+            date: now.addingTimeInterval(-60)
+        )
+        let chat = TGChat(
+            id: chatId,
+            title: "Ahaan Raizada | Brainstorm",
+            chatType: .privateChat(userId: 301),
+            unreadCount: 0,
+            lastMessage: currentMessage,
+            memberCount: nil,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+
+        let resolution = LauncherChatPreviewResolver.resolvePreview(
+            for: chat,
+            recentMessages: [currentMessage, earlierContext]
+        )
+
+        XCTAssertEqual(resolution.text, "Need to lock the invite copy before tonight.")
+        XCTAssertEqual(resolution.source, .recentContext)
+    }
+
+    func testLauncherChatPreviewResolverHidesOpaqueMediaWithoutUsefulContext() {
+        let now = Date()
+        let chatId: Int64 = 4302
+        let currentMessage = makeTGMessage(
+            id: 43021,
+            chatId: chatId,
+            text: nil,
+            date: now,
+            mediaType: .photo
+        )
+        let chat = TGChat(
+            id: chatId,
+            title: "Media Only Chat",
+            chatType: .privateChat(userId: 302),
+            unreadCount: 0,
+            lastMessage: currentMessage,
+            memberCount: nil,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+
+        let resolution = LauncherChatPreviewResolver.resolvePreview(
+            for: chat,
+            recentMessages: [currentMessage]
+        )
+
+        XCTAssertEqual(resolution.text, "")
+        XCTAssertEqual(resolution.source, .none)
+    }
+
+    func testLauncherChatPreviewResolverKeepsSpecificMediaSlugOnCurrentMessage() {
+        let now = Date()
+        let chatId: Int64 = 4303
+        let currentMessage = makeTGMessage(
+            id: 43031,
+            chatId: chatId,
+            text: "pitch-deck-v4.pdf",
+            date: now,
+            mediaType: .document
+        )
+        let earlierContext = makeTGMessage(
+            id: 43030,
+            chatId: chatId,
+            text: "Sharing the latest deck now.",
+            date: now.addingTimeInterval(-60)
+        )
+        let chat = TGChat(
+            id: chatId,
+            title: "Deck Thread",
+            chatType: .privateChat(userId: 303),
+            unreadCount: 0,
+            lastMessage: currentMessage,
+            memberCount: nil,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+
+        let resolution = LauncherChatPreviewResolver.resolvePreview(
+            for: chat,
+            recentMessages: [currentMessage, earlierContext]
+        )
+
+        XCTAssertEqual(resolution.text, "pitch-deck-v4.pdf")
+        XCTAssertEqual(resolution.source, .currentMessage)
+    }
+
+    func testLauncherChatPreviewResolverSkipsSyntheticPlaceholderContext() {
+        let now = Date()
+        let chatId: Int64 = 4304
+        let currentMessage = makeTGMessage(
+            id: 43041,
+            chatId: chatId,
+            text: nil,
+            date: now,
+            mediaType: .photo
+        )
+        let syntheticPlaceholder = makeTGMessage(
+            id: 43040,
+            chatId: chatId,
+            text: "[Media]",
+            date: now.addingTimeInterval(-60)
+        )
+        let realContext = makeTGMessage(
+            id: 43039,
+            chatId: chatId,
+            text: "Need to review the brainstorm notes before tomorrow.",
+            date: now.addingTimeInterval(-120)
+        )
+        let chat = TGChat(
+            id: chatId,
+            title: "Placeholder Cache Chat",
+            chatType: .privateChat(userId: 304),
+            unreadCount: 0,
+            lastMessage: currentMessage,
+            memberCount: nil,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+
+        let resolution = LauncherChatPreviewResolver.resolvePreview(
+            for: chat,
+            recentMessages: [currentMessage, syntheticPlaceholder, realContext]
+        )
+
+        XCTAssertEqual(resolution.text, "Need to review the brainstorm notes before tomorrow.")
+        XCTAssertEqual(resolution.source, .recentContext)
+    }
+
+    func testFollowUpPipelineAnalyzerCollectCandidateChatsExcludesLikelyBotsWhenDisabled() {
+        let now = Date()
+        let botDM = makeChat(
+            id: 51,
+            title: "Reminder Bot",
+            chatType: .privateChat(userId: 151),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-60)
+        )
+        let normalDM = makeChat(
+            id: 52,
+            title: "Normal DM",
+            chatType: .privateChat(userId: 152),
+            unreadCount: 0,
+            lastMessageDate: now.addingTimeInterval(-120)
+        )
+
+        let result = FollowUpPipelineAnalyzer.collectCandidateChats(
+            from: [botDM, normalDM],
+            includeBots: false,
+            isLikelyBot: { $0.id == botDM.id }
+        )
+
+        XCTAssertEqual(result.map(\.id), [normalDM.id])
+    }
+
+    func testFollowUpPipelineAnalyzerFillsBlankOnMeSuggestion() {
+        let suggestion = FollowUpPipelineAnalyzer.fallbackSuggestedAction(
+            for: .onMe,
+            existing: "",
+            age: 600
+        )
+
+        XCTAssertEqual(suggestion, "Reply with a concrete next step.")
+    }
+
+    func testFollowUpPipelineAnalyzerFillsRecentOnThemSuggestionWhenBlank() {
+        let suggestion = FollowUpPipelineAnalyzer.fallbackSuggestedAction(
+            for: .onThem,
+            existing: nil,
+            age: 600
+        )
+
+        XCTAssertEqual(suggestion, "Wait for their next message.")
+    }
+
+    func testFollowUpPipelineAnalyzerClearsReplyStyleSuggestionForQuietCategory() {
+        let suggestion = FollowUpPipelineAnalyzer.fallbackSuggestedAction(
+            for: .quiet,
+            existing: "Reply with a concrete next step.",
+            age: 600
+        )
+
+        XCTAssertNil(suggestion)
+    }
+
+    func testFollowUpPipelineAnalyzerRepairsReplyStyleSuggestionForOnThemCategory() {
+        let suggestion = FollowUpPipelineAnalyzer.fallbackSuggestedAction(
+            for: .onThem,
+            existing: "Reply to Lakshay",
+            age: 600
+        )
+
+        XCTAssertEqual(suggestion, "Wait for their next message.")
+    }
+
+    @MainActor
+    func testFollowUpPipelineAnalyzerTrustsAIDecisionWithoutHeuristicOverride() async throws {
+        try await withTempDatabase { _ in
+            let myUserId: Int64 = 99
+            let latestOutbound = makeTGMessage(
+                id: 802,
+                chatId: 2014843525,
+                text: "Will send it tomorrow morning",
+                date: Date(timeIntervalSince1970: 1_776_714_640),
+                senderUserId: myUserId,
+                senderName: "Pratzyy",
+                isOutgoing: true
+            )
+            let priorInbound = makeTGMessage(
+                id: 801,
+                chatId: 2014843525,
+                text: "Need this today?",
+                date: Date(timeIntervalSince1970: 1_776_714_000),
+                senderUserId: 201,
+                senderName: "Rahul Singh Bhadoriya"
+            )
+            let chat = TGChat(
+                id: 2014843525,
+                title: "Rahul Singh Bhadoriya",
+                chatType: .privateChat(userId: 201),
+                unreadCount: 0,
+                lastMessage: latestOutbound,
+                memberCount: nil,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: myUserId,
+                    firstName: "Pratzyy",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: [chat.id: [latestOutbound, priorInbound]]
+            )
+            let aiService = AIService(
+                testingProvider: StubAIProvider(
+                    pipelineCategoryResult: PipelineCategoryDTO(
+                        status: "decision",
+                        category: "on_me",
+                        urgency: "high",
+                        suggestedAction: "Send the proposal"
+                    )
+                )
+            )
+
+            let item = await FollowUpPipelineAnalyzer.categorizeChat(
+                chat: chat,
+                myUserId: myUserId,
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
+            XCTAssertEqual(item?.category, .onMe)
+            XCTAssertEqual(item?.suggestedAction, "Send the proposal")
+
+            let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chat.id)
+            XCTAssertEqual(cached?.category, "on_me")
+            XCTAssertEqual(cached?.suggestedAction, "Send the proposal")
+        }
+    }
+
+    @MainActor
+    func testFollowUpPipelineAnalyzerUsesAIForSmallGroups() async throws {
+        try await withTempDatabase { _ in
+            let myUserId: Int64 = 99
+            let callCounter = PipelineCategorizationCallCounter()
+            let messages = [
+                makeTGMessage(
+                    id: 2520776704,
+                    chatId: -1003542166930,
+                    text: "Can you send the event recap?",
+                    date: Date(timeIntervalSince1970: 1_775_732_000),
+                    senderUserId: 44,
+                    senderName: "Akhil B"
+                ),
+                makeTGMessage(
+                    id: 2520776705,
+                    chatId: -1003542166930,
+                    text: "Sure, will do it in 10 mins",
+                    date: Date(timeIntervalSince1970: 1_775_735_000),
+                    senderUserId: myUserId,
+                    senderName: "Pratzyy",
+                    isOutgoing: true
+                )
+            ]
+            let chat = TGChat(
+                id: -1003542166930,
+                title: "Small Inner Circle",
+                chatType: .supergroup(supergroupId: 88, isChannel: false),
+                unreadCount: 0,
+                lastMessage: messages.last,
+                memberCount: 12,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: myUserId,
+                    firstName: "Pratzyy",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: [chat.id: messages],
+                resolvedMemberCounts: [chat.id: 12]
+            )
+            let aiService = AIService(
+                testingProvider: CountingPipelineAIProvider(
+                    callCounter: callCounter,
+                    pipelineCategoryResult: PipelineCategoryDTO(
+                        status: "decision",
+                        category: "on_me",
+                        urgency: "high",
+                        suggestedAction: "Send the recap"
+                    )
+                )
+            )
+
+            let item = await FollowUpPipelineAnalyzer.categorizeChat(
+                chat: chat,
+                myUserId: myUserId,
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
+            XCTAssertEqual(item?.category, .onMe)
+            XCTAssertEqual(item?.suggestedAction, "Send the recap")
+            let aiCallCount = await callCounter.currentValue()
+            XCTAssertEqual(aiCallCount, 1)
+
+            let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chat.id)
+            XCTAssertEqual(cached?.category, "on_me")
+            XCTAssertEqual(cached?.suggestedAction, "Send the recap")
+        }
+    }
+
+    @MainActor
+    func testFollowUpPipelineAnalyzerUsesLocalRulesForUnknownSizeGroups() async throws {
+        try await withTempDatabase { _ in
+            let myUserId: Int64 = 99
+            let callCounter = PipelineCategorizationCallCounter()
+            let messages = [
+                makeTGMessage(
+                    id: 2520776704,
+                    chatId: -1003542166929,
+                    text: "i cant remember the name, it was like cafe plus co workinh vibe (not dark) had a glass room conference situation",
+                    date: Date(timeIntervalSince1970: 1_775_660_000),
+                    senderUserId: 42,
+                    senderName: "Rajanshee Singh"
+                ),
+                makeTGMessage(
+                    id: 2542796800,
+                    chatId: -1003542166929,
+                    text: "yc startup school is first come first serve. many good profiles got rejected. we should definelty use the chance to put our brand first and do something.",
+                    date: Date(timeIntervalSince1970: 1_775_724_000),
+                    senderUserId: 43,
+                    senderName: "Unknown"
+                ),
+                makeTGMessage(
+                    id: 2570059776,
+                    chatId: -1003542166929,
+                    text: "few things : - have our builders to showcase at their event. doesn’t have to do a buildathon, just pick top past people to present from our communities - us as speakers representing agentic summer",
+                    date: Date(timeIntervalSince1970: 1_775_732_000),
+                    senderUserId: 44,
+                    senderName: "Akhil B"
+                ),
+                makeTGMessage(
+                    id: 2587885568,
+                    chatId: -1003542166929,
+                    text: "thank you",
+                    date: Date(timeIntervalSince1970: 1_775_735_000),
+                    senderUserId: 45,
+                    senderName: "Priyanshu Ratnakar"
+                )
+            ]
+            let chat = TGChat(
+                id: -1003542166929,
+                title: "AI Weekends <> Inner Circle",
+                chatType: .supergroup(supergroupId: 88, isChannel: false),
+                unreadCount: 0,
+                lastMessage: messages.last,
+                memberCount: nil,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: myUserId,
+                    firstName: "Pratzyy",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: [chat.id: messages],
+                resolvedMemberCounts: [:]
+            )
+            let aiService = AIService(
+                testingProvider: CountingPipelineAIProvider(
+                    callCounter: callCounter,
+                    pipelineCategoryResult: PipelineCategoryDTO(
+                        status: "decision",
+                        category: "on_me",
+                        urgency: "high",
+                        suggestedAction: "Reply with event plan"
+                    )
+                )
+            )
+
+            let item = await FollowUpPipelineAnalyzer.categorizeChat(
+                chat: chat,
+                myUserId: myUserId,
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
+            XCTAssertEqual(item?.category, .quiet)
+            XCTAssertNil(item?.suggestedAction)
+            let aiCallCount = await callCounter.currentValue()
+            XCTAssertEqual(aiCallCount, 0)
+
+            let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chat.id)
+            XCTAssertEqual(cached?.category, "quiet")
+            XCTAssertEqual(cached?.suggestedAction, "")
+        }
+    }
+
+    func testMessageCacheServiceIgnoresLegacyPipelineCacheSchemaVersion() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 777
+            await DatabaseManager.shared.savePipelineCache(
+                DatabaseManager.PipelineCacheRecord(
+                    chatId: chatId,
+                    category: "on_me",
+                    suggestedAction: "Reply with a concrete next step.",
+                    lastMessageId: 9001,
+                    analyzedAt: Date(),
+                    schemaVersion: MessageCacheService.pipelineCacheSchemaVersion - 1
+                )
+            )
+
+            let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chatId)
+            XCTAssertNil(cached)
+        }
+    }
+
+    func testConversationReplyHeuristicsIgnoresUnreadBurstWithoutReplySignal() {
+        let myUserId: Int64 = 99
+        let chat = TGChat(
+            id: 2014843525,
+            title: "Rahul Singh Bhadoriya",
+            chatType: .privateChat(userId: 201),
+            unreadCount: 1,
+            lastMessage: nil,
+            memberCount: nil,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+        let messages = [
+            makeTGMessage(
+                id: 700,
+                chatId: chat.id,
+                text: "1966",
+                date: Date(timeIntervalSince1970: 1_775_852_994),
+                senderUserId: myUserId,
+                senderName: "Pratzyy",
+                isOutgoing: true
+            ),
+            makeTGMessage(
+                id: 701,
+                chatId: chat.id,
+                text: "https://etherscan.io/tx/0x6f935cbf381a36a10b57e5e9a5fbffba84b98a3046cbd6fe63a1b25735415e2c",
+                date: Date(timeIntervalSince1970: 1_775_853_276),
+                senderUserId: 201,
+                senderName: "Rahul Singh Bhadoriya"
+            ),
+            makeTGMessage(
+                id: 702,
+                chatId: chat.id,
+                text: "We still in the game",
+                date: Date(timeIntervalSince1970: 1_776_356_495),
+                senderUserId: 201,
+                senderName: "Rahul Singh Bhadoriya"
+            ),
+            makeTGMessage(
+                id: 703,
+                chatId: chat.id,
+                text: "Mazedar",
+                date: Date(timeIntervalSince1970: 1_776_714_640),
+                senderUserId: 201,
+                senderName: "Rahul Singh Bhadoriya"
+            )
+        ]
+
+        XCTAssertFalse(
+            ConversationReplyHeuristics.hasPendingReplySignal(
+                chat: chat,
+                messages: messages,
+                myUserId: myUserId
+            )
+        )
+    }
+
+    func testAppLaunchPresentationModeDefaultsToMenuBarPanel() {
+        let mode = AppLaunchPresentationMode.resolve(
+            environment: [:],
+            allowsDebugWindow: true
+        )
+
+        XCTAssertEqual(mode, .menuBarPanel)
+    }
+
+    func testAppLaunchPresentationModeUsesDebugWindowWhenEnvEnabled() {
+        let mode = AppLaunchPresentationMode.resolve(
+            environment: [AppLaunchPresentationMode.environmentKey: "1"],
+            allowsDebugWindow: true
+        )
+
+        XCTAssertEqual(mode, .debugWindow)
     }
 
     func testQueryInterpreterRoutesCoreMVPQueries() {
@@ -164,6 +1856,44 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(summaryExpanded.preferredEngine, .summarize)
         XCTAssertNotNil(summaryExpanded.timeRange)
 
+        let builderProgramSummary = interpreter.parse(
+            query: "What did we discuss about the builder program with Jack and Emma?",
+            now: now,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            activeFilter: .all
+        )
+        XCTAssertEqual(builderProgramSummary.family, .summary)
+        XCTAssertEqual(builderProgramSummary.preferredEngine, .summarize)
+
+        let latestWithAkhil = interpreter.parse(
+            query: "What's the latest with Akhil?",
+            now: now,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            activeFilter: .all
+        )
+        XCTAssertEqual(latestWithAkhil.family, .summary)
+        XCTAssertEqual(latestWithAkhil.preferredEngine, .summarize)
+
+        let akhilDiscussion = interpreter.parse(
+            query: "What did Akhil and I discuss last week?",
+            now: now,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            activeFilter: .all
+        )
+        XCTAssertEqual(akhilDiscussion.family, .summary)
+        XCTAssertEqual(akhilDiscussion.preferredEngine, .summarize)
+        XCTAssertNotNil(akhilDiscussion.timeRange)
+
+        let worthCheckingGroups = interpreter.parse(
+            query: "anything worth checking in groups?",
+            now: now,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            activeFilter: .all
+        )
+        XCTAssertEqual(worthCheckingGroups.family, .replyQueue)
+        XCTAssertEqual(worthCheckingGroups.preferredEngine, .replyTriage)
+        XCTAssertEqual(worthCheckingGroups.scope, .groups)
+
         let relationship = interpreter.parse(
             query: "What is the current state of my relationship with Rahul?",
             now: now,
@@ -180,6 +1910,203 @@ final class PidgyCoreTests: XCTestCase {
             activeFilter: .all
         )
         XCTAssertEqual(staleRelationship.family, .relationship)
+    }
+
+    @MainActor
+    func testSearchCoordinatorShowsImmediateSummaryLoadingStateForDeterministicSummaryPrompt() {
+        let aiService = AIService()
+        aiService.configure(type: .none, apiKey: "")
+        let coordinator = SearchCoordinator()
+        let telegramService = TestTelegramService(scoredHits: [], vectorHits: [])
+
+        coordinator.triggerSearch(
+            query: "What are the key takeaways from chat with Akhil?",
+            activeScope: .all,
+            aiSearchSourceChats: [],
+            scopedAISearchSourceChats: [],
+            includeBotsInAISearch: false,
+            telegramService: telegramService,
+            aiService: aiService,
+            pipelineCategoryProvider: { _ in nil },
+            pipelineHintProvider: { _ in "unknown" }
+        )
+
+        XCTAssertEqual(coordinator.aiSearchMode, .summarySearch)
+        XCTAssertTrue(coordinator.isAISearching)
+        XCTAssertNotNil(coordinator.searchStartedAt)
+    }
+
+    @MainActor
+    func testSearchCoordinatorShowsImmediateReplyQueueLoadingStateForWorthCheckingPrompt() {
+        let aiService = AIService()
+        aiService.configure(type: .none, apiKey: "")
+        let coordinator = SearchCoordinator()
+        let telegramService = TestTelegramService(scoredHits: [], vectorHits: [])
+
+        coordinator.triggerSearch(
+            query: "anything worth checking in groups?",
+            activeScope: .all,
+            aiSearchSourceChats: [],
+            scopedAISearchSourceChats: [],
+            includeBotsInAISearch: false,
+            telegramService: telegramService,
+            aiService: aiService,
+            pipelineCategoryProvider: { _ in nil },
+            pipelineHintProvider: { _ in "unknown" }
+        )
+
+        XCTAssertEqual(coordinator.aiSearchMode, .agenticSearch)
+        XCTAssertTrue(coordinator.isAISearching)
+        XCTAssertNotNil(coordinator.searchStartedAt)
+    }
+
+    @MainActor
+    func testWorthCheckingPromptRunsDedicatedReplyQueuePath() async throws {
+        try await withTempDatabase { _ in
+            let myUserId: Int64 = 100
+            let chatId: Int64 = -7_001
+            let now = Date()
+            let message = makeTGMessage(
+                id: 12,
+                chatId: chatId,
+                text: "Pratzyy can you review this before launch?",
+                date: now.addingTimeInterval(-60),
+                senderUserId: 201,
+                senderName: "Alice"
+            )
+            let groupChat = TGChat(
+                id: chatId,
+                title: "Launch Group",
+                chatType: .supergroup(supergroupId: 7001, isChannel: false),
+                unreadCount: 1,
+                lastMessage: message,
+                memberCount: 5,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await MessageCacheService.shared.cacheMessages(chatId: chatId, messages: [message], append: false)
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: myUserId,
+                    firstName: "Pratzyy",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: [chatId: [message]]
+            )
+            let aiService = AIService()
+            aiService.configure(type: .none, apiKey: "")
+            let coordinator = SearchCoordinator()
+            let querySpec = QueryInterpreter().parse(
+                query: "anything worth checking in groups?",
+                now: now,
+                timezone: TimeZone(secondsFromGMT: 0)!,
+                activeFilter: .all
+            )
+
+            let results = try await coordinator.executeAgenticSearch(
+                query: "anything worth checking in groups?",
+                querySpec: querySpec,
+                searchRunID: coordinator.activeSearchRunID,
+                activeScope: .all,
+                aiSearchSourceChats: [groupChat],
+                includeBotsInAISearch: false,
+                telegramService: telegramService,
+                aiService: aiService,
+                pipelineCategoryProvider: { _ in nil },
+                pipelineHintProvider: { _ in "quiet" }
+            )
+
+            XCTAssertTrue(results.contains { result in
+                if case .replyQueueResult = result { return true }
+                return false
+            })
+            XCTAssertFalse(results.contains { result in
+                if case .agenticResult = result { return true }
+                return false
+            })
+        }
+    }
+
+    @MainActor
+    func testQueryRouterUsesAIPlannerFallbackForAmbiguousSummaryPrompt() async {
+        let plannerResult = QueryPlannerResultDTO(
+            family: "summary",
+            scope: "inherit",
+            timeRange: "last_week",
+            people: ["jack", "emma"],
+            topicTerms: ["builder program"],
+            confidence: 0.93
+        )
+        let router = QueryRouter(
+            aiProvider: StubAIProvider(queryPlannerResult: plannerResult),
+            queryInterpreter: QueryInterpreter()
+        )
+        let now = Date(timeIntervalSince1970: 1_744_329_600)
+
+        let resolved = await router.resolveQuerySpec(
+            query: "Jack and Emma builder program context?",
+            activeFilter: .all,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            now: now
+        )
+
+        XCTAssertEqual(resolved.family, .summary)
+        XCTAssertEqual(resolved.preferredEngine, .summarize)
+        XCTAssertNotNil(resolved.timeRange)
+        XCTAssertEqual(resolved.plannerHints?.people, ["jack", "emma"])
+        XCTAssertEqual(resolved.plannerHints?.topicTerms, ["builder", "program"])
+        XCTAssertGreaterThanOrEqual(resolved.parseConfidence, 0.93)
+    }
+
+    @MainActor
+    func testQueryRouterPlannerCanClearFalsePositiveMonthRange() async {
+        let plannerResult = QueryPlannerResultDTO(
+            family: "reply_queue",
+            scope: "groups",
+            timeRange: "none",
+            people: [],
+            topicTerms: [],
+            confidence: 0.95
+        )
+        let router = QueryRouter(
+            aiProvider: StubAIProvider(queryPlannerResult: plannerResult),
+            queryInterpreter: QueryInterpreter()
+        )
+        let now = Date(timeIntervalSince1970: 1_777_065_600)
+
+        let resolved = await router.resolveQuerySpec(
+            query: "anything may be worth checking in groups?",
+            activeFilter: .all,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            now: now
+        )
+
+        XCTAssertEqual(resolved.family, .replyQueue)
+        XCTAssertNil(resolved.timeRange)
+    }
+
+    @MainActor
+    func testQueryRouterFallsBackWhenAIPlannerFails() async {
+        let router = QueryRouter(
+            aiProvider: StubAIProvider(queryPlannerError: AIError.providerNotConfigured),
+            queryInterpreter: QueryInterpreter()
+        )
+        let now = Date(timeIntervalSince1970: 1_744_329_600)
+
+        let resolved = await router.resolveQuerySpec(
+            query: "Jack and Emma builder program context?",
+            activeFilter: .all,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            now: now
+        )
+
+        XCTAssertEqual(resolved.family, .topicSearch)
+        XCTAssertEqual(resolved.preferredEngine, .semanticRetrieval)
+        XCTAssertNil(resolved.plannerHints)
     }
 
     @MainActor
@@ -201,13 +2128,102 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(claude.model, "claude-custom")
     }
 
+    func testKeychainManagerUsesNativeKeychainForAISecretsWhenForcedForTesting() throws {
+        let service = "pidgy.tests.\(UUID().uuidString)"
+        KeychainManager.configureForTesting(
+            storageDirectoryOverride: tempCredentialDirectory,
+            keychainServiceOverride: service,
+            nativeKeyOverride: [.aiApiKeyOpenAI]
+        )
+        defer {
+            try? KeychainManager.delete(for: .aiApiKeyOpenAI)
+            KeychainManager.configureForTesting(storageDirectoryOverride: tempCredentialDirectory)
+        }
+
+        try KeychainManager.save("sk-native", for: .aiApiKeyOpenAI)
+        let retrieved = try XCTUnwrap(KeychainManager.retrieve(for: .aiApiKeyOpenAI))
+        XCTAssertEqual(retrieved, "sk-native")
+
+        if let tempCredentialDirectory {
+            let fileURL = tempCredentialDirectory.appendingPathComponent(KeychainManager.Key.aiApiKeyOpenAI.rawValue)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        }
+    }
+
+    func testKeychainManagerMigratesAISecretsFromFileToNativeKeychainWhenForcedForTesting() throws {
+        let service = "pidgy.tests.\(UUID().uuidString)"
+        try KeychainManager.save("sk-legacy-file", for: .aiApiKeyClaude)
+        let legacyFileURL = try XCTUnwrap(tempCredentialDirectory).appendingPathComponent(KeychainManager.Key.aiApiKeyClaude.rawValue)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacyFileURL.path))
+
+        KeychainManager.configureForTesting(
+            storageDirectoryOverride: tempCredentialDirectory,
+            keychainServiceOverride: service,
+            nativeKeyOverride: [.aiApiKeyClaude]
+        )
+        defer {
+            try? KeychainManager.delete(for: .aiApiKeyClaude)
+            KeychainManager.configureForTesting(storageDirectoryOverride: tempCredentialDirectory)
+        }
+
+        let migrated = try XCTUnwrap(KeychainManager.retrieve(for: .aiApiKeyClaude))
+        XCTAssertEqual(migrated, "sk-legacy-file")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyFileURL.path))
+
+        try KeychainManager.delete(for: .aiApiKeyClaude)
+        XCTAssertNil(try KeychainManager.retrieve(for: .aiApiKeyClaude))
+
+        if let tempCredentialDirectory {
+            let fileURL = tempCredentialDirectory.appendingPathComponent(KeychainManager.Key.aiApiKeyClaude.rawValue)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        }
+    }
+
+    func testKeychainManagerTreatsTelegramAPIHashAsProductionNativeSecret() {
+        XCTAssertTrue(KeychainManager.usesNativeKeychainInProductionForTesting(.apiHash))
+    }
+
     @MainActor
     func testSummaryEngineBuildsFocusedRetrievalQueryForPersonScopedRecap() {
-        let retrieval = SummaryEngine.shared.retrievalQueryForTesting(
-            "What are the key takeaways from the last week with Akhil?"
+        let prompts = [
+            "What are the key takeaways from the last week with Akhil?",
+            "what are the key takeaways from chat with Akhil?",
+            "Catch me up on Akhil from last week.",
+            "What did Akhil and I discuss last week?",
+            "Summarize my recent Akhil chats.",
+            "What's the recent context from my Akhil chats?",
+            "Give me the last-week recap for Akhil.",
+            "Catch me up on the latest Akhil thread.",
+            "What's the latest with Akhil?"
+        ]
+
+        for prompt in prompts {
+            let retrieval = SummaryEngine.shared.retrievalQueryForTesting(prompt)
+            XCTAssertEqual(retrieval, "akhil", prompt)
+        }
+    }
+
+    @MainActor
+    func testSummaryEngineKeepsDuplicateMessageIdsFromDifferentChats() {
+        let first = makeTGMessage(
+            id: 7001,
+            chatId: 8801,
+            text: "First chat context should stay in the merge.",
+            date: Date().addingTimeInterval(-60)
+        )
+        let second = makeTGMessage(
+            id: 7001,
+            chatId: 8802,
+            text: "Second chat context should also stay in the merge.",
+            date: Date()
         )
 
-        XCTAssertEqual(retrieval, "akhil")
+        let merged = SummaryEngine.shared.mergedSummaryMessagesForTesting(
+            cached: [first],
+            local: [second]
+        )
+
+        XCTAssertEqual(Set(merged.map { "\($0.chatId):\($0.id)" }), Set(["8801:7001", "8802:7001"]))
     }
 
     @MainActor
@@ -298,8 +2314,8 @@ final class PidgyCoreTests: XCTestCase {
     func testSummaryEngineMergesDurableHistoryWithRecentCacheWhenNoTimeRange() async throws {
         try await withTempDatabase { _ in
             let chatId: Int64 = 7771
-            let olderDate = Date(timeIntervalSince1970: 1_744_100_000)
-            let recentDate = Date(timeIntervalSince1970: 1_744_700_000)
+            let recentDate = Date().addingTimeInterval(-10 * 60)
+            let olderDate = recentDate.addingTimeInterval(-2 * 86_400)
 
             let decisionRecord = makeRecord(
                 id: 511,
@@ -704,6 +2720,649 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testSummaryEnginePrefersFocusedAkhilContextAcrossPromptVariants() async throws {
+        try await withTempDatabase { _ in
+            let genericChatId: Int64 = 7803
+            let focusedChatId: Int64 = 7804
+            let withinRange = Date(timeIntervalSince1970: 1_776_172_247)
+
+            let genericRecord = DatabaseManager.MessageRecord(
+                id: 801,
+                chatId: genericChatId,
+                senderUserId: 91,
+                senderName: "Core Member",
+                date: withinRange,
+                textContent: "Akhil join emergent",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let focusedFirstRecord = DatabaseManager.MessageRecord(
+                id: 802,
+                chatId: focusedChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: withinRange.addingTimeInterval(-2 * 86_400),
+                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let focusedSecondRecord = DatabaseManager.MessageRecord(
+                id: 803,
+                chatId: focusedChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: withinRange.addingTimeInterval(-1 * 86_400),
+                textContent: "lifi will confirm their 5k in a bit.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: genericChatId,
+                messages: [genericRecord],
+                preferredOldestMessageId: genericRecord.id,
+                isSearchReady: true
+            )
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: focusedChatId,
+                messages: [focusedFirstRecord, focusedSecondRecord],
+                preferredOldestMessageId: focusedFirstRecord.id,
+                isSearchReady: true
+            )
+            await MessageCacheService.shared.invalidateAll()
+
+            let genericMessage = TGMessage(
+                id: genericRecord.id,
+                chatId: genericChatId,
+                senderId: .user(91),
+                date: genericRecord.date,
+                textContent: genericRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "Core(EANSG)",
+                senderName: genericRecord.senderName
+            )
+            let focusedFirstMessage = TGMessage(
+                id: focusedFirstRecord.id,
+                chatId: focusedChatId,
+                senderId: .user(42),
+                date: focusedFirstRecord.date,
+                textContent: focusedFirstRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: focusedFirstRecord.senderName
+            )
+            let focusedSecondMessage = TGMessage(
+                id: focusedSecondRecord.id,
+                chatId: focusedChatId,
+                senderId: .user(42),
+                date: focusedSecondRecord.date,
+                textContent: focusedSecondRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: focusedSecondRecord.senderName
+            )
+
+            let genericChat = TGChat(
+                id: genericChatId,
+                title: "Core(EANSG)",
+                chatType: .supergroup(supergroupId: 89, isChannel: false),
+                unreadCount: 0,
+                lastMessage: genericMessage,
+                memberCount: nil,
+                order: 3,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let focusedChat = TGChat(
+                id: focusedChatId,
+                title: "AI Weekends <> Inner Circle",
+                chatType: .supergroup(supergroupId: 90, isChannel: false),
+                unreadCount: 0,
+                lastMessage: focusedSecondMessage,
+                memberCount: nil,
+                order: 2,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            let prompts = [
+                "What are the key takeaways from the last week with Akhil?",
+                "what are the key takeaways from chat with Akhil?",
+                "Catch me up on Akhil from last week."
+            ]
+
+            for prompt in prompts {
+                let timeRange = TimeRangeConstraint(
+                    startDate: withinRange.addingTimeInterval(-7 * 86_400),
+                    endDate: withinRange.addingTimeInterval(60),
+                    label: "Last week"
+                )
+                let querySpec = QuerySpec(
+                    rawQuery: prompt,
+                    mode: .summarySearch,
+                    family: .summary,
+                    preferredEngine: .summarize,
+                    scope: .all,
+                    scopeWasExplicit: false,
+                    replyConstraint: .none,
+                    timeRange: timeRange,
+                    parseConfidence: 0.9,
+                    unsupportedFragments: []
+                )
+
+                let telegramService = TestTelegramService(
+                    scoredHits: [
+                        .init(message: genericMessage, score: 0.96),
+                        .init(message: focusedFirstMessage, score: 0.72),
+                        .init(message: focusedSecondMessage, score: 0.69)
+                    ],
+                    vectorHits: []
+                )
+                let aiService = AIService()
+                aiService.configure(type: .none, apiKey: "")
+
+                let execution = await SummaryEngine.shared.search(
+                    query: querySpec,
+                    scope: .all,
+                    scopedChats: [genericChat, focusedChat],
+                    telegramService: telegramService,
+                    aiService: aiService
+                )
+
+                let output = try XCTUnwrap(execution.output, prompt)
+                XCTAssertEqual(output.supportingChatId, focusedChatId, prompt)
+                XCTAssertTrue(output.summaryText.lowercased().contains("builders"), prompt)
+                XCTAssertTrue(output.summaryText.lowercased().contains("5k"), prompt)
+                XCTAssertFalse(output.summaryText.lowercased().contains("emergent"), prompt)
+            }
+        }
+    }
+
+    @MainActor
+    func testSummaryEngineDefaultsSingleEntityRecapToRecentContextWithoutExplicitTimeRange() async throws {
+        try await withTempDatabase { _ in
+            let oldChatId: Int64 = 7805
+            let recentChatId: Int64 = 7806
+            let now = Date()
+            let oldDate = now.addingTimeInterval(-40 * 86_400)
+            let recentDate = now.addingTimeInterval(-2 * 86_400)
+
+            let oldRecord = DatabaseManager.MessageRecord(
+                id: 811,
+                chatId: oldChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: oldDate,
+                textContent: "Old Akhil planning thread about media articles and SEO that should not win a recent recap by default.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let recentFirstRecord = DatabaseManager.MessageRecord(
+                id: 812,
+                chatId: recentChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: recentDate,
+                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let recentSecondRecord = DatabaseManager.MessageRecord(
+                id: 813,
+                chatId: recentChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: recentDate.addingTimeInterval(300),
+                textContent: "lifi will confirm their 5k in a bit.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: oldChatId,
+                messages: [oldRecord],
+                preferredOldestMessageId: oldRecord.id,
+                isSearchReady: true
+            )
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: recentChatId,
+                messages: [recentFirstRecord, recentSecondRecord],
+                preferredOldestMessageId: recentFirstRecord.id,
+                isSearchReady: true
+            )
+            await MessageCacheService.shared.invalidateAll()
+
+            let oldMessage = TGMessage(
+                id: oldRecord.id,
+                chatId: oldChatId,
+                senderId: .user(42),
+                date: oldRecord.date,
+                textContent: oldRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "Akhil B",
+                senderName: "Akhil B"
+            )
+            let recentFirstMessage = TGMessage(
+                id: recentFirstRecord.id,
+                chatId: recentChatId,
+                senderId: .user(42),
+                date: recentFirstRecord.date,
+                textContent: recentFirstRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: "Akhil B"
+            )
+            let recentSecondMessage = TGMessage(
+                id: recentSecondRecord.id,
+                chatId: recentChatId,
+                senderId: .user(42),
+                date: recentSecondRecord.date,
+                textContent: recentSecondRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: "Akhil B"
+            )
+
+            let oldChat = TGChat(
+                id: oldChatId,
+                title: "Akhil B",
+                chatType: .privateChat(userId: 42),
+                unreadCount: 0,
+                lastMessage: oldMessage,
+                memberCount: nil,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let recentChat = TGChat(
+                id: recentChatId,
+                title: "AI Weekends <> Inner Circle",
+                chatType: .supergroup(supergroupId: 91, isChannel: false),
+                unreadCount: 0,
+                lastMessage: recentSecondMessage,
+                memberCount: nil,
+                order: 2,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            let querySpec = QuerySpec(
+                rawQuery: "Give me a quick recap of my chats with Akhil.",
+                mode: .summarySearch,
+                family: .summary,
+                preferredEngine: .summarize,
+                scope: .all,
+                scopeWasExplicit: false,
+                replyConstraint: .none,
+                timeRange: nil,
+                parseConfidence: 0.9,
+                unsupportedFragments: []
+            )
+
+            let telegramService = TestTelegramService(
+                scoredHits: [
+                    .init(message: oldMessage, score: 0.98),
+                    .init(message: recentFirstMessage, score: 0.73),
+                    .init(message: recentSecondMessage, score: 0.71)
+                ],
+                vectorHits: []
+            )
+            let aiService = AIService()
+            aiService.configure(type: .none, apiKey: "")
+
+            let execution = await SummaryEngine.shared.search(
+                query: querySpec,
+                scope: .all,
+                scopedChats: [oldChat, recentChat],
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
+            let output = try XCTUnwrap(execution.output)
+            XCTAssertEqual(output.supportingChatId, recentChatId)
+            XCTAssertTrue(output.summaryText.lowercased().contains("builders"))
+            XCTAssertTrue(output.summaryText.lowercased().contains("5k"))
+            XCTAssertFalse(output.summaryText.lowercased().contains("seo"))
+        }
+    }
+
+    @MainActor
+    func testSummaryEngineCombinesTopRecentAnchoredChatsForPersonScopedRecap() async throws {
+        try await withTempDatabase { _ in
+            let strategyChatId: Int64 = 7807
+            let eventsChatId: Int64 = 7808
+            let now = Date()
+            let strategyDate = now.addingTimeInterval(-3 * 86_400)
+            let eventsDate = now.addingTimeInterval(-2 * 86_400)
+
+            let strategyFirstRecord = DatabaseManager.MessageRecord(
+                id: 821,
+                chatId: strategyChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: strategyDate,
+                textContent: "i need to setup a media team and travel budgets to execute.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let strategySecondRecord = DatabaseManager.MessageRecord(
+                id: 822,
+                chatId: strategyChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: strategyDate.addingTimeInterval(240),
+                textContent: "need to crack sponsorship for this.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let eventsFirstRecord = DatabaseManager.MessageRecord(
+                id: 823,
+                chatId: eventsChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: eventsDate,
+                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let eventsSecondRecord = DatabaseManager.MessageRecord(
+                id: 824,
+                chatId: eventsChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: eventsDate.addingTimeInterval(300),
+                textContent: "lifi will confirm their 5k in a bit.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: strategyChatId,
+                messages: [strategyFirstRecord, strategySecondRecord],
+                preferredOldestMessageId: strategyFirstRecord.id,
+                isSearchReady: true
+            )
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: eventsChatId,
+                messages: [eventsFirstRecord, eventsSecondRecord],
+                preferredOldestMessageId: eventsFirstRecord.id,
+                isSearchReady: true
+            )
+            await MessageCacheService.shared.invalidateAll()
+
+            let strategyFirstMessage = TGMessage(
+                id: strategyFirstRecord.id,
+                chatId: strategyChatId,
+                senderId: .user(42),
+                date: strategyFirstRecord.date,
+                textContent: strategyFirstRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "Core(EANSG)",
+                senderName: "Akhil B"
+            )
+            let strategySecondMessage = TGMessage(
+                id: strategySecondRecord.id,
+                chatId: strategyChatId,
+                senderId: .user(42),
+                date: strategySecondRecord.date,
+                textContent: strategySecondRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "Core(EANSG)",
+                senderName: "Akhil B"
+            )
+            let eventsFirstMessage = TGMessage(
+                id: eventsFirstRecord.id,
+                chatId: eventsChatId,
+                senderId: .user(42),
+                date: eventsFirstRecord.date,
+                textContent: eventsFirstRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: "Akhil B"
+            )
+            let eventsSecondMessage = TGMessage(
+                id: eventsSecondRecord.id,
+                chatId: eventsChatId,
+                senderId: .user(42),
+                date: eventsSecondRecord.date,
+                textContent: eventsSecondRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: "Akhil B"
+            )
+
+            let strategyChat = TGChat(
+                id: strategyChatId,
+                title: "Core(EANSG)",
+                chatType: .supergroup(supergroupId: 92, isChannel: false),
+                unreadCount: 0,
+                lastMessage: strategySecondMessage,
+                memberCount: nil,
+                order: 3,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let eventsChat = TGChat(
+                id: eventsChatId,
+                title: "AI Weekends <> Inner Circle",
+                chatType: .supergroup(supergroupId: 93, isChannel: false),
+                unreadCount: 0,
+                lastMessage: eventsSecondMessage,
+                memberCount: nil,
+                order: 2,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            let querySpec = QuerySpec(
+                rawQuery: "Give me a quick recap of my chats with Akhil.",
+                mode: .summarySearch,
+                family: .summary,
+                preferredEngine: .summarize,
+                scope: .all,
+                scopeWasExplicit: false,
+                replyConstraint: .none,
+                timeRange: nil,
+                parseConfidence: 0.9,
+                unsupportedFragments: []
+            )
+
+            let telegramService = TestTelegramService(
+                scoredHits: [
+                    .init(message: strategyFirstMessage, score: 0.96),
+                    .init(message: strategySecondMessage, score: 0.91),
+                    .init(message: eventsFirstMessage, score: 0.73),
+                    .init(message: eventsSecondMessage, score: 0.71)
+                ],
+                vectorHits: []
+            )
+            let aiService = AIService()
+            aiService.configure(type: .none, apiKey: "")
+
+            let execution = await SummaryEngine.shared.search(
+                query: querySpec,
+                scope: .all,
+                scopedChats: [strategyChat, eventsChat],
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
+            let output = try XCTUnwrap(execution.output)
+            XCTAssertEqual(output.supportingChatId, strategyChatId)
+            XCTAssertTrue(output.title.contains("Recent Akhil Context"))
+            XCTAssertTrue(output.summaryText.lowercased().contains("media team"))
+            XCTAssertTrue(output.summaryText.lowercased().contains("builders"))
+            XCTAssertTrue(output.summaryText.lowercased().contains("5k"))
+            XCTAssertTrue(Set(output.supportingMessageIds).isSuperset(of: [821, 823]))
+        }
+    }
+
+    @MainActor
+    func testSummaryEngineDoesNotLetHighVolumePersonDMBeatRicherRecentContext() async throws {
+        try await withTempDatabase { _ in
+            let noisyDirectChatId: Int64 = 7809
+            let focusedGroupChatId: Int64 = 7810
+            let now = Date()
+
+            let directRecords: [DatabaseManager.MessageRecord] = (0..<12).map { index in
+                DatabaseManager.MessageRecord(
+                    id: Int64(830 + index),
+                    chatId: noisyDirectChatId,
+                    senderUserId: 42,
+                    senderName: "Akhil B",
+                    date: now.addingTimeInterval(TimeInterval(-(index + 1) * 300)),
+                    textContent: ["done", "one min", "check once", "hmm", "okay", "yess", "cool", "got it", "later", "noted", "fine", "send?"][index],
+                    mediaTypeRaw: nil,
+                    isOutgoing: false
+                )
+            }
+
+            let focusedFirstRecord = DatabaseManager.MessageRecord(
+                id: 850,
+                chatId: focusedGroupChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: now.addingTimeInterval(-2 * 86_400),
+                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let focusedSecondRecord = DatabaseManager.MessageRecord(
+                id: 851,
+                chatId: focusedGroupChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: now.addingTimeInterval(-2 * 86_400 + 300),
+                textContent: "lifi will confirm their 5k in a bit.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: noisyDirectChatId,
+                messages: directRecords,
+                preferredOldestMessageId: directRecords.last?.id ?? 830,
+                isSearchReady: true
+            )
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: focusedGroupChatId,
+                messages: [focusedFirstRecord, focusedSecondRecord],
+                preferredOldestMessageId: focusedFirstRecord.id,
+                isSearchReady: true
+            )
+            await MessageCacheService.shared.invalidateAll()
+
+            let directMessages = directRecords.map { record in
+                TGMessage(
+                    id: record.id,
+                    chatId: noisyDirectChatId,
+                    senderId: .user(42),
+                    date: record.date,
+                    textContent: record.textContent,
+                    mediaType: nil,
+                    isOutgoing: false,
+                    chatTitle: "Akhil B",
+                    senderName: "Akhil B"
+                )
+            }
+            let focusedFirstMessage = TGMessage(
+                id: focusedFirstRecord.id,
+                chatId: focusedGroupChatId,
+                senderId: .user(42),
+                date: focusedFirstRecord.date,
+                textContent: focusedFirstRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: "Akhil B"
+            )
+            let focusedSecondMessage = TGMessage(
+                id: focusedSecondRecord.id,
+                chatId: focusedGroupChatId,
+                senderId: .user(42),
+                date: focusedSecondRecord.date,
+                textContent: focusedSecondRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: "AI Weekends <> Inner Circle",
+                senderName: "Akhil B"
+            )
+
+            let noisyDirectChat = TGChat(
+                id: noisyDirectChatId,
+                title: "Akhil B",
+                chatType: .privateChat(userId: 42),
+                unreadCount: 0,
+                lastMessage: directMessages.first,
+                memberCount: nil,
+                order: 4,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let focusedGroupChat = TGChat(
+                id: focusedGroupChatId,
+                title: "AI Weekends <> Inner Circle",
+                chatType: .supergroup(supergroupId: 94, isChannel: false),
+                unreadCount: 0,
+                lastMessage: focusedSecondMessage,
+                memberCount: nil,
+                order: 3,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            let querySpec = QuerySpec(
+                rawQuery: "What are the key takeaways from chat with Akhil?",
+                mode: .summarySearch,
+                family: .summary,
+                preferredEngine: .summarize,
+                scope: .all,
+                scopeWasExplicit: false,
+                replyConstraint: .none,
+                timeRange: nil,
+                parseConfidence: 0.9,
+                unsupportedFragments: []
+            )
+
+            let scoredHits = directMessages.map { TelegramService.LocalMessageSearchHit(message: $0, score: 0.93) } + [
+                .init(message: focusedFirstMessage, score: 0.88),
+                .init(message: focusedSecondMessage, score: 0.87)
+            ]
+
+            let telegramService = TestTelegramService(
+                scoredHits: scoredHits,
+                vectorHits: []
+            )
+            let aiService = AIService()
+            aiService.configure(type: .none, apiKey: "")
+
+            let execution = await SummaryEngine.shared.search(
+                query: querySpec,
+                scope: .all,
+                scopedChats: [noisyDirectChat, focusedGroupChat],
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
+            let output = try XCTUnwrap(execution.output)
+            XCTAssertEqual(output.supportingChatId, focusedGroupChatId)
+            XCTAssertTrue(output.summaryText.lowercased().contains("builders"))
+            XCTAssertTrue(output.summaryText.lowercased().contains("5k"))
+            XCTAssertFalse(output.summaryText.lowercased().contains("check once"))
+        }
+    }
+
+    @MainActor
     func testSummaryEnginePrefersFocusedRecapChatOverGenericMentions() async throws {
         try await withTempDatabase { _ in
             let genericChatId: Int64 = 778
@@ -894,6 +3553,133 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testSummaryEnginePlannerHintsPreferSenderAnchoredAkhilChatOverIncidentalMention() async throws {
+        try await withTempDatabase { _ in
+            let genericChatId: Int64 = 8891
+            let focusedChatId: Int64 = 8892
+            let baseDate = Date().addingTimeInterval(-2 * 86_400)
+
+            let genericRecord = DatabaseManager.MessageRecord(
+                id: 991,
+                chatId: genericChatId,
+                senderUserId: 10,
+                senderName: "Core Member",
+                date: baseDate,
+                textContent: "Send location once Akhil",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+            let focusedRecord = DatabaseManager.MessageRecord(
+                id: 992,
+                chatId: focusedChatId,
+                senderUserId: 42,
+                senderName: "Akhil B",
+                date: baseDate.addingTimeInterval(-300),
+                textContent: "I'll get him added to our Claude plan to use.",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            )
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: genericChatId,
+                messages: [genericRecord],
+                preferredOldestMessageId: genericRecord.id,
+                isSearchReady: true
+            )
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: focusedChatId,
+                messages: [focusedRecord],
+                preferredOldestMessageId: focusedRecord.id,
+                isSearchReady: true
+            )
+
+            let genericChat = TGChat(
+                id: genericChatId,
+                title: "Core(EANSG)",
+                chatType: .basicGroup(groupId: genericChatId),
+                unreadCount: 0,
+                lastMessage: nil,
+                memberCount: 8,
+                order: 2,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let focusedChat = TGChat(
+                id: focusedChatId,
+                title: "Akhil B",
+                chatType: .privateChat(userId: 42),
+                unreadCount: 0,
+                lastMessage: nil,
+                memberCount: nil,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            let genericTG = TGMessage(
+                id: genericRecord.id,
+                chatId: genericChatId,
+                senderId: .user(10),
+                date: genericRecord.date,
+                textContent: genericRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: genericChat.title,
+                senderName: genericRecord.senderName
+            )
+            let focusedTG = TGMessage(
+                id: focusedRecord.id,
+                chatId: focusedChatId,
+                senderId: .user(42),
+                date: focusedRecord.date,
+                textContent: focusedRecord.textContent,
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: focusedChat.title,
+                senderName: focusedRecord.senderName
+            )
+
+            let querySpec = QuerySpec(
+                rawQuery: "What's the latest with Akhil?",
+                mode: .summarySearch,
+                family: .summary,
+                preferredEngine: .summarize,
+                scope: .all,
+                scopeWasExplicit: false,
+                replyConstraint: .none,
+                timeRange: nil,
+                parseConfidence: 0.65,
+                unsupportedFragments: [],
+                plannerHints: QueryPlannerHints(
+                    people: ["akhil"],
+                    topicTerms: []
+                )
+            )
+
+            let telegramService = TestTelegramService(
+                scoredHits: [
+                    .init(message: genericTG, score: 1.0),
+                    .init(message: focusedTG, score: 0.58)
+                ],
+                vectorHits: []
+            )
+            let aiService = AIService()
+            aiService.configure(type: .none, apiKey: "")
+
+            let execution = await SummaryEngine.shared.search(
+                query: querySpec,
+                scope: .all,
+                scopedChats: [genericChat, focusedChat],
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
+            let output = try XCTUnwrap(execution.output)
+            XCTAssertEqual(output.supportingChatId, focusedChatId)
+        }
+    }
+
+    @MainActor
     func testSearchCoordinatorSemanticSearchPrefersFocusedTopicChatOverGenericChatter() async throws {
         let genericChatId: Int64 = 790
         let focusedChatId: Int64 = 791
@@ -1023,6 +3809,74 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testSearchCoordinatorSemanticSearchAppliesParsedTimeRange() async throws {
+        let oldChatId: Int64 = 794
+        let recentChatId: Int64 = 795
+        let now = Date()
+        let timeRange = TimeRangeConstraint(
+            startDate: now.addingTimeInterval(-7 * 86_400),
+            endDate: now,
+            label: "Last Week"
+        )
+        let oldChat = TGChat(
+            id: oldChatId,
+            title: "Old Wallet",
+            chatType: .privateChat(userId: 214),
+            unreadCount: 0,
+            lastMessage: nil,
+            memberCount: nil,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+        let recentChat = TGChat(
+            id: recentChatId,
+            title: "Recent Wallet",
+            chatType: .privateChat(userId: 215),
+            unreadCount: 0,
+            lastMessage: nil,
+            memberCount: nil,
+            order: 2,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+        let oldMessage = makeTGMessage(
+            id: 625,
+            chatId: oldChatId,
+            text: "The wallet address conversation happened a long time ago.",
+            date: now.addingTimeInterval(-30 * 86_400)
+        )
+        let recentMessage = makeTGMessage(
+            id: 626,
+            chatId: recentChatId,
+            text: "The wallet address was updated this week.",
+            date: now.addingTimeInterval(-2 * 86_400)
+        )
+
+        let telegramService = TestTelegramService(
+            scoredHits: [
+                .init(message: oldMessage, score: 1.0),
+                .init(message: recentMessage, score: 0.4)
+            ],
+            vectorHits: []
+        )
+        let aiService = AIService()
+        aiService.configure(type: .none, apiKey: "")
+
+        let coordinator = SearchCoordinator()
+        let results = await coordinator.semanticResultsForTesting(
+            query: "wallet address",
+            scope: .all,
+            scopedChats: [oldChat, recentChat],
+            telegramService: telegramService,
+            aiService: aiService,
+            timeRange: timeRange
+        )
+
+        XCTAssertEqual(results.map(\.chatId), [recentChatId])
+    }
+
+    @MainActor
     func testPatternSearchEnginePrefersOutgoingWalletMessagesForBroadShareQuery() async throws {
         try await withTempDatabase { _ in
             let chatId: Int64 = 9001
@@ -1083,6 +3937,73 @@ final class PidgyCoreTests: XCTestCase {
 
             XCTAssertEqual(results.first?.message.id, 702)
             XCTAssertTrue(results.first?.outgoingBiasApplied == true)
+        }
+    }
+
+    @MainActor
+    func testPatternSearchEngineAppliesParsedTimeRange() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 9004
+            let now = Date()
+            let oldWallet = makeRecord(
+                id: 703,
+                chatId: chatId,
+                text: "Here is the wallet I shared 0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+                date: now.addingTimeInterval(-30 * 86_400),
+                isOutgoing: true
+            )
+            let recentWallet = makeRecord(
+                id: 704,
+                chatId: chatId,
+                text: "Here is the wallet I shared 0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+                date: now.addingTimeInterval(-2 * 86_400),
+                isOutgoing: true
+            )
+
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: chatId,
+                messages: [oldWallet, recentWallet],
+                preferredOldestMessageId: oldWallet.id,
+                isSearchReady: true
+            )
+
+            let chat = TGChat(
+                id: chatId,
+                title: "Wallet History",
+                chatType: .privateChat(userId: 103),
+                unreadCount: 0,
+                lastMessage: nil,
+                memberCount: nil,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let querySpec = QuerySpec(
+                rawQuery: "where I shared wallet address",
+                mode: .messageSearch,
+                family: .exactLookup,
+                preferredEngine: .messageLookup,
+                scope: .all,
+                scopeWasExplicit: false,
+                replyConstraint: .none,
+                timeRange: TimeRangeConstraint(
+                    startDate: now.addingTimeInterval(-7 * 86_400),
+                    endDate: now,
+                    label: "Last Week"
+                ),
+                parseConfidence: 0.9,
+                unsupportedFragments: []
+            )
+
+            let telegramService = TestTelegramService(scoredHits: [], vectorHits: [])
+            let results = await PatternSearchEngine.shared.search(
+                query: querySpec,
+                scope: .all,
+                scopedChats: [chat],
+                telegramService: telegramService
+            )
+
+            XCTAssertEqual(results.map(\.message.id), [704])
         }
     }
 
@@ -1522,6 +4443,116 @@ final class PidgyCoreTests: XCTestCase {
         )
     }
 
+    func testConversationReplyHeuristicsAllowsWorthCheckingWhenSupportIdsOnlyPointAtLatestTaskDump() {
+        let myUserId: Int64 = 99
+        let chat = TGChat(
+            id: -7770001,
+            title: "Builders Group",
+            chatType: .basicGroup(groupId: -7770001),
+            unreadCount: 1,
+            lastMessage: nil,
+            memberCount: 6,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+        let baseDate = Date(timeIntervalSince1970: 1_776_100_000)
+        var fillerMessages: [TGMessage] = []
+        for index in 0..<7 {
+            fillerMessages.append(
+                makeTGMessage(
+                    id: Int64(100 + index),
+                    chatId: chat.id,
+                    text: "noted \(index)",
+                    date: baseDate.addingTimeInterval(TimeInterval(index * 60)),
+                    senderUserId: Int64(300 + index),
+                    senderName: "Member \(index)"
+                )
+            )
+        }
+        let earlierAsk = makeTGMessage(
+            id: 90,
+            chatId: chat.id,
+            text: "can you share more input on the builder list",
+            date: baseDate.addingTimeInterval(-120),
+            senderUserId: 201,
+            senderName: "Karan"
+        )
+        let latestTaskDump = makeTGMessage(
+            id: 200,
+            chatId: chat.id,
+            text: "Design changes that need to be made and are already on figma. Cc @divi280605 @ultraviolet1000",
+            date: baseDate.addingTimeInterval(8 * 60),
+            senderUserId: 202,
+            senderName: "Aritra"
+        )
+        var messages = [earlierAsk]
+        messages.append(contentsOf: fillerMessages)
+        messages.append(latestTaskDump)
+
+        XCTAssertTrue(
+            ConversationReplyHeuristics.hasWorthCheckingGroupOpportunity(
+                chat: chat,
+                messages: messages,
+                myUserId: myUserId,
+                myUsername: "pratzyy",
+                supportingMessageIds: [200]
+            )
+        )
+    }
+
+    func testConversationReplyHeuristicsRejectsWorthCheckingWhenClosureFollowsSupportedTaskDump() {
+        let myUserId: Int64 = 99
+        let chat = TGChat(
+            id: -7770002,
+            title: "Builders Group",
+            chatType: .basicGroup(groupId: -7770002),
+            unreadCount: 1,
+            lastMessage: nil,
+            memberCount: 6,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+        let baseDate = Date(timeIntervalSince1970: 1_776_100_000)
+        let messages = [
+            makeTGMessage(
+                id: 301,
+                chatId: chat.id,
+                text: "gib more input on this once you look",
+                date: baseDate.addingTimeInterval(-120),
+                senderUserId: 201,
+                senderName: "Karan"
+            ),
+            makeTGMessage(
+                id: 302,
+                chatId: chat.id,
+                text: "Design changes that need to be made and are already on figma. Cc @divi280605 @ultraviolet1000",
+                date: baseDate.addingTimeInterval(-60),
+                senderUserId: 202,
+                senderName: "Aritra"
+            ),
+            makeTGMessage(
+                id: 303,
+                chatId: chat.id,
+                text: "Already added",
+                date: baseDate,
+                senderUserId: 203,
+                senderName: "Deeksha"
+            )
+        ]
+
+        XCTAssertFalse(
+            ConversationReplyHeuristics.hasWorthCheckingGroupOpportunity(
+                chat: chat,
+                messages: messages,
+                myUserId: myUserId,
+                myUsername: "pratzyy",
+                supportingMessageIds: [302]
+            )
+        )
+    }
+
     func testReplyQueueTriagePromptTreatsAlreadyAddedAsClosureSignal() {
         let candidate = ReplyQueueCandidateDTO(
             chatId: -5212516832,
@@ -1570,6 +4601,21 @@ final class PidgyCoreTests: XCTestCase {
 
         XCTAssertTrue(prompt.contains("latestClosureText: Already added 🫡"))
         XCTAssertTrue(prompt.contains("closureAfterLatestActionable: true"))
+    }
+
+    func testPromptsRouteArtifactDeliveryOutOfReplyQueue() {
+        XCTAssertTrue(
+            ReplyQueueTriagePrompt.systemPrompt.contains("send or share a pitch deck")
+        )
+        XCTAssertTrue(
+            PipelineCategoryPrompt.systemPrompt.contains("send or share a pitch deck")
+        )
+        XCTAssertTrue(
+            PipelineCategoryPrompt.systemPrompt.contains("Bro, can you please send me the pitch deck")
+        )
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("send or share a pitch deck")
+        )
     }
 
     func testReplyQueuePromptAndModelSupportWorthCheckingAndRedirectedDMs() {
@@ -1644,6 +4690,154 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(result.replyability.label, "CHECK")
     }
 
+    @MainActor
+    func testReplyQueueLocalFallbackHonorsEffectiveGroupSignal() async throws {
+        try await withTempDatabase { _ in
+            let myUserId: Int64 = 100
+            let chatId: Int64 = -8_001
+            let now = Date()
+            let messages = [
+                makeTGMessage(
+                    id: 31,
+                    chatId: chatId,
+                    text: "Can someone check the release notes?",
+                    date: now.addingTimeInterval(-120),
+                    senderUserId: 201,
+                    senderName: "Alice"
+                ),
+                makeTGMessage(
+                    id: 32,
+                    chatId: chatId,
+                    text: "Pratzyy can you review this before we ship?",
+                    date: now.addingTimeInterval(-60),
+                    senderUserId: 202,
+                    senderName: "Bob"
+                )
+            ]
+            let groupChat = TGChat(
+                id: chatId,
+                title: "Small Ops Group",
+                chatType: .supergroup(supergroupId: 8001, isChannel: false),
+                unreadCount: 2,
+                lastMessage: messages.last,
+                memberCount: 5,
+                order: 1,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await MessageCacheService.shared.cacheMessages(chatId: chatId, messages: messages, append: false)
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: myUserId,
+                    firstName: "Pratzyy",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: [chatId: messages]
+            )
+            let aiService = AIService()
+            aiService.configure(type: .none, apiKey: "")
+            let querySpec = QuerySpec(
+                rawQuery: "anything worth checking in groups?",
+                mode: .agenticSearch,
+                family: .replyQueue,
+                preferredEngine: .replyTriage,
+                scope: .groups,
+                scopeWasExplicit: true,
+                replyConstraint: .pipelineOnMeOnly,
+                timeRange: nil,
+                parseConfidence: 0.9,
+                unsupportedFragments: []
+            )
+
+            let execution = await ReplyQueueEngine.shared.search(
+                query: querySpec.rawQuery,
+                querySpec: querySpec,
+                aiSearchSourceChats: [groupChat],
+                includeBotsInAISearch: false,
+                telegramService: telegramService,
+                aiService: aiService,
+                pipelineHintProvider: { _ in "quiet" }
+            )
+
+            XCTAssertEqual(execution.results.first?.chatId, chatId)
+            XCTAssertEqual(execution.results.first?.classification, .onMe)
+        }
+    }
+
+    func testLegacyMessageImportPreservesExistingSQLiteHistory() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        let appSupportDirectory = tempDirectory.appendingPathComponent("PidgySupport", isDirectory: true)
+        let databaseURL = tempDirectory.appendingPathComponent("pidgy-tests.sqlite", isDirectory: false)
+        let chatId: Int64 = 9_801
+        let now = Date()
+
+        await DatabaseManager.shared.close()
+        await DatabaseManager.shared.configureForTesting(
+            databaseURLOverride: databaseURL,
+            appSupportDirectoryOverride: appSupportDirectory
+        )
+        await DatabaseManager.shared.initialize()
+        await DatabaseManager.shared.upsertIndexedMessages(
+            chatId: chatId,
+            messages: [
+                makeRecord(id: 1, chatId: chatId, text: "oldest rich history", date: now.addingTimeInterval(-40 * 86_400)),
+                makeRecord(id: 3, chatId: chatId, text: "newest rich history", date: now)
+            ],
+            preferredOldestMessageId: 1,
+            isSearchReady: true
+        )
+        await DatabaseManager.shared.close()
+
+        let legacyDirectory = appSupportDirectory.appendingPathComponent(
+            AppConstants.Storage.messageCacheDirectoryName,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
+        let legacyJSON = """
+        {
+          "chatId": \(chatId),
+          "oldestMessageId": 2,
+          "messages": [
+            {
+              "id": 2,
+              "chatId": \(chatId),
+              "senderUserId": 200,
+              "senderName": "Legacy",
+              "date": \(now.addingTimeInterval(-20 * 86_400).timeIntervalSince1970),
+              "textContent": "legacy cached middle message",
+              "mediaTypeRaw": null,
+              "isOutgoing": false
+            }
+          ]
+        }
+        """
+        try legacyJSON.data(using: .utf8)?.write(
+            to: legacyDirectory.appendingPathComponent("chat-\(chatId).json"),
+            options: [.atomic]
+        )
+
+        await DatabaseManager.shared.configureForTesting(
+            databaseURLOverride: databaseURL,
+            appSupportDirectoryOverride: appSupportDirectory
+        )
+        await DatabaseManager.shared.initialize()
+
+        let messages = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 10)
+        XCTAssertEqual(Set(messages.map(\.id)), Set([1, 2, 3]))
+        let syncState = await DatabaseManager.shared.loadSyncState(chatId: chatId)
+        XCTAssertEqual(syncState?.lastIndexedMessageId, 1)
+        XCTAssertEqual(syncState?.isSearchReady, true)
+
+        await DatabaseManager.shared.close()
+        await DatabaseManager.shared.configureForTesting(databaseURLOverride: nil)
+        try? FileManager.default.removeItem(at: tempDirectory)
+    }
+
     private func withTempDatabase(
         _ body: (URL) async throws -> Void
     ) async throws {
@@ -1710,11 +4904,12 @@ final class PidgyCoreTests: XCTestCase {
     private func makeTGMessage(
         id: Int64,
         chatId: Int64,
-        text: String,
+        text: String?,
         date: Date,
         senderUserId: Int64 = 1,
         senderName: String = "Tester",
-        isOutgoing: Bool = false
+        isOutgoing: Bool = false,
+        mediaType: TGMessage.MediaType? = nil
     ) -> TGMessage {
         TGMessage(
             id: id,
@@ -1722,10 +4917,36 @@ final class PidgyCoreTests: XCTestCase {
             senderId: .user(senderUserId),
             date: date,
             textContent: text,
-            mediaType: nil,
+            mediaType: mediaType,
             isOutgoing: isOutgoing,
             chatTitle: "Chat \(chatId)",
             senderName: senderName
+        )
+    }
+
+    private func makeChat(
+        id: Int64,
+        title: String,
+        chatType: TGChat.ChatType,
+        unreadCount: Int,
+        lastMessageDate: Date,
+        memberCount: Int? = nil
+    ) -> TGChat {
+        TGChat(
+            id: id,
+            title: title,
+            chatType: chatType,
+            unreadCount: unreadCount,
+            lastMessage: makeTGMessage(
+                id: id * 100,
+                chatId: id,
+                text: "latest",
+                date: lastMessageDate
+            ),
+            memberCount: memberCount,
+            order: id,
+            isInMainList: true,
+            smallPhotoFileId: nil
         )
     }
 
@@ -1744,6 +4965,57 @@ final class PidgyCoreTests: XCTestCase {
             relativeTimestamp: relativeTimestamp,
             chatId: chatId,
             chatName: chatName
+        )
+    }
+
+    private func embeddingCount(chatId: Int64, messageId: Int64) async throws -> Int {
+        try await DatabaseManager.shared.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*)
+                    FROM embeddings
+                    WHERE chat_id = ? AND message_id = ?
+                    """,
+                arguments: [chatId, messageId]
+            ) ?? 0
+        }
+    }
+}
+
+private extension DashboardTask {
+    static func mock(
+        id: Int64,
+        title: String,
+        status: DashboardTaskStatus,
+        topicId: Int64?,
+        topicName: String?,
+        chatId: Int64,
+        personName: String,
+        priority: DashboardTaskPriority = .medium,
+        updatedAt: Date = Date(),
+        latestSourceDate: Date? = nil
+    ) -> DashboardTask {
+        DashboardTask(
+            id: id,
+            stableFingerprint: "mock-\(id)",
+            title: title,
+            summary: title,
+            suggestedAction: title,
+            ownerName: "Me",
+            personName: personName,
+            chatId: chatId,
+            chatTitle: personName,
+            topicId: topicId,
+            topicName: topicName,
+            priority: priority,
+            status: status,
+            confidence: 1,
+            createdAt: Date(),
+            updatedAt: updatedAt,
+            dueAt: nil,
+            snoozedUntil: nil,
+            latestSourceDate: latestSourceDate
         )
     }
 }
@@ -1768,5 +5040,331 @@ private final class TestTelegramService: TelegramService {
 
     override func localVectorSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
         stubVectorHits
+    }
+}
+
+@MainActor
+private final class PipelineTestTelegramService: TelegramService {
+    private let historyByChatId: [Int64: [TGMessage]]
+    private let resolvedMemberCounts: [Int64: Int]
+
+    init(
+        currentUser: TGUser?,
+        historyByChatId: [Int64: [TGMessage]],
+        resolvedMemberCounts: [Int64: Int] = [:]
+    ) {
+        self.historyByChatId = historyByChatId
+        self.resolvedMemberCounts = resolvedMemberCounts
+        super.init()
+        self.currentUser = currentUser
+    }
+
+    override func getChatHistory(
+        chatId: Int64,
+        fromMessageId: Int64 = 0,
+        limit: Int = 50,
+        onlyLocal: Bool = false,
+        priority: RateLimiter.Priority = .userInitiated
+    ) async throws -> [TGMessage] {
+        let sorted = (historyByChatId[chatId] ?? []).sorted { lhs, rhs in
+            if lhs.date != rhs.date {
+                return lhs.date > rhs.date
+            }
+            return lhs.id > rhs.id
+        }
+
+        guard fromMessageId != 0 else {
+            return Array(sorted.prefix(limit))
+        }
+
+        guard let index = sorted.firstIndex(where: { $0.id == fromMessageId }) else {
+            return []
+        }
+
+        let older = sorted.suffix(from: sorted.index(after: index))
+        return Array(older.prefix(limit))
+    }
+
+    override func resolvedMemberCount(for chat: TGChat) async -> Int? {
+        if let count = resolvedMemberCounts[chat.id] {
+            return count
+        }
+        return await super.resolvedMemberCount(for: chat)
+    }
+}
+
+private actor PipelineCategorizationCallCounter {
+    private(set) var value = 0
+
+    func increment() {
+        value += 1
+    }
+
+    func currentValue() -> Int {
+        value
+    }
+}
+
+private actor DashboardTaskTriageRecorder {
+    private var extractedIds: [Int64] = []
+    private var triageBatchCounts: [Int] = []
+
+    func recordTriageBatch(count: Int) {
+        triageBatchCounts.append(count)
+    }
+
+    func recordExtraction(chatId: Int64) {
+        extractedIds.append(chatId)
+    }
+
+    func extractedChatIds() -> [Int64] {
+        extractedIds
+    }
+}
+
+private struct DashboardTaskTriageAIProvider: AIProvider {
+    let recorder: DashboardTaskTriageRecorder
+    let decisions: [DashboardTaskTriageResultDTO]
+    let tasksByChatId: [Int64: DashboardTaskCandidate]
+
+    func summarize(messages: [MessageSnippet], prompt: String) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
+    func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func rerankResults(
+        query: String,
+        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
+    ) async throws -> [Int64] {
+        throw AIError.providerNotConfigured
+    }
+
+    func agenticSearch(
+        query: String,
+        constraints: AgenticSearchConstraintsDTO,
+        candidates: [AgenticCandidateDTO]
+    ) async throws -> [AgenticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func triageReplyQueue(
+        query: String,
+        scope: QueryScope,
+        candidates: [ReplyQueueCandidateDTO]
+    ) async throws -> [ReplyQueueTriageResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func triageDashboardTaskCandidates(
+        candidates: [DashboardTaskTriageCandidateDTO]
+    ) async throws -> [DashboardTaskTriageResultDTO] {
+        await recorder.recordTriageBatch(count: candidates.count)
+        let candidateIds = Set(candidates.map(\.chatId))
+        return decisions.filter { candidateIds.contains($0.chatId) }
+    }
+
+    func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
+        throw AIError.providerNotConfigured
+    }
+
+    func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO {
+        throw AIError.providerNotConfigured
+    }
+
+    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO] {
+        return []
+    }
+
+    func extractDashboardTasks(
+        chat: TGChat,
+        topics: [DashboardTopic],
+        messages: [MessageSnippet]
+    ) async throws -> [DashboardTaskCandidate] {
+        await recorder.recordExtraction(chatId: chat.id)
+        return tasksByChatId[chat.id].map { [$0] } ?? []
+    }
+
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO {
+        throw AIError.providerNotConfigured
+    }
+
+    func testConnection() async throws -> Bool {
+        true
+    }
+}
+
+private struct CountingPipelineAIProvider: AIProvider {
+    let callCounter: PipelineCategorizationCallCounter
+    let pipelineCategoryResult: PipelineCategoryDTO
+
+    func summarize(messages: [MessageSnippet], prompt: String) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
+    func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func rerankResults(
+        query: String,
+        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
+    ) async throws -> [Int64] {
+        throw AIError.providerNotConfigured
+    }
+
+    func agenticSearch(
+        query: String,
+        constraints: AgenticSearchConstraintsDTO,
+        candidates: [AgenticCandidateDTO]
+    ) async throws -> [AgenticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func triageReplyQueue(
+        query: String,
+        scope: QueryScope,
+        candidates: [ReplyQueueCandidateDTO]
+    ) async throws -> [ReplyQueueTriageResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func triageDashboardTaskCandidates(
+        candidates: [DashboardTaskTriageCandidateDTO]
+    ) async throws -> [DashboardTaskTriageResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
+        throw AIError.providerNotConfigured
+    }
+
+    func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO {
+        await callCounter.increment()
+        return pipelineCategoryResult
+    }
+
+    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func extractDashboardTasks(
+        chat: TGChat,
+        topics: [DashboardTopic],
+        messages: [MessageSnippet]
+    ) async throws -> [DashboardTaskCandidate] {
+        throw AIError.providerNotConfigured
+    }
+
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO {
+        throw AIError.providerNotConfigured
+    }
+
+    func testConnection() async throws -> Bool {
+        throw AIError.providerNotConfigured
+    }
+}
+
+private struct StubAIProvider: AIProvider {
+    var queryPlannerResult: QueryPlannerResultDTO?
+    var queryPlannerError: Error?
+    var pipelineCategoryResult: PipelineCategoryDTO?
+    var pipelineCategoryError: Error?
+
+    func summarize(messages: [MessageSnippet], prompt: String) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
+    func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func rerankResults(
+        query: String,
+        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
+    ) async throws -> [Int64] {
+        throw AIError.providerNotConfigured
+    }
+
+    func agenticSearch(
+        query: String,
+        constraints: AgenticSearchConstraintsDTO,
+        candidates: [AgenticCandidateDTO]
+    ) async throws -> [AgenticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func triageReplyQueue(
+        query: String,
+        scope: QueryScope,
+        candidates: [ReplyQueueCandidateDTO]
+    ) async throws -> [ReplyQueueTriageResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func triageDashboardTaskCandidates(
+        candidates: [DashboardTaskTriageCandidateDTO]
+    ) async throws -> [DashboardTaskTriageResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
+        throw AIError.providerNotConfigured
+    }
+
+    func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO {
+        if let pipelineCategoryError {
+            throw pipelineCategoryError
+        }
+        return pipelineCategoryResult ?? PipelineCategoryDTO(
+            status: "decision",
+            category: "quiet",
+            urgency: "low",
+            suggestedAction: ""
+        )
+    }
+
+    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func extractDashboardTasks(
+        chat: TGChat,
+        topics: [DashboardTopic],
+        messages: [MessageSnippet]
+    ) async throws -> [DashboardTaskCandidate] {
+        throw AIError.providerNotConfigured
+    }
+
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO {
+        if let queryPlannerError {
+            throw queryPlannerError
+        }
+        return queryPlannerResult ?? QueryPlannerResultDTO(
+            family: deterministicSpec.family.rawValue,
+            scope: "inherit",
+            timeRange: "inherit",
+            people: [],
+            topicTerms: [],
+            confidence: deterministicSpec.parseConfidence
+        )
+    }
+
+    func testConnection() async throws -> Bool {
+        throw AIError.providerNotConfigured
     }
 }

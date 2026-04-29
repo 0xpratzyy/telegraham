@@ -65,6 +65,7 @@ actor GraphBuilder {
         let id: Int64
         let displayName: String
         let username: String?
+        let isBot: Bool?
     }
 
     private struct ScoreMetric: Sendable {
@@ -304,7 +305,8 @@ actor GraphBuilder {
                 resolved[participant] = UserSnapshot(
                     id: currentUser.id,
                     displayName: currentUser.displayName,
-                    username: currentUser.username
+                    username: currentUser.username,
+                    isBot: currentUser.isBot
                 )
                 continue
             }
@@ -320,7 +322,8 @@ actor GraphBuilder {
                 resolved[participant] = UserSnapshot(
                     id: participant.userId,
                     displayName: "User \(participant.userId)",
-                    username: nil
+                    username: nil,
+                    isBot: nil
                 )
             }
         }
@@ -342,10 +345,11 @@ actor GraphBuilder {
             snapshot = UserSnapshot(
                 id: user.id,
                 displayName: user.displayName,
-                username: user.username
+                username: user.username,
+                isBot: user.isBot
             )
         } else if let fallbackName {
-            snapshot = UserSnapshot(id: userId, displayName: fallbackName, username: nil)
+            snapshot = UserSnapshot(id: userId, displayName: fallbackName, username: nil, isBot: nil)
         } else {
             snapshot = nil
         }
@@ -363,6 +367,7 @@ actor GraphBuilder {
                     entityType: AppConstants.Graph.selfEntityType,
                     displayName: currentUser.displayName,
                     username: currentUser.username,
+                    isBot: currentUser.isBot,
                     lastInteractionAt: nil,
                     firstSeenAt: Date()
                 )
@@ -386,6 +391,7 @@ actor GraphBuilder {
                     entityType: AppConstants.Graph.userEntityType,
                     displayName: resolvedUser?.displayName ?? chat.title,
                     username: resolvedUser?.username,
+                    isBot: resolvedUser?.isBot,
                     lastInteractionAt: chat.lastActivityDate,
                     firstSeenAt: chat.lastActivityDate
                 )
@@ -436,6 +442,7 @@ actor GraphBuilder {
                         entityType: AppConstants.Graph.userEntityType,
                         displayName: resolvedUser.displayName,
                         username: resolvedUser.username,
+                        isBot: resolvedUser.isBot,
                         lastInteractionAt: nil,
                         firstSeenAt: nil
                     )
@@ -771,9 +778,12 @@ actor GraphBuilder {
         entityType: String,
         displayName: String?,
         username: String?,
+        isBot: Bool? = nil,
         lastInteractionAt: Date?,
         firstSeenAt: Date?
     ) throws {
+        let metadata = GraphNodeMetadata.encoded(isBot: isBot)
+
         try db.execute(
             sql: """
                 INSERT INTO nodes (
@@ -788,11 +798,12 @@ actor GraphBuilder {
                     first_seen_at,
                     metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                 ON CONFLICT(entity_id) DO UPDATE SET
                     entity_type = excluded.entity_type,
                     display_name = COALESCE(excluded.display_name, nodes.display_name),
                     username = COALESCE(excluded.username, nodes.username),
+                    metadata = COALESCE(excluded.metadata, nodes.metadata),
                     last_interaction_at = MAX(nodes.last_interaction_at, excluded.last_interaction_at),
                     first_seen_at = CASE
                         WHEN nodes.first_seen_at = 0 THEN excluded.first_seen_at
@@ -808,7 +819,8 @@ actor GraphBuilder {
                 AppConstants.Graph.defaultCategory,
                 AppConstants.Graph.automaticCategorySource,
                 lastInteractionAt?.timeIntervalSince1970 ?? 0,
-                firstSeenAt?.timeIntervalSince1970 ?? 0
+                firstSeenAt?.timeIntervalSince1970 ?? 0,
+                metadata
             ]
         )
     }

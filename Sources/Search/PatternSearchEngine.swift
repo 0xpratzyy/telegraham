@@ -89,7 +89,7 @@ final class PatternSearchEngine {
                 limit: AppConstants.Search.Pattern.ftsCandidateLimit
             )
 
-            for hit in ftsHits {
+            for hit in applyTimeRange(ftsHits, timeRange: querySpec.timeRange) {
                 guard let verified = verify(
                     message: hit.message,
                     chat: chatsById[hit.message.chatId],
@@ -104,7 +104,9 @@ final class PatternSearchEngine {
 
         let searchable = await DatabaseManager.shared.loadSearchableMessages(
             chatIds: scopedChatIds,
-            limit: AppConstants.Search.Pattern.maxSearchableMessages
+            limit: AppConstants.Search.Pattern.maxSearchableMessages,
+            startDate: querySpec.timeRange?.startDate,
+            endDate: querySpec.timeRange?.endDate
         )
         for record in searchable {
             let message = tgMessage(from: record, chat: chatsById[record.chatId])
@@ -138,6 +140,14 @@ final class PatternSearchEngine {
                     outgoingBiasApplied: $0.outgoingBiasApplied
                 )
             }
+    }
+
+    private func applyTimeRange(
+        _ hits: [TelegramService.LocalMessageSearchHit],
+        timeRange: TimeRangeConstraint?
+    ) -> [TelegramService.LocalMessageSearchHit] {
+        guard let timeRange else { return hits }
+        return hits.filter { timeRange.contains($0.message.date) }
     }
 
     private func parse(_ rawQuery: String) -> ParsedQuery {

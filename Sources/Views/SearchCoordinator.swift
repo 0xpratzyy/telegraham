@@ -2,36 +2,6 @@ import Foundation
 import Combine
 import TDLibKit
 
-enum AISearchResult: Identifiable {
-    case semanticResult(SemanticSearchResult)
-    case agenticResult(AgenticSearchResult)
-    case patternResult(PatternSearchResult)
-    case replyQueueResult(ReplyQueueResult)
-
-    var id: String {
-        switch self {
-        case .semanticResult(let result): return "sem-\(result.id)"
-        case .agenticResult(let result): return "ag-\(result.id)"
-        case .patternResult(let result): return "pattern-\(result.id)"
-        case .replyQueueResult(let result): return "reply-\(result.id)"
-        }
-    }
-
-    func linkedChat(in chats: [TGChat]) -> TGChat? {
-        switch self {
-        case .semanticResult(let result):
-            return chats.first(where: { $0.id == result.chatId })
-        case .agenticResult(let result):
-            return chats.first(where: { $0.id == result.chatId })
-        case .patternResult(let result):
-            if let chat = result.chat { return chat }
-            return chats.first(where: { $0.id == result.message.chatId })
-        case .replyQueueResult(let result):
-            return chats.first(where: { $0.id == result.chatId })
-        }
-    }
-}
-
 private struct LocalSemanticMessageScore {
     let message: TGMessage
     var ftsScore: Double
@@ -142,7 +112,6 @@ final class SearchCoordinator: ObservableObject {
     func triggerSearch(
         query rawQuery: String,
         activeScope: QueryScope,
-        visibleChats: [TGChat],
         aiSearchSourceChats: [TGChat],
         scopedAISearchSourceChats: [TGChat],
         includeBotsInAISearch: Bool,
@@ -165,35 +134,46 @@ final class SearchCoordinator: ObservableObject {
             return
         }
 
-        let parsedSpec = queryInterpreter.parse(
+        let deterministicSpec = queryInterpreter.parse(
             query: query,
             now: Date(),
             timezone: .current,
             activeFilter: activeScope
         )
+        let optimisticIntent = optimisticIntent(for: deterministicSpec)
+        let optimisticStartDate = optimisticIntent == nil ? nil : Foundation.Date()
 
-        currentQuerySpec = parsedSpec
+        currentQuerySpec = deterministicSpec
         let searchRunID = UUID()
         activeSearchRunID = searchRunID
-        routedQueryIntent = nil
+        routedQueryIntent = optimisticIntent
         routingSnapshot = nil
-        aiSearchMode = nil
+        aiSearchMode = optimisticIntent
         aiResults = []
         aiSearchError = nil
         agenticDebugInfo = nil
         summaryOutput = nil
         semanticMatchedChats = 0
         totalChatsToScan = 0
-        searchStartedAt = nil
+        searchStartedAt = optimisticStartDate
         lastSearchDuration = nil
         searchResultChatIds = []
         isSearching = false
-        isAISearching = false
+        isAISearching = optimisticIntent != nil
 
         searchTask = Task { @MainActor in
+            let resolvedSpec = await aiService.queryRouter.resolveQuerySpec(
+                query: query,
+                activeFilter: activeScope,
+                timezone: .current,
+                now: Date()
+            )
+            guard !Task.isCancelled else { return }
+
+            currentQuerySpec = resolvedSpec
             let intent = await aiService.queryRouter.route(
                 query: query,
-                querySpec: parsedSpec,
+                querySpec: resolvedSpec,
                 activeFilter: activeScope,
                 timezone: .current,
                 now: Date()
@@ -203,11 +183,11 @@ final class SearchCoordinator: ObservableObject {
             routedQueryIntent = intent
             routingSnapshot = SearchRoutingSnapshot(
                 query: query,
-                spec: parsedSpec,
+                spec: resolvedSpec,
                 runtimeIntent: intent
             )
 
-            if intent == .unsupported || parsedSpec.preferredEngine == .graphCRM {
+            if intent == .unsupported || resolvedSpec.preferredEngine == .graphCRM {
                 aiSearchMode = nil
                 aiResults = []
                 summaryOutput = nil
@@ -219,12 +199,14 @@ final class SearchCoordinator: ObservableObject {
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
 
-            searchStartedAt = Foundation.Date()
+            if searchStartedAt == nil {
+                searchStartedAt = Foundation.Date()
+            }
             lastSearchDuration = nil
             aiSearchMode = intent
             isAISearching = true
             aiSearchError = nil
-            currentQuerySpec = parsedSpec
+            currentQuerySpec = resolvedSpec
             summaryOutput = nil
             searchResultChatIds = []
 
@@ -232,7 +214,7 @@ final class SearchCoordinator: ObservableObject {
                 let results = try await executeAISearch(
                     intent: intent,
                     query: query,
-                    querySpec: parsedSpec,
+                    querySpec: resolvedSpec,
                     searchRunID: searchRunID,
                     activeScope: activeScope,
                     aiSearchSourceChats: aiSearchSourceChats,
@@ -253,6 +235,15 @@ final class SearchCoordinator: ObservableObject {
                 isAISearching = false
                 markSearchFinished()
             }
+        }
+    }
+
+    private func optimisticIntent(for spec: QuerySpec) -> QueryIntent? {
+        switch spec.preferredEngine {
+        case .messageLookup, .replyTriage, .summarize:
+            return spec.mode
+        case .semanticRetrieval, .graphCRM:
+            return nil
         }
     }
 
@@ -302,6 +293,7 @@ final class SearchCoordinator: ObservableObject {
         case .semanticRetrieval:
             return await executeLocalSemanticSearch(
                 query: query,
+                timeRange: resolvedQuerySpec.timeRange,
                 scope: resolvedScope,
                 scopedChats: resolvedScopedChats,
                 telegramService: telegramService,
@@ -372,6 +364,7 @@ final class SearchCoordinator: ObservableObject {
 
     private func executeLocalSemanticSearch(
         query: String,
+        timeRange: TimeRangeConstraint?,
         scope: QueryScope,
         scopedChats: [TGChat],
         telegramService: TelegramService,
@@ -400,7 +393,9 @@ final class SearchCoordinator: ObservableObject {
             limit: constants.vectorTopMessages
         )
 
-        let mergedHits = mergeLocalSemanticHits(ftsHits: ftsHits, vectorHits: vectorHits)
+        let rangedFTSHits = filterLocalSemanticHits(ftsHits, timeRange: timeRange)
+        let rangedVectorHits = filterLocalSemanticHits(vectorHits, timeRange: timeRange)
+        let mergedHits = mergeLocalSemanticHits(ftsHits: rangedFTSHits, vectorHits: rangedVectorHits)
         var candidatesByChatId = buildLocalSemanticCandidates(
             from: mergedHits,
             chatsById: chatById,
@@ -409,6 +404,7 @@ final class SearchCoordinator: ObservableObject {
         mergeTitleSemanticCandidates(
             query: query,
             queryContext: topicContext,
+            timeRange: timeRange,
             chats: scopedChats,
             candidatesByChatId: &candidatesByChatId
         )
@@ -514,6 +510,14 @@ final class SearchCoordinator: ObservableObject {
         }
     }
 
+    private func filterLocalSemanticHits(
+        _ hits: [TelegramService.LocalMessageSearchHit],
+        timeRange: TimeRangeConstraint?
+    ) -> [TelegramService.LocalMessageSearchHit] {
+        guard let timeRange else { return hits }
+        return hits.filter { timeRange.contains($0.message.date) }
+    }
+
     private func buildLocalSemanticCandidates(
         from mergedHits: [LocalSemanticMessageScore],
         chatsById: [Int64: TGChat],
@@ -592,12 +596,18 @@ final class SearchCoordinator: ObservableObject {
     private func mergeTitleSemanticCandidates(
         query: String,
         queryContext: SemanticTopicQueryContext,
+        timeRange: TimeRangeConstraint?,
         chats: [TGChat],
         candidatesByChatId: inout [Int64: LocalSemanticChatCandidate]
     ) {
         for chat in chats {
             let titleScore = normalizedTitleMatchScore(query: query, title: chat.title)
             guard titleScore > 0 else { continue }
+            if candidatesByChatId[chat.id] == nil,
+               let timeRange,
+               chat.lastMessage.map({ timeRange.contains($0.date) }) != true {
+                continue
+            }
             if queryContext.requiresGuardedTopicRanking
                 && candidatesByChatId[chat.id] == nil
                 && titleScore < 0.99 {
@@ -870,10 +880,12 @@ final class SearchCoordinator: ObservableObject {
         scope: QueryScope,
         scopedChats: [TGChat],
         telegramService: TelegramService,
-        aiService: AIService
+        aiService: AIService,
+        timeRange: TimeRangeConstraint? = nil
     ) async -> [SemanticSearchResult] {
         await executeLocalSemanticSearch(
             query: query,
+            timeRange: timeRange,
             scope: scope,
             scopedChats: scopedChats,
             telegramService: telegramService,

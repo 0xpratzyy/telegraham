@@ -104,6 +104,20 @@ struct TimeRangeConstraint: Codable {
     }
 }
 
+struct QueryPlannerHints: Codable, Equatable, Sendable {
+    let people: [String]
+    let topicTerms: [String]
+}
+
+struct QueryPlannerResultDTO: Codable, Equatable, Sendable {
+    let family: String
+    let scope: String
+    let timeRange: String
+    let people: [String]
+    let topicTerms: [String]
+    let confidence: Double
+}
+
 struct QuerySpec: Codable {
     let rawQuery: String
     let mode: QueryIntent
@@ -115,6 +129,33 @@ struct QuerySpec: Codable {
     let timeRange: TimeRangeConstraint?
     let parseConfidence: Double
     let unsupportedFragments: [String]
+    let plannerHints: QueryPlannerHints?
+
+    init(
+        rawQuery: String,
+        mode: QueryIntent,
+        family: QueryFamily,
+        preferredEngine: QueryEngine,
+        scope: QueryScope,
+        scopeWasExplicit: Bool,
+        replyConstraint: ReplyConstraint,
+        timeRange: TimeRangeConstraint?,
+        parseConfidence: Double,
+        unsupportedFragments: [String],
+        plannerHints: QueryPlannerHints? = nil
+    ) {
+        self.rawQuery = rawQuery
+        self.mode = mode
+        self.family = family
+        self.preferredEngine = preferredEngine
+        self.scope = scope
+        self.scopeWasExplicit = scopeWasExplicit
+        self.replyConstraint = replyConstraint
+        self.timeRange = timeRange
+        self.parseConfidence = parseConfidence
+        self.unsupportedFragments = unsupportedFragments
+        self.plannerHints = plannerHints
+    }
 
     var hasActionableConstraints: Bool {
         scopeWasExplicit || replyConstraint != .none || timeRange != nil

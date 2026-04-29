@@ -9,6 +9,7 @@ struct ChatRowView: View {
     let isHighlighted: Bool
     var pipelineStatus: FollowUpItem.Category? = nil
     var pipelineSuggestion: String? = nil
+    var messagePreview: String? = nil
     let onOpen: () -> Void
 
     var body: some View {
@@ -78,6 +79,13 @@ struct ChatRowView: View {
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                    } else if let messagePreview {
+                        if !messagePreview.isEmpty {
+                            Text(messagePreview)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                     } else if let lastMessage = chat.lastMessage {
                         Text(lastMessage.displayText)
                             .font(.system(size: 11.5))

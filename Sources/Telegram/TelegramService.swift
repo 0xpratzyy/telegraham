@@ -11,15 +11,18 @@ class TelegramService: ObservableObject {
     }
 
     @Published var authState: AuthState = .uninitialized
+    @Published var connectionState: ConnectionState = .connectionStateConnecting
     @Published var chats: [TGChat] = []
     @Published var currentUser: TGUser?
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published private(set) var botMetadataRefreshVersion = 0
 
     private let tdClient = TDLibClientWrapper()
     private let rateLimiter = RateLimiter()
     private var updateTask: Task<Void, Never>?
     private var chatDiscoveryTask: Task<Void, Never>?
+    private var botMetadataWarmTask: Task<Void, Never>?
     private var userCache: [Int64: TGUser] = [:]
     private var chatCache: [Int64: TGChat] = [:]
 
@@ -31,6 +34,13 @@ class TelegramService: ObservableObject {
     // MARK: - Lifecycle
 
     func start(apiId: Int, apiHash: String) {
+        updateTask?.cancel()
+        updateTask = nil
+        chatDiscoveryTask?.cancel()
+        chatDiscoveryTask = nil
+        botMetadataWarmTask?.cancel()
+        botMetadataWarmTask = nil
+
         tdClient.start(apiId: apiId, apiHash: apiHash)
         startListeningForUpdates()
 
@@ -42,7 +52,11 @@ class TelegramService: ObservableObject {
 
     func stop() {
         updateTask?.cancel()
+        updateTask = nil
         chatDiscoveryTask?.cancel()
+        chatDiscoveryTask = nil
+        botMetadataWarmTask?.cancel()
+        botMetadataWarmTask = nil
         tdClient.close()
     }
 
@@ -193,6 +207,11 @@ class TelegramService: ObservableObject {
         error.code == 404
     }
 
+    private func normalizedMemberCount(_ memberCount: Int?) -> Int? {
+        guard let memberCount, memberCount > 0 else { return nil }
+        return memberCount
+    }
+
     func getChat(id: Int64) async throws -> TGChat? {
         if let cached = chatCache[id] { return cached }
 
@@ -202,6 +221,26 @@ class TelegramService: ObservableObject {
         let tgChat = mapChat(chat)
         chatCache[tgChat.id] = tgChat
         return tgChat
+    }
+
+    func resolvedMemberCount(for chat: TGChat) async -> Int? {
+        if let cached = normalizedMemberCount(chat.memberCount) {
+            return cached
+        }
+
+        let fetchedCount: Int?
+        switch chat.chatType {
+        case .basicGroup(let groupId):
+            fetchedCount = await fetchBasicGroupMemberCount(groupId: groupId)
+        case .supergroup(let supergroupId, _):
+            fetchedCount = await fetchSupergroupMemberCount(supergroupId: supergroupId)
+        case .privateChat, .secretChat:
+            fetchedCount = nil
+        }
+
+        guard let fetchedCount else { return nil }
+        cacheMemberCount(fetchedCount, for: chat.id)
+        return fetchedCount
     }
 
     // MARK: - File Downloads (read-only)
@@ -345,51 +384,101 @@ class TelegramService: ObservableObject {
         return tgUser
     }
 
+    /// Hydrates private-chat user metadata so sync bot filters can rely on cached bot flags.
+    func warmPrivateChatUserMetadata(
+        for chats: [TGChat],
+        priority: RateLimiter.Priority = .background
+    ) async -> Bool {
+        let uncachedUserIds = Set(chats.compactMap { chat -> Int64? in
+            guard case .privateChat(let userId) = chat.chatType else { return nil }
+            guard userCache[userId] == nil else { return nil }
+            return userId
+        })
+
+        guard !uncachedUserIds.isEmpty else { return false }
+
+        var hydratedAny = false
+
+        for userId in uncachedUserIds {
+            guard !Task.isCancelled else { break }
+            guard userCache[userId] == nil else { continue }
+
+            do {
+                if let _ = try await getUser(id: userId, priority: priority) {
+                    hydratedAny = true
+                }
+            } catch {
+                continue
+            }
+
+            if userCache[userId] != nil {
+                hydratedAny = true
+            }
+        }
+
+        return hydratedAny
+    }
+
+    func ensureBotFilterMetadataReady(
+        for chats: [TGChat],
+        includeBots: Bool,
+        priority: RateLimiter.Priority = .background
+    ) async {
+        guard !includeBots else { return }
+
+        let hydratedAny = await warmPrivateChatUserMetadata(for: chats, priority: priority)
+        guard hydratedAny else { return }
+        botMetadataRefreshVersion += 1
+    }
+
+    func scheduleBotMetadataWarm(
+        for chats: [TGChat],
+        includeBots: Bool,
+        priority: RateLimiter.Priority = .background
+    ) {
+        guard !includeBots else {
+            botMetadataWarmTask?.cancel()
+            return
+        }
+
+        botMetadataWarmTask?.cancel()
+        botMetadataWarmTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let hydratedAny = await self.warmPrivateChatUserMetadata(for: chats, priority: priority)
+            guard hydratedAny, !Task.isCancelled else { return }
+            self.botMetadataRefreshVersion += 1
+        }
+    }
+
+    func cancelBotMetadataWarm() {
+        botMetadataWarmTask?.cancel()
+    }
+
     /// Lightweight bot check for private chats used by AI search filters.
-    /// Uses cached user metadata when available and falls back to title heuristic.
+    /// Uses only cached Telegram user metadata; unknown users are treated as non-bots
+    /// until metadata hydration completes.
     func isLikelyBotChat(_ chat: TGChat) -> Bool {
         guard case .privateChat(let userId) = chat.chatType else { return false }
 
         if let cachedUser = userCache[userId] {
-            return isLikelyBotUser(cachedUser)
+            return cachedUser.isBot
         }
 
-        let normalizedTitle = chat.title.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        if normalizedTitle.hasSuffix("bot") { return true }
-        if normalizedTitle.contains("botfather") { return true }
-        if normalizedTitle.contains(" bot") || normalizedTitle.hasPrefix("bot ") { return true }
         return false
     }
 
-    /// Strong bot check for private chats. Falls back to lightweight heuristic only if user lookup fails.
+    /// Strong bot check for private chats using Telegram's user.type metadata.
     func isBotChat(_ chat: TGChat) async -> Bool {
         guard case .privateChat(let userId) = chat.chatType else { return false }
 
         if let cachedUser = userCache[userId] {
-            return isLikelyBotUser(cachedUser)
+            return cachedUser.isBot
         }
 
         if let user = try? await getUser(id: userId) {
-            return isLikelyBotUser(user)
+            return user.isBot
         }
 
-        return isLikelyBotChat(chat)
-    }
-
-    private func isLikelyBotUser(_ user: TGUser) -> Bool {
-        if user.isBot { return true }
-
-        if let username = user.username?.lowercased() {
-            if username.hasSuffix("bot") || username.hasSuffix("_bot") {
-                return true
-            }
-        }
-
-        let normalizedName = user.displayName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        if normalizedName.contains("botfather") { return true }
-        if normalizedName.hasSuffix("bot") { return true }
-        if normalizedName.hasSuffix(" bot") { return true }
-        if normalizedName.hasPrefix("bot ") { return true }
         return false
     }
 
@@ -416,6 +505,47 @@ class TelegramService: ObservableObject {
 
         case .basicGroup, .secretChat:
             return (nil, nil)
+        }
+    }
+
+    private func fetchBasicGroupMemberCount(groupId: Int64) async -> Int? {
+        guard let basicGroup = try? await withRateLimitedCall(method: "getBasicGroup", operation: { client in
+            try await client.getBasicGroup(basicGroupId: groupId)
+        }) else {
+            return nil
+        }
+
+        return normalizedMemberCount(basicGroup.memberCount)
+    }
+
+    private func fetchSupergroupMemberCount(supergroupId: Int64) async -> Int? {
+        if let fullInfo = try? await withRateLimitedCall(method: "getSupergroupFullInfo", operation: { client in
+            try await client.getSupergroupFullInfo(supergroupId: supergroupId)
+        }),
+           let memberCount = normalizedMemberCount(fullInfo.memberCount) {
+            return memberCount
+        }
+
+        if let supergroup = try? await withRateLimitedCall(method: "getSupergroup", operation: { client in
+            try await client.getSupergroup(supergroupId: supergroupId)
+        }),
+           let memberCount = normalizedMemberCount(supergroup.memberCount) {
+            return memberCount
+        }
+
+        return nil
+    }
+
+    private func cacheMemberCount(_ memberCount: Int, for chatId: Int64) {
+        guard let cached = chatCache[chatId], cached.memberCount != memberCount else {
+            return
+        }
+
+        let updated = cached.updating(memberCount: memberCount)
+        chatCache[chatId] = updated
+
+        if let index = chats.firstIndex(where: { $0.id == chatId }) {
+            chats[index] = updated
         }
     }
 
@@ -558,6 +688,9 @@ class TelegramService: ObservableObject {
             let tgUser = mapUser(userUpdate.user)
             userCache[tgUser.id] = tgUser
 
+        case .updateConnectionState(let connectionUpdate):
+            handleConnectionState(connectionUpdate.state)
+
         default:
             break
         }
@@ -609,6 +742,54 @@ class TelegramService: ObservableObject {
             break
         }
     }
+
+    private func handleConnectionState(_ state: ConnectionState) {
+        let previous = connectionState
+        connectionState = state
+
+        guard Self.shouldTriggerRecoveryRefresh(
+            previousConnectionState: previous,
+            newConnectionState: state,
+            authState: authState
+        ) else {
+            return
+        }
+
+        Task {
+            try? await loadChats(
+                limit: AppConstants.Fetch.chatListLimit,
+                priority: .background,
+                updatesLoadingState: false
+            )
+            startBackgroundChatDiscovery()
+            await RecentSyncCoordinator.shared.recoverNow()
+        }
+    }
+
+    nonisolated private static func shouldTriggerRecoveryRefresh(
+        previousConnectionState: ConnectionState?,
+        newConnectionState: ConnectionState,
+        authState: AuthState
+    ) -> Bool {
+        guard authState == .ready else { return false }
+        guard let previousConnectionState else { return false }
+        return previousConnectionState != .connectionStateReady
+            && newConnectionState == .connectionStateReady
+    }
+
+#if DEBUG
+    nonisolated static func shouldTriggerRecoveryRefreshForTesting(
+        previousConnectionState: ConnectionState?,
+        newConnectionState: ConnectionState,
+        authState: AuthState
+    ) -> Bool {
+        shouldTriggerRecoveryRefresh(
+            previousConnectionState: previousConnectionState,
+            newConnectionState: newConnectionState,
+            authState: authState
+        )
+    }
+#endif
 
     // MARK: - Mapping from TDLibKit types to domain models
 
@@ -727,24 +908,135 @@ class TelegramService: ObservableObject {
     private func extractContent(from content: MessageContent) -> (String?, TGMessage.MediaType?) {
         switch content {
         case .messageText(let text):
-            return (text.text.text, nil)
+            return (trimmedPreviewText(text.text.text), nil)
         case .messagePhoto(let photo):
-            return (photo.caption.text.isEmpty ? nil : photo.caption.text, .photo)
+            return (trimmedPreviewText(photo.caption.text), .photo)
         case .messageVideo(let video):
-            return (video.caption.text.isEmpty ? nil : video.caption.text, .video)
+            return (
+                trimmedPreviewText(video.caption.text)
+                    ?? preferredFileLabel(video.video.fileName)
+                    ?? durationLabel(prefix: "Video", duration: video.video.duration),
+                .video
+            )
         case .messageDocument(let doc):
-            return (doc.caption.text.isEmpty ? nil : doc.caption.text, .document)
+            return (
+                trimmedPreviewText(doc.caption.text)
+                    ?? preferredFileLabel(doc.document.fileName)
+                    ?? trimmedPreviewText(doc.document.mimeType),
+                .document
+            )
         case .messageAudio(let audio):
-            return (audio.caption.text.isEmpty ? nil : audio.caption.text, .audio)
+            return (
+                trimmedPreviewText(audio.caption.text)
+                    ?? audioLabel(audio.audio),
+                .audio
+            )
         case .messageVoiceNote(let voice):
-            return (voice.caption.text.isEmpty ? nil : voice.caption.text, .voice)
-        case .messageSticker:
-            return (nil, .sticker)
+            return (
+                trimmedPreviewText(voice.caption.text)
+                    ?? speechRecognitionLabel(voice.voiceNote.speechRecognitionResult)
+                    ?? durationLabel(prefix: "Voice note", duration: voice.voiceNote.duration),
+                .voice
+            )
+        case .messageVideoNote(let videoNote):
+            return (
+                speechRecognitionLabel(videoNote.videoNote.speechRecognitionResult)
+                    ?? durationLabel(prefix: "Video note", duration: videoNote.videoNote.duration),
+                .video
+            )
+        case .messageSticker(let sticker):
+            return (trimmedPreviewText(sticker.sticker.emoji) ?? "Sticker", .sticker)
         case .messageAnimation(let anim):
-            return (anim.caption.text.isEmpty ? nil : anim.caption.text, .animation)
+            return (
+                trimmedPreviewText(anim.caption.text)
+                    ?? preferredFileLabel(anim.animation.fileName)
+                    ?? "GIF",
+                .animation
+            )
+        case .messageContact(let contact):
+            return (contactLabel(contact.contact), .other)
+        case .messagePoll(let poll):
+            return (trimmedPreviewText(poll.poll.question.text) ?? "Poll", .other)
+        case .messageVenue(let venue):
+            return (
+                trimmedPreviewText(venue.venue.title)
+                    ?? trimmedPreviewText(venue.venue.address)
+                    ?? "Venue",
+                .other
+            )
+        case .messageLocation(let location):
+            return (location.livePeriod > 0 ? "Live location" : "Location", .other)
+        case .messageAnimatedEmoji(let emoji):
+            return (trimmedPreviewText(emoji.emoji) ?? "Emoji", .other)
+        case .messageDice(let dice):
+            return (diceLabel(emoji: dice.emoji, value: dice.value), .other)
         default:
             return (nil, .other)
         }
+    }
+
+    private func trimmedPreviewText(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let cleaned = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    private func preferredFileLabel(_ fileName: String) -> String? {
+        trimmedPreviewText(fileName)
+    }
+
+    private func audioLabel(_ audio: Audio) -> String? {
+        let title = trimmedPreviewText(audio.title)
+        let performer = trimmedPreviewText(audio.performer)
+
+        if let title, let performer {
+            return "\(title) - \(performer)"
+        }
+        if let title { return title }
+        if let performer { return performer }
+        if let fileName = preferredFileLabel(audio.fileName) { return fileName }
+        return durationLabel(prefix: "Audio", duration: audio.duration)
+    }
+
+    private func speechRecognitionLabel(_ result: SpeechRecognitionResult?) -> String? {
+        guard let result else { return nil }
+        switch result {
+        case .speechRecognitionResultText(let text):
+            return trimmedPreviewText(text.text)
+        case .speechRecognitionResultPending(let pending):
+            return trimmedPreviewText(pending.partialText)
+        case .speechRecognitionResultError:
+            return nil
+        }
+    }
+
+    private func contactLabel(_ contact: Contact) -> String {
+        let first = trimmedPreviewText(contact.firstName)
+        let last = trimmedPreviewText(contact.lastName)
+        let fullName = [first, last].compactMap { $0 }.joined(separator: " ")
+        if !fullName.isEmpty {
+            return "Contact: \(fullName)"
+        }
+        if let phone = trimmedPreviewText(contact.phoneNumber) {
+            return "Contact: \(phone)"
+        }
+        return "Contact"
+    }
+
+    private func diceLabel(emoji: String, value: Int) -> String {
+        let trimmedEmoji = trimmedPreviewText(emoji) ?? "Dice"
+        guard value > 0 else { return trimmedEmoji }
+        return "\(trimmedEmoji) \(value)"
+    }
+
+    private func durationLabel(prefix: String, duration: Int) -> String {
+        guard duration > 0 else { return prefix }
+        let minutes = duration / 60
+        let seconds = duration % 60
+        return "\(prefix) (\(minutes):\(String(format: "%02d", seconds)))"
     }
 
     private func extractOrder(from positions: [ChatPosition]) -> Int64 {

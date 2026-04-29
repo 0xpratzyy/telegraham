@@ -43,6 +43,20 @@ final class AIService: ObservableObject {
         loadConfiguration()
     }
 
+    init(
+        testingProvider: AIProvider,
+        providerType: AIProviderConfig.ProviderType = .openai,
+        providerModel: String = "test-model",
+        isConfigured: Bool = true
+    ) {
+        self.queryRouter = QueryRouter(aiProvider: testingProvider)
+        self.provider = testingProvider
+        self.providerType = providerType
+        self.providerModel = providerModel
+        self.configuredAPIKey = isConfigured ? "test-key" : ""
+        self.isConfigured = isConfigured
+    }
+
     // MARK: - Configuration
 
     func configure(type: AIProviderConfig.ProviderType, apiKey: String, model: String? = nil) {
@@ -237,6 +251,52 @@ final class AIService: ObservableObject {
             additionalMessages: dto.additionalMessages,
             confident: dto.confident ?? true
         )
+    }
+
+    func discoverDashboardTopics(messages: [TGMessage]) async throws -> [DashboardTopicDTO] {
+        let snippets = MessageSnippet.fromMessages(messages)
+        guard !snippets.isEmpty else { return [] }
+        return try await provider.discoverDashboardTopics(messages: snippets)
+    }
+
+    func extractDashboardTasks(
+        chat: TGChat,
+        messages: [TGMessage],
+        topics: [DashboardTopic],
+        myUserId: Int64
+    ) async throws -> [DashboardTaskCandidate] {
+        let snippets = conversationSnippets(messages: messages, chatTitle: chat.title, myUserId: myUserId)
+        guard !snippets.isEmpty else { return [] }
+        let extracted = try await provider.extractDashboardTasks(
+            chat: chat,
+            topics: topics,
+            messages: snippets
+        )
+        return extracted.map { $0.resolvingSourceDates(from: messages) }
+    }
+
+    func triageDashboardTaskCandidates(
+        _ candidates: [DashboardTaskTriageCandidate],
+        myUserId: Int64
+    ) async throws -> [DashboardTaskTriageResultDTO] {
+        let candidateDTOs = candidates.compactMap { candidate -> DashboardTaskTriageCandidateDTO? in
+            let snippets = conversationSnippets(
+                messages: candidate.messages,
+                chatTitle: candidate.chat.title,
+                myUserId: myUserId
+            )
+            guard !snippets.isEmpty else { return nil }
+            return DashboardTaskTriageCandidateDTO(
+                chatId: candidate.chat.id,
+                chatTitle: candidate.chat.title,
+                chatType: candidate.chat.chatType.displayName,
+                unreadCount: candidate.chat.unreadCount,
+                memberCount: candidate.chat.memberCount,
+                messages: snippets
+            )
+        }
+        guard !candidateDTOs.isEmpty else { return [] }
+        return try await provider.triageDashboardTaskCandidates(candidates: candidateDTOs)
     }
 
     private func conversationSnippets(messages: [TGMessage], chatTitle: String, myUserId: Int64) -> [MessageSnippet] {

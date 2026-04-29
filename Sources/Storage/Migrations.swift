@@ -209,6 +209,96 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v7_pipeline_cache_schema_version") { db in
+            try db.execute(sql: """
+                ALTER TABLE pipeline_cache
+                ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1
+                """)
+        }
+
+        migrator.registerMigration("v8_dashboard_tasks") { db in
+            try db.execute(sql: """
+                CREATE TABLE dashboard_topics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    rationale TEXT NOT NULL DEFAULT '',
+                    score REAL NOT NULL DEFAULT 0,
+                    rank INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_dashboard_topics_rank
+                ON dashboard_topics(rank ASC, score DESC)
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE dashboard_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stable_fingerprint TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    suggested_action TEXT NOT NULL DEFAULT '',
+                    owner_name TEXT NOT NULL DEFAULT '',
+                    person_name TEXT NOT NULL DEFAULT '',
+                    chat_id INTEGER NOT NULL,
+                    chat_title TEXT NOT NULL DEFAULT '',
+                    topic_id INTEGER REFERENCES dashboard_topics(id) ON DELETE SET NULL,
+                    topic_name TEXT,
+                    priority TEXT NOT NULL DEFAULT 'medium',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    due_at REAL,
+                    snoozed_until REAL,
+                    latest_source_date REAL
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_dashboard_tasks_status
+                ON dashboard_tasks(status, priority, updated_at DESC)
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_dashboard_tasks_topic
+                ON dashboard_tasks(topic_id, status, updated_at DESC)
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_dashboard_tasks_chat
+                ON dashboard_tasks(chat_id, status, updated_at DESC)
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE dashboard_task_sources (
+                    task_id INTEGER NOT NULL REFERENCES dashboard_tasks(id) ON DELETE CASCADE,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    sender_name TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    date REAL NOT NULL,
+                    PRIMARY KEY (task_id, chat_id, message_id)
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_dashboard_task_sources_message
+                ON dashboard_task_sources(chat_id, message_id)
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE dashboard_task_sync_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    latest_message_id INTEGER NOT NULL DEFAULT 0,
+                    last_synced_at REAL NOT NULL DEFAULT 0
+                )
+                """)
+        }
+
         return migrator
     }
 }

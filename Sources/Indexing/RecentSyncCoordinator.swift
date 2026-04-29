@@ -45,7 +45,9 @@ actor RecentSyncCoordinator {
     private var telegramService: TelegramService?
     private var processingTask: Task<Void, Never>?
     private var prioritizedChatIds: [Int64] = []
+    private var recoveryChatIds: Set<Int64> = []
     private var pendingImmediateRefresh = true
+    private var lastRecoveryRefreshAt: Date?
     private var sessionStartedAt: Date?
     private var sessionRefreshedChats = 0
     private var sessionRefreshedMessages = 0
@@ -58,6 +60,8 @@ actor RecentSyncCoordinator {
     func start(using telegramService: TelegramService) async {
         self.telegramService = telegramService
         pendingImmediateRefresh = true
+        recoveryChatIds.removeAll()
+        lastRecoveryRefreshAt = nil
 
         guard processingTask == nil else { return }
 
@@ -76,11 +80,14 @@ actor RecentSyncCoordinator {
     }
 
     func stop() async {
-        processingTask?.cancel()
+        let task = processingTask
+        task?.cancel()
         processingTask = nil
         telegramService = nil
         prioritizedChatIds.removeAll()
+        recoveryChatIds.removeAll()
         pendingImmediateRefresh = false
+        lastRecoveryRefreshAt = nil
         sessionStartedAt = nil
         sessionRefreshedChats = 0
         sessionRefreshedMessages = 0
@@ -89,20 +96,26 @@ actor RecentSyncCoordinator {
         lastBatchRefreshedChats = 0
         lastBatchMessageCount = 0
         activeRefreshes = 0
+        await task?.value
         await publishProgress(totalVisibleChats: 0, staleVisibleChats: 0)
     }
 
     func prioritize(chatId: Int64) async {
-        prioritizedChatIds.removeAll { $0 == chatId }
-        prioritizedChatIds.insert(chatId, at: 0)
-        if prioritizedChatIds.count > AppConstants.Indexing.maxPrioritizedChats {
-            prioritizedChatIds = Array(prioritizedChatIds.prefix(AppConstants.Indexing.maxPrioritizedChats))
-        }
+        prependPrioritized(chatIds: [chatId])
         pendingImmediateRefresh = true
     }
 
     func refreshNow() async {
         pendingImmediateRefresh = true
+    }
+
+    func recoverNow() async {
+        guard let telegramService else {
+            pendingImmediateRefresh = true
+            return
+        }
+        let visibleChats = await snapshot(using: telegramService)
+        scheduleRecoveryRefresh(from: visibleChats)
     }
 
     private func runLoop() async {
@@ -120,6 +133,7 @@ actor RecentSyncCoordinator {
                 continue
             }
 
+            recoveryChatIds.formIntersection(Set(snapshot.map(\.id)))
             let orderedChats = orderedChats(from: snapshot)
             let recentSyncStates = await DatabaseManager.shared.loadRecentSyncStates(in: orderedChats.map(\.id))
             let staleChats = orderedChats.filter { shouldRefresh(chat: $0, state: recentSyncStates[$0.id]) }
@@ -138,6 +152,7 @@ actor RecentSyncCoordinator {
             let refreshedChatIds = await sync(chats: nextChats, using: telegramService)
             if !refreshedChatIds.isEmpty {
                 prioritizedChatIds.removeAll { refreshedChatIds.contains($0) }
+                recoveryChatIds.subtract(refreshedChatIds)
             }
 
             activeRefreshes = 0
@@ -154,9 +169,41 @@ actor RecentSyncCoordinator {
     }
 
     private func snapshot(using telegramService: TelegramService) async -> [TGChat] {
-        await MainActor.run {
-            telegramService.visibleChats.filter(Self.isIndexable)
+        let visibleChats = await MainActor.run {
+            telegramService.visibleChats
         }
+        let resolvedChats = await resolveMemberCountsIfNeeded(
+            in: visibleChats,
+            using: telegramService
+        )
+        return resolvedChats.filter(Self.isIndexable)
+    }
+
+    private func resolveMemberCountsIfNeeded(
+        in chats: [TGChat],
+        using telegramService: TelegramService
+    ) async -> [TGChat] {
+        var resolvedChats: [TGChat] = []
+        resolvedChats.reserveCapacity(chats.count)
+
+        for chat in chats {
+            guard Self.needsMemberCountResolution(chat),
+                  let memberCount = await telegramService.resolvedMemberCount(for: chat) else {
+                resolvedChats.append(chat)
+                continue
+            }
+            resolvedChats.append(chat.updating(memberCount: memberCount))
+        }
+
+        return resolvedChats
+    }
+
+    nonisolated private static func needsMemberCountResolution(_ chat: TGChat) -> Bool {
+        guard chat.memberCount == nil else { return false }
+        if case .supergroup(_, let isChannel) = chat.chatType {
+            return !isChannel
+        }
+        return false
     }
 
     private func orderedChats(from chats: [TGChat]) -> [TGChat] {
@@ -192,6 +239,10 @@ actor RecentSyncCoordinator {
         let latestChatMessageId = chat.lastMessage?.id ?? 0
         guard latestChatMessageId != 0 else { return false }
 
+        if recoveryChatIds.contains(chat.id) {
+            return true
+        }
+
         guard let state else { return true }
         if latestChatMessageId != state.latestSyncedMessageId {
             return true
@@ -199,6 +250,39 @@ actor RecentSyncCoordinator {
 
         guard let lastRecentSyncAt = state.lastRecentSyncAt else { return true }
         return Date().timeIntervalSince(lastRecentSyncAt) >= AppConstants.RecentSync.staleRefreshAgeSeconds
+    }
+
+    private func scheduleRecoveryRefresh(from chats: [TGChat], ignoreCooldown: Bool = false) {
+        let now = Date()
+        if !ignoreCooldown,
+           let lastRecoveryRefreshAt,
+           now.timeIntervalSince(lastRecoveryRefreshAt) < AppConstants.RecentSync.recoveryRefreshCooldownSeconds {
+            pendingImmediateRefresh = true
+            return
+        }
+
+        let recoveryTargets = orderedChats(from: chats)
+            .prefix(AppConstants.RecentSync.recoveryRefreshChatLimit)
+            .map(\.id)
+        guard !recoveryTargets.isEmpty else {
+            pendingImmediateRefresh = true
+            return
+        }
+
+        recoveryChatIds.formUnion(recoveryTargets)
+        prependPrioritized(chatIds: recoveryTargets)
+        pendingImmediateRefresh = true
+        lastRecoveryRefreshAt = now
+    }
+
+    private func prependPrioritized(chatIds: [Int64]) {
+        for chatId in chatIds.reversed() {
+            prioritizedChatIds.removeAll { $0 == chatId }
+            prioritizedChatIds.insert(chatId, at: 0)
+        }
+        if prioritizedChatIds.count > AppConstants.Indexing.maxPrioritizedChats {
+            prioritizedChatIds = Array(prioritizedChatIds.prefix(AppConstants.Indexing.maxPrioritizedChats))
+        }
     }
 
     private func sync(chats: [TGChat], using telegramService: TelegramService) async -> Set<Int64> {
@@ -331,6 +415,27 @@ actor RecentSyncCoordinator {
             progress.lastBatchMessageCount = snapshot.lastBatchMessageCount
         }
     }
+
+#if DEBUG
+    func scheduleRecoveryRefreshForTesting(chats: [TGChat], ignoreCooldown: Bool = true) async {
+        scheduleRecoveryRefresh(from: chats, ignoreCooldown: ignoreCooldown)
+    }
+
+    func shouldRefreshForTesting(
+        chat: TGChat,
+        state: DatabaseManager.RecentSyncStateRecord?
+    ) async -> Bool {
+        shouldRefresh(chat: chat, state: state)
+    }
+
+    func recoveryChatIdsForTesting() async -> Set<Int64> {
+        recoveryChatIds
+    }
+
+    func indexableChatsForTesting(using telegramService: TelegramService) async -> [TGChat] {
+        await snapshot(using: telegramService)
+    }
+#endif
 }
 
 private func batchChats<T>(_ items: [T], size: Int) -> [[T]] {

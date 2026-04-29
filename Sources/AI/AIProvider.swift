@@ -8,6 +8,13 @@ protocol AIProvider {
     /// Semantic search: find chats relevant to a topic/concept.
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO]
 
+    /// Query planning: normalize ambiguous natural-language queries into a structured search plan.
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO
+
     /// Rerank already-retrieved local semantic candidates.
     func rerankResults(
         query: String,
@@ -34,6 +41,21 @@ protocol AIProvider {
 
     /// Categorize a conversation for the Pipeline view (on_me / on_them / quiet).
     func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO
+
+    /// Discover the dashboard's small set of durable operating topics.
+    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO]
+
+    /// Extract durable tasks from one chat using the dashboard topic taxonomy.
+    func extractDashboardTasks(
+        chat: TGChat,
+        topics: [DashboardTopic],
+        messages: [MessageSnippet]
+    ) async throws -> [DashboardTaskCandidate]
+
+    /// Dashboard task triage: classify many chats into effort_task / reply_queue / ignore.
+    func triageDashboardTaskCandidates(
+        candidates: [DashboardTaskTriageCandidateDTO]
+    ) async throws -> [DashboardTaskTriageResultDTO]
 
     /// Validates the API key by making a minimal request.
     func testConnection() async throws -> Bool
@@ -147,6 +169,55 @@ enum SearchRerankPrompt {
 
         Candidates:
         \(renderedCandidates)
+        """
+    }
+}
+
+enum QueryPlanningPrompt {
+    static let systemPrompt = """
+    You normalize natural-language search queries for a local Telegram launcher.
+
+    Return exactly one JSON object with this shape:
+    {
+      "family": "summary" | "reply_queue" | "topic_search" | "exact_lookup" | "relationship",
+      "scope": "inherit" | "all" | "dms" | "groups",
+      "timeRange": "inherit" | "none" | "today" | "yesterday" | "last_week" | "this_week" | "last_30_days",
+      "people": ["lowercase person tokens"],
+      "topicTerms": ["lowercase concrete topic tokens"],
+      "confidence": 0.0
+    }
+
+    Rules:
+    - Use "summary" for recap, catch-up, "latest with", or "what did we discuss" prompts.
+    - Use "reply_queue" for "on me", reply, follow-up, or "worth checking" prompts.
+    - Use "exact_lookup" only for specific artifacts like wallet addresses, links, usernames, emails, or transaction hashes.
+    - Use "topic_search" for general thematic search.
+    - Use "relationship" only for CRM / relationship-state questions.
+    - "people" should contain only actual people or handles the search should anchor on.
+    - "topicTerms" should contain only concrete topic words. Exclude generic recap words like latest, recent, discuss, chats, summary.
+    - Keep "scope" as "inherit" unless the user explicitly asks for DMs or groups.
+    - Keep "timeRange" as "inherit" unless the user explicitly asks for a time window or strongly implies one.
+    - If you are unsure, stay close to the deterministic guess and lower confidence.
+    """
+
+    static func userMessage(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) -> String {
+        """
+        Query:
+        \(query)
+
+        Active filter tab:
+        \(activeFilter.rawValue)
+
+        Deterministic guess:
+        - family: \(deterministicSpec.family.rawValue)
+        - scope: \(deterministicSpec.scope.rawValue)
+        - replyConstraint: \(deterministicSpec.replyConstraint.rawValue)
+        - timeRange: \(deterministicSpec.timeRange?.label ?? "none")
+        - confidence: \(String(format: "%.2f", deterministicSpec.parseConfidence))
         """
     }
 }

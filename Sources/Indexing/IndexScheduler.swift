@@ -88,7 +88,8 @@ actor IndexScheduler {
     }
 
     func stop() async {
-        processingTask?.cancel()
+        let task = processingTask
+        task?.cancel()
         processingTask = nil
         telegramService = nil
         prioritizedChatIds.removeAll()
@@ -101,6 +102,7 @@ actor IndexScheduler {
         lastBatchMessageCount = 0
         lastBackfillCount = 0
         activeWorkers = 0
+        await task?.value
         await publishProgress(
             indexed: 0,
             total: 0,
@@ -270,10 +272,41 @@ actor IndexScheduler {
     }
 
     private func snapshot(using telegramService: TelegramService) async -> (currentUserId: Int64?, chats: [TGChat]) {
-        await MainActor.run {
-            let chats = telegramService.visibleChats.filter(Self.isIndexable)
-            return (telegramService.currentUser?.id, chats)
+        let snapshot = await MainActor.run {
+            (telegramService.currentUser?.id, telegramService.visibleChats)
         }
+        let resolvedChats = await resolveMemberCountsIfNeeded(
+            in: snapshot.1,
+            using: telegramService
+        )
+        return (snapshot.0, resolvedChats.filter(Self.isIndexable))
+    }
+
+    private func resolveMemberCountsIfNeeded(
+        in chats: [TGChat],
+        using telegramService: TelegramService
+    ) async -> [TGChat] {
+        var resolvedChats: [TGChat] = []
+        resolvedChats.reserveCapacity(chats.count)
+
+        for chat in chats {
+            guard Self.needsMemberCountResolution(chat),
+                  let memberCount = await telegramService.resolvedMemberCount(for: chat) else {
+                resolvedChats.append(chat)
+                continue
+            }
+            resolvedChats.append(chat.updating(memberCount: memberCount))
+        }
+
+        return resolvedChats
+    }
+
+    nonisolated private static func needsMemberCountResolution(_ chat: TGChat) -> Bool {
+        guard chat.memberCount == nil else { return false }
+        if case .supergroup(_, let isChannel) = chat.chatType {
+            return !isChannel
+        }
+        return false
     }
 
     nonisolated private static func isIndexable(_ chat: TGChat) -> Bool {
@@ -606,4 +639,10 @@ actor IndexScheduler {
             progress.lastBackfillCount = snapshot.lastBackfillCount
         }
     }
+
+#if DEBUG
+    func indexableChatsForTesting(using telegramService: TelegramService) async -> [TGChat] {
+        await snapshot(using: telegramService).chats
+    }
+#endif
 }

@@ -1,5 +1,16 @@
 import Foundation
 
+struct ReplySignalEvaluation {
+    let pipelineHintCategory: String
+    let replyOwed: Bool
+    let strictReplySignal: Bool
+    let effectiveGroupReplySignal: Bool
+
+    func resolvedPipelineCategory(forReplyQueueQuery replyQueueQuery: Bool) -> String {
+        ((replyQueueQuery && effectiveGroupReplySignal) || replyOwed) ? "on_me" : pipelineHintCategory
+    }
+}
+
 enum ConversationReplyHeuristics {
     static func messageIsFromMe(_ message: TGMessage, myUserId: Int64) -> Bool {
         if case .user(let senderId) = message.senderId {
@@ -39,6 +50,10 @@ enum ConversationReplyHeuristics {
     }
 
     static func inboundMessageLikelyNeedsReply(_ message: TGMessage) -> Bool {
+        if looksStandaloneArtifact(message.textContent) {
+            return false
+        }
+
         let compact = normalizedSignalText(message.textContent)
         guard !compact.isEmpty else { return false }
 
@@ -93,10 +108,6 @@ enum ConversationReplyHeuristics {
 
         if !hasOutbound {
             return chat.unreadCount > 0 && inboundTail.count >= 2
-        }
-
-        if chat.unreadCount > 0 && inboundTail.count >= 2 {
-            return true
         }
 
         return false
@@ -223,16 +234,23 @@ enum ConversationReplyHeuristics {
             if $0.date != $1.date { return $0.date < $1.date }
             return $0.id < $1.id
         }
-        let recentWindow = Array(sorted.suffix(8))
+        let evidenceWindow = worthCheckingEvidenceWindow(
+            from: sorted,
+            supportingMessageIds: supportingMessageIds
+        )
         let referencedWindow = supportingMessageIds.isEmpty
-            ? recentWindow
-            : recentWindow.filter { supportingMessageIds.contains($0.id) }
+            ? evidenceWindow
+            : evidenceWindow.filter { supportingMessageIds.contains($0.id) }
+        let inboundEvidence = evidenceWindow.filter {
+            !messageIsFromMe($0, myUserId: myUserId)
+                && !normalizedSignalText($0.textContent).isEmpty
+        }
         let inboundReferenced = referencedWindow.filter {
             !messageIsFromMe($0, myUserId: myUserId)
                 && !normalizedSignalText($0.textContent).isEmpty
         }
 
-        guard let latestReferenced = inboundReferenced.last else {
+        guard let latestReferenced = inboundReferenced.last ?? inboundEvidence.last else {
             return false
         }
 
@@ -248,7 +266,14 @@ enum ConversationReplyHeuristics {
             return false
         }
 
-        let earlierInbound = Array(inboundReferenced.dropLast())
+        guard let latestReferencedIndex = evidenceWindow.firstIndex(where: { $0.id == latestReferenced.id }) else {
+            return false
+        }
+
+        let earlierInbound = evidenceWindow[..<latestReferencedIndex].filter {
+            !messageIsFromMe($0, myUserId: myUserId)
+                && !normalizedSignalText($0.textContent).isEmpty
+        }
         let hasEarlierOwnedAsk = earlierInbound.contains {
             inboundMessageLikelyNeedsReply($0) && !messageTargetsSomeoneElse($0, myUsername: myUsername)
         }
@@ -262,8 +287,9 @@ enum ConversationReplyHeuristics {
             return false
         }
 
-        let hasLaterClosure = recentWindow.contains {
-            guard $0.id > latestReferenced.id, !messageIsFromMe($0, myUserId: myUserId) else {
+        let laterMessages = evidenceWindow.suffix(from: evidenceWindow.index(after: latestReferencedIndex))
+        let hasLaterClosure = laterMessages.contains {
+            guard !messageIsFromMe($0, myUserId: myUserId) else {
                 return false
             }
             let compact = normalizedSignalText($0.textContent)
@@ -290,10 +316,12 @@ enum ConversationReplyHeuristics {
         )
         if hasReplySignal { return "on_me" }
 
-        let latestTextMessage = messages
-            .filter { ($0.textContent?.isEmpty == false) }
-            .sorted { $0.date > $1.date }
-            .first
+        let latestTextMessage = relevantTextMessages(
+            for: chat,
+            messages: messages
+        )
+        .sorted { $0.date > $1.date }
+        .first
 
         guard let latestTextMessage else {
             if normalizedHint == "on_them" || normalizedHint == "quiet" {
@@ -308,11 +336,53 @@ enum ConversationReplyHeuristics {
             return "on_them"
         }
 
+        if inboundMessageLikelyNeedsReply(latestTextMessage) {
+            return "on_me"
+        }
+
         if normalizedHint == "on_them" || normalizedHint == "quiet" {
             return normalizedHint
         }
 
         return "quiet"
+    }
+
+    static func evaluateSignals(
+        for chat: TGChat,
+        hint: String,
+        messages: [TGMessage],
+        myUserId: Int64,
+        myUsername: String? = nil
+    ) -> ReplySignalEvaluation {
+        let pipelineHintCategory = resolvePipelineCategory(
+            for: chat,
+            hint: hint,
+            messages: messages,
+            myUserId: myUserId
+        )
+        let replyOwed = isReplyOwed(
+            for: chat,
+            messages: messages,
+            myUserId: myUserId
+        )
+        let strictReplySignal = hasStrictReplyOpportunity(
+            chat: chat,
+            messages: messages,
+            myUserId: myUserId,
+            myUsername: myUsername
+        )
+        let effectiveGroupReplySignal = strictReplySignal || hasLikelyDirectedGroupReplyOpportunity(
+            chat: chat,
+            messages: messages,
+            myUserId: myUserId,
+            myUsername: myUsername
+        )
+        return ReplySignalEvaluation(
+            pipelineHintCategory: pipelineHintCategory,
+            replyOwed: replyOwed,
+            strictReplySignal: strictReplySignal,
+            effectiveGroupReplySignal: effectiveGroupReplySignal
+        )
     }
 
     static func isReplyOwed(
@@ -332,7 +402,10 @@ enum ConversationReplyHeuristics {
     ) -> FollowUpItem.Category {
         guard myUserId > 0 else { return proposed }
 
-        let textMessages = messages.filter { ($0.textContent?.isEmpty == false) }
+        let textMessages = relevantTextMessages(
+            for: chat,
+            messages: messages
+        )
         guard !textMessages.isEmpty else { return proposed }
 
         if hasPendingReplySignal(chat: chat, messages: textMessages, myUserId: myUserId) {
@@ -344,6 +417,10 @@ enum ConversationReplyHeuristics {
 
         if messageIsFromMe(latestText, myUserId: myUserId) {
             return .onThem
+        }
+
+        if inboundMessageLikelyNeedsReply(latestText) {
+            return .onMe
         }
 
         let compact = normalizedSignalText(latestText.textContent)
@@ -361,6 +438,23 @@ enum ConversationReplyHeuristics {
         }
 
         return .quiet
+    }
+
+    private static func relevantTextMessages(
+        for chat: TGChat,
+        messages: [TGMessage]
+    ) -> [TGMessage] {
+        let directMessages = messages.filter { ($0.textContent?.isEmpty == false) }
+        if !directMessages.isEmpty {
+            return directMessages
+        }
+
+        if let lastMessage = chat.lastMessage,
+           lastMessage.textContent?.isEmpty == false {
+            return [lastMessage]
+        }
+
+        return []
     }
 
     private static func inboundTail(
@@ -399,6 +493,18 @@ enum ConversationReplyHeuristics {
         }
 
         return true
+    }
+
+    private static func looksStandaloneArtifact(_ rawText: String?) -> Bool {
+        guard let rawText else { return false }
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        if trimmed.range(of: #"^(https?://|www\.)\S+$"#, options: .regularExpression) != nil {
+            return true
+        }
+
+        return trimmed.range(of: #"^0x[a-fA-F0-9]{32,}$"#, options: .regularExpression) != nil
     }
 
     private static func mentionedUsernames(in rawText: String?) -> Set<String> {
@@ -482,5 +588,25 @@ enum ConversationReplyHeuristics {
         return (closureSignals + passiveSignals).contains(where: {
             compact == $0 || compact.contains($0)
         })
+    }
+
+    private static func worthCheckingEvidenceWindow(
+        from sorted: [TGMessage],
+        supportingMessageIds: Set<Int64>
+    ) -> [TGMessage] {
+        let recentLimit = 10
+        guard !supportingMessageIds.isEmpty else {
+            return Array(sorted.suffix(recentLimit))
+        }
+
+        let anchorIndices = sorted.enumerated().compactMap { index, message in
+            supportingMessageIds.contains(message.id) ? index : nil
+        }
+        guard let earliestAnchorIndex = anchorIndices.min() else {
+            return Array(sorted.suffix(recentLimit))
+        }
+
+        let lowerBound = max(0, earliestAnchorIndex - recentLimit)
+        return Array(sorted[lowerBound...])
     }
 }

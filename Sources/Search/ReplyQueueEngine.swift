@@ -141,37 +141,29 @@ final class ReplyQueueEngine {
             var wavePending: [PendingChat] = []
             let batchHeuristicsStartedAt = Date()
             for chat in chatWave {
+                let resolvedMemberCount = await telegramService.resolvedMemberCount(for: chat)
+                let effectiveChat = chat.updating(memberCount: resolvedMemberCount ?? chat.memberCount)
                 debug.scannedChats += 1
                 var audit = AgenticDebugChatAudit(
-                    chatId: chat.id,
-                    chatTitle: chat.title,
-                    chatType: chat.chatType.isPrivate ? "private" : (chat.chatType.isGroup ? "group" : "other")
+                    chatId: effectiveChat.id,
+                    chatTitle: effectiveChat.title,
+                    chatType: effectiveChat.chatType.isPrivate ? "private" : (effectiveChat.chatType.isGroup ? "group" : "other")
                 )
                 audit.scanned = true
 
                 let messages = initialMessagesByChatId[chat.id]?.messages ?? []
                 let filtered = applyTimeRange(messages, timeRange: querySpec.timeRange)
                 guard !filtered.isEmpty else {
-                    debug.recordExclusion("no messages in active date range", chatTitle: chat.title)
+                    debug.recordExclusion("no messages in active date range", chatTitle: effectiveChat.title)
                     audit.prefilterExclusionReason = "no messages in active date range"
-                    chatAudits[chat.id] = audit
+                    chatAudits[effectiveChat.id] = audit
                     continue
                 }
 
-                let pipelineHint = await pipelineHintProvider(chat.id)
-                let replyOwed = ConversationReplyHeuristics.isReplyOwed(
-                    for: chat,
-                    messages: filtered,
-                    myUserId: myUserId
-                )
-                let strictReplySignal = ConversationReplyHeuristics.hasStrictReplyOpportunity(
-                    chat: chat,
-                    messages: filtered,
-                    myUserId: myUserId,
-                    myUsername: myUsername
-                )
-                let effectiveGroupReplySignal = strictReplySignal || ConversationReplyHeuristics.hasLikelyDirectedGroupReplyOpportunity(
-                    chat: chat,
+                let pipelineHint = await pipelineHintProvider(effectiveChat.id)
+                let signalEvaluation = ConversationReplyHeuristics.evaluateSignals(
+                    for: effectiveChat,
+                    hint: pipelineHint,
                     messages: filtered,
                     myUserId: myUserId,
                     myUsername: myUsername
@@ -179,30 +171,30 @@ final class ReplyQueueEngine {
 
                 debug.inRangeChats += 1
                 debug.matchedChats += 1
-                if chat.chatType.isPrivate {
+                if effectiveChat.chatType.isPrivate {
                     debug.matchedPrivateChats += 1
-                } else if chat.chatType.isGroup {
+                } else if effectiveChat.chatType.isGroup {
                     debug.matchedGroupChats += 1
                 }
-                if replyOwed {
+                if signalEvaluation.replyOwed {
                     debug.replyOwedChats += 1
                 }
 
                 audit.inRange = true
                 audit.messageCount = filtered.count
-                audit.pipelineCategory = (replyOwed || effectiveGroupReplySignal) ? "on_me" : pipelineHint
-                audit.replyOwed = replyOwed
-                audit.strictReplySignal = strictReplySignal
-                audit.effectiveGroupReplySignal = effectiveGroupReplySignal
-                chatAudits[chat.id] = audit
+                audit.pipelineCategory = signalEvaluation.resolvedPipelineCategory(forReplyQueueQuery: true)
+                audit.replyOwed = signalEvaluation.replyOwed
+                audit.strictReplySignal = signalEvaluation.strictReplySignal
+                audit.effectiveGroupReplySignal = signalEvaluation.effectiveGroupReplySignal
+                chatAudits[effectiveChat.id] = audit
 
                 wavePending.append(
                     PendingChat(
-                        chat: chat,
+                        chat: effectiveChat,
                         messages: filtered,
-                        replyOwed: replyOwed,
-                        strictReplySignal: strictReplySignal,
-                        effectiveGroupReplySignal: effectiveGroupReplySignal,
+                        replyOwed: signalEvaluation.replyOwed,
+                        strictReplySignal: signalEvaluation.strictReplySignal,
+                        effectiveGroupReplySignal: signalEvaluation.effectiveGroupReplySignal,
                         pipelineHint: pipelineHint
                     )
                 )
@@ -536,6 +528,10 @@ final class ReplyQueueEngine {
             return true
         }
 
+        if isAIAuthoritativeGroup(pending.chat) {
+            return true
+        }
+
         if pending.effectiveGroupReplySignal || pending.replyOwed {
             return true
         }
@@ -570,6 +566,7 @@ final class ReplyQueueEngine {
             }
 
             if item.chat.chatType.isGroup,
+               !isAIAuthoritativeGroup(item.chat),
                !item.effectiveGroupReplySignal,
                !item.replyOwed {
                 return nil
@@ -906,10 +903,12 @@ final class ReplyQueueEngine {
         let reason: String
 
         if pending.chat.chatType.isGroup {
-            if pending.strictReplySignal {
+            if pending.strictReplySignal || pending.effectiveGroupReplySignal {
                 classification = ReplyQueueResult.Classification.onMe.rawValue
-                urgency = "high"
-                reason = "Recent group messages still look clearly directed at you."
+                urgency = pending.strictReplySignal ? "high" : "medium"
+                reason = pending.strictReplySignal
+                    ? "Recent group messages still look clearly directed at you."
+                    : "Recent small-group context looks likely directed at you."
             } else {
                 classification = ReplyQueueResult.Classification.quiet.rawValue
                 urgency = "low"
@@ -975,70 +974,20 @@ final class ReplyQueueEngine {
         includeBotsInAISearch: Bool,
         telegramService: TelegramService
     ) -> (included: [TGChat], exclusions: [(reason: String, chatTitle: String)]) {
-        let now = Date()
-        let maxAge = AppConstants.FollowUp.maxPipelineAgeSeconds
+        let result = SearchChatEligibilityFilter.applyingLikelyBotFilter(
+            to: SearchChatEligibilityFilter.collectCandidateChats(
+                from: aiSearchSourceChats,
+                scope: scope,
+                replyQueueQuery: replyQueueQuery
+            ),
+            includeBots: includeBotsInAISearch,
+            isLikelyBot: { telegramService.isLikelyBotChat($0) }
+        )
 
-        var included: [TGChat] = []
-        var exclusions: [(reason: String, chatTitle: String)] = []
-
-        for chat in aiSearchSourceChats {
-            guard let lastMessage = chat.lastMessage else {
-                exclusions.append(("no last message", chat.title))
-                continue
-            }
-            guard !chat.chatType.isChannel else {
-                exclusions.append(("channel skipped", chat.title))
-                continue
-            }
-
-            switch scope {
-            case .all:
-                guard chat.chatType.isPrivate || chat.chatType.isGroup else {
-                    exclusions.append(("outside active scope", chat.title))
-                    continue
-                }
-            case .dms:
-                guard chat.chatType.isPrivate else {
-                    exclusions.append(("outside active scope", chat.title))
-                    continue
-                }
-            case .groups:
-                guard chat.chatType.isGroup else {
-                    exclusions.append(("outside active scope", chat.title))
-                    continue
-                }
-            }
-
-            let ageLimit = replyQueueQuery && chat.chatType.isPrivate
-                ? AppConstants.AI.AgenticSearch.replyQueuePrivateMaxAgeSeconds
-                : maxAge
-            let age = now.timeIntervalSince(lastMessage.date)
-            guard age <= ageLimit else {
-                let dayLabel = Int(ageLimit / 86_400)
-                exclusions.append(("older than \(dayLabel) days", chat.title))
-                continue
-            }
-
-            if chat.chatType.isGroup {
-                if let count = chat.memberCount, count > AppConstants.FollowUp.maxGroupMembers {
-                    exclusions.append(("group too large", chat.title))
-                    continue
-                }
-                if chat.unreadCount > AppConstants.FollowUp.maxGroupUnread {
-                    exclusions.append(("group unread too high", chat.title))
-                    continue
-                }
-            }
-
-            if !includeBotsInAISearch && telegramService.isLikelyBotChat(chat) {
-                exclusions.append(("bot filtered", chat.title))
-                continue
-            }
-
-            included.append(chat)
-        }
-
-        return (included, exclusions)
+        return (
+            result.included,
+            result.exclusions.map { (reason: $0.reason, chatTitle: $0.chatTitle) }
+        )
     }
 
     private func prioritizeEligibleChats(_ chats: [TGChat]) -> [TGChat] {
@@ -1248,6 +1197,15 @@ final class ReplyQueueEngine {
             return "on_them"
         }
         return "quiet"
+    }
+
+    private func isAIAuthoritativeGroup(_ chat: TGChat) -> Bool {
+        guard chat.chatType.isGroup,
+              let memberCount = chat.memberCount else {
+            return false
+        }
+
+        return memberCount <= AppConstants.FollowUp.maxGroupMembers
     }
 
     private func snippets(

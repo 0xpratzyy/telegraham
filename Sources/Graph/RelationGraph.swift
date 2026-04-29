@@ -1,6 +1,22 @@
 import Foundation
 import GRDB
 
+struct GraphNodeMetadata: Codable, Sendable, Equatable {
+    let isBot: Bool?
+
+    static func encoded(isBot: Bool?) -> String? {
+        guard let isBot else { return nil }
+        let metadata = GraphNodeMetadata(isBot: isBot)
+        guard let data = try? JSONEncoder().encode(metadata) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func decoded(from rawValue: String?) -> GraphNodeMetadata? {
+        guard let rawValue, let data = rawValue.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(GraphNodeMetadata.self, from: data)
+    }
+}
+
 actor RelationGraph {
     static let shared = RelationGraph()
 
@@ -25,6 +41,10 @@ actor RelationGraph {
         let lastInteractionAt: Date?
         let firstSeenAt: Date?
         let metadata: String?
+
+        var isBot: Bool {
+            GraphNodeMetadata.decoded(from: metadata)?.isBot == true
+        }
     }
 
     struct Edge: Sendable, Equatable, Hashable {
@@ -38,8 +58,15 @@ actor RelationGraph {
         let contextChatId: Int64?
     }
 
-    func upsertNode(entityId: Int64, type: String, name: String?, username: String?) async {
+    func upsertNode(
+        entityId: Int64,
+        type: String,
+        name: String?,
+        username: String?,
+        isBot: Bool? = nil
+    ) async {
         let now = Date().timeIntervalSince1970
+        let metadata = GraphNodeMetadata.encoded(isBot: isBot)
 
         do {
             try await DatabaseManager.shared.write { db in
@@ -57,11 +84,12 @@ actor RelationGraph {
                             first_seen_at,
                             metadata
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, NULL)
+                        VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
                         ON CONFLICT(entity_id) DO UPDATE SET
                             entity_type = excluded.entity_type,
                             display_name = COALESCE(excluded.display_name, nodes.display_name),
-                            username = COALESCE(excluded.username, nodes.username)
+                            username = COALESCE(excluded.username, nodes.username),
+                            metadata = COALESCE(excluded.metadata, nodes.metadata)
                         """,
                     arguments: [
                         entityId,
@@ -70,7 +98,8 @@ actor RelationGraph {
                         username,
                         AppConstants.Graph.defaultCategory,
                         AppConstants.Graph.automaticCategorySource,
-                        now
+                        now,
+                        metadata
                     ]
                 )
             }
@@ -252,7 +281,7 @@ actor RelationGraph {
                     arguments: [category, category, limit]
                 )
 
-                return rows.map(Self.node(from:))
+                return rows.map(Self.node(from:)).filter { !$0.isBot }
             }
         } catch {
             print("[RelationGraph] Failed to fetch top contacts: \(error)")
@@ -319,7 +348,7 @@ actor RelationGraph {
                     arguments: [category, category, cutoff]
                 )
 
-                return rows.map(Self.node(from:))
+                return rows.map(Self.node(from:)).filter { !$0.isBot }
             }
         } catch {
             print("[RelationGraph] Failed to fetch stale contacts: \(error)")
@@ -346,6 +375,7 @@ actor RelationGraph {
 
                 return rows.reduce(into: [String: [Node]]()) { grouped, row in
                     let node = Self.node(from: row)
+                    guard !node.isBot else { return }
                     grouped[node.category, default: []].append(node)
                 }
             }

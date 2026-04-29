@@ -1,12 +1,12 @@
 import Foundation
 
 enum QuerySummaryPrompt {
-    static func systemPrompt(query: String, chatTitle: String) -> String {
+    static func systemPrompt(query: String, scopeDescription: String) -> String {
         """
         You prepare a Telegram operator to reply quickly.
         The user asked: "\(query)".
 
-        Focus only on the provided chat: "\(chatTitle)".
+        Focus only on the provided summary scope: "\(scopeDescription)".
 
         Return a short answer in 2-4 bullet-style sentences covering:
         - the latest relevant topic or decision
@@ -17,6 +17,7 @@ enum QuerySummaryPrompt {
         - Be concrete and concise.
         - Prefer decisions, asks, blockers, next actions, rankings, options, feedback, and product gaps over general chatter.
         - Stay tightly grounded in the provided messages and reuse exact facts when possible.
+        - If multiple recent chats are provided, combine only the grounded overlaps that help answer the query.
         - If the messages are sparse, say that clearly.
         - If the provided messages do not contain strong local context for the query, say "No clear local summary context found."
         - Do not invent facts that are not in the provided messages.

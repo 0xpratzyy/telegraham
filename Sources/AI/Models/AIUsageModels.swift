@@ -3,9 +3,13 @@ import Foundation
 enum AIRequestKind: String, Codable, CaseIterable {
     case semanticSearch
     case agenticSearch
+    case queryPlanning
     case followUpSuggestion
     case pipelineTriage
     case replyQueueTriage
+    case dashboardTopicDiscovery
+    case dashboardTaskTriage
+    case dashboardTaskExtraction
     case summary
 
     var label: String {
@@ -14,12 +18,20 @@ enum AIRequestKind: String, Codable, CaseIterable {
             return "Semantic Search"
         case .agenticSearch:
             return "Agentic Search"
+        case .queryPlanning:
+            return "Query Planning"
         case .followUpSuggestion:
             return "Follow-Up Suggestion"
         case .pipelineTriage:
             return "Pipeline Triage"
         case .replyQueueTriage:
             return "Reply Queue Triage"
+        case .dashboardTopicDiscovery:
+            return "Dashboard Topics"
+        case .dashboardTaskTriage:
+            return "Dashboard Task Triage"
+        case .dashboardTaskExtraction:
+            return "Dashboard Tasks"
         case .summary:
             return "Summary"
         }

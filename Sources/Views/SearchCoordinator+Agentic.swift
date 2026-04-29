@@ -1,123 +1,5 @@
 import Foundation
 
-struct AgenticDebugExclusionBucket: Identifiable, Codable {
-    let reason: String
-    var count: Int = 0
-    var sampleChats: [String] = []
-
-    var id: String { reason }
-}
-
-struct AgenticDebugWaveTiming: Identifiable, Codable {
-    let wave: Int
-    let chatCount: Int
-    let localPrepMs: Int
-    let aiMs: Int
-    let provisionalCount: Int
-
-    var id: Int { wave }
-}
-
-struct AgenticDebugBatchTiming: Identifiable, Codable {
-    let label: String
-    let size: Int
-    let durationMs: Int
-    let resultCount: Int
-
-    var id: String { label }
-}
-
-struct AgenticDebugInfo: Codable {
-    var scopedChats: Int
-    var maxScanChats: Int
-    var providerName: String = ""
-    var providerModel: String = ""
-    var eligiblePrivateChats: Int = 0
-    var eligibleGroupChats: Int = 0
-    var cappedPrivateChats: Int = 0
-    var cappedGroupChats: Int = 0
-    var scannedChats: Int = 0
-    var inRangeChats: Int = 0
-    var replyOwedChats: Int = 0
-    var matchedChats: Int = 0
-    var matchedPrivateChats: Int = 0
-    var matchedGroupChats: Int = 0
-    var candidatesSentToAI: Int = 0
-    var aiReturned: Int = 0
-    var rankedBeforeValidation: Int = 0
-    var droppedByValidation: Int = 0
-    var finalCount: Int = 0
-    var finalPrivateChats: Int = 0
-    var finalGroupChats: Int = 0
-    var totalDurationMs: Int = 0
-    var candidateCollectionMs: Int = 0
-    var prioritizationMs: Int = 0
-    var localPrepMs: Int = 0
-    var aiMs: Int = 0
-    var needMoreMs: Int = 0
-    var finalizationMs: Int = 0
-    var memoryHitChats: Int = 0
-    var sqliteHitChats: Int = 0
-    var emptyLocalChats: Int = 0
-    var aiBatchCount: Int = 0
-    var needMoreCount: Int = 0
-    var stopReason: String = "unknown"
-    var exclusionBuckets: [AgenticDebugExclusionBucket] = []
-    var waveTimings: [AgenticDebugWaveTiming] = []
-    var batchTimings: [AgenticDebugBatchTiming] = []
-
-    mutating func recordExclusion(_ reason: String, chatTitle: String) {
-        if let index = exclusionBuckets.firstIndex(where: { $0.reason == reason }) {
-            exclusionBuckets[index].count += 1
-            if exclusionBuckets[index].sampleChats.count < 3,
-               !exclusionBuckets[index].sampleChats.contains(chatTitle) {
-                exclusionBuckets[index].sampleChats.append(chatTitle)
-            }
-        } else {
-            exclusionBuckets.append(
-                AgenticDebugExclusionBucket(
-                    reason: reason,
-                    count: 1,
-                    sampleChats: chatTitle.isEmpty ? [] : [chatTitle]
-                )
-            )
-        }
-    }
-}
-
-struct AgenticDebugChatAudit: Identifiable, Codable {
-    let chatId: Int64
-    let chatTitle: String
-    let chatType: String
-    var scanned: Bool = false
-    var inRange: Bool = false
-    var messageCount: Int = 0
-    var pipelineCategory: String = ""
-    var replyOwed: Bool = false
-    var strictReplySignal: Bool = false
-    var effectiveGroupReplySignal: Bool = false
-    var prefilterExclusionReason: String?
-    var sentToAI: Bool = false
-    var aiScore: Int?
-    var aiWarmth: String?
-    var aiReplyability: String?
-    var aiConfidence: Double?
-    var aiReason: String?
-    var supportingMessageIds: [Int64] = []
-    var validationFailureReason: String?
-    var finalIncluded: Bool = false
-
-    var id: Int64 { chatId }
-}
-
-private struct PersistedAgenticDebugSnapshot: Codable {
-    let query: String
-    let querySpec: QuerySpec?
-    let capturedAt: Date
-    let debug: AgenticDebugInfo
-    let chatAudits: [AgenticDebugChatAudit]
-}
-
 extension SearchCoordinator {
     func executeAgenticSearch(
         query: String,
@@ -260,36 +142,20 @@ extension SearchCoordinator {
                 audit.messageCount = messages.count
 
                 let pipelineHint = await pipelineHintProvider(chat.id)
-                let effectivePipelineCategory = ConversationReplyHeuristics.resolvePipelineCategory(
+                let signalEvaluation = ConversationReplyHeuristics.evaluateSignals(
                     for: chat,
                     hint: pipelineHint,
                     messages: messages,
-                    myUserId: myUserId
-                )
-                let replyOwed = ConversationReplyHeuristics.isReplyOwed(
-                    for: chat,
-                    messages: messages,
-                    myUserId: myUserId
-                )
-                let strictReplySignal = ConversationReplyHeuristics.hasStrictReplyOpportunity(
-                    chat: chat,
-                    messages: messages,
                     myUserId: myUserId,
                     myUsername: myUsername
                 )
-                let effectiveGroupReplySignal = strictReplySignal || ConversationReplyHeuristics.hasLikelyDirectedGroupReplyOpportunity(
-                    chat: chat,
-                    messages: messages,
-                    myUserId: myUserId,
-                    myUsername: myUsername
+                audit.pipelineCategory = signalEvaluation.resolvedPipelineCategory(
+                    forReplyQueueQuery: replyQueueQuery
                 )
-                audit.pipelineCategory = (replyQueueQuery && effectiveGroupReplySignal) || replyOwed
-                    ? "on_me"
-                    : effectivePipelineCategory
-                audit.replyOwed = replyOwed
-                audit.strictReplySignal = strictReplySignal
-                audit.effectiveGroupReplySignal = effectiveGroupReplySignal
-                if replyOwed {
+                audit.replyOwed = signalEvaluation.replyOwed
+                audit.strictReplySignal = signalEvaluation.strictReplySignal
+                audit.effectiveGroupReplySignal = signalEvaluation.effectiveGroupReplySignal
+                if signalEvaluation.replyOwed {
                     debug.replyOwedChats += 1
                 }
 
@@ -297,9 +163,9 @@ extension SearchCoordinator {
                     chat: chat,
                     messages: messages,
                     query: query,
-                    pipelineHint: effectivePipelineCategory,
-                    replyOwed: replyOwed,
-                    strictReplySignal: effectiveGroupReplySignal,
+                    pipelineHint: signalEvaluation.pipelineHintCategory,
+                    replyOwed: signalEvaluation.replyOwed,
+                    strictReplySignal: signalEvaluation.effectiveGroupReplySignal,
                     querySpec: resolvedQuerySpec
                 ) {
                     debug.recordExclusion(exclusionReason, chatTitle: chat.title)
@@ -317,7 +183,7 @@ extension SearchCoordinator {
                 candidateByChatId[chat.id] = AgenticSearchCandidate(
                     chat: chat,
                     pipelineCategory: audit.pipelineCategory,
-                    strictReplySignal: strictReplySignal,
+                    strictReplySignal: signalEvaluation.strictReplySignal,
                     messages: messages
                 )
                 chatAudits[chat.id] = audit
@@ -477,25 +343,9 @@ extension SearchCoordinator {
                 let filteredBase = applyTimeRange(baseMessages, timeRange: resolvedQuerySpec.timeRange)
                 guard !filteredBase.isEmpty else { continue }
                 let pipelineHint = await pipelineHintProvider(chat.id)
-                let effectivePipelineCategory = ConversationReplyHeuristics.resolvePipelineCategory(
+                let signalEvaluation = ConversationReplyHeuristics.evaluateSignals(
                     for: chat,
                     hint: pipelineHint,
-                    messages: filteredBase,
-                    myUserId: myUserId
-                )
-                let replyOwed = ConversationReplyHeuristics.isReplyOwed(
-                    for: chat,
-                    messages: filteredBase,
-                    myUserId: myUserId
-                )
-                let strictReplySignal = ConversationReplyHeuristics.hasStrictReplyOpportunity(
-                    chat: chat,
-                    messages: filteredBase,
-                    myUserId: myUserId,
-                    myUsername: myUsername
-                )
-                let effectiveGroupReplySignal = strictReplySignal || ConversationReplyHeuristics.hasLikelyDirectedGroupReplyOpportunity(
-                    chat: chat,
                     messages: filteredBase,
                     myUserId: myUserId,
                     myUsername: myUsername
@@ -514,10 +364,10 @@ extension SearchCoordinator {
 
                 let topUpCandidate = AgenticSearchCandidate(
                     chat: chat,
-                    pipelineCategory: (replyQueueQuery && effectiveGroupReplySignal) || replyOwed
-                        ? "on_me"
-                        : effectivePipelineCategory,
-                    strictReplySignal: strictReplySignal,
+                    pipelineCategory: signalEvaluation.resolvedPipelineCategory(
+                        forReplyQueueQuery: replyQueueQuery
+                    ),
+                    strictReplySignal: signalEvaluation.strictReplySignal,
                     messages: filteredExpanded
                 )
                 candidateByChatId[chat.id] = topUpCandidate
@@ -755,7 +605,11 @@ extension SearchCoordinator {
     }
 
     private func isReplyQueueQuery(query: String, querySpec: QuerySpec) -> Bool {
-        guard querySpec.replyConstraint == .pipelineOnMeOnly else { return false }
+        if querySpec.family == .replyQueue
+            || querySpec.preferredEngine == .replyTriage
+            || querySpec.replyConstraint == .pipelineOnMeOnly {
+            return true
+        }
 
         let normalized = query.lowercased()
         let replySignals = [
@@ -766,7 +620,9 @@ extension SearchCoordinator {
             "who do i",
             "who should i",
             "follow up",
-            "follow-up"
+            "follow-up",
+            "worth checking",
+            "worth reviewing"
         ]
         return replySignals.contains(where: { normalized.contains($0) })
     }
@@ -1003,75 +859,20 @@ extension SearchCoordinator {
         includeBotsInAISearch: Bool,
         telegramService: TelegramService
     ) async -> (included: [TGChat], exclusions: [(reason: String, chatTitle: String)]) {
-        let now = Date()
-        let maxAge = AppConstants.FollowUp.maxPipelineAgeSeconds
+        let result = await SearchChatEligibilityFilter.applyingBotFilter(
+            to: SearchChatEligibilityFilter.collectCandidateChats(
+                from: aiSearchSourceChats,
+                scope: scope,
+                replyQueueQuery: replyQueueQuery
+            ),
+            includeBots: includeBotsInAISearch,
+            isBot: { await telegramService.isBotChat($0) }
+        )
 
-        var included: [TGChat] = []
-        var exclusions: [(reason: String, chatTitle: String)] = []
-
-        for chat in aiSearchSourceChats {
-            guard let lastMessage = chat.lastMessage else {
-                exclusions.append(("no last message", chat.title))
-                continue
-            }
-            guard !chat.chatType.isChannel else {
-                exclusions.append(("channel skipped", chat.title))
-                continue
-            }
-            switch scope {
-            case .all:
-                guard chat.chatType.isPrivate || chat.chatType.isGroup else {
-                    exclusions.append(("outside active scope", chat.title))
-                    continue
-                }
-            case .dms:
-                guard chat.chatType.isPrivate else {
-                    exclusions.append(("outside active scope", chat.title))
-                    continue
-                }
-            case .groups:
-                guard chat.chatType.isGroup else {
-                    exclusions.append(("outside active scope", chat.title))
-                    continue
-                }
-            }
-
-            let ageLimit = replyQueueQuery && chat.chatType.isPrivate
-                ? AppConstants.AI.AgenticSearch.replyQueuePrivateMaxAgeSeconds
-                : maxAge
-            let age = now.timeIntervalSince(lastMessage.date)
-            guard age <= ageLimit else {
-                let dayLabel = Int(ageLimit / 86_400)
-                exclusions.append(("older than \(dayLabel) days", chat.title))
-                continue
-            }
-
-            if chat.chatType.isGroup {
-                if let count = chat.memberCount, count > AppConstants.FollowUp.maxGroupMembers {
-                    exclusions.append(("group too large", chat.title))
-                    continue
-                }
-                if chat.unreadCount > AppConstants.FollowUp.maxGroupUnread {
-                    exclusions.append(("group unread too high", chat.title))
-                    continue
-                }
-            }
-
-            included.append(chat)
-        }
-
-        guard !includeBotsInAISearch else { return (included, exclusions) }
-
-        var filtered: [TGChat] = []
-        filtered.reserveCapacity(included.count)
-        for chat in included {
-            if await telegramService.isBotChat(chat) {
-                exclusions.append(("bot filtered", chat.title))
-                continue
-            }
-            filtered.append(chat)
-        }
-        return (filtered, exclusions)
+        return (
+            result.included,
+            result.exclusions.map { (reason: $0.reason, chatTitle: $0.chatTitle) }
+        )
     }
 
     private func compactAIErrorReason(_ error: Swift.Error) -> String {

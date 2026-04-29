@@ -1,341 +1,257 @@
 # Pidgy Architecture
 
-Last updated: 2026-04-12
+Last updated: 2026-04-27
 
-This is a living architecture doc for the launcher-first MVP.
+Pidgy is a local-first macOS app for operating Telegram relationship context without turning Telegram into a full CRM. The launcher is still the fastest query surface; the dashboard is now a secondary operating surface for attention, extracted tasks, and relationship context.
 
-## System Overview
+## System Shape
 
-Pidgy is a local-first macOS app built around three layers:
+The runtime is organized into five practical layers:
 
-1. local data platform
-2. query routing + search engines
-3. launcher presentation
-
-At a high level:
+1. App shell and presentation
+2. Telegram sync and local data
+3. Query planning and search engines
+4. Dashboard task / attention indexing
+5. Shared search / follow-up domain logic
 
 ```mermaid
 flowchart TD
-    A["Telegram / TDLib"] --> B["Local storage layer"]
-    B --> C["Query parser + router"]
-    C --> D["PatternSearchEngine"]
-    C --> E["Semantic retrieval engine"]
-    C --> F["ReplyQueueEngine"]
-    C --> G["SummaryEngine"]
-    D --> H["Launcher UI"]
-    E --> H
-    F --> H
-    G --> H
+    A["TDLib / Telegram"] --> B["TelegramService"]
+    B --> C["SQLite + message cache"]
+    C --> D["QueryInterpreter + QueryRouter"]
+    D --> E["PatternSearchEngine"]
+    D --> F["SearchCoordinator semantic path"]
+    D --> G["ReplyQueueEngine"]
+    D --> H["SummaryEngine"]
+    C --> L["TaskIndexCoordinator"]
+    B --> M["AttentionStore"]
+    M --> N["DashboardView"]
+    L --> N
+    L --> O["Dashboard AI prompts"]
+    O --> P["AIProvider"]
+    P --> L
+    G --> I["ReplyQueue helpers"]
+    H --> I2["Summary / search models"]
+    E --> J["LauncherView"]
+    F --> J
+    G --> J
+    H --> J
+    C --> K["Settings / debug surfaces"]
 ```
 
-## 1. Local Data Platform
+## 1. App Shell
 
-### Storage
+Primary entry points:
 
-Primary source of truth is SQLite via:
+- [PidgyApp.swift](/Users/pratyushrungta/telegraham/Sources/App/PidgyApp.swift)
+- [AppDelegate.swift](/Users/pratyushrungta/telegraham/Sources/App/AppDelegate.swift)
+- [PanelManager.swift](/Users/pratyushrungta/telegraham/Sources/App/PanelManager.swift)
+- [MenuBarManager.swift](/Users/pratyushrungta/telegraham/Sources/App/MenuBarManager.swift)
+- [HotkeyManager.swift](/Users/pratyushrungta/telegraham/Sources/App/HotkeyManager.swift)
 
+Responsibilities:
+
+- boot the menu bar app / debug-window mode
+- initialize the database before Telegram startup
+- restore credentials and start TDLib if available
+- start recent sync, graph build, and deep indexing only after auth + initial chat readiness
+- manage launcher, dashboard, and settings presentation
+
+Current rule: startup orchestration lives in `AppDelegate`; search and dashboard extraction logic does not. `AppDelegate` opens the dashboard window, wires the menu/launcher dashboard actions, and starts `TaskIndexCoordinator` after Telegram readiness.
+
+## 2. Telegram Sync And Local Data
+
+Core files:
+
+- [TelegramService.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/TelegramService.swift)
+- [MessageCacheService.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/MessageCacheService.swift)
 - [DatabaseManager.swift](/Users/pratyushrungta/telegraham/Sources/Storage/DatabaseManager.swift)
 - [Migrations.swift](/Users/pratyushrungta/telegraham/Sources/Storage/Migrations.swift)
-
-Key local stores:
-
-- `messages`
-- `sync_state`
-- `recent_sync_state`
-- FTS tables
-- `embeddings`
-- graph tables (`nodes`, `edges`)
-
-Current storage semantics:
-
-- `messages` is the durable local history table
-- recent hot-cache behavior lives in memory inside [MessageCacheService.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/MessageCacheService.swift)
-- recent disk fallback comes from `SELECT ... FROM messages ORDER BY date DESC LIMIT N`
-- `sync_state` is owned by deep indexing, not by normal cache refreshes
-- `recent_sync_state` is owned by recent-sync freshness, not by deep indexing
-
-At a high level:
-
-```mermaid
-flowchart TD
-    A["TDLib live updates"] --> B["MessageCacheService memory cache (latest window)"]
-    A --> C["messages table (durable upserts)"]
-    D["RecentSyncCoordinator"] --> C
-    D --> E["recent_sync_state"]
-    F["IndexScheduler deep history"] --> C
-    F --> G["sync_state"]
-    C --> H["PatternSearchEngine"]
-    C --> I["Semantic retrieval"]
-    C --> J["SummaryEngine"]
-    C --> K["ReplyQueueEngine"]
-    C --> L["Recent fallback reads"]
-```
-
-### Indexing
-
-Pidgy now treats freshness and deep indexing as separate background concerns.
-
-Fresh recent sync:
-
 - [RecentSyncCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/RecentSyncCoordinator.swift)
-- keeps the latest message window for active/indexable chats fresh in SQLite
-- runs on app startup readiness, app foreground, and explicit chat prioritization
-- never mutates `sync_state.is_search_ready`
-
-Deep indexing:
-
 - [IndexScheduler.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/IndexScheduler.swift)
 - [EmbeddingService.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/EmbeddingService.swift)
 - [VectorStore.swift](/Users/pratyushrungta/telegraham/Sources/Storage/VectorStore.swift)
 
-The current safe default is:
+Storage rules:
 
-- recent sync prioritizes explicit chat priorities, then newest `lastActivityDate`, with DM/group as a tiebreaker
-- deep indexing prioritizes explicit chat priorities, then newest `lastActivityDate`, then DM/group bucket
-- deep indexing runs with up to 2 concurrent chat workers
-- embedding backfill runs only when the indexing queue is idle, not every N chats in the hot loop
-- channels are skipped by default for deep indexing
-- both schedulers now publish live progress state into Debug UI so we can see:
-  - stale visible chats vs total visible chats
-  - active recent-sync refreshes
-  - pending deep-index chats
-  - active deep-index workers
-  - session-level throughput and the last meaningful progress event
+- `messages` is the durable source of local history.
+- `MessageCacheService` is the hot recent window, not the long-term source of truth.
+- `recent_sync_state` tracks launcher freshness.
+- `sync_state` tracks deep-index readiness.
+- `dashboard_topics`, `dashboard_tasks`, `dashboard_task_sources`, and `dashboard_task_sync_state` persist dashboard operating state.
+- search-time networking is an anti-goal; the launcher should search local state.
 
-### Graph foundation
+Freshness model:
 
-Relationship graph foundation exists in:
+- `RecentSyncCoordinator` keeps active / visible chats fresh.
+- `IndexScheduler` handles deeper backfill and embeddings.
+- both publish progress used by Settings debug UI.
 
-- [RelationGraph.swift](/Users/pratyushrungta/telegraham/Sources/Graph/RelationGraph.swift)
-- [GraphBuilder.swift](/Users/pratyushrungta/telegraham/Sources/Graph/GraphBuilder.swift)
+## 3. Query Planning And Search Execution
 
-This is not yet the main MVP execution path for end-user CRM queries.
+Planning / routing files:
 
-## 2. Query Routing Layer
-
-The parser/router is the source of truth for query family selection.
-
-Main files:
-
-- [AIModels.swift](/Users/pratyushrungta/telegraham/Sources/AI/Models/AIModels.swift)
 - [QueryInterpreter.swift](/Users/pratyushrungta/telegraham/Sources/AI/QueryInterpreter.swift)
 - [QueryRouter.swift](/Users/pratyushrungta/telegraham/Sources/AI/QueryRouter.swift)
+- [SearchCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Views/SearchCoordinator.swift)
+- [SearchCoordinator+Agentic.swift](/Users/pratyushrungta/telegraham/Sources/Views/SearchCoordinator+Agentic.swift)
 
-Current families:
+Current query families:
 
 - `exact_lookup`
 - `topic_search`
 - `reply_queue`
-- `relationship`
 - `summary`
+- `relationship` is recognized, but still not a shipped end-user engine
 
-Current engines:
-
-- `message_lookup`
-- `semantic_retrieval`
-- `reply_triage`
-- `graph_crm`
-- `summarize`
-
-Current routing state:
-
-- the app-side router now reflects the script-first `product_coverage_v2` winner, so broader real-user phrasings for reply queue, summary, relationship, and exact lookup resolve more consistently before any engine logic runs
-
-## 3. Search Engines
-
-### PatternSearchEngine
-
-File:
+Execution ownership:
 
 - [PatternSearchEngine.swift](/Users/pratyushrungta/telegraham/Sources/Search/PatternSearchEngine.swift)
-
-Purpose:
-
-- exact/pattern/entity lookup
-
-Current behavior:
-
-- message-first results
-- cheap local retrieval first
-- regex/entity verification second
-- outgoing bias when query implies `I shared / I sent / I pasted`
-- exact structured-token lookups now prefer true token matches over nested/generic fallthroughs
-- full URL queries no longer degrade into domain-only matches
-- person-scoped artifact queries now require both the artifact evidence and the recipient context, so `wallet I sent to Rahul` prefers the actual Rahul wallet message over generic Rahul chatter
-- artifact-transfer phrasings like `wallet I sent to Rahul` now route into `PatternSearchEngine` instead of falling back to topic search
-- exact emails, Google Meet codes, platform-specific links, and guarded no-result cases now follow the same verified-artifact rules that won the script-side exact-lookup benchmark
-
-Current supported entity classes:
-
-- exact phrases
-- EVM-like addresses
-- long address-like strings
-- URLs
-- domains
-- `@handles`
-
-### Semantic retrieval engine
-
-Main orchestration:
-
+  - exact / literal / entity retrieval
 - [SearchCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Views/SearchCoordinator.swift)
-
-Supporting local retrieval:
-
-- [TelegramService.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/TelegramService.swift)
-- [VectorStore.swift](/Users/pratyushrungta/telegraham/Sources/Storage/VectorStore.swift)
-
-Purpose:
-
-- concept/topic search
-
-Current behavior:
-
-- FTS + vector merge
-- title evidence
-- local-only at query time: memory cache + durable SQLite
-- clue-aware topical scoring from the promoted `topic_guarded_v3` script winner
-- phrase and anchor coverage guards so topic chats need real local evidence, not just nearby generic terms
-- weak title-only topical matches are suppressed unless the title match is effectively exact
-- split-evidence false positives are rejected when person clues and topic clues only appear in different chats
-- optional rerank
-
-### ReplyQueueEngine
-
-File:
-
+  - semantic/topic local retrieval and optional rerank orchestration
 - [ReplyQueueEngine.swift](/Users/pratyushrungta/telegraham/Sources/Search/ReplyQueueEngine.swift)
-
-Purpose:
-
-- identify chats where the user likely owes a response
-
-Current behavior:
-
-- coarse local eligibility filter first
-- local-only first pass from memory/SQLite
-- capped candidate set of 48 chats
-- compact deterministic per-chat digests, not raw full chat payloads
-- dedicated OpenAI reply-queue model path uses `gpt-5.4-mini`
-- AI triage runs in 4 parallel batches of 12 chats
-- progressive rendering of confident results while scanning continues
-- recent-first ordering
-
-Important current product rule:
-
-- this is a dedicated reply-queue path, not generic semantic search
-
-### SummaryEngine
-
-File:
-
+  - ownership / reply-now triage
 - [SummaryEngine.swift](/Users/pratyushrungta/telegraham/Sources/Search/SummaryEngine.swift)
+  - retrieval-first recap / prep synthesis
 
-Purpose:
+Important boundary:
 
-- retrieval-first synthesis for prep and recap queries
+- `SearchCoordinator` is the launcher orchestration boundary.
+- engine-specific heuristics should live in the engine or shared search-domain helpers, not in the launcher view.
 
-Current behavior:
+## 4. Dashboard Task / Attention Indexing
 
-- retrieve relevant chats/messages first
-- generate one bounded summary card
-- render supporting result hits underneath
-- time-range filtering is now applied before summary synthesis
-- stronger focus gating now prefers the chat that actually contains the recap/decision context instead of generic mention noise
-- person-plus-topic summary queries now require a real joint anchor in the same chat, which prevents fake overlaps like `Sophia` in one thread and `wallet addresses` in another from synthesizing into a bad summary
+Dashboard files:
 
-## 4. AI Layer
+- [DashboardView.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardView.swift)
+- [TaskIndexCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/TaskIndexCoordinator.swift)
+- [AttentionStore.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/AttentionStore.swift)
+- [DashboardModels.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardModels.swift)
+- [DashboardPrompt.swift](/Users/pratyushrungta/telegraham/Sources/AI/Prompts/DashboardPrompt.swift)
 
-Main files:
+Current dashboard responsibilities:
 
-- [AIService.swift](/Users/pratyushrungta/telegraham/Sources/AI/AIService.swift)
-- [AIProvider.swift](/Users/pratyushrungta/telegraham/Sources/AI/AIProvider.swift)
-- [OpenAIProvider.swift](/Users/pratyushrungta/telegraham/Sources/AI/OpenAIProvider.swift)
-- [ClaudeProvider.swift](/Users/pratyushrungta/telegraham/Sources/AI/ClaudeProvider.swift)
+- show a calm operating view over four pages: Dashboard, Reply queue, Tasks, People
+- reuse reply/follow-up pipeline state through `AttentionStore`
+- discover a small topic taxonomy from recent local messages
+- extract durable tasks from recent per-chat local message windows
+- preserve manual task status across extraction refreshes
+- show task evidence snippets and deep-link back to Telegram
+- surface graph-derived top/stale contacts as context, not as a full CRM engine
 
-Current prompt files:
+Dashboard data flow:
 
-- [ReplyQueueTriagePrompt.swift](/Users/pratyushrungta/telegraham/Sources/AI/Prompts/ReplyQueueTriagePrompt.swift)
-- [QuerySummaryPrompt.swift](/Users/pratyushrungta/telegraham/Sources/AI/Prompts/QuerySummaryPrompt.swift)
+```mermaid
+flowchart TD
+    A["Visible chats + SQLite messages"] --> B["TaskIndexCoordinator"]
+    B --> C["DashboardTopicPrompt"]
+    B --> D["DashboardTaskPrompt"]
+    C --> E["AIProvider"]
+    D --> E
+    E --> F["DashboardModels parsers"]
+    F --> G["dashboard_topics / dashboard_tasks"]
+    G --> H["DashboardView Tasks page"]
+    I["Reply pipeline cache + visible chats"] --> J["AttentionStore"]
+    J --> K["Dashboard Home / Reply queue"]
+    L["RelationGraph"] --> M["Dashboard People page"]
+```
 
-Design principle:
+Important boundaries:
 
-- AI should be used for judgment and synthesis
-- local retrieval should do as much work as possible before AI is invoked
-- reply queue uses a dedicated model path when needed, instead of inheriting the generic OpenAI default model blindly
-- launcher search-time networking is an anti-goal; freshness belongs to sync-time, not query-time
+- Dashboard extraction reads local state; it should not fetch Telegram history inline.
+- Task extraction is a background indexing concern, separate from launcher query execution.
+- Dashboard tasks are not yet a complete task lifecycle engine. Today the code can insert/update positive task candidates and preserve manual status, but launch hardening still needs stale/closed task reconciliation so old open tasks do not linger forever.
+- Dashboard refresh currently runs on a timer and through manual refresh. Any product launch should include a clear user-facing cost/freshness story because dashboard extraction uses AI.
 
-## 5. Launcher UI
+## 5. Shared Search / Follow-Up Domain Logic
 
-Main surface:
+The repo had accumulated several shared concepts inside view files. As of the 2026-04-20 cleanup pass, these live closer to the search domain:
+
+- [SearchModels.swift](/Users/pratyushrungta/telegraham/Sources/Search/Models/SearchModels.swift)
+  - cross-engine result models and shared chat eligibility filtering
+- [AgenticDebugModels.swift](/Users/pratyushrungta/telegraham/Sources/Search/Models/AgenticDebugModels.swift)
+  - shared debug payloads consumed by search engines, coordinator, and launcher UI
+- [ConversationReplyHeuristics.swift](/Users/pratyushrungta/telegraham/Sources/Search/ReplyQueue/ConversationReplyHeuristics.swift)
+  - reply / ownership heuristics and shared signal evaluation
+- [FollowUpPipelineAnalyzer.swift](/Users/pratyushrungta/telegraham/Sources/Search/ReplyQueue/FollowUpPipelineAnalyzer.swift)
+  - launcher follow-up categorization extracted out of `LauncherView`
+
+This is intentional: reply-queue and follow-up behavior are search-domain concerns, not view concerns.
+
+## 6. Launcher, Dashboard, And Settings UI
+
+Primary UI files:
 
 - [LauncherView.swift](/Users/pratyushrungta/telegraham/Sources/Views/LauncherView.swift)
+- [DashboardView.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardView.swift)
+- [SettingsView.swift](/Users/pratyushrungta/telegraham/Sources/Views/SettingsView.swift)
+- [QueryRoutingDebugSnapshot.swift](/Users/pratyushrungta/telegraham/Sources/Views/Settings/QueryRoutingDebugSnapshot.swift)
+- [Components](/Users/pratyushrungta/telegraham/Sources/Views/Components)
 
-Coordinator:
+Launcher responsibilities:
 
-- [SearchCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Views/SearchCoordinator.swift)
-- [SearchCoordinator+Agentic.swift](/Users/pratyushrungta/telegraham/Sources/Views/SearchCoordinator+Agentic.swift)
+- query input and result rendering
+- pipeline badge state
+- chat opening / deep-link actions
+- delegating search and follow-up analysis to coordinator / service layers
 
-Current UI intent by family:
+Dashboard responsibilities:
 
-- exact lookup -> message-first rows
-- topic search -> chat-first rows
-- reply queue -> action-first rows
-- summary -> summary card + supporting rows
+- provide a scannable daily operating view
+- combine reply queue, extracted tasks, and people context without replacing Telegram
+- expose task status actions: done, snooze, ignore, open chat
 
-Development/debug support exists, but normal launcher UI should stay focused on end-user results.
+Settings responsibilities:
 
-## Current Runtime Mapping
+- credentials and AI configuration
+- usage/debug surfaces
+- query routing inspection
+- destructive reset controls
 
-| Preferred engine | Current runtime behavior |
-| --- | --- |
-| `message_lookup` | dedicated `PatternSearchEngine` |
-| `semantic_retrieval` | local semantic retrieval pipeline |
-| `reply_triage` | dedicated `ReplyQueueEngine` for reply-queue queries; older agentic path still exists for non-reply agentic intents |
-| `summarize` | dedicated `SummaryEngine` |
-| `graph_crm` | recognized but unsupported in MVP runtime |
+Current architectural debt still visible:
 
-## Known Architectural Gaps
+- `LauncherView` remains too large and still mixes multiple result presentations.
+- `DashboardView` is now the largest UI file and mixes page composition, filters, row/detail views, theme, and local dashboard view models.
+- `SettingsView` still owns tab rendering plus a large amount of debug/formatting code.
+- `SearchCoordinator` still contains the full semantic/topic path inline.
+- `DatabaseManager` now owns both core message storage and dashboard persistence helpers; dashboard storage can be extracted once launch behavior settles.
 
-1. reply queue still leans too hard on local group heuristics in final validation, which can block AI from rescuing true group obligations
-2. compact reply-queue digests can over-compress context and hide the original actionable ask in some threads
-3. recent sync still needs stronger reconnect/network-recovery triggers beyond startup, foreground, and explicit chat prioritization
-4. summary is still single-focus and not true cross-chat synthesis
-5. graph/CRM execution is deferred to post-MVP
-6. automated coverage now exists for the core regressions, but still needs expansion for recent sync coordinator behavior and reply-queue group-vs-DM fixtures
+## 7. Graph Foundation
 
-## Recent Changes
+Files:
 
-### 2026-04-11
+- [GraphBuilder.swift](/Users/pratyushrungta/telegraham/Sources/Graph/GraphBuilder.swift)
+- [RelationGraph.swift](/Users/pratyushrungta/telegraham/Sources/Graph/RelationGraph.swift)
 
-- added `recent_sync_state` to track freshness separately from `sync_state`
-- added `RecentSyncCoordinator` to keep active/indexable chats fresh in durable SQLite
-- removed search-time Telegram fallbacks from semantic search, exact lookup, and summary paths
-- changed deep indexing to use up to 2 concurrent chat workers
-- moved embedding backfill off the hot indexing loop and into idle-time work
-- improved reply-queue compact digests to preserve latest actionable ask and closure signals
-- fixed reply-queue timing accounting for parallel batches
-- gated reply-queue candidate snapshot persistence behind an explicit debug preference
-- added a small XCTest target covering durable history, recent-sync readiness preservation, query routing, and summary time windows
+Status:
 
-### 2026-04-08
+- real runtime foundation
+- used by startup / debug flows
+- not the primary MVP execution path for launcher queries
 
-- made `messages` the durable local history table instead of a trim-to-50 disk cache
-- kept hot recent-message behavior in memory, not in SQLite trimming paths
-- stopped normal live/cache writes from mutating `sync_state`
-- made cache invalidation memory-only instead of wiping chat history from disk
-- verified live append and delete behavior against the real SQLite DB
+Treat this as foundation, not dead code.
 
-### 2026-04-07
+## 8. Current Cleanup Direction
 
-- added dedicated MVP engines for exact lookup, reply queue, and summary
-- made query routing the source of truth for launcher execution
-- changed reply queue to progressive rendering of confident rows
-- changed reply queue ordering to recent-first
-- hid heavy debug overlays from the main launcher UI
+The active architecture direction is:
 
-## Related Docs
+1. keep local-first retrieval and launcher speed intact
+2. centralize duplicated reply / eligibility logic
+3. treat dashboard as a secondary operational surface, not a full CRM rewrite
+4. move shared models out of UI-heavy files
+5. keep graph/relationship foundations, but document them as supporting context until graph-backed execution is real
+6. continue breaking large UI/coordinator files into smaller focused units without rewriting product behavior
+7. make dashboard task lifecycle and AI cost/freshness behavior explicit before launch
 
-- [Product PRD](/Users/pratyushrungta/telegraham/docs/product-prd.md)
-- [Task Tracker](/Users/pratyushrungta/telegraham/docs/task-tracker.md)
-- [Query Engine Matrix](/Users/pratyushrungta/telegraham/docs/query-engine-matrix.md)
+## 9. What Is Intentionally Not Core Right Now
+
+Not core to current architecture decisions:
+
+- send automation
+- full CRM pipeline management
+- graph-backed end-user CRM query execution
+- search-time Telegram fetches as a normal query path
+- autonomous reminders or proactive outreach
+
+The codebase should optimize for trustworthy local retrieval, ownership judgment, and dashboard task evidence before broad CRM automation.

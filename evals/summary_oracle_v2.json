@@ -288,6 +288,78 @@
       "why": "Recent Akhil recap should focus on event ideas and the pending LiFi sponsorship confirmation, not unrelated scattered mentions."
     },
     {
+      "id": "summary_hit_16",
+      "query": "what are the key takeaways from chat with Akhil?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-1003542166929],
+      "supportingMessageIds": [2570059776, 3222274048],
+      "retrievalHints": ["Akhil B"],
+      "timeRange": {
+        "start": 1775650000,
+        "end": 1776195000
+      },
+      "requiredFactGroups": [
+        ["builders", "showcase", "present from our communities"],
+        ["speakers", "agentic summer"],
+        ["lifi", "5k", "confirm their 5k"]
+      ],
+      "forbiddenPhrases": ["save taxes", "mainstream outside of x"],
+      "why": "Prompt-family variant for the same Akhil recap: generic 'chat with Akhil' phrasing should still find the focused event-planning context, not a random group mention."
+    },
+    {
+      "id": "summary_hit_17",
+      "query": "Catch me up on Akhil from last week.",
+      "expectedKind": "hit",
+      "expectedChatIds": [-1003542166929],
+      "supportingMessageIds": [2570059776, 3222274048],
+      "retrievalHints": ["Akhil B"],
+      "timeRange": {
+        "start": 1775650000,
+        "end": 1776195000
+      },
+      "requiredFactGroups": [
+        ["builders", "showcase", "present from our communities"],
+        ["speakers", "agentic summer"],
+        ["lifi", "5k", "confirm their 5k"]
+      ],
+      "forbiddenPhrases": ["save taxes", "mainstream outside of x"],
+      "why": "Another natural-language recap variant for the same Akhil slice; should not be derailed by stray Akhil mentions in other chats."
+    },
+    {
+      "id": "summary_hit_18",
+      "query": "What did Akhil and I discuss last week?",
+      "expectedKind": "hit",
+      "expectedChatIds": [-1003542166929],
+      "supportingMessageIds": [2570059776, 3222274048],
+      "retrievalHints": ["Akhil B"],
+      "timeRange": {
+        "start": 1775650000,
+        "end": 1776195000
+      },
+      "requiredFactGroups": [
+        ["builders", "showcase", "present from our communities"],
+        ["speakers", "agentic summer"],
+        ["lifi", "5k", "confirm their 5k"]
+      ],
+      "forbiddenPhrases": ["save taxes", "mainstream outside of x"],
+      "why": "Free-form person-scoped recap phrasing should still land on the same Akhil planning context and not glue together unrelated chats."
+    },
+    {
+      "id": "summary_hit_19",
+      "query": "Give me a quick recap of my chats with Akhil.",
+      "expectedKind": "hit",
+      "expectedChatIds": [-1003542166929],
+      "supportingMessageIds": [2570059776, 3222274048],
+      "retrievalHints": ["Akhil B"],
+      "requiredFactGroups": [
+        ["builders", "showcase", "present from our communities"],
+        ["speakers", "agentic summer"],
+        ["lifi", "5k", "confirm their 5k"]
+      ],
+      "forbiddenPhrases": ["save taxes", "mainstream outside of x"],
+      "why": "No-time-range person recap should still default to the recent Akhil planning context instead of an older stickier DM or unrelated mention."
+    },
+    {
       "id": "summary_none_01",
       "query": "Summarize my chats with Rahul about wallet addresses.",
       "expectedKind": "no_result",

@@ -7,6 +7,7 @@ struct LauncherView: View {
     @EnvironmentObject var aiService: AIService
     @ObservedObject var photoManager = ChatPhotoManager.shared
     @StateObject private var searchCoordinator = SearchCoordinator()
+    @StateObject private var attentionStore = AttentionStore.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
 
     // Search & filter
@@ -26,18 +27,16 @@ struct LauncherView: View {
     @State private var selectedIndex: Int = 0
 
     // Follow-ups state
-    @State private var followUpItems: [FollowUpItem] = []
-    @State private var isFollowUpsLoading = false
-    @State private var pipelineProcessedCount = 0
-    @State private var pipelineTotalCount = 0
     @State private var pipelineSubFilter: FollowUpItem.Category? = nil
 
     // Background pipeline refresh
     @State private var pipelineAutoLoaded = false
-    @State private var backgroundRefreshTask: Task<Void, Never>?
+    @State private var chatPreviewById: [Int64: String] = [:]
+    @State private var chatPreviewTask: Task<Void, Never>?
 
     // Settings callback
     var onOpenSettings: () -> Void = {}
+    var onOpenDashboard: () -> Void = {}
 
     // MARK: - AI Search Result Types
     // MARK: - Computed
@@ -56,38 +55,29 @@ struct LauncherView: View {
     private var totalChatsToScan: Int { searchCoordinator.totalChatsToScan }
     private var searchStartedAt: Foundation.Date? { searchCoordinator.searchStartedAt }
     private var lastSearchDuration: TimeInterval? { searchCoordinator.lastSearchDuration }
+    private var followUpItems: [FollowUpItem] { attentionStore.followUpItems }
+    private var isFollowUpsLoading: Bool { attentionStore.isFollowUpsLoading }
+    private var pipelineProcessedCount: Int { attentionStore.pipelineProcessedCount }
+    private var pipelineTotalCount: Int { attentionStore.pipelineTotalCount }
     private var agenticUsedLocalFallback: Bool {
         agenticDebugInfo?.stopReason.contains("using local fallback") == true
     }
     private var showLauncherDebugOverlays: Bool { false }
 
     private var displayedChats: [TGChat] {
-        var chats: [TGChat]
-
-        switch activeFilter {
-        case .all:
-            chats = telegramService.visibleChats
-        case .groups:
-            chats = telegramService.visibleChats.filter { $0.chatType.isGroup }
-        case .dms:
-            chats = telegramService.visibleChats.filter { $0.chatType.isPrivate }
+        let pipelineMatchingIds = pipelineSubFilter.map { subFilter in
+            Set(followUpItems.filter { $0.category == subFilter }.map(\.chat.id))
         }
 
-        // Apply pipeline sub-filter
-        if let subFilter = pipelineSubFilter {
-            let matchingIds = Set(followUpItems.filter { $0.category == subFilter }.map(\.chat.id))
-            chats = chats.filter { matchingIds.contains($0.id) }
-        }
-
-        if !searchText.isEmpty {
-            // Combine: chats matching by title OR by message content search
-            chats = chats.filter {
-                $0.title.localizedCaseInsensitiveContains(searchText)
-                || searchResultChatIds.contains($0.id)
-            }
-        }
-
-        return chats
+        return LauncherVisibleChatsFilter.filterChats(
+            from: telegramService.visibleChats,
+            scope: queryScope(for: activeFilter),
+            pipelineMatchingIds: pipelineMatchingIds,
+            searchText: searchText,
+            searchResultChatIds: searchResultChatIds,
+            includeBots: includeBotsInAISearch,
+            isLikelyBot: { telegramService.isLikelyBotChat($0) }
+        )
     }
 
     private var aiSearchSourceChats: [TGChat] {
@@ -110,33 +100,88 @@ struct LauncherView: View {
     // MARK: - Pipeline Helpers
 
     private func pipelineCategory(for chatId: Int64) -> FollowUpItem.Category? {
-        followUpItems.first(where: { $0.chat.id == chatId })?.category
+        attentionStore.pipelineCategory(for: chatId)
     }
 
     private func pipelineSuggestion(for chatId: Int64) -> String? {
-        followUpItems.first(where: { $0.chat.id == chatId })?.suggestedAction
+        attentionStore.pipelineSuggestion(for: chatId)
+    }
+
+    private func messagePreview(for chat: TGChat) -> String? {
+        if let preview = chatPreviewById[chat.id] {
+            return preview
+        }
+        return LauncherChatPreviewResolver.resolvePreview(
+            for: chat,
+            recentMessages: []
+        ).text
+    }
+
+    private func refreshChatPreviews(for chats: [TGChat]? = nil) {
+        let targetChats = chats ?? displayedChats
+        let targetIds = Set(targetChats.map(\.id))
+
+        chatPreviewTask?.cancel()
+
+        guard !targetChats.isEmpty else {
+            chatPreviewById.removeAll()
+            return
+        }
+
+        chatPreviewTask = Task {
+            let cache = MessageCacheService.shared
+            var updates: [Int64: String] = [:]
+
+            for chat in targetChats {
+                if Task.isCancelled { return }
+
+                var recentMessages = await cache.getMessages(chatId: chat.id) ?? []
+                var resolution = LauncherChatPreviewResolver.resolvePreview(
+                    for: chat,
+                    recentMessages: recentMessages
+                )
+
+                if LauncherChatPreviewResolver.shouldFetchRecentContext(
+                    for: chat,
+                    recentMessages: recentMessages,
+                    currentResolution: resolution,
+                    cachedMessageCount: recentMessages.count
+                ),
+                   let fetched = try? await telegramService.getChatHistory(
+                    chatId: chat.id,
+                    limit: LauncherChatPreviewResolver.contextMessageLimit
+                   ),
+                   !fetched.isEmpty {
+                    recentMessages = fetched
+                    await cache.cacheMessages(chatId: chat.id, messages: fetched)
+                    resolution = LauncherChatPreviewResolver.resolvePreview(
+                        for: chat,
+                        recentMessages: recentMessages
+                    )
+                }
+
+                updates[chat.id] = resolution.text
+            }
+
+            if Task.isCancelled { return }
+
+            await MainActor.run {
+                chatPreviewById = chatPreviewById.filter { targetIds.contains($0.key) }
+                for (chatId, preview) in updates {
+                    chatPreviewById[chatId] = preview
+                }
+            }
+        }
     }
 
     private func pipelineHintForSearch(chatId: Int64) async -> String {
         if let category = pipelineCategory(for: chatId) {
-            switch category {
-            case .onMe: return "on_me"
-            case .onThem: return "on_them"
-            case .quiet: return "quiet"
-            }
+            return FollowUpPipelineAnalyzer.pipelineCategoryString(category)
         }
         if let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chatId) {
             return cached.category
         }
         return "unknown"
-    }
-
-    private func pipelineCategoryString(_ category: FollowUpItem.Category) -> String {
-        switch category {
-        case .onMe: return "on_me"
-        case .onThem: return "on_them"
-        case .quiet: return "quiet"
-        }
     }
 
     /// Total navigable items (either AI results or chat rows depending on mode).
@@ -175,9 +220,16 @@ struct LauncherView: View {
         .onAppear {
             isSearchFocused = true
             selectedIndex = 0
+            telegramService.scheduleBotMetadataWarm(
+                for: telegramService.visibleChats,
+                includeBots: includeBotsInAISearch
+            )
+            refreshChatPreviews()
             Task { await IndexScheduler.shared.pause() }
         }
         .onDisappear {
+            telegramService.cancelBotMetadataWarm()
+            chatPreviewTask?.cancel()
             Task { await IndexScheduler.shared.resume() }
         }
         .task {
@@ -192,18 +244,40 @@ struct LauncherView: View {
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
             guard !telegramService.chats.isEmpty else { return }
+
+            await telegramService.ensureBotFilterMetadataReady(
+                for: telegramService.visibleChats,
+                includeBots: includeBotsInAISearch,
+                priority: .background
+            )
+
             pipelineAutoLoaded = true
             loadFollowUps()
+        }
+        .onReceive(
+            telegramService.$chats
+                .dropFirst()
+                .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+        ) { _ in
+            refreshChatPreviews()
         }
         .onReceive(
             telegramService.$chats
                 .dropFirst()  // Skip initial load (handled by .task above)
                 .debounce(for: .seconds(10), scheduler: RunLoop.main)
         ) { _ in
+            telegramService.scheduleBotMetadataWarm(
+                for: telegramService.visibleChats,
+                includeBots: includeBotsInAISearch
+            )
             backgroundRefreshPipeline()
+        }
+        .onChange(of: telegramService.botMetadataRefreshVersion) {
+            refreshBotFilteredUI()
         }
         .onChange(of: searchText) {
             selectedIndex = 0
+            refreshChatPreviews()
             let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             Task {
                 if trimmedQuery.isEmpty && !isSearchFocused {
@@ -226,10 +300,22 @@ struct LauncherView: View {
         }
         .onChange(of: activeFilter) {
             selectedIndex = 0
+            refreshChatPreviews()
             // Clear AI state when switching filters
             searchCoordinator.cancelSearch()
             searchCoordinator.clearAIState()
             pipelineSubFilter = nil
+        }
+        .onChange(of: includeBotsInAISearch) {
+            telegramService.scheduleBotMetadataWarm(
+                for: telegramService.visibleChats,
+                includeBots: includeBotsInAISearch
+            )
+            refreshChatPreviews()
+            refreshBotFilteredUI()
+        }
+        .onChange(of: pipelineSubFilter) {
+            refreshChatPreviews()
         }
         // Keyboard navigation from FloatingPanel
         .onReceive(NotificationCenter.default.publisher(for: .launcherArrowDown)) { _ in
@@ -290,6 +376,13 @@ struct LauncherView: View {
 
             Button(action: onOpenSettings) {
                 Image(systemName: "gearshape")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onOpenDashboard) {
+                Image(systemName: "rectangle.grid.2x2")
                     .font(.system(size: 13))
                     .foregroundStyle(.tertiary)
             }
@@ -805,6 +898,7 @@ struct LauncherView: View {
                                 isHighlighted: index == selectedIndex,
                                 pipelineStatus: pipelineCategory(for: chat.id),
                                 pipelineSuggestion: pipelineSuggestion(for: chat.id),
+                                messagePreview: messagePreview(for: chat),
                                 onOpen: { openChat(chat) }
                             )
                             .id(chat.id)
@@ -1336,373 +1430,20 @@ struct LauncherView: View {
 
     // MARK: - Pipeline Data Logic
 
-    /// Collect candidate chats for the pipeline (filtering only, no categorization).
-    private func collectPipelineCandidates() -> [TGChat] {
-        let now = Date()
-        let maxAge = AppConstants.FollowUp.maxPipelineAgeSeconds
+    private func refreshBotFilteredUI() {
+        selectedIndex = 0
+        loadFollowUps()
 
-        return telegramService.visibleChats.filter { chat in
-            guard chat.lastMessage != nil else { return false }
-            guard !chat.chatType.isChannel else { return false }
-            let age = now.timeIntervalSince(chat.lastMessage!.date)
-            guard age <= maxAge else { return false }
-
-            if chat.chatType.isGroup {
-                if let count = chat.memberCount, count > AppConstants.FollowUp.maxGroupMembers { return false }
-                if chat.unreadCount > AppConstants.FollowUp.maxGroupUnread { return false }
-            }
-            return true
+        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            triggerSearch()
         }
-    }
-
-    /// Rule-based fallback when AI is not configured.
-    private func buildRuleBasedFallbackItems(from candidates: [TGChat]) -> [FollowUpItem] {
-        guard let myUserId = telegramService.currentUser?.id else { return [] }
-        let now = Date()
-
-        return candidates.compactMap { chat -> FollowUpItem? in
-            guard let lastMsg = chat.lastMessage else { return nil }
-            let age = now.timeIntervalSince(lastMsg.date)
-
-            let isFromMe: Bool
-            if case .user(let uid) = lastMsg.senderId { isFromMe = uid == myUserId }
-            else { isFromMe = false }
-
-            if !isFromMe && chat.unreadCount > 0 {
-                return FollowUpItem(chat: chat, category: .onMe, lastMessage: lastMsg, timeSinceLastActivity: age)
-            } else if isFromMe && age > AppConstants.FollowUp.followUpThresholdSeconds {
-                return FollowUpItem(chat: chat, category: .onThem, lastMessage: lastMsg, timeSinceLastActivity: age)
-            } else if age > AppConstants.FollowUp.staleThresholdSeconds {
-                return FollowUpItem(chat: chat, category: .quiet, lastMessage: lastMsg, timeSinceLastActivity: age)
-            }
-            return nil
-        }
-        .sorted { a, b in
-            if abs(a.timeSinceLastActivity - b.timeSinceLastActivity) > 3600 {
-                return a.timeSinceLastActivity < b.timeSinceLastActivity
-            }
-            let order: [FollowUpItem.Category] = [.onMe, .onThem, .quiet]
-            return (order.firstIndex(of: a.category) ?? 2) < (order.firstIndex(of: b.category) ?? 2)
-        }
-    }
-
-    /// AI-powered categorization for a single chat with bounded two-pass context expansion.
-    /// Pass 1 uses the initial window. Pass 2 (optional) fetches more context once.
-    private func categorizeSingleChat(
-        chat: TGChat,
-        myUserId: Int64
-    ) async -> FollowUpItem? {
-        guard let lastMsg = chat.lastMessage else { return nil }
-        let age = Date().timeIntervalSince(lastMsg.date)
-        let initialWindowSize = AppConstants.FollowUp.messagesPerChat
-        let progressiveStep = AppConstants.FollowUp.progressiveFetchStep
-        let maxMessages = AppConstants.FollowUp.maxMessagesForAIClassification
-        let maxAIAttempts = 2
-        let defaultNeedMoreMessages = 20
-        let cache = MessageCacheService.shared
-
-        var allMessages: [TGMessage] = []
-
-        // Try message cache first
-        if let cached = await cache.getMessages(chatId: chat.id) {
-            allMessages = cached
-        }
-
-        // If cache empty or insufficient, fetch from Telegram
-        if allMessages.count < initialWindowSize {
-            do {
-                let fetched = try await telegramService.getChatHistory(chatId: chat.id, limit: initialWindowSize)
-                allMessages = fetched
-                await cache.cacheMessages(chatId: chat.id, messages: fetched)
-            } catch {
-                if allMessages.isEmpty { return nil }
-            }
-        }
-
-        allMessages.sort { $0.date > $1.date }
-
-        var currentWindowSize = min(initialWindowSize, min(allMessages.count, maxMessages))
-        guard currentWindowSize > 0 else { return nil }
-
-        func expandWindow(toAtLeast targetSize: Int) async -> Bool {
-            let target = min(maxMessages, targetSize)
-            guard target > currentWindowSize else { return false }
-
-            while allMessages.count < target {
-                let remaining = target - allMessages.count
-                let fetchLimit = min(max(progressiveStep, 1), remaining)
-                guard fetchLimit > 0 else { break }
-
-                let oldestId = allMessages.last?.id ?? 0
-                guard oldestId != 0 else { break }
-
-                do {
-                    let moreMsgs = try await telegramService.getChatHistory(
-                        chatId: chat.id,
-                        fromMessageId: oldestId,
-                        limit: fetchLimit
-                    )
-                    guard !moreMsgs.isEmpty else { break }
-                    allMessages.append(contentsOf: moreMsgs)
-                    allMessages.sort { $0.date > $1.date }
-                    await cache.cacheMessages(chatId: chat.id, messages: moreMsgs, append: true)
-                } catch {
-                    break
-                }
-            }
-
-            let updatedWindowSize = min(target, allMessages.count)
-            guard updatedWindowSize > currentWindowSize else { return false }
-            currentWindowSize = updatedWindowSize
-            return true
-        }
-
-        var attempt = 0
-        while attempt < maxAIAttempts {
-            attempt += 1
-            let messagesToSend = Array(allMessages.prefix(currentWindowSize))
-
-            do {
-                let myUser = telegramService.currentUser
-                let triage = try await aiService.categorizePipelineChat(
-                    chat: chat,
-                    messages: messagesToSend,
-                    myUserId: myUserId,
-                    myUser: myUser
-                )
-
-                switch triage.status {
-                case .needMore:
-                    guard attempt == 1 else { break }
-                    let requested = triage.additionalMessages ?? defaultNeedMoreMessages
-                    let boundedAdditional = max(10, min(defaultNeedMoreMessages, requested))
-                    let targetWindowSize = min(maxMessages, currentWindowSize + boundedAdditional)
-                    let expanded = await expandWindow(toAtLeast: targetWindowSize)
-                    guard expanded else { break }
-                    continue
-
-                case .decision:
-                    let normalizedCategory = normalizePipelineCategory(
-                        proposed: triage.category,
-                        suggestedAction: triage.suggestedAction,
-                        chat: chat,
-                        messages: messagesToSend,
-                        myUserId: myUserId
-                    )
-                    let finalSuggestion = triage.suggestedAction.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                    let needsConfidenceRetry = !triage.confident && attempt == 1 && currentWindowSize < maxMessages
-                    if needsConfidenceRetry {
-                        let targetWindowSize = min(maxMessages, currentWindowSize + defaultNeedMoreMessages)
-                        let expanded = await expandWindow(toAtLeast: targetWindowSize)
-                        guard expanded else { break }
-                        continue
-                    }
-
-                    await cache.cachePipelineCategory(
-                        chatId: chat.id,
-                        category: pipelineCategoryString(normalizedCategory),
-                        suggestedAction: finalSuggestion,
-                        lastMessageId: lastMsg.id
-                    )
-
-                    return FollowUpItem(
-                        chat: chat,
-                        category: normalizedCategory,
-                        lastMessage: lastMsg,
-                        timeSinceLastActivity: age,
-                        suggestedAction: finalSuggestion.isEmpty ? nil : finalSuggestion
-                    )
-                }
-            } catch {
-                break
-            }
-        }
-
-        // Deterministic fallback so this chat never silently disappears.
-        let fallbackWindow = Array(allMessages.prefix(currentWindowSize))
-        let fallbackCategoryHint = ConversationReplyHeuristics.resolvePipelineCategory(
-            for: chat,
-            hint: "quiet",
-            messages: fallbackWindow,
-            myUserId: myUserId
-        )
-        let fallbackCategory: FollowUpItem.Category
-        switch fallbackCategoryHint {
-        case "on_me":
-            fallbackCategory = .onMe
-        case "on_them":
-            fallbackCategory = .onThem
-        default:
-            fallbackCategory = .quiet
-        }
-        let fallbackSuggestion: String
-        switch fallbackCategory {
-        case .onMe:
-            fallbackSuggestion = "Reply with a concrete next step."
-        case .onThem:
-            fallbackSuggestion = age > 24 * 3600 ? "Send a short nudge for an update." : "Wait for their update."
-        case .quiet:
-            fallbackSuggestion = ""
-        }
-
-        await cache.cachePipelineCategory(
-            chatId: chat.id,
-            category: pipelineCategoryString(fallbackCategory),
-            suggestedAction: fallbackSuggestion,
-            lastMessageId: lastMsg.id
-        )
-
-        return FollowUpItem(
-            chat: chat,
-            category: fallbackCategory,
-            lastMessage: lastMsg,
-            timeSinceLastActivity: age,
-            suggestedAction: fallbackSuggestion.isEmpty ? nil : fallbackSuggestion
-        )
     }
 
     private func loadFollowUps() {
-        guard !isFollowUpsLoading else { return }  // Prevent concurrent loads
-        let candidates = collectPipelineCandidates()
-
-        // No AI? Fall back to rule-based categorization
-        guard aiService.isConfigured else {
-            followUpItems = buildRuleBasedFallbackItems(from: candidates)
-            postOnMeBadge()
-            return
-        }
-
-        Task {
-            let myUserId = telegramService.currentUser?.id ?? 0
-            let cache = MessageCacheService.shared
-
-            // ── PASS 1: Load from pipeline category cache (instant) ──
-            var cachedItems: [FollowUpItem] = []
-            var staleChats: [TGChat] = []
-
-            for chat in candidates {
-                guard let lastMsg = chat.lastMessage else { continue }
-
-                if let cached = await cache.getPipelineCategory(chatId: chat.id),
-                   cached.lastMessageId == lastMsg.id {
-                    // Cache hit
-                    let cachedCategory: FollowUpItem.Category
-                    switch cached.category {
-                    case "on_me": cachedCategory = .onMe
-                    case "on_them": cachedCategory = .onThem
-                    default: cachedCategory = .quiet
-                    }
-
-                    let recentMessages = (await cache.getMessages(chatId: chat.id)) ?? []
-                    let normalizedCategory = normalizePipelineCategory(
-                        proposed: cachedCategory,
-                        suggestedAction: cached.suggestedAction,
-                        chat: chat,
-                        messages: recentMessages,
-                        myUserId: myUserId
-                    )
-                    if normalizedCategory != cachedCategory {
-                        await cache.cachePipelineCategory(
-                            chatId: chat.id,
-                            category: pipelineCategoryString(normalizedCategory),
-                            suggestedAction: cached.suggestedAction,
-                            lastMessageId: lastMsg.id
-                        )
-                    }
-
-                    let age = Date().timeIntervalSince(lastMsg.date)
-                    cachedItems.append(FollowUpItem(
-                        chat: chat,
-                        category: normalizedCategory,
-                        lastMessage: lastMsg,
-                        timeSinceLastActivity: age,
-                        suggestedAction: cached.suggestedAction.isEmpty ? nil : cached.suggestedAction
-                    ))
-                } else {
-                    staleChats.append(chat)
-                }
-            }
-
-            // Show cached items immediately (no flash of empty state)
-            await MainActor.run {
-                followUpItems = cachedItems
-                sortPipelineItems()
-            }
-
-            // If nothing stale, we're done — no loading indicator needed
-            guard !staleChats.isEmpty else {
-                await MainActor.run { isFollowUpsLoading = false }
-                return
-            }
-
-            // ── PASS 2: AI-analyze ONLY stale chats ──
-            await MainActor.run {
-                pipelineProcessedCount = 0
-                pipelineTotalCount = staleChats.count
-                isFollowUpsLoading = true
-            }
-
-            let maxConcurrency = AppConstants.FollowUp.maxAIConcurrency
-
-            await withTaskGroup(of: FollowUpItem?.self) { group in
-                var queued = 0
-
-                for chat in staleChats {
-                    if queued >= maxConcurrency {
-                        if let result = await group.next() {
-                            await MainActor.run {
-                                pipelineProcessedCount += 1
-                                if let item = result {
-                                    followUpItems.removeAll { $0.chat.id == item.chat.id }
-                                    followUpItems.append(item)
-                                    sortPipelineItems()
-                                }
-                            }
-                        }
-                        queued -= 1
-                    }
-
-                    group.addTask { [self] in
-                        await self.categorizeSingleChat(chat: chat, myUserId: myUserId)
-                    }
-                    queued += 1
-                }
-
-                for await result in group {
-                    await MainActor.run {
-                        pipelineProcessedCount += 1
-                        if let item = result {
-                            followUpItems.removeAll { $0.chat.id == item.chat.id }
-                            followUpItems.append(item)
-                            sortPipelineItems()
-                        }
-                    }
-                }
-            }
-
-            await MainActor.run { isFollowUpsLoading = false }
-        }
-    }
-
-    private func sortPipelineItems() {
-        followUpItems.sort { a, b in
-            let order: [FollowUpItem.Category] = [.onMe, .onThem, .quiet]
-            let aIdx = order.firstIndex(of: a.category) ?? 2
-            let bIdx = order.firstIndex(of: b.category) ?? 2
-            if aIdx != bIdx { return aIdx < bIdx }
-            return a.timeSinceLastActivity < b.timeSinceLastActivity
-        }
-        postOnMeBadge()
-    }
-
-    /// Update menu bar badge with "On Me" count
-    private func postOnMeBadge() {
-        let count = followUpItems.filter { $0.category == .onMe }.count
-        NotificationCenter.default.post(
-            name: .onMeCountChanged,
-            object: nil,
-            userInfo: ["count": count]
+        attentionStore.loadFollowUps(
+            telegramService: telegramService,
+            aiService: aiService,
+            includeBots: includeBotsInAISearch
         )
     }
 
@@ -1710,65 +1451,11 @@ struct LauncherView: View {
 
     /// Incrementally re-analyze only pipeline chats whose lastMessage changed since last categorization.
     private func backgroundRefreshPipeline() {
-        // Guard: need existing items, AI configured, not doing a full load
-        guard !followUpItems.isEmpty, aiService.isConfigured, !isFollowUpsLoading else { return }
-
-        // Cancel any previous background refresh in flight
-        backgroundRefreshTask?.cancel()
-
-        backgroundRefreshTask = Task {
-            let myUserId = telegramService.currentUser?.id ?? 0
-
-            // Find chats with new messages since last categorization
-            var staleChats: [TGChat] = []
-            for item in followUpItems {
-                guard let currentChat = telegramService.visibleChats.first(where: { $0.id == item.chat.id }),
-                      let currentLastMsg = currentChat.lastMessage else { continue }
-                if currentLastMsg.id != item.lastMessage.id {
-                    staleChats.append(currentChat)
-                }
-            }
-
-            // Also detect new pipeline candidates not yet in followUpItems
-            let existingIds = Set(followUpItems.map(\.chat.id))
-            let newCandidates = collectPipelineCandidates().filter { !existingIds.contains($0.id) }
-
-            guard !staleChats.isEmpty || !newCandidates.isEmpty else { return }
-
-            // Re-analyze stale chats one at a time (gentle on API)
-            for chat in staleChats {
-                guard !Task.isCancelled else { return }
-                if let updatedItem = await categorizeSingleChat(chat: chat, myUserId: myUserId) {
-                    await MainActor.run {
-                        followUpItems.removeAll { $0.chat.id == chat.id }
-                        followUpItems.append(updatedItem)
-                        sortPipelineItems()
-                    }
-                }
-            }
-
-            // Categorize new candidates
-            for chat in newCandidates {
-                guard !Task.isCancelled else { return }
-                if let newItem = await categorizeSingleChat(chat: chat, myUserId: myUserId) {
-                    await MainActor.run {
-                        followUpItems.append(newItem)
-                        sortPipelineItems()
-                    }
-                }
-            }
-
-            // Prune chats no longer eligible for pipeline
-            let candidateIds = Set(collectPipelineCandidates().map(\.id))
-            let hasStale = followUpItems.contains { !candidateIds.contains($0.chat.id) }
-            if hasStale {
-                await MainActor.run {
-                    followUpItems.removeAll { !candidateIds.contains($0.chat.id) }
-                    sortPipelineItems()
-                }
-            }
-
-        }
+        attentionStore.backgroundRefreshPipeline(
+            telegramService: telegramService,
+            aiService: aiService,
+            includeBots: includeBotsInAISearch
+        )
     }
 
     // MARK: - Actions
@@ -1801,7 +1488,6 @@ struct LauncherView: View {
         searchCoordinator.triggerSearch(
             query: searchText,
             activeScope: queryScope(for: activeFilter),
-            visibleChats: telegramService.visibleChats,
             aiSearchSourceChats: aiSearchSourceChats,
             scopedAISearchSourceChats: scopedAISearchSourceChats,
             includeBotsInAISearch: includeBotsInAISearch,
@@ -1816,19 +1502,91 @@ struct LauncherView: View {
         )
     }
 
-    private func normalizePipelineCategory(
-        proposed: FollowUpItem.Category,
-        suggestedAction: String?,
-        chat: TGChat,
-        messages: [TGMessage],
-        myUserId: Int64
-    ) -> FollowUpItem.Category {
-        ConversationReplyHeuristics.normalizePipelineCategory(
-            proposed: proposed,
-            suggestedAction: suggestedAction,
-            chat: chat,
-            messages: messages,
-            myUserId: myUserId
-        )
+}
+
+enum LauncherChatPreviewResolver {
+    enum Source: Equatable {
+        case currentMessage
+        case recentContext
+        case none
+    }
+
+    struct Resolution: Equatable {
+        let text: String
+        let source: Source
+    }
+
+    static let contextMessageLimit = 10
+
+    static func resolvePreview(for chat: TGChat, recentMessages: [TGMessage]) -> Resolution {
+        guard let lastMessage = chat.lastMessage else {
+            return Resolution(text: "", source: .none)
+        }
+
+        if let currentText = meaningfulPreviewText(for: lastMessage) {
+            return Resolution(text: currentText, source: .currentMessage)
+        }
+
+        let contextualMessages = recentMessages
+            .sorted {
+                if $0.date != $1.date { return $0.date > $1.date }
+                return $0.id > $1.id
+            }
+            .filter { $0.id != lastMessage.id }
+
+        if let recentContext = contextualMessages.compactMap(meaningfulPreviewText).first {
+            return Resolution(text: recentContext, source: .recentContext)
+        }
+
+        return Resolution(text: "", source: .none)
+    }
+
+    static func shouldFetchRecentContext(
+        for chat: TGChat,
+        recentMessages: [TGMessage],
+        currentResolution: Resolution,
+        cachedMessageCount: Int
+    ) -> Bool {
+        guard let lastMessage = chat.lastMessage else { return false }
+        guard meaningfulPreviewText(for: lastMessage) == nil else { return false }
+        guard currentResolution.source != .recentContext else { return false }
+        if cachedMessageCount < contextMessageLimit {
+            return true
+        }
+        return recentMessages.contains { message in
+            guard let text = message.normalizedTextContent else { return false }
+            return isSyntheticPlaceholderText(text)
+        }
+    }
+
+    private static func meaningfulPreviewText(for message: TGMessage) -> String? {
+        guard let text = message.normalizedTextContent else { return nil }
+        return isSyntheticPlaceholderText(text) ? nil : text
+    }
+
+    private static func isSyntheticPlaceholderText(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        let syntheticLabels: Set<String> = [
+            "[photo]", "photo",
+            "[video]", "video", "video note",
+            "[document]", "document",
+            "[audio]", "audio",
+            "[voice]", "voice", "voice note",
+            "[sticker]", "sticker",
+            "[gif]", "gif",
+            "[media]", "media",
+            "[message]", "message",
+            "contact",
+            "poll",
+            "venue",
+            "location",
+            "live location",
+            "emoji"
+        ]
+
+        return syntheticLabels.contains(normalized)
     }
 }

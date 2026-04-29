@@ -101,7 +101,9 @@ final class QueryInterpreter: QueryInterpreting {
             "responsible for answering",
             "promise to get back to",
             "promised to get back to",
-            "what is on me"
+            "what is on me",
+            "worth checking in groups",
+            "worth checking in group"
         ]
         let replyPatterns = [
             #"\bneed(?:s)?\b.*\b(my|a)\s+(reply|response)\b"#,
@@ -113,7 +115,9 @@ final class QueryInterpreter: QueryInterpreting {
             #"\bresponsible\b.*\b(answering|responding)\b"#,
             #"\bpromis(?:e|ed)\b.*\bget back\b"#,
             #"\bwaiting\b.*\bmy reply\b"#,
-            #"\bopen dms?\b.*\bneed(?:s)?\b.*\breply\b"#
+            #"\bopen dms?\b.*\bneed(?:s)?\b.*\breply\b"#,
+            #"\b(anything|what|which(?: chats?)?|who)\b.*\bworth checking\b"#,
+            #"\bworth checking\b.*\b(groups?|chats?)\b"#
         ]
         let inferredReplyIntent =
             containsAny(replySignals, in: normalized)
@@ -179,9 +183,17 @@ final class QueryInterpreter: QueryInterpreting {
             "summarize", "summary", "summarise", "recap",
             "what did we decide", "what happened", "what did i discuss",
             "what have we discussed", "latest context", "catch me up",
-            "key takeaways", "takeaways from"
+            "key takeaways", "takeaways from", "recent context"
         ]
-        if containsAny(summarySignals, in: normalized) {
+        let summaryPatterns = [
+            #"\bwhat did we discuss(?: about)?\b"#,
+            #"\bwhat did .+ and i discuss\b"#,
+            #"\bwhat did i and .+ discuss\b"#,
+            #"\bwhat(?:'s| is) the latest with\b"#,
+            #"\bwhat(?:'s| is) the recent context from\b"#,
+            #"\bwhat (?:have|has) .+ been talking about lately\b"#
+        ]
+        if containsAny(summarySignals, in: normalized) || regexMatchesAny(summaryPatterns, in: normalized) {
             return .summary
         }
 

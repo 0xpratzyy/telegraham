@@ -1,13 +1,5 @@
 import SwiftUI
 
-private struct QueryRoutingDebugSnapshot: Identifiable {
-    let query: String
-    let spec: QuerySpec
-    let runtimeIntent: QueryIntent
-
-    var id: String { query }
-}
-
 struct SettingsView: View {
     private enum SettingsTab: Hashable {
         case credentials
@@ -190,7 +182,7 @@ struct SettingsView: View {
         .alert("Delete All Data?", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
-                deleteAllData()
+                Task { await deleteAllData() }
             }
         } message: {
             Text("This will remove all local data including your Telegram session. You will need to re-authenticate.")
@@ -762,7 +754,8 @@ struct SettingsView: View {
         }
     }
 
-    private func deleteAllData() {
+    @MainActor
+    private func deleteAllData() async {
         try? KeychainManager.delete(for: .apiId)
         try? KeychainManager.delete(for: .apiHash)
         try? KeychainManager.delete(for: .aiProviderType)
@@ -777,21 +770,17 @@ struct SettingsView: View {
         let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         let pidgyDataDir = appSupportDir?.appendingPathComponent("Pidgy", isDirectory: true)
 
-        let cacheResetGroup = DispatchGroup()
-        cacheResetGroup.enter()
-        Task.detached {
-            await MessageCacheService.shared.invalidateAllLocalData()
-            await AIUsageStore.shared.invalidateAll()
-            await DatabaseManager.shared.close()
-            cacheResetGroup.leave()
-        }
-        _ = cacheResetGroup.wait(timeout: .now() + 2)
+        await RecentSyncCoordinator.shared.stop()
+        await IndexScheduler.shared.stop()
+        telegramService.stop()
+        await MessageCacheService.shared.invalidateAllLocalData()
+        await AIUsageStore.shared.invalidateAll()
+        await DatabaseManager.shared.close()
 
         if let pidgyDataDir {
             try? FileManager.default.removeItem(at: pidgyDataDir)
         }
 
-        telegramService.stop()
         telegramService.authState = .uninitialized
         telegramService.chats = []
         telegramService.currentUser = nil
