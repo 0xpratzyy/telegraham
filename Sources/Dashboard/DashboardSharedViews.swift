@@ -8,29 +8,29 @@ enum PidgyBranding {
 }
 
 enum PidgyDashboardTheme {
-    static let paper = Color(red: 0.068, green: 0.071, blue: 0.078)
-    static let sidebar = Color(red: 0.045, green: 0.049, blue: 0.058)
-    static let raised = Color(red: 0.100, green: 0.108, blue: 0.124)
-    static let deep = Color(red: 0.054, green: 0.059, blue: 0.070)
-    static let primary = Color(red: 0.875, green: 0.900, blue: 0.940)
-    static let secondary = Color(red: 0.596, green: 0.640, blue: 0.700)
-    static let tertiary = Color(red: 0.386, green: 0.426, blue: 0.486)
-    static let rule = Color(red: 0.918, green: 0.934, blue: 0.960).opacity(0.085)
-    static let brand = Color(red: 0.338, green: 0.611, blue: 1.000)
-    static let blue = Color(red: 0.560, green: 0.728, blue: 1.000)
-    static let green = Color(red: 0.500, green: 0.742, blue: 0.596)
-    static let red = Color(red: 0.875, green: 0.408, blue: 0.408)
-    static let yellow = Color(red: 0.810, green: 0.715, blue: 0.392)
-    static let purple = Color(red: 0.644, green: 0.560, blue: 0.900)
+    static let paper = Color.Pidgy.bg1
+    static let sidebar = Color.Pidgy.bg2
+    static let raised = Color.Pidgy.bg3
+    static let deep = Color.Pidgy.bg0
+    static let primary = Color.Pidgy.fg1
+    static let secondary = Color.Pidgy.fg2
+    static let tertiary = Color.Pidgy.fg3
+    static let rule = Color.Pidgy.border2
+    static let brand = Color.Pidgy.accent
+    static let blue = Color.Pidgy.accentFg
+    static let green = Color.Pidgy.success
+    static let red = Color.Pidgy.danger
+    static let yellow = Color.Pidgy.warning
+    static let purple = Color.Pidgy.avPurple
 
     static let pageMaxWidth: CGFloat = 860
-    static let pageTopPadding: CGFloat = 48
-    static let pageHorizontalPadding: CGFloat = 32
-    static let pageBottomPadding: CGFloat = 44
-    static let headerBottomPadding: CGFloat = 24
-    static let sectionGap: CGFloat = 28
-    static let rowHorizontalPadding: CGFloat = 12
-    static let rowInnerSpacing: CGFloat = 12
+    static let pageTopPadding = PidgySpace.s12
+    static let pageHorizontalPadding = PidgySpace.s8
+    static let pageBottomPadding = PidgySpace.s10 + PidgySpace.s1
+    static let headerBottomPadding = PidgySpace.s6
+    static let sectionGap = PidgySpace.s6
+    static let rowHorizontalPadding = PidgySpace.s3
+    static let rowInnerSpacing = PidgySpace.s3
     static let rowHeight: CGFloat = 54
     static let topicRowHeight: CGFloat = 60
     static let compactRowHeight: CGFloat = 50
@@ -38,31 +38,31 @@ enum PidgyDashboardTheme {
     static let timestampColumnWidth: CGFloat = 52
     static let sidebarRowHeight: CGFloat = 34
 
-    static let displayTitleFont = Font.system(size: 32, weight: .semibold, design: .serif)
-    static let topicDisplayTitleFont = Font.system(size: 34, weight: .semibold, design: .serif)
-    static let titleFont = Font.system(size: 22, weight: .semibold)
+    static let displayTitleFont = Font.Pidgy.displayH1
+    static let topicDisplayTitleFont = Font.Pidgy.displayH1
+    static let titleFont = Font.Pidgy.h2
     static let pageTitleFont = displayTitleFont
-    static let pageSubtitleFont = Font.system(size: 13, weight: .regular)
-    static let sectionLabelFont = Font.system(size: 12, weight: .medium)
-    static let rowTitleFont = Font.system(size: 14, weight: .medium)
-    static let rowEmphasisFont = Font.system(size: 14, weight: .semibold)
-    static let metadataFont = Font.system(size: 12, weight: .regular)
-    static let metadataMediumFont = Font.system(size: 12, weight: .medium)
-    static let detailBodyFont = Font.system(size: 13, weight: .regular)
-    static let captionFont = Font.system(size: 11, weight: .regular)
-    static let captionMediumFont = Font.system(size: 11, weight: .medium)
-    static let monoTimestampFont = Font.system(size: 11.5, weight: .medium, design: .monospaced)
-    static let monoCaptionFont = Font.system(size: 11, weight: .medium, design: .monospaced)
-    static let selectedRowCornerRadius: CGFloat = 9
+    static let pageSubtitleFont = Font.Pidgy.bodySm
+    static let sectionLabelFont = Font.Pidgy.eyebrow
+    static let rowTitleFont = Font.Pidgy.bodyMd
+    static let rowEmphasisFont = Font.Pidgy.bodyMd
+    static let metadataFont = Font.Pidgy.bodySm
+    static let metadataMediumFont = Font.Pidgy.bodyMd
+    static let detailBodyFont = Font.Pidgy.bodySm
+    static let captionFont = Font.Pidgy.meta
+    static let captionMediumFont = Font.Pidgy.eyebrow
+    static let monoTimestampFont = Font.Pidgy.monoSm
+    static let monoCaptionFont = Font.Pidgy.monoSm
+    static let selectedRowCornerRadius = PidgyRadius.md
 
     static func topicTint(_ seed: Int64) -> Color {
         let palette = [
-            Color(red: 0.560, green: 0.728, blue: 1.000),
-            Color(red: 0.440, green: 0.780, blue: 0.900),
-            Color(red: 0.500, green: 0.742, blue: 0.596),
-            Color(red: 0.644, green: 0.560, blue: 0.900),
-            Color(red: 0.820, green: 0.520, blue: 0.780),
-            Color(red: 0.640, green: 0.690, blue: 0.760)
+            Color.Pidgy.avBlue,
+            Color.Pidgy.info,
+            Color.Pidgy.avGreen,
+            Color.Pidgy.avPurple,
+            Color.Pidgy.avPink,
+            Color.Pidgy.fg2
         ]
         return palette[abs(Int(seed % Int64(palette.count)))]
     }
@@ -696,9 +696,9 @@ struct DashboardPeopleTabs: View {
 func categoryTint(_ category: FollowUpItem.Category) -> Color {
     switch category {
     case .onMe:
-        return PidgyDashboardTheme.brand
+        return PidgyDashboardTheme.yellow
     case .onThem:
-        return PidgyDashboardTheme.blue
+        return PidgyDashboardTheme.brand
     case .quiet:
         return PidgyDashboardTheme.secondary
     }

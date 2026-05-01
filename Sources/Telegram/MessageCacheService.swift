@@ -295,6 +295,11 @@ actor MessageCacheService {
         memoryCache.removeAll()
     }
 
+    func resetInMemoryCachesForTesting() async {
+        memoryCache.removeAll()
+        pipelineCache.removeAll()
+    }
+
     // MARK: - Flush
 
     /// SQLite writes are immediate; compatibility no-op kept so older callsites remain safe.

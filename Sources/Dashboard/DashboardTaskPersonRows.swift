@@ -44,7 +44,7 @@ struct DashboardTaskRow: View {
         .frame(height: PidgyDashboardTheme.compactRowHeight)
         .background(
             RoundedRectangle(cornerRadius: PidgyDashboardTheme.selectedRowCornerRadius, style: .continuous)
-                .fill(isSelected ? PidgyDashboardTheme.brand.opacity(0.12) : Color.clear)
+                .fill(isSelected ? Color.Pidgy.bg4 : Color.clear)
         )
         .contentShape(Rectangle())
     }
@@ -113,7 +113,7 @@ struct DashboardPersonRow: View {
         .frame(height: PidgyDashboardTheme.compactRowHeight)
         .background(
             RoundedRectangle(cornerRadius: PidgyDashboardTheme.selectedRowCornerRadius, style: .continuous)
-                .fill(isSelected ? PidgyDashboardTheme.brand.opacity(0.12) : Color.clear)
+                .fill(isSelected ? Color.Pidgy.bg4 : Color.clear)
         )
         .contentShape(Rectangle())
     }

@@ -9,8 +9,8 @@ struct LoadingStateView: View {
             Spacer()
             ProgressView()
             Text(message)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(Color.Pidgy.fg2)
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -41,20 +41,20 @@ struct AISearchLoadingView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.cyan.opacity(0.9))
+                        .font(Font.Pidgy.meta)
+                        .foregroundStyle(Color.Pidgy.accent)
 
                     Text(message)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.primary)
+                        .font(Font.Pidgy.bodyMd)
+                        .foregroundStyle(Color.Pidgy.fg1)
 
                     Spacer()
                 }
 
                 if let progressText, !progressText.isEmpty {
                     Text(progressText)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(Font.Pidgy.monoSm)
+                        .foregroundStyle(Color.Pidgy.fg2)
                 }
 
                 if !visibleKeywords.isEmpty {
@@ -62,13 +62,13 @@ struct AISearchLoadingView: View {
                         ForEach(Array(visibleKeywords.enumerated()), id: \.offset) { idx, word in
                             let isActive = idx == 0
                             Text(word)
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(isActive ? Color.cyan.opacity(0.95) : .secondary)
+                                .font(Font.Pidgy.monoSm)
+                                .foregroundStyle(isActive ? Color.Pidgy.accentFg : Color.Pidgy.fg2)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 3)
                                 .background(
                                     Capsule()
-                                        .fill(isActive ? Color.cyan.opacity(0.18) : Color.secondary.opacity(0.10))
+                                        .fill(isActive ? Color.Pidgy.accentSoft : Color.Pidgy.bg4.opacity(0.55))
                                 )
                         }
                     }
@@ -79,20 +79,11 @@ struct AISearchLoadingView: View {
             .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.cyan.opacity(0.14),
-                                Color.blue.opacity(0.07)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
+                    .fill(Color.Pidgy.bg3)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.cyan.opacity(0.22), lineWidth: 1)
+                    .stroke(Color.Pidgy.border2, lineWidth: 1)
             )
 
             VStack(spacing: 6) {
@@ -126,16 +117,16 @@ private struct AISearchSkeletonRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(Color.secondary.opacity(pulse ? 0.22 : 0.14))
+                .fill(Color.Pidgy.fg2.opacity(pulse ? 0.22 : 0.14))
                 .frame(width: 26, height: 26)
 
             VStack(alignment: .leading, spacing: 5) {
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.secondary.opacity(pulse ? 0.24 : 0.15))
+                    .fill(Color.Pidgy.fg2.opacity(pulse ? 0.24 : 0.15))
                     .frame(width: titleWidth, height: 10)
 
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.secondary.opacity(pulse ? 0.16 : 0.10))
+                    .fill(Color.Pidgy.fg2.opacity(pulse ? 0.16 : 0.10))
                     .frame(width: subtitleWidth, height: 8)
             }
 
@@ -163,11 +154,11 @@ struct ErrorStateView: View {
         VStack(spacing: 12) {
             Spacer()
             Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 36))
-                .foregroundStyle(.quaternary)
+                .font(Font.Pidgy.displayH1)
+                .foregroundStyle(Color.Pidgy.fg4)
             Text(message)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(Color.Pidgy.fg2)
                 .multilineTextAlignment(.center)
             if let retry = retryAction {
                 Button("Try Again", action: retry)
@@ -188,15 +179,15 @@ struct EmptyStateView: View {
         VStack(spacing: 12) {
             Spacer()
             Image(systemName: icon)
-                .font(.system(size: 36))
-                .foregroundStyle(.quaternary)
+                .font(Font.Pidgy.displayH1)
+                .foregroundStyle(Color.Pidgy.fg4)
             Text(title)
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.body)
+                .foregroundStyle(Color.Pidgy.fg2)
             if let sub = subtitle {
                 Text(sub)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.fg3)
             }
             Spacer()
         }

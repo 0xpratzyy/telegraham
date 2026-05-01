@@ -197,8 +197,8 @@ struct SemanticSearchResult: Identifiable {
 
         var color: Color {
             switch self {
-            case .high: return .purple
-            case .medium: return .blue
+            case .high: return Color.Pidgy.avPurple
+            case .medium: return Color.Pidgy.accent
             }
         }
     }
@@ -222,9 +222,9 @@ struct AgenticSearchResult: Identifiable {
 
         var color: Color {
             switch self {
-            case .hot: return .red
-            case .warm: return .orange
-            case .cold: return .blue
+            case .hot: return Color.Pidgy.danger
+            case .warm: return Color.Pidgy.warning
+            case .cold: return Color.Pidgy.accentFg
             }
         }
     }
@@ -246,10 +246,10 @@ struct AgenticSearchResult: Identifiable {
 
         var color: Color {
             switch self {
-            case .replyNow: return .green
-            case .worthChecking: return .orange
-            case .waitingOnThem: return .blue
-            case .unclear: return .gray
+            case .replyNow: return Color.Pidgy.success
+            case .worthChecking: return Color.Pidgy.warning
+            case .waitingOnThem: return Color.Pidgy.accent
+            case .unclear: return Color.Pidgy.fg2
             }
         }
     }

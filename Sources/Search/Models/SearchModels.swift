@@ -27,11 +27,11 @@ struct PatternSearchResult: Identifiable, Sendable, Equatable {
 
         var color: Color {
             switch self {
-            case .exactPhrase: return .blue
-            case .walletAddress, .evmAddress, .longAddress: return .green
-            case .url, .domain: return .orange
-            case .handle: return .pink
-            case .literalToken: return .purple
+            case .exactPhrase: return Color.Pidgy.accent
+            case .walletAddress, .evmAddress, .longAddress: return Color.Pidgy.success
+            case .url, .domain: return Color.Pidgy.warning
+            case .handle: return Color.Pidgy.avPink
+            case .literalToken: return Color.Pidgy.avPurple
             }
         }
     }

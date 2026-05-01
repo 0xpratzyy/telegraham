@@ -11,6 +11,7 @@ final class AttentionStore: ObservableObject {
     @Published private(set) var pipelineTotalCount = 0
 
     private var backgroundRefreshTask: Task<Void, Never>?
+    private var cachedHydrationTask: Task<Void, Never>?
     private var queuedRefreshRequest: RefreshRequest?
 
     private init() {}
@@ -80,28 +81,8 @@ final class AttentionStore: ObservableObject {
             var staleChats: [TGChat] = []
 
             for chat in candidates {
-                guard let lastMessage = chat.lastMessage else { continue }
-
-                if let cached = await cache.getPipelineCategory(chatId: chat.id),
-                   cached.lastMessageId == lastMessage.id {
-                    let cachedCategory: FollowUpItem.Category
-                    switch cached.category {
-                    case "on_me":
-                        cachedCategory = .onMe
-                    case "on_them":
-                        cachedCategory = .onThem
-                    default:
-                        cachedCategory = .quiet
-                    }
-
-                    cachedItems.append(FollowUpItem(
-                        chat: chat,
-                        category: cachedCategory,
-                        lastMessage: lastMessage,
-                        timeSinceLastActivity: Date().timeIntervalSince(lastMessage.date),
-                        suggestedAction: cached.suggestedAction.isEmpty ? nil : cached.suggestedAction
-                    ))
-
+                if let cachedItem = await cachedPipelineItem(for: chat, cache: cache) {
+                    cachedItems.append(cachedItem)
                     if force {
                         staleChats.append(chat)
                     }
@@ -155,6 +136,30 @@ final class AttentionStore: ObservableObject {
                 }
             }
 
+        }
+    }
+
+    func hydrateCachedFollowUps(
+        telegramService: TelegramService,
+        includeBots: Bool
+    ) {
+        let candidates = collectPipelineCandidates(
+            telegramService: telegramService,
+            includeBots: includeBots
+        )
+        guard !candidates.isEmpty else { return }
+
+        cachedHydrationTask?.cancel()
+        cachedHydrationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let cache = MessageCacheService.shared
+
+            for chat in candidates {
+                guard !Task.isCancelled else { return }
+                if let cachedItem = await self.cachedPipelineItem(for: chat, cache: cache) {
+                    self.upsertPipelineItem(cachedItem)
+                }
+            }
         }
     }
 
@@ -215,6 +220,7 @@ final class AttentionStore: ObservableObject {
             .filter { !existingIds.contains($0.id) }
 
             guard !staleChats.isEmpty || !newCandidates.isEmpty else { return }
+            let cache = MessageCacheService.shared
 
             for chat in staleChats {
                 guard !Task.isCancelled else { return }
@@ -228,7 +234,17 @@ final class AttentionStore: ObservableObject {
                 }
             }
 
+            var uncachedNewCandidates: [TGChat] = []
             for chat in newCandidates {
+                guard !Task.isCancelled else { return }
+                if let cachedItem = await cachedPipelineItem(for: chat, cache: cache) {
+                    upsertPipelineItem(cachedItem)
+                } else {
+                    uncachedNewCandidates.append(chat)
+                }
+            }
+
+            for chat in uncachedNewCandidates {
                 guard !Task.isCancelled else { return }
                 if let newItem = await FollowUpPipelineAnalyzer.categorizeChat(
                     chat: chat,
@@ -249,6 +265,35 @@ final class AttentionStore: ObservableObject {
                 sortPipelineItems()
             }
         }
+    }
+
+    private func cachedPipelineItem(
+        for chat: TGChat,
+        cache: MessageCacheService
+    ) async -> FollowUpItem? {
+        guard let lastMessage = chat.lastMessage,
+              let cached = await cache.getPipelineCategory(chatId: chat.id),
+              cached.lastMessageId == lastMessage.id else {
+            return nil
+        }
+
+        let cachedCategory: FollowUpItem.Category
+        switch cached.category {
+        case "on_me":
+            cachedCategory = .onMe
+        case "on_them":
+            cachedCategory = .onThem
+        default:
+            cachedCategory = .quiet
+        }
+
+        return FollowUpItem(
+            chat: chat,
+            category: cachedCategory,
+            lastMessage: lastMessage,
+            timeSinceLastActivity: Date().timeIntervalSince(lastMessage.date),
+            suggestedAction: cached.suggestedAction.isEmpty ? nil : cached.suggestedAction
+        )
     }
 
     private func collectPipelineCandidates(

@@ -1333,7 +1333,7 @@ private struct DashboardPreferenceSidebarButton: View {
                     .font(PidgyDashboardTheme.metadataMediumFont)
                     .foregroundStyle(isSelected ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
                     .frame(width: 24, height: 24)
-                    .background(isSelected ? PidgyDashboardTheme.brand.opacity(0.14) : PidgyDashboardTheme.raised.opacity(0.75))
+                    .background(isSelected ? Color.Pidgy.bg4 : PidgyDashboardTheme.raised.opacity(0.75))
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(page.rawValue)
@@ -1341,7 +1341,7 @@ private struct DashboardPreferenceSidebarButton: View {
                         .lineLimit(1)
                     Text(page.subtitle)
                         .font(PidgyDashboardTheme.captionFont)
-                        .foregroundStyle(isSelected ? PidgyDashboardTheme.brand.opacity(0.78) : PidgyDashboardTheme.secondary)
+                        .foregroundStyle(isSelected ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
@@ -1351,7 +1351,7 @@ private struct DashboardPreferenceSidebarButton: View {
             .frame(height: 48)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? PidgyDashboardTheme.brand.opacity(0.15) : Color.clear)
+                    .fill(isSelected ? Color.Pidgy.bg4 : Color.clear)
             )
             .contentShape(Rectangle())
         }

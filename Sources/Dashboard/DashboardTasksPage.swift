@@ -221,7 +221,7 @@ struct DashboardTasksPage: View {
                         .foregroundStyle(isOwnerSelected(option) ? PidgyDashboardTheme.primary : PidgyDashboardTheme.secondary)
                         .background(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(isOwnerSelected(option) ? PidgyDashboardTheme.brand.opacity(0.14) : PidgyDashboardTheme.raised.opacity(0.55))
+                                .fill(isOwnerSelected(option) ? Color.Pidgy.bg4 : PidgyDashboardTheme.raised.opacity(0.55))
                         )
                     }
                     .buttonStyle(.plain)

@@ -78,6 +78,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        PidgyFontRegistrar.registerBundledFonts()
+
         if launchPresentationMode.activatesAsRegularApp {
             NSApp.setActivationPolicy(.regular)
         }

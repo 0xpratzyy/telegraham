@@ -2,6 +2,12 @@ import SwiftUI
 
 let dashboardUncategorizedTopicId: Int64 = Int64.min
 
+enum DashboardReplyQueueMetrics {
+    static func sidebarCount(for items: [FollowUpItem]) -> Int {
+        items.count
+    }
+}
+
 struct DashboardView: View {
     @EnvironmentObject private var telegramService: TelegramService
     @EnvironmentObject private var aiService: AIService
@@ -30,7 +36,7 @@ struct DashboardView: View {
                     selection: $navigation.selectedPage,
                     selectedTopicId: $selectedTopicId,
                     topicItems: sidebarTopicItems,
-                    replyCount: attentionStore.followUpItems.filter { $0.category == .onMe }.count,
+                    replyCount: DashboardReplyQueueMetrics.sidebarCount(for: attentionStore.followUpItems),
                     openTaskCount: myOpenTaskCount,
                     peopleCount: allContacts.count,
                     visibleChatCount: telegramService.visibleChats.count,
@@ -121,6 +127,10 @@ struct DashboardView: View {
         .onChange(of: visibleChatIDs) {
             telegramService.scheduleBotMetadataWarm(
                 for: telegramService.visibleChats,
+                includeBots: includeBotsInAISearch
+            )
+            attentionStore.hydrateCachedFollowUps(
+                telegramService: telegramService,
                 includeBots: includeBotsInAISearch
             )
             Task {
@@ -626,17 +636,13 @@ struct DashboardSidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            brandHeader
-            .padding(.horizontal, 16)
-            .padding(.top, 15)
-            .padding(.bottom, 20)
-
             VStack(spacing: 2) {
                 ForEach(DashboardPage.allCases.filter { $0 != .topics && $0 != .preferences }) { page in
                     sidebarButton(page, count: count(for: page))
                 }
             }
             .padding(.horizontal, 10)
+            .padding(.top, 16)
 
             Spacer()
 
@@ -664,22 +670,6 @@ struct DashboardSidebar: View {
         }
     }
 
-    private var brandHeader: some View {
-        HStack(spacing: 12) {
-            PidgyMascotMark(size: 36)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(PidgyBranding.appName)
-                    .font(.system(size: 21, weight: .semibold, design: .serif))
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                    .lineLimit(1)
-                Text(PidgyBranding.dashboardTagline)
-                    .font(PidgyDashboardTheme.captionMediumFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .lineLimit(1)
-            }
-        }
-    }
-
     private func sidebarButton(_ page: DashboardPage, count: Int?) -> some View {
         Button {
             selection = page
@@ -695,15 +685,15 @@ struct DashboardSidebar: View {
                 if let count, count > 0 {
                     Text("\(count)")
                         .font(PidgyDashboardTheme.monoCaptionFont)
-                        .foregroundStyle(selection == page ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
+                        .foregroundStyle(selection == page ? Color.white : PidgyDashboardTheme.secondary)
                 }
             }
-            .foregroundStyle(selection == page ? PidgyDashboardTheme.brand : PidgyDashboardTheme.primary)
+            .foregroundStyle(selection == page ? Color.white : PidgyDashboardTheme.primary)
             .padding(.horizontal, 10)
             .frame(height: PidgyDashboardTheme.sidebarRowHeight)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(selection == page ? PidgyDashboardTheme.brand.opacity(0.18) : Color.clear)
+                    .fill(selection == page ? Color.Pidgy.bg4 : Color.clear)
             )
             .contentShape(Rectangle())
         }
@@ -752,24 +742,24 @@ struct DashboardSidebar: View {
                         } label: {
                             HStack(spacing: 9) {
                                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                                    .fill(item.tint)
+                                    .fill(isTopicSelected(item) ? PidgyDashboardTheme.brand : item.tint.opacity(0.75))
                                     .frame(width: 8, height: 8)
                                 Text(item.name)
                                     .font(PidgyDashboardTheme.metadataMediumFont)
-                                    .foregroundStyle(isTopicSelected(item) ? PidgyDashboardTheme.brand : PidgyDashboardTheme.primary)
+                                    .foregroundStyle(isTopicSelected(item) ? Color.white : PidgyDashboardTheme.primary)
                                     .lineLimit(1)
                                 Spacer()
                                 if item.chatCount > 0 {
                                     Text("\(item.chatCount)")
                                         .font(PidgyDashboardTheme.monoCaptionFont)
-                                        .foregroundStyle(isTopicSelected(item) ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
+                                        .foregroundStyle(isTopicSelected(item) ? Color.white : PidgyDashboardTheme.secondary)
                                 }
                             }
                             .padding(.horizontal, 6)
                             .frame(height: 30)
                             .background(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(isTopicSelected(item) ? PidgyDashboardTheme.brand.opacity(0.14) : Color.clear)
+                                    .fill(isTopicSelected(item) ? Color.Pidgy.bg4 : Color.clear)
                             )
                             .contentShape(Rectangle())
                         }

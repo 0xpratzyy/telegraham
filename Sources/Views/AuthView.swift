@@ -19,11 +19,11 @@ struct AuthView: View {
             VStack(spacing: 8) {
                 PidgyMascotMark(size: 58)
                 Text("Pidgy")
-                    .font(.system(size: 24, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.primary)
+                    .font(Font.Pidgy.h2)
+                    .foregroundStyle(Color.Pidgy.fg1)
             }
-            .padding(.top, 32)
-            .padding(.bottom, 24)
+            .padding(.top, PidgySpace.s8)
+            .padding(.bottom, PidgySpace.s6)
 
             // Content based on auth state
             Group {
@@ -48,30 +48,31 @@ struct AuthView: View {
                     ProgressView("Disconnecting...")
                 case .closed:
                     Text("Session closed")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.Pidgy.fg2)
                 }
             }
-            .padding(.horizontal, 32)
+            .padding(.horizontal, PidgySpace.s8)
 
             if let error = errorMessage {
                 Text(error)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.red)
-                    .padding(.top, 12)
-                    .padding(.horizontal, 32)
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.danger)
+                    .padding(.top, PidgySpace.s3)
+                    .padding(.horizontal, PidgySpace.s8)
             }
 
             Spacer()
 
             // Safety notice
             Text("Pidgy is read-only. It can never send messages or modify your account.")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                .font(Font.Pidgy.meta)
+                .foregroundStyle(Color.Pidgy.fg3)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 20)
+                .padding(.horizontal, PidgySpace.s8)
+                .padding(.bottom, PidgySpace.s5)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.Pidgy.bg1)
         .onAppear {
             apiId = (try? KeychainManager.retrieve(for: .apiId)) ?? ""
             apiHash = (try? KeychainManager.retrieve(for: .apiHash)) ?? ""
@@ -83,8 +84,8 @@ struct AuthView: View {
     private var credentialsView: some View {
         VStack(spacing: 16) {
             Text("Enter your Telegram API credentials")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.body)
+                .foregroundStyle(Color.Pidgy.fg2)
 
             VStack(spacing: 12) {
                 inputField(title: "API ID", text: $apiId, placeholder: "e.g., 12345678")
@@ -92,8 +93,8 @@ struct AuthView: View {
             }
 
             Link("Get credentials from my.telegram.org", destination: URL(string: "https://my.telegram.org")!)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.accentColor)
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(Color.Pidgy.accent)
 
             actionButton(title: "Connect") {
                 guard !apiId.isEmpty, !apiHash.isEmpty else {
@@ -124,8 +125,8 @@ struct AuthView: View {
                 .controlSize(.regular)
 
             Text("Requesting QR code...")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.body)
+                .foregroundStyle(Color.Pidgy.fg2)
         }
         .onAppear {
             Task {
@@ -141,8 +142,8 @@ struct AuthView: View {
     private func qrCodeView(link: String) -> some View {
         VStack(spacing: 20) {
             Text("Scan with Telegram")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.primary)
+                .font(Font.Pidgy.h3)
+                .foregroundStyle(Color.Pidgy.fg1)
 
             if let qrImage = generateQRCode(from: link) {
                 Image(nsImage: qrImage)
@@ -153,12 +154,12 @@ struct AuthView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
             } else {
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(.quaternary)
+                    .fill(Color.Pidgy.bg4)
                     .frame(width: 200, height: 200)
                     .overlay {
                         Text("Failed to generate QR")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                            .font(Font.Pidgy.bodySm)
+                            .foregroundStyle(Color.Pidgy.fg2)
                     }
             }
 
@@ -167,16 +168,16 @@ struct AuthView: View {
                 Text("Go to **Settings → Devices → Link Desktop Device**")
                 Text("Point your phone at this QR code")
             }
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
+            .font(Font.Pidgy.bodySm)
+            .foregroundStyle(Color.Pidgy.fg2)
             .multilineTextAlignment(.center)
 
             Button {
                 showPhoneLogin = true
             } label: {
                 Text("Log in with phone number instead")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.accentColor)
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.accent)
             }
             .buttonStyle(.plain)
         }
@@ -187,8 +188,8 @@ struct AuthView: View {
     private var phoneNumberView: some View {
         VStack(spacing: 16) {
             Text("Enter your phone number")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.body)
+                .foregroundStyle(Color.Pidgy.fg2)
 
             inputField(title: "Phone Number", text: $phoneNumber, placeholder: "+1 234 567 8900")
 
@@ -205,8 +206,8 @@ struct AuthView: View {
                 showPhoneLogin = false
             } label: {
                 Text("Log in with QR code instead")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.accentColor)
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.accent)
             }
             .buttonStyle(.plain)
         }
@@ -217,13 +218,13 @@ struct AuthView: View {
     private func verificationCodeView(codeInfo: CodeInfo?) -> some View {
         VStack(spacing: 16) {
             Text("Enter the verification code")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.body)
+                .foregroundStyle(Color.Pidgy.fg2)
 
             if let info = codeInfo, !info.phoneNumber.isEmpty {
                 Text("Sent to \(info.phoneNumber)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.fg3)
             }
 
             inputField(title: "Code", text: $verificationCode, placeholder: "12345")
@@ -244,13 +245,13 @@ struct AuthView: View {
     private func passwordView(hint: String?) -> some View {
         VStack(spacing: 16) {
             Text("Enter your two-factor authentication password")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .font(Font.Pidgy.body)
+                .foregroundStyle(Color.Pidgy.fg2)
 
             if let hint, !hint.isEmpty {
                 Text("Hint: \(hint)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.fg3)
             }
 
             inputField(title: "Password", text: $password, placeholder: "Your 2FA password", isSecure: true)
@@ -271,17 +272,17 @@ struct AuthView: View {
     private var readyView: some View {
         VStack(spacing: 12) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 36))
-                .foregroundStyle(.green)
+                .font(Font.Pidgy.displayH1)
+                .foregroundStyle(Color.Pidgy.success)
 
             Text("Connected to Telegram")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.primary)
+                .font(Font.Pidgy.h3)
+                .foregroundStyle(Color.Pidgy.fg1)
 
             if let user = telegramService.currentUser {
                 Text(user.displayName)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.fg2)
             }
         }
     }
@@ -308,8 +309,8 @@ struct AuthView: View {
     private func inputField(title: String, text: Binding<String>, placeholder: String, isSecure: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.tertiary)
+                .font(Font.Pidgy.eyebrow)
+                .foregroundStyle(Color.Pidgy.fg3)
                 .textCase(.uppercase)
 
             Group {
@@ -320,20 +321,13 @@ struct AuthView: View {
                 }
             }
             .textFieldStyle(.plain)
-            .font(.system(size: 14))
-            .padding(10)
-            .background(.ultraThinMaterial)
-            .cornerRadius(8)
+            .font(Font.Pidgy.body)
+            .padding(PidgySpace.s3)
+            .background(Color.Pidgy.bg3)
+            .cornerRadius(PidgyRadius.sm)
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [.white.opacity(0.15), .white.opacity(0.05)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.5
-                    )
+                RoundedRectangle(cornerRadius: PidgyRadius.sm)
+                    .stroke(Color.Pidgy.border2, lineWidth: 1)
             )
         }
     }
@@ -353,13 +347,13 @@ struct AuthView: View {
                         .tint(.white)
                 }
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(Font.Pidgy.bodyMd)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(Color.accentColor)
-            .foregroundColor(.white)
-            .cornerRadius(8)
+            .padding(.vertical, PidgySpace.s3)
+            .background(Color.Pidgy.accent)
+            .foregroundColor(Color.white)
+            .cornerRadius(PidgyRadius.sm)
         }
         .buttonStyle(.plain)
         .disabled(isSubmitting)

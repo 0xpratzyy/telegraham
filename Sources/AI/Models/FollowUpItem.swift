@@ -17,9 +17,9 @@ struct FollowUpItem: Identifiable, Sendable {
 
         var color: Color {
             switch self {
-            case .onMe: return .orange
-            case .onThem: return .blue
-            case .quiet: return .gray
+            case .onMe: return Color.Pidgy.warning
+            case .onThem: return Color.Pidgy.accent
+            case .quiet: return Color.Pidgy.fg2
             }
         }
 

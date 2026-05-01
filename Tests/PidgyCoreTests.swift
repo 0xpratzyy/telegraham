@@ -16,16 +16,33 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        await MessageCacheService.shared.invalidateAll()
-        await MessageCacheService.shared.invalidateAllPipelineCache()
+        await MessageCacheService.shared.resetInMemoryCachesForTesting()
         await DatabaseManager.shared.close()
-        await DatabaseManager.shared.configureForTesting(databaseURLOverride: nil)
+        await DatabaseManager.shared.configureForTesting(
+            databaseURLOverride: nil,
+            appSupportDirectoryOverride: nil
+        )
         KeychainManager.configureForTesting(storageDirectoryOverride: nil)
         if let tempCredentialDirectory {
             try? FileManager.default.removeItem(at: tempCredentialDirectory)
             self.tempCredentialDirectory = nil
         }
         try await super.tearDown()
+    }
+
+    func testPidgyDesignSystemBridgeUsesBundledFontsAndSharedTokens() {
+        XCTAssertEqual(PidgyFontRegistrar.fontsSubdirectory, "Fonts")
+        XCTAssertEqual(
+            PidgyFontRegistrar.bundledFontFilenames,
+            [
+                "Inter[opsz,wght].ttf",
+                "Newsreader[opsz,wght].ttf",
+                "JetBrainsMono[wght].ttf"
+            ]
+        )
+        XCTAssertEqual(PidgyDashboardTheme.pageHorizontalPadding, PidgySpace.s8)
+        XCTAssertEqual(PidgyDashboardTheme.rowHorizontalPadding, PidgySpace.s3)
+        XCTAssertEqual(PidgyDashboardTheme.selectedRowCornerRadius, PidgyRadius.md)
     }
 
     func testDurableHistorySurvivesLiveUpdateAndDelete() async throws {
@@ -598,6 +615,27 @@ final class PidgyCoreTests: XCTestCase {
             query: "dee"
         )
         XCTAssertEqual(searchedOptions.map(\.label), ["Deeeeeksha"])
+    }
+
+    func testDashboardReplyQueueCountIncludesEveryPipelineCategory() {
+        let chats = [
+            makeChat(id: 51_001, title: "On me", chatType: .privateChat(userId: 51_101), unreadCount: 1, lastMessageDate: Date()),
+            makeChat(id: 51_002, title: "On them", chatType: .privateChat(userId: 51_102), unreadCount: 1, lastMessageDate: Date().addingTimeInterval(-60)),
+            makeChat(id: 51_003, title: "Quiet", chatType: .privateChat(userId: 51_103), unreadCount: 1, lastMessageDate: Date().addingTimeInterval(-120))
+        ]
+        let categories: [FollowUpItem.Category] = [.onMe, .onThem, .quiet]
+        let items = zip(chats, categories).compactMap { chat, category -> FollowUpItem? in
+            guard let lastMessage = chat.lastMessage else { return nil }
+            return FollowUpItem(
+                chat: chat,
+                category: category,
+                lastMessage: lastMessage,
+                timeSinceLastActivity: Date().timeIntervalSince(lastMessage.date),
+                suggestedAction: nil
+            )
+        }
+
+        XCTAssertEqual(DashboardReplyQueueMetrics.sidebarCount(for: items), 3)
     }
 
     func testDashboardTaskProfileFilterMatchesPersonAliasesFromPeopleSearch() {
@@ -2610,6 +2648,118 @@ final class PidgyCoreTests: XCTestCase {
             XCTAssertFalse(store.isFollowUpsLoading)
             let aiCallCount = await callCounter.currentValue()
             XCTAssertEqual(aiCallCount, 1)
+        }
+    }
+
+    @MainActor
+    func testAttentionStoreHydratesNewlyVisibleCachedFollowUpsWithoutAI() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let initiallyVisibleChats = [
+                makeChat(
+                    id: 45_001,
+                    title: "Initial cached one",
+                    chatType: .privateChat(userId: 45_101),
+                    unreadCount: 1,
+                    lastMessageDate: now
+                ),
+                makeChat(
+                    id: 45_002,
+                    title: "Initial cached two",
+                    chatType: .privateChat(userId: 45_102),
+                    unreadCount: 1,
+                    lastMessageDate: now.addingTimeInterval(-60)
+                )
+            ]
+            let newlyVisibleChats = [
+                makeChat(
+                    id: 45_003,
+                    title: "Later cached three",
+                    chatType: .privateChat(userId: 45_103),
+                    unreadCount: 1,
+                    lastMessageDate: now.addingTimeInterval(-120)
+                ),
+                makeChat(
+                    id: 45_004,
+                    title: "Later cached four",
+                    chatType: .privateChat(userId: 45_104),
+                    unreadCount: 1,
+                    lastMessageDate: now.addingTimeInterval(-180)
+                )
+            ]
+            let allChats = initiallyVisibleChats + newlyVisibleChats
+
+            for chat in allChats {
+                guard let lastMessage = chat.lastMessage else {
+                    XCTFail("Expected test chat to have a last message")
+                    return
+                }
+                await MessageCacheService.shared.cachePipelineCategory(
+                    chatId: chat.id,
+                    category: "on_me",
+                    suggestedAction: "Reply from cached row.",
+                    lastMessageId: lastMessage.id
+                )
+                await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: [lastMessage])
+            }
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: 99,
+                    firstName: "Pratyush",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: Dictionary(uniqueKeysWithValues: allChats.map { chat in
+                    (chat.id, [chat.lastMessage].compactMap { $0 })
+                })
+            )
+            telegramService.chats = initiallyVisibleChats
+
+            let callCounter = PipelineCategorizationCallCounter()
+            let aiService = AIService(
+                testingProvider: CountingPipelineAIProvider(
+                    callCounter: callCounter,
+                    pipelineCategoryResult: PipelineCategoryDTO(
+                        status: "decision",
+                        category: "quiet",
+                        urgency: "none",
+                        suggestedAction: ""
+                    )
+                )
+            )
+
+            let store = AttentionStore.shared
+            store.loadFollowUps(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBots: true
+            )
+
+            for _ in 0..<100 where store.isFollowUpsLoading {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+
+            XCTAssertEqual(store.followUpItems.map(\.chat.id).sorted(), initiallyVisibleChats.map(\.id).sorted())
+            let initialAICallCount = await callCounter.currentValue()
+            XCTAssertEqual(initialAICallCount, 0)
+
+            telegramService.chats = allChats
+            store.backgroundRefreshPipeline(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBots: true
+            )
+
+            for _ in 0..<100 where store.followUpItems.count < allChats.count {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+
+            XCTAssertEqual(store.followUpItems.map(\.chat.id).sorted(), allChats.map(\.id).sorted())
+            let finalAICallCount = await callCounter.currentValue()
+            XCTAssertEqual(finalAICallCount, 0)
         }
     }
 
@@ -6774,10 +6924,14 @@ final class PidgyCoreTests: XCTestCase {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        let appSupportDirectory = tempDirectory.appendingPathComponent("PidgySupport", isDirectory: true)
         let databaseURL = tempDirectory.appendingPathComponent("pidgy-tests.sqlite", isDirectory: false)
 
         await DatabaseManager.shared.close()
-        await DatabaseManager.shared.configureForTesting(databaseURLOverride: databaseURL)
+        await DatabaseManager.shared.configureForTesting(
+            databaseURLOverride: databaseURL,
+            appSupportDirectoryOverride: appSupportDirectory
+        )
         await DatabaseManager.shared.initialize()
         await MessageCacheService.shared.invalidateAllLocalData()
         await MessageCacheService.shared.invalidateAll()
@@ -6785,14 +6939,22 @@ final class PidgyCoreTests: XCTestCase {
         do {
             try await body(databaseURL)
         } catch {
+            await MessageCacheService.shared.resetInMemoryCachesForTesting()
             await DatabaseManager.shared.close()
-            await DatabaseManager.shared.configureForTesting(databaseURLOverride: nil)
+            await DatabaseManager.shared.configureForTesting(
+                databaseURLOverride: nil,
+                appSupportDirectoryOverride: nil
+            )
             try? FileManager.default.removeItem(at: tempDirectory)
             throw error
         }
 
+        await MessageCacheService.shared.resetInMemoryCachesForTesting()
         await DatabaseManager.shared.close()
-        await DatabaseManager.shared.configureForTesting(databaseURLOverride: nil)
+        await DatabaseManager.shared.configureForTesting(
+            databaseURLOverride: nil,
+            appSupportDirectoryOverride: nil
+        )
         try? FileManager.default.removeItem(at: tempDirectory)
     }
 

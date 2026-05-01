@@ -31,13 +31,13 @@ struct ChatRowView: View {
                     // Line 1: Title + status/type badge + unread + time
                     HStack(spacing: 5) {
                         Text(chat.title)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.primary)
+                            .font(Font.Pidgy.bodyMd)
+                            .foregroundStyle(Color.Pidgy.fg1)
                             .lineLimit(1)
 
                         if let status = pipelineStatus {
                             Text(status.rawValue)
-                                .font(.system(size: 8, weight: .bold))
+                                .font(Font.Pidgy.eyebrow)
                                 .foregroundStyle(status.color)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 2)
@@ -45,21 +45,21 @@ struct ChatRowView: View {
                                 .clipShape(Capsule())
                         } else {
                             Text(chat.chatType.displayName)
-                                .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.tertiary)
+                                .font(Font.Pidgy.monoSm)
+                                .foregroundStyle(Color.Pidgy.fg3)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1.5)
-                                .background(Color.secondary.opacity(0.1))
+                                .background(Color.Pidgy.bg4.opacity(0.55))
                                 .clipShape(Capsule())
                         }
 
                         if chat.unreadCount > 0 {
                             Text("\(chat.unreadCount)")
-                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .font(Font.Pidgy.monoSm)
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1.5)
-                                .background(Color.accentColor)
+                                .background(Color.Pidgy.accent)
                                 .clipShape(Capsule())
                         }
 
@@ -67,8 +67,8 @@ struct ChatRowView: View {
 
                         if let date = chat.lastActivityDate {
                             Text(DateFormatting.compactRelativeTime(from: date))
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.tertiary)
+                                .font(Font.Pidgy.monoSm)
+                                .foregroundStyle(Color.Pidgy.fg3)
                         }
                     }
 
@@ -76,20 +76,20 @@ struct ChatRowView: View {
                     if let suggestion = pipelineSuggestion, !suggestion.isEmpty,
                        suggestion != "No action needed", pipelineStatus != nil {
                         Text("→ \(suggestion)")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
+                            .font(Font.Pidgy.bodySm)
+                            .foregroundStyle(Color.Pidgy.fg2)
                             .lineLimit(1)
                     } else if let messagePreview {
                         if !messagePreview.isEmpty {
                             Text(messagePreview)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
+                                .font(Font.Pidgy.bodySm)
+                                .foregroundStyle(Color.Pidgy.fg2)
                                 .lineLimit(1)
                         }
                     } else if let lastMessage = chat.lastMessage {
                         Text(lastMessage.displayText)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
+                            .font(Font.Pidgy.bodySm)
+                            .foregroundStyle(Color.Pidgy.fg2)
                             .lineLimit(1)
                     }
                 }
@@ -98,7 +98,7 @@ struct ChatRowView: View {
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(isHighlighted ? Color.accentColor.opacity(0.12) : Color.clear)
+                    .fill(isHighlighted ? Color.Pidgy.bg4 : Color.clear)
             )
             .contentShape(Rectangle())
         }

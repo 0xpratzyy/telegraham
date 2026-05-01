@@ -127,8 +127,8 @@ final class PanelManager {
     private func buildContainerView() -> NSView {
         let containerView = NSView()
         containerView.wantsLayer = true
-        containerView.layer?.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0).cgColor
-        containerView.layer?.cornerRadius = 12
+        containerView.layer?.backgroundColor = NSColor.Pidgy.bg1.cgColor
+        containerView.layer?.cornerRadius = PidgyRadius.lg
 
         let hostingView = NSHostingView(
             rootView: LauncherView(onOpenDashboard: { [weak self] in
