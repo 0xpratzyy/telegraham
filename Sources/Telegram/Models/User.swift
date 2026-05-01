@@ -6,11 +6,35 @@ struct TGUser: Identifiable, Equatable, Sendable {
     let lastName: String
     let username: String?
     let phoneNumber: String?
+    let smallPhotoFileId: Int?
     let isBot: Bool
+
+    init(
+        id: Int64,
+        firstName: String,
+        lastName: String,
+        username: String?,
+        phoneNumber: String?,
+        isBot: Bool,
+        smallPhotoFileId: Int? = nil
+    ) {
+        self.id = id
+        self.firstName = firstName
+        self.lastName = lastName
+        self.username = username
+        self.phoneNumber = phoneNumber
+        self.isBot = isBot
+        self.smallPhotoFileId = smallPhotoFileId
+    }
 
     var displayName: String {
         let full = "\(firstName) \(lastName)".trimmingCharacters(in: .whitespaces)
         return full.isEmpty ? (username ?? "Unknown") : full
+    }
+
+    var displayHandle: String? {
+        guard let username, !username.isEmpty else { return nil }
+        return "@\(username)"
     }
 
     var initials: String {

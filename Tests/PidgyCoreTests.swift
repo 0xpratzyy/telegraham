@@ -167,16 +167,21 @@ final class PidgyCoreTests: XCTestCase {
 
     func testDashboardTopicDiscoveryCapsAndPreservesStableLabels() async throws {
         try await withTempDatabase { _ in
-            let discovered = (1...8).map { index in
+            var discovered = (1...8).map { index in
                 DashboardTopicDTO(
                     name: "Topic \(index)",
                     rationale: "Observed in chat \(index)",
                     score: Double(10 - index)
                 )
             }
+            discovered[1] = DashboardTopicDTO(
+                name: "Airdrops",
+                rationale: "Generic campaign bucket",
+                score: 99
+            )
 
             let firstPass = await DatabaseManager.shared.upsertDashboardTopics(discovered)
-            XCTAssertEqual(firstPass.map(\.name), ["Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6"])
+            XCTAssertEqual(firstPass.map(\.name), ["Airdrops", "Topic 1", "Topic 3", "Topic 4", "Topic 5", "Topic 6"])
 
             let secondPass = await DatabaseManager.shared.upsertDashboardTopics([
                 DashboardTopicDTO(name: "Topic 1", rationale: "Newer rationale", score: 42),
@@ -184,9 +189,31 @@ final class PidgyCoreTests: XCTestCase {
             ])
             let reloaded = await DatabaseManager.shared.loadDashboardTopics()
 
-            XCTAssertEqual(secondPass.first(where: { $0.name == "Topic 1" })?.id, firstPass.first?.id)
+            XCTAssertEqual(secondPass.first(where: { $0.name == "Topic 1" })?.id, firstPass.first { $0.name == "Topic 1" }?.id)
             XCTAssertTrue(reloaded.contains { $0.name == "Topic 1" })
+            XCTAssertEqual(Array(reloaded.prefix(2).map(\.name)), ["Topic 1", "Inner Circle"])
+            XCTAssertLessThan((reloaded.firstIndex { $0.name == "Inner Circle" } ?? Int.max), (reloaded.firstIndex { $0.name == "Airdrops" } ?? Int.max))
             XCTAssertLessThanOrEqual(reloaded.count, AppConstants.Dashboard.maxTopicCount)
+        }
+    }
+
+    func testManualDashboardTopicStaysPinnedAcrossDiscoveryRefresh() async throws {
+        try await withTempDatabase { _ in
+            let manual = await DatabaseManager.shared.addDashboardTopic(
+                name: "FBI",
+                rationale: "Manual workspace"
+            )
+            XCTAssertEqual(manual?.name, "FBI")
+
+            _ = await DatabaseManager.shared.upsertDashboardTopics([
+                DashboardTopicDTO(name: "First Dollar", rationale: "Company workspace", score: 92),
+                DashboardTopicDTO(name: "Inner Circle", rationale: "Community workspace", score: 91)
+            ])
+
+            let reloaded = await DatabaseManager.shared.loadDashboardTopics()
+            XCTAssertEqual(reloaded.first?.name, "FBI")
+            XCTAssertTrue(reloaded.contains { $0.name == "First Dollar" })
+            XCTAssertTrue(reloaded.contains { $0.name == "Inner Circle" })
         }
     }
 
@@ -321,6 +348,390 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(filtered.map(\.id), [1])
     }
 
+    func testDashboardTaskFilterBuildsOwnerChipsAndFiltersAssignedWork() {
+        let currentUser = TGUser(
+            id: 99,
+            firstName: "Pratyush",
+            lastName: "",
+            username: "pratzyy",
+            phoneNumber: nil,
+            isBot: false
+        )
+        let tasks = [
+            DashboardTask.mock(
+                id: 1,
+                title: "Send pitch deck",
+                status: .open,
+                topicId: 10,
+                topicName: "First Dollar",
+                chatId: 100,
+                personName: "Rahul",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 2,
+                title: "Post rev-share announcement",
+                status: .open,
+                topicId: 10,
+                topicName: "Based Games",
+                chatId: 101,
+                personName: "Rajanshee",
+                ownerName: "Rajanshee"
+            ),
+            DashboardTask.mock(
+                id: 3,
+                title: "Share campaign plans",
+                status: .open,
+                topicId: 10,
+                topicName: "Based Games",
+                chatId: 102,
+                personName: "Rajanshee",
+                ownerName: "Rajanshee"
+            )
+        ]
+
+        let mine = DashboardTaskFilter.apply(
+            tasks,
+            status: .open,
+            ownerFilter: .mine,
+            currentUser: currentUser
+        )
+        XCTAssertEqual(mine.map(\.id), [1])
+
+        let rajanshee = DashboardTaskFilter.apply(
+            tasks,
+            status: .open,
+            ownerFilter: .owner("Rajanshee"),
+            currentUser: currentUser
+        )
+        XCTAssertEqual(rajanshee.map(\.id), [3, 2])
+
+        let options = DashboardTaskOwnership.ownerOptions(
+            for: tasks,
+            currentUser: currentUser
+        )
+        XCTAssertEqual(options.map(\.label), ["Mine", "Rajanshee", "All"])
+        XCTAssertEqual(options.map(\.count), [1, 2, 3])
+    }
+
+    func testDashboardTaskListFiltersUseOwnerNameForChipsAndCounts() {
+        let currentUser = TGUser(
+            id: 99,
+            firstName: "Pratyush",
+            lastName: "",
+            username: "pratzyy",
+            phoneNumber: nil,
+            isBot: false
+        )
+        let tasks = [
+            DashboardTask.mock(
+                id: 1,
+                title: "Send pitch deck",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 100,
+                personName: "Rajanshee",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 2,
+                title: "Post announcement",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 101,
+                personName: "Rajanshee",
+                ownerName: "Rajanshee"
+            ),
+            DashboardTask.mock(
+                id: 3,
+                title: "Share campaign plans",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 102,
+                personName: "Pratyush",
+                ownerName: "Rajanshee"
+            ),
+            DashboardTask.mock(
+                id: 4,
+                title: "Closed work",
+                status: .done,
+                topicId: nil,
+                topicName: nil,
+                chatId: 103,
+                personName: "Rajanshee",
+                ownerName: "Me"
+            )
+        ]
+
+        let forMeOpen = DashboardTaskListFilters.filteredTasks(
+            tasks,
+            status: .open,
+            ownerFilter: .mine,
+            currentUser: currentUser
+        )
+        XCTAssertEqual(forMeOpen.map(\.id), [1])
+
+        let rajansheeOpen = DashboardTaskListFilters.filteredTasks(
+            tasks,
+            status: .open,
+            ownerFilter: .owner("Rajanshee"),
+            currentUser: currentUser
+        )
+        XCTAssertEqual(rajansheeOpen.map(\.id), [3, 2, 1])
+
+        let chips = DashboardTaskListFilters.ownerChips(
+            for: tasks.filter { $0.status == .open },
+            currentUser: currentUser
+        )
+        XCTAssertEqual(chips.map(\.label), ["For me", "Rajanshee"])
+        XCTAssertEqual(chips.map(\.count), [1, 2])
+    }
+
+    func testDashboardTaskAllFilterExcludesIgnoredArchiveRows() {
+        let currentUser = TGUser(
+            id: 99,
+            firstName: "Pratyush",
+            lastName: "",
+            username: "pratzyy",
+            phoneNumber: nil,
+            isBot: false
+        )
+        let tasks = [
+            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Pratyush", ownerName: "Me"),
+            DashboardTask.mock(id: 2, title: "Done me", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Pratyush", ownerName: "Me"),
+            DashboardTask.mock(id: 3, title: "Ignored me", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Pratyush", ownerName: "Me"),
+            DashboardTask.mock(id: 4, title: "Open Rajanshee", status: .open, topicId: nil, topicName: nil, chatId: 4, personName: "Rajanshee", ownerName: "Rajanshee")
+        ]
+
+        let visibleAll = DashboardTaskListFilters.tasksForStatusFilter(tasks, statusFilter: .all)
+        XCTAssertEqual(visibleAll.map(\.id), [1, 2, 4])
+
+        let forMeAll = DashboardTaskListFilters.filteredTasks(
+            visibleAll,
+            status: nil,
+            ownerFilter: .mine,
+            currentUser: currentUser
+        )
+        XCTAssertEqual(forMeAll.map(\.id), [2, 1])
+
+        let chips = DashboardTaskListFilters.ownerChips(
+            for: visibleAll,
+            currentUser: currentUser
+        )
+        XCTAssertEqual(chips.map(\.label), ["For me", "Rajanshee"])
+        XCTAssertEqual(chips.map(\.count), [2, 1])
+    }
+
+    func testDashboardTaskOwnerAddOptionsIncludeKnownHiddenOwners() {
+        let currentUser = TGUser(
+            id: 99,
+            firstName: "Pratyush",
+            lastName: "",
+            username: "pratzyy",
+            phoneNumber: nil,
+            isBot: false
+        )
+        let tasks = [
+            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Pratyush", ownerName: "Me"),
+            DashboardTask.mock(id: 2, title: "Done me", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Pratyush", ownerName: "Me"),
+            DashboardTask.mock(id: 3, title: "Archived Rajanshee", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Rajanshee", ownerName: "Rajanshee Singh"),
+            DashboardTask.mock(id: 4, title: "Archived Rajanshee 2", status: .ignored, topicId: nil, topicName: nil, chatId: 4, personName: "Rajanshee", ownerName: "Rajanshee Singh"),
+            DashboardTask.mock(id: 5, title: "Archived Mayur", status: .ignored, topicId: nil, topicName: nil, chatId: 5, personName: "Mayur", ownerName: "Mayur")
+        ]
+
+        let visibleOptions = DashboardTaskListFilters.ownerChips(
+            for: tasks.filter { $0.status == .open },
+            currentUser: currentUser
+        )
+        XCTAssertEqual(visibleOptions.map(\.label), ["For me"])
+
+        let addOptions = DashboardTaskListFilters.ownerAddOptions(
+            visibleOptions: visibleOptions,
+            allTasks: tasks,
+            currentUser: currentUser
+        )
+        XCTAssertEqual(addOptions.map(\.label), ["Rajanshee Singh", "Mayur"])
+        XCTAssertEqual(addOptions.map(\.count), [2, 1])
+    }
+
+    func testDashboardTaskOwnerSearchOptionsIncludePeopleDirectoryMatches() {
+        let currentUser = TGUser(
+            id: 99,
+            firstName: "Pratyush",
+            lastName: "",
+            username: "pratzyy",
+            phoneNumber: nil,
+            isBot: false
+        )
+        let tasks = [
+            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Pratyush", ownerName: "Me"),
+            DashboardTask.mock(id: 2, title: "Archived Rajanshee", status: .ignored, topicId: nil, topicName: nil, chatId: 2, personName: "Rajanshee", ownerName: "Rajanshee Singh"),
+            DashboardTask.mock(id: 3, title: "Archived Rajanshee 2", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Rajanshee", ownerName: "Rajanshee Singh")
+        ]
+        let people = [
+            RelationGraph.Node.mock(entityId: 10, displayName: "Deeeeeksha", interactionScore: 600, lastInteractionAt: nil),
+            RelationGraph.Node.mock(entityId: 11, displayName: "Akhil", interactionScore: 500, lastInteractionAt: nil),
+            RelationGraph.Node.mock(entityId: 12, displayName: "Rajanshee Singh", interactionScore: 100, lastInteractionAt: nil)
+        ]
+        let visibleOptions = DashboardTaskListFilters.ownerChips(
+            for: tasks.filter { $0.status == .open },
+            currentUser: currentUser
+        )
+
+        let allOptions = DashboardTaskListFilters.ownerSearchOptions(
+            visibleOptions: visibleOptions,
+            allTasks: tasks,
+            people: people,
+            currentUser: currentUser,
+            query: ""
+        )
+        XCTAssertEqual(Array(allOptions.map(\.label).prefix(3)), ["Rajanshee Singh", "Deeeeeksha", "Akhil"])
+
+        let searchedOptions = DashboardTaskListFilters.ownerSearchOptions(
+            visibleOptions: visibleOptions,
+            allTasks: tasks,
+            people: people,
+            currentUser: currentUser,
+            query: "dee"
+        )
+        XCTAssertEqual(searchedOptions.map(\.label), ["Deeeeeksha"])
+    }
+
+    func testDashboardTaskProfileFilterMatchesPersonAliasesFromPeopleSearch() {
+        let currentUser = TGUser(
+            id: 99,
+            firstName: "Pratyush",
+            lastName: "",
+            username: "pratzyy",
+            phoneNumber: nil,
+            isBot: false
+        )
+        let tasks = [
+            DashboardTask.mock(id: 1, title: "Follow up with Rajanshee", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Rajanshee", ownerName: "Me"),
+            DashboardTask.mock(id: 2, title: "Closed Rajanshee work", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Rajanshee", ownerName: "Me"),
+            DashboardTask.mock(id: 3, title: "Ask Deeeeeksha", status: .open, topicId: nil, topicName: nil, chatId: 3, personName: "Deeeeeksha", ownerName: "Me")
+        ]
+        let people = [
+            RelationGraph.Node.mock(entityId: 10, displayName: "Rajanshee Singh", interactionScore: 700, lastInteractionAt: nil),
+            RelationGraph.Node.mock(entityId: 11, displayName: "Deeeeeksha", interactionScore: 600, lastInteractionAt: nil)
+        ]
+        let visibleOptions = DashboardTaskListFilters.ownerChips(
+            for: tasks.filter { $0.status == .open },
+            currentUser: currentUser
+        )
+
+        let searchOptions = DashboardTaskListFilters.ownerSearchOptions(
+            visibleOptions: visibleOptions,
+            allTasks: tasks,
+            people: people,
+            currentUser: currentUser,
+            query: "rajan"
+        )
+        XCTAssertEqual(searchOptions.first?.label, "Rajanshee Singh")
+        XCTAssertEqual(searchOptions.first?.count, 2)
+
+        let rajansheeOpen = DashboardTaskListFilters.filteredTasks(
+            tasks.filter { $0.status == .open },
+            status: nil,
+            ownerFilter: .owner("Rajanshee Singh"),
+            currentUser: currentUser
+        )
+        XCTAssertEqual(rajansheeOpen.map(\.id), [1])
+    }
+
+    func testDashboardTaskPeopleOptionsShowTwoTaskPeopleSortedByCount() {
+        let tasks = [
+            DashboardTask.mock(
+                id: 1,
+                title: "A",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 101,
+                personName: "Rajanshee",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 2,
+                title: "B",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 102,
+                personName: "Deeeeeksha",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 3,
+                title: "C",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 103,
+                personName: "Rajanshee",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 4,
+                title: "D",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 104,
+                personName: "Akhil",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 5,
+                title: "E",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 105,
+                personName: "Deeeeeksha",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 6,
+                title: "F",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 106,
+                personName: "Akhil",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 7,
+                title: "G",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 107,
+                personName: "Akhil",
+                ownerName: "Me"
+            ),
+            DashboardTask.mock(
+                id: 8,
+                title: "H",
+                status: .open,
+                topicId: nil,
+                topicName: nil,
+                chatId: 108,
+                personName: "One-off",
+                ownerName: "Me"
+            )
+        ]
+
+        let options = DashboardTaskPeople.personOptions(for: tasks)
+
+        XCTAssertEqual(options.map { $0.name }, ["Akhil", "Deeeeeksha", "Rajanshee"])
+        XCTAssertEqual(options.map { $0.count }, [3, 2, 2])
+    }
+
     func testDashboardTaskFilterSortsNewestActivityBeforePriority() {
         let base = Date(timeIntervalSince1970: 1_777_400_000)
         let tasks = [
@@ -351,6 +762,331 @@ final class PidgyCoreTests: XCTestCase {
         let filtered = DashboardTaskFilter.apply(tasks, status: .open)
 
         XCTAssertEqual(filtered.map(\.id), [2, 1])
+    }
+
+    func testDashboardPeopleDirectoryBuildsOperatorLenses() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let akhil = RelationGraph.Node.mock(
+            entityId: 1,
+            displayName: "Akhil",
+            interactionScore: 95,
+            lastInteractionAt: now.addingTimeInterval(-3_600)
+        )
+        let rahul = RelationGraph.Node.mock(
+            entityId: 2,
+            displayName: "Rahul",
+            interactionScore: 80,
+            lastInteractionAt: now.addingTimeInterval(-2 * 86_400)
+        )
+        let stale = RelationGraph.Node.mock(
+            entityId: 3,
+            displayName: "Priya",
+            interactionScore: 70,
+            lastInteractionAt: now.addingTimeInterval(-40 * 86_400)
+        )
+
+        let signals = DashboardPeopleDirectory.buildSignals(
+            contacts: [stale, rahul, akhil],
+            replyCountsByPersonId: [2: 1],
+            taskCountsByPersonId: [1: 2],
+            staleContactIds: [3],
+            now: now
+        )
+
+        XCTAssertEqual(
+            DashboardPeopleDirectory.filtered(signals, lens: .needsYou).map(\.contact.entityId),
+            [1, 2]
+        )
+        XCTAssertEqual(
+            DashboardPeopleDirectory.filtered(signals, lens: .goingCold).map(\.contact.entityId),
+            [3]
+        )
+        XCTAssertEqual(
+            DashboardPeopleDirectory.filtered(signals, lens: .recent).map(\.contact.entityId),
+            [1, 2, 3]
+        )
+    }
+
+    func testDashboardPeopleDirectoryBuildsSignalsFromTasksAndReplyQueueWork() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let akhil = RelationGraph.Node.mock(
+            entityId: 1,
+            displayName: "Akhil",
+            interactionScore: 95,
+            lastInteractionAt: now.addingTimeInterval(-3_600)
+        )
+        let rahul = RelationGraph.Node.mock(
+            entityId: 2,
+            displayName: "Rahul",
+            interactionScore: 80,
+            lastInteractionAt: now.addingTimeInterval(-2 * 86_400)
+        )
+        let priya = RelationGraph.Node.mock(
+            entityId: 3,
+            displayName: "Priya",
+            interactionScore: 60,
+            lastInteractionAt: now.addingTimeInterval(-10 * 86_400)
+        )
+
+        let signals = DashboardPeopleDirectory.buildSignals(
+            contacts: [akhil, rahul, priya],
+            tasks: [
+                DashboardTask.mock(
+                    id: 1,
+                    title: "Send deck",
+                    status: .open,
+                    topicId: nil,
+                    topicName: nil,
+                    chatId: 10,
+                    personName: "Akhil"
+                ),
+                DashboardTask.mock(
+                    id: 2,
+                    title: "Ignored old work",
+                    status: .ignored,
+                    topicId: nil,
+                    topicName: nil,
+                    chatId: 11,
+                    personName: "Priya"
+                )
+            ],
+            followUpItems: [
+                .mockPrivate(
+                    chatId: 20,
+                    userId: 2,
+                    title: "Rahul",
+                    category: .onMe,
+                    senderName: "Rahul",
+                    text: "Can you send the pitch deck?"
+                ),
+                .mockPrivate(
+                    chatId: 21,
+                    userId: 3,
+                    title: "Priya",
+                    category: .onThem,
+                    senderName: "Priya",
+                    text: "Waiting for them"
+                )
+            ],
+            staleContactIds: [3],
+            now: now
+        )
+
+        let signalById = Dictionary(uniqueKeysWithValues: signals.map { ($0.contact.entityId, $0) })
+        XCTAssertEqual(signalById[1]?.openTaskCount, 1)
+        XCTAssertEqual(signalById[2]?.openReplyCount, 1)
+        XCTAssertEqual(signalById[3]?.openTaskCount, 0)
+        XCTAssertEqual(signalById[3]?.openReplyCount, 0)
+        XCTAssertEqual(
+            DashboardPeopleDirectory.filtered(signals, lens: .needsYou).map(\.contact.entityId),
+            [1, 2]
+        )
+    }
+
+    func testDashboardPeopleRenderWindowPagesLargeDirectories() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let signals = (0..<125).map { index in
+            DashboardPersonSignal(
+                contact: RelationGraph.Node.mock(
+                    entityId: Int64(index),
+                    displayName: "Person \(index)",
+                    interactionScore: Double(index),
+                    lastInteractionAt: now
+                ),
+                openReplyCount: 0,
+                openTaskCount: 0,
+                stale: false,
+                latestActivityAt: now
+            )
+        }
+
+        let firstWindow = DashboardPeopleRenderWindow(pageSize: 40, loadedCount: 40)
+        XCTAssertEqual(firstWindow.visibleSignals(from: signals).count, 40)
+        XCTAssertFalse(firstWindow.hasLoadedAll(totalCount: signals.count))
+        XCTAssertEqual(firstWindow.nextLoadedCount(totalCount: signals.count), 80)
+
+        let lastWindow = DashboardPeopleRenderWindow(pageSize: 40, loadedCount: 120)
+        XCTAssertEqual(lastWindow.nextLoadedCount(totalCount: signals.count), 125)
+    }
+
+    func testDashboardTopicMatcherBuildsSidebarItemsFromCachedSnapshots() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let pinned = DashboardTopic(
+            id: 1,
+            name: "Inner Circle",
+            rationale: "Pinned workspace",
+            score: 9_001,
+            rank: 4,
+            createdAt: now,
+            updatedAt: now
+        )
+        let popular = DashboardTopic(
+            id: 2,
+            name: "First Dollar",
+            rationale: "Company workspace",
+            score: 80,
+            rank: 1,
+            createdAt: now,
+            updatedAt: now
+        )
+        let tiny = DashboardTopic(
+            id: 3,
+            name: "Rare Thing",
+            rationale: "Low signal",
+            score: 70,
+            rank: 2,
+            createdAt: now,
+            updatedAt: now
+        )
+        let chats = (0..<12).map { index in
+            DashboardTopicMatcher.ChatSnapshot(
+                id: Int64(index),
+                title: "First Dollar chat \(index)",
+                preview: index == 0 ? "also discussed inner circle" : nil
+            )
+        } + [
+            DashboardTopicMatcher.ChatSnapshot(id: 100, title: "Rare Thing", preview: nil)
+        ]
+
+        let items = DashboardTopicMatcher.sidebarItems(
+            topics: [tiny, popular, pinned],
+            chats: chats
+        )
+
+        XCTAssertEqual(items.map(\.id), [1, 2])
+        XCTAssertEqual(items.first?.chatCount, 1)
+        XCTAssertTrue(items.first?.isPinned == true)
+        XCTAssertEqual(items.last?.chatCount, 12)
+    }
+
+    func testDashboardTopicSemanticSearchKeepsChatScopedMessageMatches() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let first = TGMessage(
+            id: 77,
+            chatId: 10,
+            senderId: .user(1),
+            date: now,
+            textContent: "Send the pitch deck to Dacoit",
+            mediaType: nil,
+            isOutgoing: false,
+            chatTitle: "Rahul",
+            senderName: "Rahul"
+        )
+        let second = TGMessage(
+            id: 77,
+            chatId: 20,
+            senderId: .user(2),
+            date: now.addingTimeInterval(-60),
+            textContent: "Deck asks from the investor group",
+            mediaType: nil,
+            isOutgoing: false,
+            chatTitle: "First Dollar",
+            senderName: "Akhil"
+        )
+
+        let results = DashboardTopicSemanticSearchEngine.results(
+            query: "pitch deck",
+            mode: .search,
+            topicName: "First Dollar",
+            chatTitles: [10: "Rahul", 20: "First Dollar"],
+            ftsHits: [.init(message: first, score: 4)],
+            vectorHits: [.init(message: second, score: 0.82)],
+            recentMessages: [],
+            tasks: [],
+            replies: [],
+            limit: 10
+        )
+
+        XCTAssertEqual(Set(results.map { "\($0.chatId):\($0.messageId ?? 0)" }), ["10:77", "20:77"])
+    }
+
+    func testDashboardTopicSemanticSearchCatchUpBlendsTasksRepliesAndRecentMessages() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let reply = FollowUpItem.mockPrivate(
+            chatId: 30,
+            userId: 3,
+            title: "Rahul",
+            category: .onMe,
+            senderName: "Rahul",
+            text: "Can you send the deck?"
+        )
+        let task = DashboardTask.mock(
+            id: 1,
+            title: "Send Dacoit pitch deck",
+            status: .open,
+            topicId: 5,
+            topicName: "First Dollar",
+            chatId: 30,
+            personName: "Rahul",
+            updatedAt: now,
+            latestSourceDate: now
+        )
+        let recent = DashboardPersonRecentMessage(
+            chatId: 40,
+            chatTitle: "First Dollar",
+            senderName: "Akhil",
+            text: "We need better deck positioning before the call.",
+            date: now.addingTimeInterval(-600),
+            isOutgoing: false
+        )
+
+        let results = DashboardTopicSemanticSearchEngine.results(
+            query: "",
+            mode: .catchUp,
+            topicName: "First Dollar",
+            chatTitles: [30: "Rahul", 40: "First Dollar"],
+            ftsHits: [],
+            vectorHits: [],
+            recentMessages: [recent],
+            tasks: [task],
+            replies: [reply],
+            limit: 10
+        )
+
+        XCTAssertTrue(results.contains { $0.source == .task && $0.title == "Send Dacoit pitch deck" })
+        XCTAssertTrue(results.contains { $0.source == .reply && $0.chatId == 30 })
+        XCTAssertTrue(results.contains { $0.source == .recent && $0.chatId == 40 })
+    }
+
+    func testDashboardPersonContextSummaryHighlightsOpenWorkAndRecentMessages() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let contact = RelationGraph.Node.mock(
+            entityId: 42,
+            displayName: "Rahul",
+            interactionScore: 80,
+            lastInteractionAt: now.addingTimeInterval(-3_600)
+        )
+
+        let summary = DashboardPersonContextSummary.make(
+            contact: contact,
+            openTaskCount: 1,
+            openReplyCount: 1,
+            messages: [
+                DashboardPersonRecentMessage(
+                    chatId: 10,
+                    chatTitle: "Rahul Singh",
+                    senderName: "Rahul",
+                    text: "Can you send me the pitch deck?",
+                    date: now.addingTimeInterval(-600),
+                    isOutgoing: false
+                ),
+                DashboardPersonRecentMessage(
+                    chatId: 20,
+                    chatTitle: "First Dollar",
+                    senderName: "Rahul",
+                    text: "We should follow up on the listing.",
+                    date: now.addingTimeInterval(-3_600),
+                    isOutgoing: false
+                )
+            ],
+            now: now
+        )
+
+        XCTAssertTrue(summary.headline.contains("1 reply"))
+        XCTAssertTrue(summary.headline.contains("1 task"))
+        XCTAssertEqual(summary.recentChatCount, 2)
+        XCTAssertTrue(summary.detail.contains("pitch deck"))
+        XCTAssertEqual(summary.snippets.first?.chatTitle, "Rahul Singh")
     }
 
     func testDashboardTaskCandidateResolvesSourceDatesFromChatScopedMessages() {
@@ -407,12 +1143,12 @@ final class PidgyCoreTests: XCTestCase {
             )
         ]
 
-        let resolved = candidate.resolvingSourceDates(from: messages)
+        let resolved = candidate.resolvingSourceMetadata(from: messages, myUserId: 99)
 
         XCTAssertEqual(resolved.sourceMessages.first?.date, actualSourceDate)
     }
 
-    func testDashboardListTimestampIncludesLocalDateAndTime() {
+    func testDashboardListTimestampUsesCompactDashboardStyle() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let now = Date(timeIntervalSince1970: 1_777_405_020)
@@ -421,11 +1157,11 @@ final class PidgyCoreTests: XCTestCase {
 
         XCTAssertEqual(
             DateFormatting.dashboardListTimestamp(from: sameDay, now: now, calendar: calendar),
-            "Today, 6:48 PM"
+            "48m"
         )
         XCTAssertEqual(
             DateFormatting.dashboardListTimestamp(from: older, now: now, calendar: calendar),
-            "Apr 27, 12:14 AM"
+            "1d"
         )
     }
 
@@ -533,6 +1269,52 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(tasks.first?.sourceMessages.first?.messageId, 501)
     }
 
+    func testDashboardTaskParserDoesNotDefaultMissingOwnerToMe() throws {
+        let tasksJSON = """
+        {
+          "tasks": [
+            {
+              "stableFingerprint": "based-games:rev-share",
+              "title": "Post rev-share announcement",
+              "summary": "Someone was asked to post the announcement.",
+              "suggestedAction": "Share the announcement.",
+              "personName": "Rajanshee",
+              "chatId": "10",
+              "chatTitle": "Based Games s2 <> Inner Circle",
+              "topicName": "Based Games",
+              "priority": "medium",
+              "confidence": 0.9,
+              "dueAtISO8601": null,
+              "sourceMessages": [
+                {
+                  "chatId": "10",
+                  "messageId": "501",
+                  "senderName": "Kshitij",
+                  "text": "@Rajanshee can you post this in Inner Circle and RT as well?",
+                  "dateISO8601": "2026-04-24T10:00:00Z"
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let tasks = try DashboardTaskParser.parse(tasksJSON)
+        XCTAssertEqual(tasks.first?.ownerName, "Unknown")
+    }
+
+    func testDashboardTopicPromptPrefersCompanyWorkspacesOverGenericThemes() {
+        XCTAssertTrue(
+            DashboardTopicPrompt.systemPrompt.contains("company, project, fund, community, or workspace")
+        )
+        XCTAssertTrue(
+            DashboardTopicPrompt.systemPrompt.contains("First Dollar")
+        )
+        XCTAssertTrue(
+            DashboardTopicPrompt.systemPrompt.contains("Avoid generic buckets")
+        )
+    }
+
     func testDashboardTaskTriageParserAcceptsReplyQueueEffortAndIgnoreRoutes() throws {
         let json = """
         {
@@ -556,7 +1338,16 @@ final class PidgyCoreTests: XCTestCase {
               "route": "ignore",
               "confidence": 0.82,
               "reason": "Assigned to someone else.",
-              "supportingMessageIds": []
+              "supportingMessageIds": [],
+              "completedTaskIds": []
+            },
+            {
+              "chatId": 13,
+              "route": "completed_task",
+              "confidence": 0.9,
+              "reason": "The latest reply shows the existing task was completed.",
+              "supportingMessageIds": [301, 302],
+              "completedTaskIds": ["42"]
             }
           ]
         }
@@ -564,10 +1355,11 @@ final class PidgyCoreTests: XCTestCase {
 
         let decisions = try DashboardTaskTriageParser.parse(json)
 
-        XCTAssertEqual(decisions.map(\.chatId), [10, 11, 12])
-        XCTAssertEqual(decisions.map(\.route), [.replyQueue, .effortTask, .ignore])
+        XCTAssertEqual(decisions.map(\.chatId), [10, 11, 12, 13])
+        XCTAssertEqual(decisions.map(\.route), [.replyQueue, .effortTask, .ignore, .completedTask])
         XCTAssertEqual(decisions[0].supportingMessageIds, [101])
         XCTAssertEqual(decisions[1].supportingMessageIds, [201])
+        XCTAssertEqual(decisions[3].completedTaskIds, [42])
     }
 
     @MainActor
@@ -757,6 +1549,1000 @@ final class PidgyCoreTests: XCTestCase {
             let ignoredSync = await DatabaseManager.shared.loadDashboardTaskSyncState(chatId: ignoredChat.id)
             XCTAssertEqual(replySync?.latestMessageId, 10101)
             XCTAssertEqual(ignoredSync?.latestMessageId, 10301)
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorIgnoresOpenTaskWhenTriageReturnsIgnoreWithoutMessageIds() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: 104,
+                title: "Banko <> First Dollar",
+                chatType: .basicGroup(groupId: 304),
+                unreadCount: 1,
+                lastMessageDate: now,
+                memberCount: 4
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 10401,
+                        chatId: chat.id,
+                        text: "I'll send across new access codes",
+                        date: now
+                    )
+                ]
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):access-codes:10401",
+                    title: "Send new access codes",
+                    summary: "Someone said they will send new access codes.",
+                    suggestedAction: "Send across the new access codes.",
+                    ownerName: "Me",
+                    personName: "Deeeeeksha",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: "Banko",
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.93,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 10401,
+                            senderName: "Unknown",
+                            text: "I'll send across new access codes",
+                            date: now
+                        )
+                    ]
+                )
+            ])
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .ignore,
+                        confidence: 0.89,
+                        reason: "Another person accepted the work.",
+                        supportingMessageIds: []
+                    )
+                ],
+                tasksByChatId: [:]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertTrue(openTasks.isEmpty)
+            let ignoredTasks = await DatabaseManager.shared.loadDashboardTasks(status: .ignored)
+            XCTAssertEqual(ignoredTasks.map(\.title), ["Send new access codes"])
+            let extractedChatIds = await recorder.extractedChatIds()
+            XCTAssertTrue(extractedChatIds.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorIgnoresStaleOpenTaskWhenExtractionNoLongerReturnsIt() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: 105,
+                title: "Banko <> First Dollar",
+                chatType: .basicGroup(groupId: 305),
+                unreadCount: 1,
+                lastMessageDate: now,
+                memberCount: 4
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(id: 10501, chatId: chat.id, text: "@pratzyy can we individually send access codes?", date: now.addingTimeInterval(-120)),
+                    makeRecord(id: 10502, chatId: chat.id, text: "I'll send across new access codes", date: now)
+                ]
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):access-codes:10502",
+                    title: "Send new access codes",
+                    summary: "The thread originally looked like access-code work for the user.",
+                    suggestedAction: "Send across the new access codes.",
+                    ownerName: "Me",
+                    personName: "Deeeeeksha",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: "Banko",
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.93,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 10502,
+                            senderName: "Unknown",
+                            text: "I'll send across new access codes",
+                            date: now
+                        )
+                    ]
+                )
+            ])
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .effortTask,
+                        confidence: 0.86,
+                        reason: "There may be task-like access-code context.",
+                        supportingMessageIds: [10501]
+                    )
+                ],
+                tasksByChatId: [:]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertTrue(openTasks.isEmpty)
+            let ignoredTasks = await DatabaseManager.shared.loadDashboardTasks(status: .ignored)
+            XCTAssertEqual(ignoredTasks.map(\.title), ["Send new access codes"])
+            let extractedChatIds = await recorder.extractedChatIds()
+            XCTAssertEqual(extractedChatIds, [chat.id])
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorKeepsOpenTasksOwnedByAnotherNamedPersonOnLoad() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: 141,
+                title: "Based Games s2 <> Inner Circle",
+                chatType: .basicGroup(groupId: 441),
+                unreadCount: 1,
+                lastMessageDate: now,
+                memberCount: 12
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 14101,
+                        chatId: chat.id,
+                        text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                        date: now
+                    )
+                ]
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):rev-share:14101",
+                    title: "Post rev-share announcement in Inner Circle and RT",
+                    summary: "Kshitij asked Rajanshee to post and retweet the announcement.",
+                    suggestedAction: "Share the announcement and retweet the post.",
+                    ownerName: "Rajanshee",
+                    personName: "Rajanshee",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: "Based Games",
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.97,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 14101,
+                            senderName: "Kshitij",
+                            text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                            date: now
+                        )
+                    ]
+                )
+            ])
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.loadFromStore(
+                telegramService: telegramService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = TaskIndexCoordinator.shared.tasks.filter { $0.status == .open }
+            XCTAssertEqual(openTasks.map(\.title), ["Post rev-share announcement in Inner Circle and RT"])
+            XCTAssertEqual(openTasks.first?.ownerName, "Rajanshee")
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorKeepsAnotherNamedOwnerBeforeCurrentUserLoads() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let chat = makeChat(
+                id: 143,
+                title: "Based Games s2 <> Inner Circle",
+                chatType: .basicGroup(groupId: 443),
+                unreadCount: 1,
+                lastMessageDate: now,
+                memberCount: 12
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):rev-share:14301",
+                    title: "Post rev-share announcement in Inner Circle and RT",
+                    summary: "Kshitij asked Rajanshee to post and retweet the announcement.",
+                    suggestedAction: "Share the announcement and retweet the post.",
+                    ownerName: "Rajanshee",
+                    personName: "Rajanshee",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: "Based Games",
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.97,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 14301,
+                            senderName: "Kshitij",
+                            text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                            date: now
+                        )
+                    ]
+                )
+            ])
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.loadFromStore(
+                telegramService: telegramService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = TaskIndexCoordinator.shared.tasks.filter { $0.status == .open }
+            XCTAssertEqual(openTasks.map(\.title), ["Post rev-share announcement in Inner Circle and RT"])
+            XCTAssertEqual(openTasks.first?.ownerName, "Rajanshee")
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorPersistsExtractedTaskOwnedByAnotherNamedPerson() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: 142,
+                title: "Based Games s2 <> Inner Circle",
+                chatType: .basicGroup(groupId: 442),
+                unreadCount: 1,
+                lastMessageDate: now,
+                memberCount: 12
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 14201,
+                        chatId: chat.id,
+                        text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                        date: now
+                    )
+                ]
+            )
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .effortTask,
+                        confidence: 0.96,
+                        reason: "AI incorrectly routed this as an effort task.",
+                        supportingMessageIds: [14201]
+                    )
+                ],
+                tasksByChatId: [
+                    chat.id: DashboardTaskCandidate(
+                        stableFingerprint: "\(chat.id):rev-share:14201",
+                        title: "Post rev-share announcement in Inner Circle and RT",
+                        summary: "Kshitij asked Rajanshee to post and retweet the announcement.",
+                        suggestedAction: "Share the announcement and retweet the post.",
+                        ownerName: "Rajanshee",
+                        personName: "Rajanshee",
+                        chatId: chat.id,
+                        chatTitle: chat.title,
+                        topicName: "Based Games",
+                        priority: .medium,
+                        status: .open,
+                        confidence: 0.97,
+                        createdAt: now,
+                        dueAt: nil,
+                        sourceMessages: [
+                            DashboardTaskSourceMessage(
+                                chatId: chat.id,
+                                messageId: 14201,
+                                senderName: "Kshitij",
+                                text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                                date: now
+                            )
+                        ]
+                    )
+                ]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertEqual(openTasks.map(\.title), ["Post rev-share announcement in Inner Circle and RT"])
+            XCTAssertEqual(openTasks.first?.ownerName, "Rajanshee")
+            let extractedChatIds = await recorder.extractedChatIds()
+            XCTAssertEqual(extractedChatIds, [chat.id])
+            let sync = await DatabaseManager.shared.loadDashboardTaskSyncState(chatId: chat.id)
+            XCTAssertEqual(sync?.latestMessageId, 14201)
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorMarksOutgoingMessagesAsMeForDashboardAI() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: 144,
+                title: "Banko <> First Dollar",
+                chatType: .basicGroup(groupId: 444),
+                unreadCount: 1,
+                lastMessageDate: now,
+                memberCount: 4
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 14401,
+                        chatId: chat.id,
+                        text: "Can we individually send access codes?",
+                        date: now.addingTimeInterval(-240),
+                        isOutgoing: false,
+                        senderUserId: 201,
+                        senderName: "Deeeeeksha"
+                    ),
+                    makeRecord(
+                        id: 14402,
+                        chatId: chat.id,
+                        text: "I will send the codes.",
+                        date: now,
+                        isOutgoing: true,
+                        senderUserId: 1,
+                        senderName: nil
+                    )
+                ]
+            )
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .ignore,
+                        confidence: 0.9,
+                        reason: "Only recording AI input.",
+                        supportingMessageIds: [14402]
+                    )
+                ],
+                tasksByChatId: [:]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let messagesByChat = await recorder.candidateMessagesByChat()
+            XCTAssertEqual(
+                messagesByChat[chat.id]?.map(\.senderFirstName),
+                ["Deeeeeksha", "[ME]"]
+            )
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorSendsOpenTaskEvidenceToTriageForStaleCleanup() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: 145,
+                title: "Banko <> First Dollar",
+                chatType: .basicGroup(groupId: 445),
+                unreadCount: 1,
+                lastMessageDate: now,
+                memberCount: 4
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 14501,
+                        chatId: chat.id,
+                        text: "@deeksharungta @pratzyy",
+                        date: now.addingTimeInterval(-420),
+                        senderUserId: 301,
+                        senderName: "Karan"
+                    ),
+                    makeRecord(
+                        id: 14502,
+                        chatId: chat.id,
+                        text: "Can we individually send access codes?",
+                        date: now.addingTimeInterval(-360),
+                        senderUserId: 301,
+                        senderName: "Karan"
+                    ),
+                    makeRecord(
+                        id: 14503,
+                        chatId: chat.id,
+                        text: "So we assign an access code uniquely to each user",
+                        date: now.addingTimeInterval(-240),
+                        senderUserId: 201,
+                        senderName: "Deeeeeksha"
+                    ),
+                    makeRecord(
+                        id: 14504,
+                        chatId: chat.id,
+                        text: "I'll send across new access codes",
+                        date: now.addingTimeInterval(-120),
+                        senderUserId: 301,
+                        senderName: nil
+                    ),
+                    makeRecord(
+                        id: 14505,
+                        chatId: chat.id,
+                        text: "Okieeee",
+                        date: now,
+                        senderUserId: 201,
+                        senderName: "Deeeeeksha"
+                    )
+                ]
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):access-codes:14504",
+                    title: "Send new access codes",
+                    summary: "The thread discussed sending new access codes.",
+                    suggestedAction: "Send across the new access codes.",
+                    ownerName: "Me",
+                    personName: "Deeeeeksha",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: "Banko",
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.93,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 14503,
+                            senderName: "Deeeeeksha",
+                            text: "So we assign an access code uniquely to each user",
+                            date: now.addingTimeInterval(-240)
+                        ),
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 14504,
+                            senderName: "Unknown",
+                            text: "I'll send across new access codes",
+                            date: now.addingTimeInterval(-120)
+                        )
+                    ]
+                )
+            ])
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .ignore,
+                        confidence: 0.95,
+                        reason: "Existing task evidence shows a non-user sender took the work.",
+                        supportingMessageIds: [14504]
+                    )
+                ],
+                tasksByChatId: [:]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let openTaskDTOs = await recorder.openTasksByChat()
+            XCTAssertEqual(openTaskDTOs[chat.id]?.first?.ownerName, "Me")
+            XCTAssertEqual(openTaskDTOs[chat.id]?.first?.sourceMessages.map(\.messageId), [14503, 14504])
+            XCTAssertEqual(openTaskDTOs[chat.id]?.first?.sourceMessages.last?.text, "I'll send across new access codes")
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertTrue(openTasks.isEmpty)
+            let ignoredTasks = await DatabaseManager.shared.loadDashboardTasks(status: .ignored)
+            XCTAssertEqual(ignoredTasks.map(\.title), ["Send new access codes"])
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorRescansOpenTaskChatsOutsideVisibleCandidates() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: -146,
+                title: "Banko <> First Dollar",
+                chatType: .basicGroup(groupId: 446),
+                unreadCount: 0,
+                lastMessageDate: now,
+                memberCount: 4
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 14601,
+                        chatId: chat.id,
+                        text: "So we assign an access code uniquely to each user",
+                        date: now.addingTimeInterval(-240),
+                        senderUserId: 201,
+                        senderName: "Deeeeeksha"
+                    ),
+                    makeRecord(
+                        id: 14602,
+                        chatId: chat.id,
+                        text: "I'll send across new access codes",
+                        date: now.addingTimeInterval(-120),
+                        senderUserId: 301,
+                        senderName: "Karan"
+                    )
+                ]
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):access-codes:14602",
+                    title: "Send new access codes",
+                    summary: "The thread discussed sending new access codes.",
+                    suggestedAction: "Send across the new access codes.",
+                    ownerName: "Me",
+                    personName: "Deeeeeksha",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: "Banko",
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.93,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 14602,
+                            senderName: "Karan",
+                            text: "I'll send across new access codes",
+                            date: now.addingTimeInterval(-120)
+                        )
+                    ]
+                )
+            ])
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .ignore,
+                        confidence: 0.95,
+                        reason: "Existing task evidence shows another person owns the work.",
+                        supportingMessageIds: [14602]
+                    )
+                ],
+                tasksByChatId: [:]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = []
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let candidateMessages = await recorder.candidateMessagesByChat()
+            XCTAssertEqual(candidateMessages[chat.id]?.map(\.messageId), [14601, 14602])
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertTrue(openTasks.isEmpty)
+            let ignoredTasks = await DatabaseManager.shared.loadDashboardTasks(status: .ignored)
+            XCTAssertEqual(ignoredTasks.map(\.title), ["Send new access codes"])
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorReplacesStaleMeTaskWhenExtractionReassignsOwner() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: -147,
+                title: "Based Games s2 <> Inner Circle",
+                chatType: .basicGroup(groupId: 447),
+                unreadCount: 0,
+                lastMessageDate: now,
+                memberCount: 12
+            )
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 14701,
+                        chatId: chat.id,
+                        text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                        date: now,
+                        senderUserId: 201,
+                        senderName: "Kshitij"
+                    )
+                ]
+            )
+            _ = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):stale-me:14701",
+                    title: "Post rev-share announcement in Inner Circle and RT",
+                    summary: "A stale pass incorrectly assigned this to the user.",
+                    suggestedAction: "Share the announcement and retweet the post.",
+                    ownerName: "Me",
+                    personName: "Rajanshee",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: "Based Games",
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.97,
+                    createdAt: now,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 14701,
+                            senderName: "Kshitij",
+                            text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                            date: now
+                        )
+                    ]
+                )
+            ])
+
+            let replacement = DashboardTaskCandidate(
+                stableFingerprint: "\(chat.id):rajanshee-post-rev-share:14701",
+                title: "Post rev-share announcement in Inner Circle and RT",
+                summary: "Kshitij asked Rajanshee to post and retweet the announcement.",
+                suggestedAction: "Share the announcement and retweet the post.",
+                ownerName: "Rajanshee",
+                personName: "Rajanshee",
+                chatId: chat.id,
+                chatTitle: chat.title,
+                topicName: "Based Games",
+                priority: .medium,
+                status: .open,
+                confidence: 0.97,
+                createdAt: now,
+                dueAt: nil,
+                sourceMessages: [
+                    DashboardTaskSourceMessage(
+                        chatId: chat.id,
+                        messageId: 14701,
+                        senderName: "Kshitij",
+                        text: "@Rajanshee can you post this in Inner Circle and RT as well?",
+                        date: now
+                    )
+                ]
+            )
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .effortTask,
+                        confidence: 0.95,
+                        reason: "The durable task is explicitly assigned to Rajanshee.",
+                        supportingMessageIds: [14701]
+                    )
+                ],
+                tasksByChatId: [chat.id: replacement]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = []
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertEqual(openTasks.map(\.ownerName), ["Rajanshee"])
+            XCTAssertEqual(openTasks.map(\.stableFingerprint), [replacement.stableFingerprint])
+
+            let ignoredTasks = await DatabaseManager.shared.loadDashboardTasks(status: .ignored)
+            XCTAssertEqual(ignoredTasks.map(\.ownerName), ["Me"])
+            XCTAssertEqual(ignoredTasks.map(\.stableFingerprint), ["\(chat.id):stale-me:14701"])
+        }
+    }
+
+    @MainActor
+    func testTaskIndexCoordinatorMarksExistingTaskDoneWhenReplyCompletesIt() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let myUser = TGUser(
+                id: 99,
+                firstName: "Pratyush",
+                lastName: "",
+                username: "pratzyy",
+                phoneNumber: nil,
+                isBot: false
+            )
+            let chat = makeChat(
+                id: 104,
+                title: "Rahul Singh Bhadoriya",
+                chatType: .privateChat(userId: 204),
+                unreadCount: 1,
+                lastMessageDate: now
+            )
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chat.id,
+                messages: [
+                    makeRecord(
+                        id: 10401,
+                        chatId: chat.id,
+                        text: "Can you send me the pitch deck?",
+                        date: now.addingTimeInterval(-600)
+                    ),
+                    makeRecord(
+                        id: 10402,
+                        chatId: chat.id,
+                        text: "Sent it here.",
+                        date: now,
+                        isOutgoing: true,
+                        senderUserId: myUser.id,
+                        senderName: "Pratyush"
+                    )
+                ]
+            )
+
+            let inserted = await DatabaseManager.shared.upsertDashboardTasks([
+                DashboardTaskCandidate(
+                    stableFingerprint: "\(chat.id):pitch-deck:10401",
+                    title: "Send pitch deck",
+                    summary: "Rahul asked for the pitch deck.",
+                    suggestedAction: "Send Rahul the pitch deck.",
+                    ownerName: "Me",
+                    personName: "Rahul",
+                    chatId: chat.id,
+                    chatTitle: chat.title,
+                    topicName: nil,
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.84,
+                    createdAt: now.addingTimeInterval(-600),
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: chat.id,
+                            messageId: 10401,
+                            senderName: "Rahul",
+                            text: "Can you send me the pitch deck?",
+                            date: now.addingTimeInterval(-600)
+                        )
+                    ]
+                )
+            ])
+            let taskId = try XCTUnwrap(inserted.first?.id)
+
+            let recorder = DashboardTaskTriageRecorder()
+            let provider = DashboardTaskTriageAIProvider(
+                recorder: recorder,
+                decisions: [
+                    DashboardTaskTriageResultDTO(
+                        chatId: chat.id,
+                        route: .completedTask,
+                        confidence: 0.92,
+                        reason: "The user sent the requested deck.",
+                        supportingMessageIds: [10402],
+                        completedTaskIds: [taskId]
+                    )
+                ],
+                tasksByChatId: [:]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: myUser,
+                historyByChatId: [:]
+            )
+            telegramService.authState = .ready
+            telegramService.chats = [chat]
+            let aiService = AIService(testingProvider: provider)
+
+            TaskIndexCoordinator.shared.stop()
+            await TaskIndexCoordinator.shared.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: true
+            )
+
+            let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open)
+            XCTAssertTrue(openTasks.isEmpty)
+            let doneTasks = await DatabaseManager.shared.loadDashboardTasks(status: .done)
+            XCTAssertEqual(doneTasks.map(\.id), [taskId])
+            let extractedChatIds = await recorder.extractedChatIds()
+            XCTAssertTrue(extractedChatIds.isEmpty)
+            let openTaskCountsByChat = await recorder.openTaskCountsByChat()
+            XCTAssertEqual(openTaskCountsByChat[chat.id], 1)
+            let sync = await DatabaseManager.shared.loadDashboardTaskSyncState(chatId: chat.id)
+            XCTAssertEqual(sync?.latestMessageId, 10402)
         }
     }
 
@@ -1794,6 +3580,108 @@ final class PidgyCoreTests: XCTestCase {
         )
 
         XCTAssertEqual(mode, .debugWindow)
+    }
+
+    func testAppDashboardLaunchPolicyDefaultsToDashboardWindow() {
+        XCTAssertTrue(AppDashboardLaunchPolicy.opensDashboardOnLaunch(environment: [:]))
+        XCTAssertTrue(AppLaunchPresentationMode.menuBarPanel.activatesAsRegularApp)
+    }
+
+    func testAppDashboardLaunchPolicyAllowsExplicitOptOut() {
+        XCTAssertFalse(
+            AppDashboardLaunchPolicy.opensDashboardOnLaunch(
+                environment: [AppDashboardLaunchPolicy.environmentKey: "0"]
+            )
+        )
+    }
+
+    func testLauncherChromeActionsKeepSettingsOutOfQuickLauncher() {
+        XCTAssertEqual(LauncherChromeAction.allCases, [.dashboard])
+        XCTAssertFalse(LauncherChromeAction.allCases.map(\.rawValue).contains("settings"))
+        XCTAssertFalse(LauncherChromeAction.allCases.map(\.rawValue).contains("preferences"))
+    }
+
+    func testPidgyBrandingDefinesDashboardIdentity() {
+        XCTAssertEqual(PidgyBranding.appName, "Pidgy")
+        XCTAssertEqual(PidgyBranding.dashboardWindowTitle, "Pidgy")
+        XCTAssertEqual(PidgyBranding.logoAssetName, "PidgyLogo")
+        XCTAssertFalse(PidgyBranding.dashboardTagline.isEmpty)
+    }
+
+    @MainActor
+    func testPreferencesRoutingUsesDashboardPreferencesPage() {
+        let store = DashboardNavigationStore.shared
+        store.show(.dashboard)
+
+        PreferencesRouting.showAuthoritativePreferences(in: store)
+
+        XCTAssertEqual(store.selectedPage, .preferences)
+        XCTAssertEqual(PreferencesRouting.authoritativePage, .preferences)
+        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.pricing))
+        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.diagnostics))
+    }
+
+    func testDashboardChromePolicyFocusesPreferencesOnly() {
+        XCTAssertEqual(DashboardChromePolicy.policy(for: .preferences), .focusedPreferences)
+        XCTAssertFalse(DashboardChromePolicy.policy(for: .preferences).showsDashboardSidebar)
+        XCTAssertFalse(DashboardChromePolicy.policy(for: .preferences).showsDashboardTopBar)
+
+        for page in DashboardPage.allCases where page != .preferences {
+            XCTAssertEqual(DashboardChromePolicy.policy(for: page), .standard)
+            XCTAssertTrue(DashboardChromePolicy.policy(for: page).showsDashboardSidebar)
+            XCTAssertTrue(DashboardChromePolicy.policy(for: page).showsDashboardTopBar)
+        }
+    }
+
+    func testPreferencesResetPlanCoversCredentialsDefaultsAndPidgyDataDirectory() {
+        XCTAssertEqual(
+            Set(PreferencesResetPlan.credentialKeysToDelete),
+            Set([
+                .apiId,
+                .apiHash,
+                .aiProviderType,
+                .aiApiKeyOpenAI,
+                .aiApiKeyClaude,
+                .aiModelOpenAI,
+                .aiModelClaude,
+                .aiApiKey,
+                .aiModel
+            ])
+        )
+        XCTAssertEqual(
+            Set(PreferencesResetPlan.userDefaultsKeysToDelete),
+            Set([
+                AppConstants.Preferences.includeBotsInAISearchKey,
+                AppConstants.Preferences.dashboardTaskTriageContextVersionKey
+            ])
+        )
+
+        let appSupport = URL(fileURLWithPath: "/tmp/pidgy-support", isDirectory: true)
+        XCTAssertEqual(
+            PreferencesResetPlan.pidgyDataDirectory(in: appSupport),
+            appSupport.appendingPathComponent("Pidgy", isDirectory: true)
+        )
+    }
+
+    @MainActor
+    func testDashboardDiagnosticsBuildsRoutingSnapshotsWithoutNetwork() async {
+        let aiService = AIService(
+            testingProvider: NoAIProvider(),
+            providerType: .none,
+            providerModel: "",
+            isConfigured: false
+        )
+
+        let snapshots = await DashboardDiagnosticsService.routingSnapshots(
+            query: "who do I need to reply to",
+            aiService: aiService,
+            now: Date(timeIntervalSince1970: 1_744_329_600),
+            timezone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(snapshots.first?.query, "who do I need to reply to")
+        XCTAssertEqual(snapshots.first?.runtimeIntent, .agenticSearch)
+        XCTAssertGreaterThanOrEqual(snapshots.count, 2)
     }
 
     func testQueryInterpreterRoutesCoreMVPQueries() {
@@ -4618,6 +6506,48 @@ final class PidgyCoreTests: XCTestCase {
         )
     }
 
+    func testDashboardPromptsDoNotPromoteSomeoneElseCoordinationToUserTask() {
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("let's find a time")
+        )
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("not an effort_task")
+        )
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("Do not infer ownership from \"we\" or \"let's\"")
+        )
+        XCTAssertTrue(
+            DashboardTaskPrompt.systemPrompt.contains("let's find a time")
+        )
+        XCTAssertTrue(
+            DashboardTaskPrompt.systemPrompt.contains("Do not extract tasks from another person narrating their own plan")
+        )
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("Someone else saying \"I'll send\"")
+        )
+        XCTAssertTrue(
+            DashboardTaskPrompt.systemPrompt.contains("If a non-[ME] sender says \"I'll send\"")
+        )
+        XCTAssertTrue(
+            DashboardTaskPrompt.systemPrompt.contains("ownerName \"Me\" requires direct evidence")
+        )
+        XCTAssertTrue(
+            DashboardTaskPrompt.systemPrompt.contains("\"can we have\" with no named owner")
+        )
+        XCTAssertTrue(
+            DashboardTaskPrompt.systemPrompt.contains("If [ME] already sent or shared the requested thing")
+        )
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("Existing open task source evidence")
+        )
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("current stored ownerName")
+        )
+        XCTAssertTrue(
+            DashboardTaskTriagePrompt.systemPrompt.contains("ownerName \"Me\" only when the user is directly named")
+        )
+    }
+
     func testReplyQueuePromptAndModelSupportWorthCheckingAndRedirectedDMs() {
         let candidate = ReplyQueueCandidateDTO(
             chatId: 6743321353,
@@ -4887,13 +6817,15 @@ final class PidgyCoreTests: XCTestCase {
         chatId: Int64,
         text: String,
         date: Date,
-        isOutgoing: Bool = false
+        isOutgoing: Bool = false,
+        senderUserId: Int64 = 1,
+        senderName: String? = "Tester"
     ) -> DatabaseManager.MessageRecord {
         DatabaseManager.MessageRecord(
             id: id,
             chatId: chatId,
-            senderUserId: 1,
-            senderName: "Tester",
+            senderUserId: senderUserId,
+            senderName: senderName,
             date: date,
             textContent: text,
             mediaTypeRaw: nil,
@@ -4992,6 +6924,7 @@ private extension DashboardTask {
         topicName: String?,
         chatId: Int64,
         personName: String,
+        ownerName: String = "Me",
         priority: DashboardTaskPriority = .medium,
         updatedAt: Date = Date(),
         latestSourceDate: Date? = nil
@@ -5002,7 +6935,7 @@ private extension DashboardTask {
             title: title,
             summary: title,
             suggestedAction: title,
-            ownerName: "Me",
+            ownerName: ownerName,
             personName: personName,
             chatId: chatId,
             chatTitle: personName,
@@ -5016,6 +6949,69 @@ private extension DashboardTask {
             dueAt: nil,
             snoozedUntil: nil,
             latestSourceDate: latestSourceDate
+        )
+    }
+}
+
+private extension FollowUpItem {
+    static func mockPrivate(
+        chatId: Int64,
+        userId: Int64,
+        title: String,
+        category: FollowUpItem.Category,
+        senderName: String,
+        text: String
+    ) -> FollowUpItem {
+        let message = TGMessage(
+            id: 1,
+            chatId: chatId,
+            senderId: .user(userId),
+            date: Date(),
+            textContent: text,
+            mediaType: nil,
+            isOutgoing: false,
+            chatTitle: title,
+            senderName: senderName
+        )
+        let chat = TGChat(
+            id: chatId,
+            title: title,
+            chatType: .privateChat(userId: userId),
+            unreadCount: 1,
+            lastMessage: message,
+            memberCount: nil,
+            order: 1,
+            isInMainList: true,
+            smallPhotoFileId: nil
+        )
+        return FollowUpItem(
+            chat: chat,
+            category: category,
+            lastMessage: message,
+            timeSinceLastActivity: 0,
+            suggestedAction: nil
+        )
+    }
+}
+
+private extension RelationGraph.Node {
+    static func mock(
+        entityId: Int64,
+        displayName: String,
+        interactionScore: Double,
+        lastInteractionAt: Date?
+    ) -> RelationGraph.Node {
+        RelationGraph.Node(
+            entityId: entityId,
+            entityType: "user",
+            displayName: displayName,
+            username: nil,
+            category: "General",
+            categorySource: "test",
+            interactionScore: interactionScore,
+            lastInteractionAt: lastInteractionAt,
+            firstSeenAt: nil,
+            metadata: nil
         )
     }
 }
@@ -5108,9 +7104,20 @@ private actor PipelineCategorizationCallCounter {
 private actor DashboardTaskTriageRecorder {
     private var extractedIds: [Int64] = []
     private var triageBatchCounts: [Int] = []
+    private var recordedOpenTaskCountsByChat: [Int64: Int] = [:]
+    private var recordedCandidateMessagesByChat: [Int64: [MessageSnippet]] = [:]
+    private var recordedOpenTasksByChat: [Int64: [DashboardTaskTriageOpenTaskDTO]] = [:]
 
     func recordTriageBatch(count: Int) {
         triageBatchCounts.append(count)
+    }
+
+    func recordTriageCandidates(_ candidates: [DashboardTaskTriageCandidateDTO]) {
+        for candidate in candidates {
+            recordedOpenTaskCountsByChat[candidate.chatId] = candidate.openTasks.count
+            recordedCandidateMessagesByChat[candidate.chatId] = candidate.messages
+            recordedOpenTasksByChat[candidate.chatId] = candidate.openTasks
+        }
     }
 
     func recordExtraction(chatId: Int64) {
@@ -5119,6 +7126,18 @@ private actor DashboardTaskTriageRecorder {
 
     func extractedChatIds() -> [Int64] {
         extractedIds
+    }
+
+    func openTaskCountsByChat() -> [Int64: Int] {
+        recordedOpenTaskCountsByChat
+    }
+
+    func candidateMessagesByChat() -> [Int64: [MessageSnippet]] {
+        recordedCandidateMessagesByChat
+    }
+
+    func openTasksByChat() -> [Int64: [DashboardTaskTriageOpenTaskDTO]] {
+        recordedOpenTasksByChat
     }
 }
 
@@ -5162,6 +7181,7 @@ private struct DashboardTaskTriageAIProvider: AIProvider {
         candidates: [DashboardTaskTriageCandidateDTO]
     ) async throws -> [DashboardTaskTriageResultDTO] {
         await recorder.recordTriageBatch(count: candidates.count)
+        await recorder.recordTriageCandidates(candidates)
         let candidateIds = Set(candidates.map(\.chatId))
         return decisions.filter { candidateIds.contains($0.chatId) }
     }

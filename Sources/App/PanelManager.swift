@@ -72,7 +72,6 @@ final class PanelManager {
     private let telegramService: TelegramService
     private let aiService: AIService
     private let presentationMode: AppLaunchPresentationMode
-    var onOpenSettings: (() -> Void)?
     var onOpenDashboard: (() -> Void)?
 
     init(
@@ -132,9 +131,7 @@ final class PanelManager {
         containerView.layer?.cornerRadius = 12
 
         let hostingView = NSHostingView(
-            rootView: LauncherView(onOpenSettings: { [weak self] in
-                    self?.onOpenSettings?()
-                }, onOpenDashboard: { [weak self] in
+            rootView: LauncherView(onOpenDashboard: { [weak self] in
                     self?.onOpenDashboard?()
                 })
                 .environmentObject(telegramService)

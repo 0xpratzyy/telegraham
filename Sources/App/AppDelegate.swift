@@ -32,11 +32,30 @@ enum AppLaunchPresentationMode: Equatable {
     }
 
     var activatesAsRegularApp: Bool {
-        self == .debugWindow
+        true
     }
 
     var showsLauncherOnLaunch: Bool {
         self == .debugWindow
+    }
+}
+
+enum AppDashboardLaunchPolicy {
+    static let environmentKey = "PIDGY_DASHBOARD_ON_LAUNCH"
+
+    static func opensDashboardOnLaunch(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        let value = environment[environmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch value {
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return true
+        }
     }
 }
 
@@ -47,11 +66,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var menuBarManager: MenuBarManager?
     private var panelManager: PanelManager?
     private var hotkeyManager: HotkeyManager?
-    private var settingsWindow: NSWindow?
     private var dashboardWindow: NSWindow?
     private var graphBuildTask: Task<Void, Never>?
+    private var preferencesOpenObserver: NSObjectProtocol?
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
-    private let opensDashboardOnLaunch = ProcessInfo.processInfo.environment["PIDGY_DASHBOARD_ON_LAUNCH"] == "1"
+    private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
     private var terminationCleanupCompleted = false
     private var isRunningTests: Bool {
@@ -68,8 +87,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             aiService: aiService,
             presentationMode: launchPresentationMode
         )
-        panelManager?.onOpenSettings = { [weak self] in self?.openSettings() }
         panelManager?.onOpenDashboard = { [weak self] in self?.openDashboard() }
+
+        preferencesOpenObserver = NotificationCenter.default.addObserver(
+            forName: .pidgyOpenDashboardPreferences,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.openSettings()
+            }
+        }
 
         menuBarManager = MenuBarManager(
             onTogglePanel: { [weak self] in self?.panelManager?.toggle() },
@@ -125,10 +153,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    deinit {
+        if let preferencesOpenObserver {
+            NotificationCenter.default.removeObserver(preferencesOpenObserver)
+        }
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         Task {
             await RecentSyncCoordinator.shared.recoverNow()
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            openDashboard()
+        }
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -166,35 +207,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func openSettings() {
-        if let settingsWindow, settingsWindow.isVisible {
-            settingsWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let settingsView = SettingsView()
-            .environmentObject(telegramService)
-            .environmentObject(aiService)
-
-        let hostingView = NSHostingView(rootView: settingsView)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Pidgy Settings"
-        window.contentView = hostingView
-        window.center()
-        window.isReleasedWhenClosed = false
-        self.settingsWindow = window
-
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        openDashboard(page: PreferencesRouting.authoritativePage)
     }
 
-    private func openDashboard() {
+    private func openDashboard(page: DashboardPage = .dashboard) {
+        if page == PreferencesRouting.authoritativePage {
+            PreferencesRouting.showAuthoritativePreferences()
+        } else {
+            DashboardNavigationStore.shared.show(page)
+        }
+
         if let dashboardWindow, dashboardWindow.isVisible {
             dashboardWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -213,7 +235,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             backing: .buffered,
             defer: false
         )
-        window.title = "Pidgy Dashboard"
+        window.title = PidgyBranding.dashboardWindowTitle
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unifiedCompact
         window.appearance = NSAppearance(named: .darkAqua)

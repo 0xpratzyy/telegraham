@@ -272,7 +272,7 @@ final class AIService: ObservableObject {
             topics: topics,
             messages: snippets
         )
-        return extracted.map { $0.resolvingSourceDates(from: messages) }
+        return extracted.map { $0.resolvingSourceMetadata(from: messages, myUserId: myUserId) }
     }
 
     func triageDashboardTaskCandidates(
@@ -292,11 +292,49 @@ final class AIService: ObservableObject {
                 chatType: candidate.chat.chatType.displayName,
                 unreadCount: candidate.chat.unreadCount,
                 memberCount: candidate.chat.memberCount,
-                messages: snippets
+                messages: snippets,
+                openTasks: candidate.openTasks.map {
+                    Self.dashboardTaskTriageOpenTaskDTO(
+                        from: $0,
+                        evidence: candidate.openTaskEvidenceByTaskId[$0.id] ?? []
+                    )
+                }
             )
         }
         guard !candidateDTOs.isEmpty else { return [] }
         return try await provider.triageDashboardTaskCandidates(candidates: candidateDTOs)
+    }
+
+    private static func dashboardTaskTriageOpenTaskDTO(
+        from task: DashboardTask,
+        evidence: [DashboardTaskSourceMessage]
+    ) -> DashboardTaskTriageOpenTaskDTO {
+        DashboardTaskTriageOpenTaskDTO(
+            taskId: task.id,
+            title: task.title,
+            summary: task.summary,
+            suggestedAction: task.suggestedAction,
+            ownerName: task.ownerName,
+            personName: task.personName.isEmpty ? task.ownerName : task.personName,
+            latestSourceDateISO8601: task.latestSourceDate.map {
+                ISO8601DateFormatter.dashboard.string(from: $0)
+            },
+            sourceMessages: evidence
+                .sorted { $0.date < $1.date }
+                .map(Self.dashboardTaskSourceDTO)
+        )
+    }
+
+    private static func dashboardTaskSourceDTO(
+        from source: DashboardTaskSourceMessage
+    ) -> DashboardTaskSourceMessageDTO {
+        DashboardTaskSourceMessageDTO(
+            chatId: source.chatId,
+            messageId: source.messageId,
+            senderName: source.senderName,
+            text: source.text,
+            dateISO8601: ISO8601DateFormatter.dashboard.string(from: source.date)
+        )
     }
 
     private func conversationSnippets(messages: [TGMessage], chatTitle: String, myUserId: Int64) -> [MessageSnippet] {
@@ -305,7 +343,13 @@ final class AIService: ObservableObject {
             .compactMap { msg -> MessageSnippet? in
             guard let text = msg.textContent, !text.isEmpty else { return nil }
             let isMe: Bool
-            if case .user(let uid) = msg.senderId { isMe = uid == myUserId } else { isMe = false }
+            if msg.isOutgoing {
+                isMe = true
+            } else if case .user(let uid) = msg.senderId, myUserId > 0 {
+                isMe = uid == myUserId
+            } else {
+                isMe = false
+            }
             let name = isMe ? "[ME]" : (msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown")
             return MessageSnippet(
                 messageId: msg.id,

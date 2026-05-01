@@ -1,6 +1,6 @@
 # Pidgy Product PRD
 
-Last updated: 2026-04-27
+Last updated: 2026-04-29
 
 ## Product Thesis
 
@@ -24,7 +24,8 @@ The current MVP promise is:
 2. topic search across chats
 3. reply queue / ownership triage
 4. quick recap / reply prep summaries
-5. a lightweight dashboard for active work, reply attention, and people context
+5. a lightweight dashboard for active work, reply attention, topics, and people context
+6. dashboard-native preferences for configuration, privacy, and diagnostics
 
 ## Primary User
 
@@ -46,7 +47,7 @@ Hybrid BD / community operators who:
 
 ## Current MVP Surface
 
-Launcher is the primary query surface. Dashboard is the secondary operating surface.
+Launcher is the primary query surface. Dashboard is the secondary operating surface. Preferences should live inside the dashboard so setup, sync status, privacy, and diagnostics feel like part of the same operating cockpit instead of a separate app.
 
 Supported product experiences:
 
@@ -120,7 +121,8 @@ Current pages:
 - Dashboard: merged feed of open tasks and reply attention
 - Reply queue: scannable conversations where the user may owe a response
 - Tasks: AI-extracted work items with topic, priority, evidence, and status actions
-- People: top/stale contacts from relationship graph context
+- Topics: workspace-like pages for companies, projects, communities, and operating themes
+- People: top/stale contacts from relationship graph context with related work
 
 Expected behavior:
 
@@ -129,7 +131,22 @@ Expected behavior:
 - user actions can mark tasks done, snoozed, or ignored
 - manual task state should survive refreshes
 - dashboard extraction should run from local indexed/recent data
+- topics should prefer user-relevant workspaces such as companies/projects over generic categories
+- topic pages should provide search, catch-up, open tasks, needs-reply, related chats, and highlighted people/group context
+- people pages should open quickly, lazy-load heavier context, and summarize recent relationship context from local messages
 - dashboard cost/freshness should be understandable before launch
+
+### 6. Preferences
+
+Preferences live inside the dashboard.
+
+Expected behavior:
+
+- open from the dashboard sidebar/account menu and from existing menu-bar/launcher settings actions
+- keep a calm dark macOS-native layout consistent with the dashboard
+- group settings into clear sections: account, Telegram connection, AI providers, indexing, data/privacy, diagnostics, and reset
+- keep advanced routing/index/debug tools available but visually secondary
+- make background AI extraction and indexing cost/freshness understandable in product language
 
 ## Product Principles
 
@@ -141,6 +158,7 @@ Expected behavior:
 6. Reply / ownership questions must optimize for trust over breadth.
 7. Freshness and deep indexing are background responsibilities, not query-time responsibilities.
 8. Dashboard tasks need evidence and lifecycle behavior, not just nice wording.
+9. Settings and diagnostics should feel like part of the dashboard product, not a separate utility bolted on later.
 
 ## What Is In Product But Not Primary
 
@@ -150,6 +168,7 @@ These exist in the codebase, but are not the core shipped promise:
 - launcher follow-up cache / categorization support paths
 - debug surfaces for routing, indexing, graph state, and usage
 - dashboard topic taxonomy and task extraction internals
+- dashboard Preferences / diagnostics internals
 
 These are supporting systems, not the headline MVP experience.
 
@@ -163,6 +182,7 @@ Not part of the current shipped promise:
 - workflow automation
 - graph-backed end-user CRM query engine
 - replacing Telegram as the main communication client
+- team billing, referrals, templates, or workspace collaboration controls
 
 ## Success Criteria
 
@@ -174,6 +194,7 @@ Pidgy MVP is working if a user can reliably:
 4. get a useful, bounded recap before replying
 5. trust that the launcher routes the query to the right family
 6. open the dashboard and see evidence-backed tasks / attention items without obvious stale noise
+7. configure Telegram, AI, indexing, privacy, and diagnostics without leaving the dashboard visual system
 
 ## Current Product Risks
 
@@ -181,11 +202,12 @@ The biggest product risks right now are:
 
 - reply-queue precision in noisy groups
 - summary quality for person-scoped and multi-chat recap prompts
-- dashboard task extraction output quality: titles, suggested actions, priority, and topic labels need dogfooding
-- stale dashboard tasks: currently positive extraction updates are stronger than closed-loop reconciliation
+- dashboard task extraction output quality: titles, suggested actions, priority, topic labels, and false-positive ownership need dogfooding
+- stale dashboard tasks: closed-loop reconciliation exists for some reply-completed tasks, but broader stale/open-loop cleanup still needs hardening
 - dashboard AI cost/freshness expectations because background extraction can run without an explicit query
 - deep-index coverage across larger local histories
-- UI readability as launcher, settings, and dashboard files accumulate page-specific rendering
+- legacy settings/debug code still needs cleanup now that visible entry points route into dashboard-native Preferences
+- UI readability as launcher, settings, and dashboard model/storage files accumulate page-specific rendering
 
 ## Launch Scope
 
@@ -196,14 +218,15 @@ Must have before a proper launch:
 1. Tune dashboard task outputs on real dogfood data.
 2. Add stale/closed task reconciliation so resolved asks do not remain open forever.
 3. Make dashboard refresh/cost behavior obvious, especially for background AI extraction.
-4. Run live QA for launcher search, reply queue, dashboard refresh, task status changes, reset, restart, and Telegram deep links.
-5. Keep launch read-only: no send automation, no proactive reminders, no full CRM pipeline controls.
+4. Harden dashboard-native Preferences and remove or retire the old settings/debug surface.
+5. Run live QA for launcher search, reply queue, dashboard refresh, task status changes, preferences, reset, restart, and Telegram deep links.
+6. Keep launch read-only: no send automation, no proactive reminders, no full CRM pipeline controls.
 
 Nice to have before launch:
 
-1. Split large dashboard/launcher/settings files enough that fixes are easy to review.
+1. Split remaining large launcher/settings/model files enough that fixes are easy to review.
 2. Add dashboard-specific eval fixtures for false positives, closed loops, duplicate task fingerprints, and topic drift.
-3. Polish placeholder controls such as dashboard search and re-index wording so the UI does not imply unsupported behavior.
+3. Polish placeholder controls such as global dashboard search and re-index wording so the UI does not imply unsupported behavior.
 
 ## Current Product Direction
 
@@ -212,7 +235,8 @@ The roadmap is still one continuous line:
 1. raw Telegram messages
 2. reliable launcher retrieval and ownership judgment
 3. dashboard-visible operating state
-4. structured relationship state
-5. agentic CRM workflows
+4. dashboard-native preferences and diagnostics
+5. structured relationship state
+6. agentic CRM workflows
 
 The codebase should keep biasing toward trustworthy retrieval, evidence-backed task state, and a lightweight dashboard before becoming a broad CRM product.

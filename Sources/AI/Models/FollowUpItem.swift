@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 /// A chat that needs follow-up attention, categorized by AI analysis of conversation state.
-struct FollowUpItem: Identifiable {
+struct FollowUpItem: Identifiable, Sendable {
     let id = UUID()
     let chat: TGChat
     let category: Category
@@ -10,7 +10,7 @@ struct FollowUpItem: Identifiable {
     let timeSinceLastActivity: TimeInterval
     var suggestedAction: String?
 
-    enum Category: String, CaseIterable {
+    enum Category: String, CaseIterable, Sendable {
         case onMe = "ON ME"
         case onThem = "ON THEM"
         case quiet = "QUIET"

@@ -901,7 +901,8 @@ class TelegramService: ObservableObject {
             lastName: user.lastName,
             username: user.usernames?.activeUsernames.first,
             phoneNumber: user.phoneNumber.isEmpty ? nil : user.phoneNumber,
-            isBot: isBot
+            isBot: isBot,
+            smallPhotoFileId: user.profilePhoto?.small.id
         )
     }
 

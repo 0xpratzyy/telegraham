@@ -26,8 +26,7 @@ final class MenuBarManager: NSObject {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "Pidgy")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = makeStatusImage()
             button.action = #selector(statusBarClicked(_:))
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -44,6 +43,11 @@ final class MenuBarManager: NSObject {
         // Build menu for right-click only
         let menu = NSMenu()
 
+        let brandItem = NSMenuItem(title: PidgyBranding.appName, action: nil, keyEquivalent: "")
+        brandItem.isEnabled = false
+        menu.addItem(brandItem)
+        menu.addItem(.separator())
+
         let searchItem = NSMenuItem(title: "Search Telegram", action: #selector(togglePanel), keyEquivalent: "")
         searchItem.target = self
         menu.addItem(searchItem)
@@ -54,13 +58,13 @@ final class MenuBarManager: NSObject {
 
         menu.addItem(.separator())
 
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: "Preferences...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Quit Pidgy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit \(PidgyBranding.appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
 
         self.menu = menu
@@ -107,11 +111,7 @@ final class MenuBarManager: NSObject {
     private func updateBadge(count: Int) {
         guard let button = statusItem?.button else { return }
 
-        // Keep icon as template so it adapts to dark/light menu bar
-        let icon = NSImage(systemSymbolName: "bolt.circle.fill", accessibilityDescription: "Pidgy")!
-        icon.size = NSSize(width: 18, height: 18)
-        icon.isTemplate = true
-        button.image = icon
+        button.image = makeStatusImage()
 
         if count > 0 {
             button.attributedTitle = NSAttributedString(
@@ -124,5 +124,14 @@ final class MenuBarManager: NSObject {
         } else {
             button.title = ""
         }
+    }
+
+    private func makeStatusImage() -> NSImage {
+        let image = NSImage(named: PidgyBranding.logoAssetName)
+            ?? NSImage(systemSymbolName: "app.fill", accessibilityDescription: PidgyBranding.appName)!
+        image.size = NSSize(width: 18, height: 18)
+        image.isTemplate = false
+        image.accessibilityDescription = PidgyBranding.appName
+        return image
     }
 }

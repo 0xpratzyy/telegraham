@@ -2,6 +2,26 @@ import SwiftUI
 import Combine
 import TDLibKit
 
+enum LauncherChromeAction: String, CaseIterable, Identifiable {
+    case dashboard
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .dashboard:
+            return "rectangle.grid.2x2"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .dashboard:
+            return "Open Dashboard"
+        }
+    }
+}
+
 struct LauncherView: View {
     @EnvironmentObject var telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
@@ -34,8 +54,6 @@ struct LauncherView: View {
     @State private var chatPreviewById: [Int64: String] = [:]
     @State private var chatPreviewTask: Task<Void, Never>?
 
-    // Settings callback
-    var onOpenSettings: () -> Void = {}
     var onOpenDashboard: () -> Void = {}
 
     // MARK: - AI Search Result Types
@@ -374,23 +392,29 @@ struct LauncherView: View {
                 }
             }
 
-            Button(action: onOpenSettings) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
+            ForEach(LauncherChromeAction.allCases) { action in
+                Button {
+                    performChromeAction(action)
+                } label: {
+                    Image(systemName: action.systemImage)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help(action.accessibilityLabel)
+                .accessibilityLabel(action.accessibilityLabel)
             }
-            .buttonStyle(.plain)
-
-            Button(action: onOpenDashboard) {
-                Image(systemName: "rectangle.grid.2x2")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color.clear)
+    }
+
+    private func performChromeAction(_ action: LauncherChromeAction) {
+        switch action {
+        case .dashboard:
+            onOpenDashboard()
+        }
     }
 
     // MARK: - Filter Tags

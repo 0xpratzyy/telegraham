@@ -1,8 +1,8 @@
 # Pidgy Task Tracker
 
-Last updated: 2026-04-27
+Last updated: 2026-04-29
 
-This tracker is the living status view for the current launch scope: fast launcher search plus a lightweight dashboard for attention, tasks, and people context.
+This tracker is the living status view for the current launch scope: fast launcher search plus a lightweight dashboard for attention, tasks, topics, people context, and dashboard-native preferences.
 
 ## Status Legend
 
@@ -26,13 +26,16 @@ This tracker is the living status view for the current launch scope: fast launch
 ### Dashboard Foundation
 
 - `done` dashboard window is reachable from menu bar and launcher
-- `done` dashboard has Dashboard, Reply queue, Tasks, and People pages
+- `done` dashboard has Dashboard, Reply queue, Tasks, Topics, and People pages
+- `done` dashboard has native Preferences for Telegram credentials, AI providers, bot inclusion, indexing status, diagnostics, and reset
 - `done` `AttentionStore` reuses follow-up pipeline state for dashboard attention views
 - `done` `TaskIndexCoordinator` discovers dashboard topics and extracts chat-scoped tasks from local messages
 - `done` dashboard topics, tasks, evidence, status, and per-chat sync state persist in SQLite
 - `done` dashboard task status actions exist: done, snooze, ignore, open chat
 - `done` dashboard AI usage is tracked as dedicated request kinds
 - `done` dashboard parser/storage/filter basics are covered by unit tests
+- `done` topic pages combine local semantic search, FTS/vector message hits, recent messages, reply queue items, and tasks
+- `done` people pages use graph/contact signals with lazy-rendered relationship context
 
 ### Search Quality / Infra
 
@@ -48,6 +51,7 @@ This tracker is the living status view for the current launch scope: fast launch
 - `done` shared agentic debug payloads moved out of `SearchCoordinator+Agentic.swift`
 - `done` reply / ownership heuristics moved out of `Sources/Views` into the search domain
 - `done` launcher follow-up categorization logic extracted into `FollowUpPipelineAnalyzer`
+- `done` dashboard UI monolith split into root, home/reply, tasks, topics, people, detail, row, shared-theme, and topic-search files
 - `done` dead `default.profraw` artifact removed from tracked source; any regenerated local coverage artifact should stay untracked
 - `done` stale top-level `QueryRoutingDebugSnapshot` type moved out of `SettingsView`
 - `done` dead `visibleChats` parameter removed from `SearchCoordinator.triggerSearch`
@@ -70,13 +74,14 @@ This tracker is the living status view for the current launch scope: fast launch
 - `in_progress` make dashboard refresh behavior and AI cost expectations explicit
 - `in_progress` dogfood task extraction on real Telegram histories and convert misses into tests/evals
 - `in_progress` verify dashboard task refresh after prompt/output changes, because current per-chat sync state scans only newer message IDs
+- `done` move settings into dashboard-native Preferences so configuration, privacy, indexing, diagnostics, and reset share the dashboard visual system
 
 ### Codebase Readability
 
 - `in_progress` keep breaking oversized files into smaller focused units
 - `in_progress` reduce the amount of domain logic still living inside `LauncherView`
-- `in_progress` split `DashboardView` page/rendering/theme logic after the product shape stabilizes
-- `in_progress` reduce the amount of debug / formatting logic still living inside `SettingsView`
+- `in_progress` split dashboard model/parser/directory logic now that view files are separated
+- `in_progress` retire or shrink legacy `SettingsView` now that visible settings entry points use dashboard Preferences
 - `in_progress` keep shrinking `SearchCoordinator` toward orchestration instead of engine-heavy logic
 - `in_progress` consider extracting dashboard persistence helpers out of `DatabaseManager` once dashboard behavior stops moving
 
@@ -91,10 +96,10 @@ This tracker is the living status view for the current launch scope: fast launch
 2. `next` tune dashboard task output prompts on real misses and add a small dashboard eval fixture set
 3. `next` implement or explicitly scope stale/closed dashboard task reconciliation
 4. `next` clarify dashboard refresh/cost UX and decide whether background extraction should be opt-in, manual-first, or always-on after auth
-5. `next` polish dashboard placeholder affordances: `Search everywhere` is not wired and `Re-index` currently means dashboard refresh, not full deep indexing
-6. `next` split `DashboardView` into page/detail/row/theme files enough to keep launch fixes reviewable
-7. `next` split `LauncherView` result rendering into focused subviews / files
-8. `next` split `SettingsView` tabs and debug helpers into dedicated units
+5. `next` polish dashboard placeholder affordances: global search is not fully wired and `Re-index` currently means dashboard refresh, not full deep indexing
+6. `next` split `LauncherView` result rendering into focused subviews / files
+7. `next` split or retire old `SettingsView` now that dashboard Preferences owns visible settings
+8. `next` split `DashboardModels` into DTO/parser/filter/people-directory files
 9. `next` carve semantic/topic ranking helpers out of `SearchCoordinator`
 10. `next` dogfood summary + reply-queue changes in the live app and turn misses into grounded tests/evals
 11. `next` add more reply-queue fixtures for group-vs-DM precision and degraded-mode visibility
@@ -105,6 +110,7 @@ This tracker is the living status view for the current launch scope: fast launch
 - `next` clean build and full `PidgyTests` pass on the current branch
 - `next` live dashboard QA with AI configured, including topic discovery and task extraction
 - `next` live no-AI/degraded dashboard QA so empty states are honest
+- `done` verify dashboard Preferences replaces old settings entry points cleanly
 - `next` verify `Delete All Data` stops dashboard indexing before deleting the app-support directory
 - `next` verify background dashboard extraction cannot silently surprise the user with cost
 - `next` confirm app restart preserves task status and does not duplicate extracted tasks

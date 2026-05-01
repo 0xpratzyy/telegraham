@@ -17,9 +17,7 @@ struct AuthView: View {
         VStack(spacing: 0) {
             // Header
             VStack(spacing: 8) {
-                Image(systemName: "bolt.circle.fill")
-                    .font(.system(size: 48))
-                    .foregroundStyle(Color.accentColor)
+                PidgyMascotMark(size: 58)
                 Text("Pidgy")
                     .font(.system(size: 24, weight: .bold, design: .monospaced))
                     .foregroundStyle(.primary)

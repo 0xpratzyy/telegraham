@@ -195,7 +195,8 @@ final class OpenAIProvider: AIProvider {
                     topics: topics,
                     snippets: messages
                 ),
-                requestKind: .dashboardTaskExtraction
+                requestKind: .dashboardTaskExtraction,
+                responseFormat: self.dashboardTaskExtractionResponseFormat()
             )
         }
         return try DashboardTaskParser.parse(response)
@@ -486,11 +487,15 @@ final class OpenAIProvider: AIProvider {
                             ],
                             "route": [
                                 "type": "string",
-                                "enum": ["effort_task", "reply_queue", "ignore"]
+                                "enum": ["effort_task", "reply_queue", "completed_task", "ignore"]
                             ],
                             "confidence": ["type": "number", "minimum": 0, "maximum": 1],
                             "reason": ["type": "string"],
                             "supportingMessageIds": [
+                                "type": "array",
+                                "items": ["type": "integer"]
+                            ],
+                            "completedTaskIds": [
                                 "type": "array",
                                 "items": ["type": "integer"]
                             ]
@@ -500,7 +505,8 @@ final class OpenAIProvider: AIProvider {
                             "route",
                             "confidence",
                             "reason",
-                            "supportingMessageIds"
+                            "supportingMessageIds",
+                            "completedTaskIds"
                         ],
                         "additionalProperties": false
                     ]
@@ -514,6 +520,78 @@ final class OpenAIProvider: AIProvider {
             "type": "json_schema",
             "json_schema": [
                 "name": "dashboard_task_triage_results",
+                "strict": true,
+                "schema": schema
+            ]
+        ]
+    }
+
+    private func dashboardTaskExtractionResponseFormat() -> [String: Any] {
+        let sourceMessageSchema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "chatId": ["type": ["integer", "string", "null"]],
+                "messageId": ["type": ["integer", "string"]],
+                "senderName": ["type": "string"],
+                "text": ["type": "string"],
+                "dateISO8601": ["type": ["string", "null"]]
+            ],
+            "required": ["chatId", "messageId", "senderName", "text", "dateISO8601"],
+            "additionalProperties": false
+        ]
+        let taskSchema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "stableFingerprint": ["type": "string"],
+                "title": ["type": "string"],
+                "summary": ["type": "string"],
+                "suggestedAction": ["type": "string"],
+                "ownerName": ["type": "string"],
+                "personName": ["type": "string"],
+                "chatId": ["type": ["integer", "string"]],
+                "chatTitle": ["type": "string"],
+                "topicName": ["type": ["string", "null"]],
+                "priority": ["type": "string", "enum": ["high", "medium", "low"]],
+                "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                "dueAtISO8601": ["type": ["string", "null"]],
+                "sourceMessages": [
+                    "type": "array",
+                    "items": sourceMessageSchema
+                ]
+            ],
+            "required": [
+                "stableFingerprint",
+                "title",
+                "summary",
+                "suggestedAction",
+                "ownerName",
+                "personName",
+                "chatId",
+                "chatTitle",
+                "topicName",
+                "priority",
+                "confidence",
+                "dueAtISO8601",
+                "sourceMessages"
+            ],
+            "additionalProperties": false
+        ]
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "tasks": [
+                    "type": "array",
+                    "items": taskSchema
+                ]
+            ],
+            "required": ["tasks"],
+            "additionalProperties": false
+        ]
+
+        return [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "dashboard_task_extraction_results",
                 "strict": true,
                 "schema": schema
             ]

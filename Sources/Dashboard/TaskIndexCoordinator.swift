@@ -9,6 +9,8 @@ final class TaskIndexCoordinator: ObservableObject {
         let chat: TGChat
         let messages: [TGMessage]
         let latestMessageId: Int64
+        let openTasks: [DashboardTask]
+        let openTaskEvidenceByTaskId: [Int64: [DashboardTaskSourceMessage]]
     }
 
     private struct RefreshRequest {
@@ -209,13 +211,25 @@ final class TaskIndexCoordinator: ObservableObject {
             telegramService: telegramService,
             includeBotsInAISearch: includeBotsInAISearch
         )
+        let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open, limit: 1_000)
+        let openTaskEvidenceByTaskId = await DatabaseManager.shared.loadDashboardTaskEvidence(
+            taskIds: openTasks.map(\.id)
+        )
+        let openTasksByChatId = Dictionary(grouping: openTasks, by: \.chatId)
+        let scanChats = Self.scanChats(from: candidateChats, openTasks: openTasks)
+        let forceRescan = request.forceRescan || Self.needsTriageContextVersionRescan()
         let pendingScans = await Self.pendingTaskScans(
-            from: candidateChats,
-            forceRescan: request.forceRescan
+            from: scanChats,
+            openTasksByChatId: openTasksByChatId,
+            openTaskEvidenceByTaskId: openTaskEvidenceByTaskId,
+            forceRescan: forceRescan
         )
 
         guard !pendingScans.isEmpty else {
             lastRefreshAt = Date()
+            if forceRescan {
+                Self.markTriageContextVersionScanned()
+            }
             return
         }
 
@@ -235,9 +249,23 @@ final class TaskIndexCoordinator: ObservableObject {
             guard !Task.isCancelled else { return }
 
             guard let triage = triageByChatId[pending.chat.id] else { continue }
+            if triage.route == .completedTask {
+                await DatabaseManager.shared.completeOpenDashboardTasks(
+                    chatId: pending.chat.id,
+                    matchingTaskIds: triage.completedTaskIds,
+                    matchingSourceMessageIds: triage.supportingMessageIds
+                )
+                await DatabaseManager.shared.updateDashboardTaskSyncState(
+                    chatId: pending.chat.id,
+                    latestMessageId: pending.latestMessageId
+                )
+                continue
+            }
+
             guard triage.route == .effortTask else {
                 await DatabaseManager.shared.ignoreOpenDashboardTasks(
                     chatId: pending.chat.id,
+                    matchingTaskIds: pending.openTasks.map(\.id),
                     matchingSourceMessageIds: triage.supportingMessageIds
                 )
                 await DatabaseManager.shared.updateDashboardTaskSyncState(
@@ -256,9 +284,27 @@ final class TaskIndexCoordinator: ObservableObject {
                     topics: activeTopics,
                     myUserId: myUserId
                 )
-                let evidencedCandidates = candidates.filter { !$0.sourceMessages.isEmpty }
+                let evidencedCandidates = candidates.filter {
+                    !$0.sourceMessages.isEmpty && DashboardTaskOwnership.isKnownOwner($0.ownerName)
+                }
                 if !evidencedCandidates.isEmpty {
                     _ = await DatabaseManager.shared.upsertDashboardTasks(evidencedCandidates)
+                }
+                let retainedFingerprints = Set(evidencedCandidates.map(\.stableFingerprint))
+                // If extraction returns the same source under a corrected owner/fingerprint,
+                // retire the stale row instead of leaving duplicate "Me" ownership behind.
+                let staleOpenTaskIds = pending.openTasks.compactMap { task -> Int64? in
+                    guard !retainedFingerprints.contains(task.stableFingerprint) else { return nil }
+                    let evidence = pending.openTaskEvidenceByTaskId[task.id] ?? []
+                    guard !evidence.isEmpty else { return nil }
+                    return task.id
+                }
+                if !staleOpenTaskIds.isEmpty {
+                    await DatabaseManager.shared.ignoreOpenDashboardTasks(
+                        chatId: pending.chat.id,
+                        matchingTaskIds: staleOpenTaskIds,
+                        matchingSourceMessageIds: []
+                    )
                 }
                 await DatabaseManager.shared.updateDashboardTaskSyncState(
                     chatId: pending.chat.id,
@@ -271,6 +317,9 @@ final class TaskIndexCoordinator: ObservableObject {
         }
 
         lastRefreshAt = Date()
+        if forceRescan {
+            Self.markTriageContextVersionScanned()
+        }
         await loadFromStore(
             telegramService: telegramService,
             includeBotsInAISearch: includeBotsInAISearch
@@ -288,6 +337,13 @@ final class TaskIndexCoordinator: ObservableObject {
             snoozedUntil: snoozedUntil
         )
         await loadFromStore()
+    }
+
+    func addTopic(named name: String) async -> DashboardTopic? {
+        let added = await DatabaseManager.shared.addDashboardTopic(name: name)
+        await loadFromStore()
+        guard let added else { return nil }
+        return topics.first { $0.id == added.id } ?? added
     }
 
     private func refreshTopicsIfNeeded(
@@ -411,8 +467,50 @@ final class TaskIndexCoordinator: ObservableObject {
         return filtered
     }
 
+    private static func scanChats(
+        from candidateChats: [TGChat],
+        openTasks: [DashboardTask]
+    ) -> [TGChat] {
+        var seenChatIds = Set(candidateChats.map(\.id))
+        var scanChats = candidateChats
+
+        let staleTaskChats = openTasks
+            .sorted {
+                let lhsDate = $0.latestSourceDate ?? $0.updatedAt
+                let rhsDate = $1.latestSourceDate ?? $1.updatedAt
+                if lhsDate != rhsDate { return lhsDate > rhsDate }
+                return $0.chatTitle.localizedCaseInsensitiveCompare($1.chatTitle) == .orderedAscending
+            }
+
+        for task in staleTaskChats where !seenChatIds.contains(task.chatId) {
+            seenChatIds.insert(task.chatId)
+            scanChats.append(TGChat(
+                id: task.chatId,
+                title: task.chatTitle.isEmpty ? "Chat \(task.chatId)" : task.chatTitle,
+                chatType: fallbackChatType(for: task.chatId),
+                unreadCount: 0,
+                lastMessage: nil,
+                memberCount: nil,
+                order: 0,
+                isInMainList: false,
+                smallPhotoFileId: nil
+            ))
+        }
+
+        return scanChats
+    }
+
+    private static func fallbackChatType(for chatId: Int64) -> TGChat.ChatType {
+        if chatId > 0 {
+            return .privateChat(userId: chatId)
+        }
+        return .basicGroup(groupId: abs(chatId))
+    }
+
     private static func pendingTaskScans(
         from chats: [TGChat],
+        openTasksByChatId: [Int64: [DashboardTask]],
+        openTaskEvidenceByTaskId: [Int64: [DashboardTaskSourceMessage]],
         forceRescan: Bool = false
     ) async -> [PendingTaskScan] {
         var pending: [PendingTaskScan] = []
@@ -440,10 +538,18 @@ final class TaskIndexCoordinator: ObservableObject {
 
             let messages = records.map { Self.tgMessage(from: $0, chat: chat) }
             guard !messages.isEmpty else { continue }
+            let openTasks = openTasksByChatId[chat.id] ?? []
+            let evidenceForOpenTasks = Dictionary(
+                uniqueKeysWithValues: openTasks.map {
+                    ($0.id, openTaskEvidenceByTaskId[$0.id] ?? [])
+                }
+            )
             pending.append(PendingTaskScan(
                 chat: chat,
                 messages: messages,
-                latestMessageId: latestMessageId
+                latestMessageId: latestMessageId,
+                openTasks: openTasks,
+                openTaskEvidenceByTaskId: evidenceForOpenTasks
             ))
         }
 
@@ -459,7 +565,12 @@ final class TaskIndexCoordinator: ObservableObject {
 
         for batch in pending.chunked(into: AppConstants.Dashboard.taskTriageBatchSize) {
             let candidates = batch.map {
-                DashboardTaskTriageCandidate(chat: $0.chat, messages: $0.messages)
+                DashboardTaskTriageCandidate(
+                    chat: $0.chat,
+                    messages: $0.messages,
+                    openTasks: $0.openTasks,
+                    openTaskEvidenceByTaskId: $0.openTaskEvidenceByTaskId
+                )
             }
             let decisions = try await aiService.triageDashboardTaskCandidates(
                 candidates,
@@ -471,6 +582,19 @@ final class TaskIndexCoordinator: ObservableObject {
         }
 
         return triageByChatId
+    }
+
+    private static func needsTriageContextVersionRescan() -> Bool {
+        UserDefaults.standard.integer(
+            forKey: AppConstants.Preferences.dashboardTaskTriageContextVersionKey
+        ) < AppConstants.Dashboard.taskTriageContextVersion
+    }
+
+    private static func markTriageContextVersionScanned() {
+        UserDefaults.standard.set(
+            AppConstants.Dashboard.taskTriageContextVersion,
+            forKey: AppConstants.Preferences.dashboardTaskTriageContextVersionKey
+        )
     }
 
     private static func tgMessage(from record: DatabaseManager.MessageRecord, chat: TGChat) -> TGMessage {

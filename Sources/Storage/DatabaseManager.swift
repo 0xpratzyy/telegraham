@@ -7,6 +7,7 @@ enum DatabaseManagerError: Error {
 
 actor DatabaseManager {
     static let shared = DatabaseManager()
+    private static let manualDashboardTopicScore = 10_000.0
 
     struct MessageRecord: Sendable, Equatable {
         let id: Int64
@@ -977,6 +978,30 @@ actor DatabaseManager {
         do {
             return try await pool.write { db in
                 let now = Date().timeIntervalSince1970
+                let activeNames = normalized.map(\.name)
+                let staleRankOffset = AppConstants.Dashboard.maxTopicCount + 1_000
+                if !activeNames.isEmpty {
+                    let placeholders = Array(repeating: "?", count: activeNames.count).joined(separator: ", ")
+                    var staleArguments = StatementArguments()
+                    staleArguments += [staleRankOffset]
+                    for name in activeNames {
+                        staleArguments += [name]
+                    }
+                    staleArguments += [staleRankOffset]
+                    staleArguments += [Self.manualDashboardTopicScore]
+
+                    try db.execute(
+                        sql: """
+                            UPDATE dashboard_topics
+                            SET rank = ? + rank
+                            WHERE name COLLATE NOCASE NOT IN (\(placeholders))
+                              AND rank < ?
+                              AND score < ?
+                            """,
+                        arguments: staleArguments
+                    )
+                }
+
                 for (index, topic) in normalized.enumerated() {
                     try db.execute(
                         sql: """
@@ -1017,6 +1042,63 @@ actor DatabaseManager {
         } catch {
             print("[DatabaseManager] Failed to load dashboard topics: \(error)")
             return []
+        }
+    }
+
+    func addDashboardTopic(name rawName: String, rationale rawRationale: String = "Added manually.") async -> DashboardTopic? {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.lowercased() != "uncategorized" else { return nil }
+        guard let pool = await ensureDatabase() else { return nil }
+
+        let rationale = rawRationale.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        do {
+            return try await pool.write { db in
+                let now = Date().timeIntervalSince1970
+                let pinnedRank = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COALESCE(MIN(rank), 0) - 1 FROM dashboard_topics"
+                ) ?? -1
+
+                try db.execute(
+                    sql: """
+                        INSERT INTO dashboard_topics (name, rationale, score, rank, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(name) DO UPDATE SET
+                            rationale = CASE
+                                WHEN excluded.rationale != '' THEN excluded.rationale
+                                ELSE dashboard_topics.rationale
+                            END,
+                            score = MAX(dashboard_topics.score, excluded.score),
+                            rank = MIN(dashboard_topics.rank, excluded.rank),
+                            updated_at = excluded.updated_at
+                        """,
+                    arguments: [
+                        name,
+                        rationale,
+                        Self.manualDashboardTopicScore,
+                        pinnedRank,
+                        now,
+                        now
+                    ]
+                )
+
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT id, name, rationale, score, rank, created_at, updated_at
+                        FROM dashboard_topics
+                        WHERE name = ? COLLATE NOCASE
+                        """,
+                    arguments: [name]
+                ) else {
+                    return nil
+                }
+                return Self.dashboardTopic(from: row)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to add dashboard topic \(name): \(error)")
+            return nil
         }
     }
 
@@ -1283,21 +1365,46 @@ actor DatabaseManager {
 
     func ignoreOpenDashboardTasks(
         chatId: Int64,
+        matchingTaskIds taskIds: [Int64] = [],
         matchingSourceMessageIds messageIds: [Int64]
     ) async {
+        let uniqueTaskIds = Array(Set(taskIds)).filter { $0 > 0 }
         let uniqueMessageIds = Array(Set(messageIds)).filter { $0 > 0 }
-        guard !uniqueMessageIds.isEmpty else { return }
+        guard !uniqueTaskIds.isEmpty || !uniqueMessageIds.isEmpty else { return }
         guard let pool = await ensureDatabase() else { return }
 
         do {
             try await pool.write { db in
-                let placeholders = Array(repeating: "?", count: uniqueMessageIds.count).joined(separator: ", ")
+                var matchClauses: [String] = []
                 var arguments = StatementArguments()
                 arguments += [DashboardTaskStatus.ignored.rawValue]
                 arguments += [Date().timeIntervalSince1970]
                 arguments += [chatId]
-                for messageId in uniqueMessageIds {
-                    arguments += [messageId]
+
+                if !uniqueTaskIds.isEmpty {
+                    let placeholders = Array(repeating: "?", count: uniqueTaskIds.count).joined(separator: ", ")
+                    matchClauses.append("dashboard_tasks.id IN (\(placeholders))")
+                    for taskId in uniqueTaskIds {
+                        arguments += [taskId]
+                    }
+                }
+
+                if !uniqueMessageIds.isEmpty {
+                    let placeholders = Array(repeating: "?", count: uniqueMessageIds.count).joined(separator: ", ")
+                    matchClauses.append(
+                        """
+                        EXISTS (
+                            SELECT 1
+                            FROM dashboard_task_sources
+                            WHERE dashboard_task_sources.task_id = dashboard_tasks.id
+                              AND dashboard_task_sources.chat_id = dashboard_tasks.chat_id
+                              AND dashboard_task_sources.message_id IN (\(placeholders))
+                        )
+                        """
+                    )
+                    for messageId in uniqueMessageIds {
+                        arguments += [messageId]
+                    }
                 }
 
                 try db.execute(
@@ -1308,19 +1415,75 @@ actor DatabaseManager {
                             updated_at = ?
                         WHERE status = 'open'
                           AND chat_id = ?
-                          AND EXISTS (
-                              SELECT 1
-                              FROM dashboard_task_sources
-                              WHERE dashboard_task_sources.task_id = dashboard_tasks.id
-                                AND dashboard_task_sources.chat_id = dashboard_tasks.chat_id
-                                AND dashboard_task_sources.message_id IN (\(placeholders))
-                          )
+                          AND (\(matchClauses.joined(separator: " OR ")))
                         """,
                     arguments: arguments
                 )
             }
         } catch {
             print("[DatabaseManager] Failed to ignore stale dashboard tasks for chat \(chatId): \(error)")
+        }
+    }
+
+    func completeOpenDashboardTasks(
+        chatId: Int64,
+        matchingTaskIds taskIds: [Int64],
+        matchingSourceMessageIds messageIds: [Int64]
+    ) async {
+        let uniqueTaskIds = Array(Set(taskIds)).filter { $0 > 0 }
+        let uniqueMessageIds = Array(Set(messageIds)).filter { $0 > 0 }
+        guard !uniqueTaskIds.isEmpty || !uniqueMessageIds.isEmpty else { return }
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                var matchClauses: [String] = []
+                var arguments = StatementArguments()
+                arguments += [DashboardTaskStatus.done.rawValue]
+                arguments += [Date().timeIntervalSince1970]
+                arguments += [chatId]
+
+                if !uniqueTaskIds.isEmpty {
+                    let placeholders = Array(repeating: "?", count: uniqueTaskIds.count).joined(separator: ", ")
+                    matchClauses.append("dashboard_tasks.id IN (\(placeholders))")
+                    for taskId in uniqueTaskIds {
+                        arguments += [taskId]
+                    }
+                }
+
+                if !uniqueMessageIds.isEmpty {
+                    let placeholders = Array(repeating: "?", count: uniqueMessageIds.count).joined(separator: ", ")
+                    matchClauses.append(
+                        """
+                        EXISTS (
+                            SELECT 1
+                            FROM dashboard_task_sources
+                            WHERE dashboard_task_sources.task_id = dashboard_tasks.id
+                              AND dashboard_task_sources.chat_id = dashboard_tasks.chat_id
+                              AND dashboard_task_sources.message_id IN (\(placeholders))
+                        )
+                        """
+                    )
+                    for messageId in uniqueMessageIds {
+                        arguments += [messageId]
+                    }
+                }
+
+                try db.execute(
+                    sql: """
+                        UPDATE dashboard_tasks
+                        SET status = ?,
+                            snoozed_until = NULL,
+                            updated_at = ?
+                        WHERE status IN ('open', 'snoozed')
+                          AND chat_id = ?
+                          AND (\(matchClauses.joined(separator: " OR ")))
+                        """,
+                    arguments: arguments
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to complete dashboard tasks for chat \(chatId): \(error)")
         }
     }
 

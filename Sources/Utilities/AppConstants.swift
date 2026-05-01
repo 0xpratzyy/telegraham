@@ -202,6 +202,7 @@ enum AppConstants {
 
     enum Dashboard {
         static let maxTopicCount = 6
+        static let taskTriageContextVersion = 7
         static let taskTriageChatLimit = 48
         static let taskTriageBatchSize = 12
         static let taskExtractionMessagesPerChat = 16
@@ -217,5 +218,6 @@ enum AppConstants {
     enum Preferences {
         static let includeBotsInAISearchKey = "includeBotsInAISearch"
         static let persistReplyQueueCandidateSnapshotsKey = "persistReplyQueueCandidateSnapshots"
+        static let dashboardTaskTriageContextVersionKey = "dashboardTaskTriageContextVersion"
     }
 }

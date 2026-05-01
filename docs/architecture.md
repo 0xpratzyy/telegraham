@@ -1,6 +1,6 @@
 # Pidgy Architecture
 
-Last updated: 2026-04-27
+Last updated: 2026-04-29
 
 Pidgy is a local-first macOS app for operating Telegram relationship context without turning Telegram into a full CRM. The launcher is still the fastest query surface; the dashboard is now a secondary operating surface for attention, extracted tasks, and relationship context.
 
@@ -25,7 +25,7 @@ flowchart TD
     D --> H["SummaryEngine"]
     C --> L["TaskIndexCoordinator"]
     B --> M["AttentionStore"]
-    M --> N["DashboardView"]
+    M --> N["Dashboard shell"]
     L --> N
     L --> O["Dashboard AI prompts"]
     O --> P["AIProvider"]
@@ -37,6 +37,7 @@ flowchart TD
     G --> J
     H --> J
     C --> K["Settings / debug surfaces"]
+    K -. "planned consolidation" .-> N
 ```
 
 ## 1. App Shell
@@ -125,6 +126,16 @@ Important boundary:
 Dashboard files:
 
 - [DashboardView.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardView.swift)
+- [DashboardHomeReplyViews.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardHomeReplyViews.swift)
+- [DashboardTasksPage.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardTasksPage.swift)
+- [DashboardPeoplePage.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardPeoplePage.swift)
+- [DashboardPreferencesPage.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardPreferencesPage.swift)
+- [DashboardTopicsPage.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardTopicsPage.swift)
+- [DashboardTopicSemanticSearch.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardTopicSemanticSearch.swift)
+- [DashboardTopicRows.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardTopicRows.swift)
+- [DashboardTaskPersonDetailViews.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardTaskPersonDetailViews.swift)
+- [DashboardTaskPersonRows.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardTaskPersonRows.swift)
+- [DashboardSharedViews.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardSharedViews.swift)
 - [TaskIndexCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/TaskIndexCoordinator.swift)
 - [AttentionStore.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/AttentionStore.swift)
 - [DashboardModels.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardModels.swift)
@@ -132,13 +143,14 @@ Dashboard files:
 
 Current dashboard responsibilities:
 
-- show a calm operating view over four pages: Dashboard, Reply queue, Tasks, People
+- show a calm operating view over Dashboard, Reply queue, Tasks, Topics, and People
 - reuse reply/follow-up pipeline state through `AttentionStore`
-- discover a small topic taxonomy from recent local messages
+- discover and pin a small workspace/topic taxonomy from recent local messages and user-created topics
 - extract durable tasks from recent per-chat local message windows
 - preserve manual task status across extraction refreshes
 - show task evidence snippets and deep-link back to Telegram
 - surface graph-derived top/stale contacts as context, not as a full CRM engine
+- provide topic-level catch-up/search using local semantic, FTS, task, reply, and recent-message signals
 
 Dashboard data flow:
 
@@ -151,7 +163,7 @@ flowchart TD
     D --> E
     E --> F["DashboardModels parsers"]
     F --> G["dashboard_topics / dashboard_tasks"]
-    G --> H["DashboardView Tasks page"]
+    G --> H["Dashboard Tasks / Topics pages"]
     I["Reply pipeline cache + visible chats"] --> J["AttentionStore"]
     J --> K["Dashboard Home / Reply queue"]
     L["RelationGraph"] --> M["Dashboard People page"]
@@ -161,7 +173,7 @@ Important boundaries:
 
 - Dashboard extraction reads local state; it should not fetch Telegram history inline.
 - Task extraction is a background indexing concern, separate from launcher query execution.
-- Dashboard tasks are not yet a complete task lifecycle engine. Today the code can insert/update positive task candidates and preserve manual status, but launch hardening still needs stale/closed task reconciliation so old open tasks do not linger forever.
+- Dashboard tasks are not yet a complete task lifecycle engine. The code can insert/update task candidates, preserve manual status, and mark existing tasks done when newer reply evidence closes them, but launch hardening still needs broader stale/closed task reconciliation so old open tasks do not linger forever.
 - Dashboard refresh currently runs on a timer and through manual refresh. Any product launch should include a clear user-facing cost/freshness story because dashboard extraction uses AI.
 
 ## 5. Shared Search / Follow-Up Domain Logic
@@ -185,6 +197,7 @@ Primary UI files:
 
 - [LauncherView.swift](/Users/pratyushrungta/telegraham/Sources/Views/LauncherView.swift)
 - [DashboardView.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardView.swift)
+- [DashboardSharedViews.swift](/Users/pratyushrungta/telegraham/Sources/Dashboard/DashboardSharedViews.swift)
 - [SettingsView.swift](/Users/pratyushrungta/telegraham/Sources/Views/SettingsView.swift)
 - [QueryRoutingDebugSnapshot.swift](/Users/pratyushrungta/telegraham/Sources/Views/Settings/QueryRoutingDebugSnapshot.swift)
 - [Components](/Users/pratyushrungta/telegraham/Sources/Views/Components)
@@ -201,19 +214,28 @@ Dashboard responsibilities:
 - provide a scannable daily operating view
 - combine reply queue, extracted tasks, and people context without replacing Telegram
 - expose task status actions: done, snooze, ignore, open chat
+- host workspace-like topic pages with search, catch-up, open tasks, and needs-reply views
+- own the shared dark dashboard design system: typography, spacing, colors, avatars, skeletons, rows, and detail panes
 
-Settings responsibilities:
+Dashboard Preferences responsibilities:
 
-- credentials and AI configuration
-- usage/debug surfaces
-- query routing inspection
-- destructive reset controls
+- Telegram credentials, auth status, and logout controls
+- AI provider configuration, connection testing, bot inclusion, and privacy notes
+- AI usage, graph health, recent-sync freshness, and deep-index coverage
+- destructive local reset controls
+
+Settings direction:
+
+- Settings now route into the dashboard as a Preferences section instead of opening a separate-feeling utility window.
+- The model is a dashboard-native preferences page for account, Telegram, AI providers, indexing, privacy/data, diagnostics, and destructive reset.
+- The launcher/menu-bar path still offers quick access, but opens the dashboard Preferences page rather than a separate visual system.
+- Debug-heavy panes should remain behind explicit diagnostics affordances so normal settings stay calm and operator-focused.
 
 Current architectural debt still visible:
 
 - `LauncherView` remains too large and still mixes multiple result presentations.
-- `DashboardView` is now the largest UI file and mixes page composition, filters, row/detail views, theme, and local dashboard view models.
-- `SettingsView` still owns tab rendering plus a large amount of debug/formatting code.
+- dashboard views are now split by page/detail/row/theme responsibility, but `DashboardModels` still mixes DTOs, parsers, filters, people directory logic, and refresh policy.
+- `SettingsView` remains in the tree as a legacy/fallback implementation; visible entry points now use `DashboardPreferencesPage`.
 - `SearchCoordinator` still contains the full semantic/topic path inline.
 - `DatabaseManager` now owns both core message storage and dashboard persistence helpers; dashboard storage can be extracted once launch behavior settles.
 
@@ -243,6 +265,7 @@ The active architecture direction is:
 5. keep graph/relationship foundations, but document them as supporting context until graph-backed execution is real
 6. continue breaking large UI/coordinator files into smaller focused units without rewriting product behavior
 7. make dashboard task lifecycle and AI cost/freshness behavior explicit before launch
+8. keep shrinking the legacy settings/debug path now that Preferences is dashboard-native
 
 ## 9. What Is Intentionally Not Core Right Now
 

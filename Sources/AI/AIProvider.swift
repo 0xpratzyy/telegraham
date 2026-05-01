@@ -52,7 +52,7 @@ protocol AIProvider {
         messages: [MessageSnippet]
     ) async throws -> [DashboardTaskCandidate]
 
-    /// Dashboard task triage: classify many chats into effort_task / reply_queue / ignore.
+    /// Dashboard task triage: classify many chats into effort_task / reply_queue / completed_task / ignore.
     func triageDashboardTaskCandidates(
         candidates: [DashboardTaskTriageCandidateDTO]
     ) async throws -> [DashboardTaskTriageResultDTO]
