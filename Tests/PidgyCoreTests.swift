@@ -2924,6 +2924,24 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertFalse(recoveryChatIds.contains(oldestChat.id))
     }
 
+    func testRecentSyncBackfillFetchPolicyAdaptsForRetryFailures() {
+        let primary = RecentSyncCoordinator.backfillFetchPolicyForTesting(lane: "primary", failureCount: 4)
+        XCTAssertEqual(primary.pageSize, 100)
+        XCTAssertEqual(primary.timeoutSeconds, 25)
+
+        let earlyRetry = RecentSyncCoordinator.backfillFetchPolicyForTesting(lane: "retry", failureCount: 0)
+        XCTAssertEqual(earlyRetry.pageSize, 100)
+        XCTAssertEqual(earlyRetry.timeoutSeconds, 45)
+
+        let midRetry = RecentSyncCoordinator.backfillFetchPolicyForTesting(lane: "retry", failureCount: 2)
+        XCTAssertEqual(midRetry.pageSize, 50)
+        XCTAssertEqual(midRetry.timeoutSeconds, 90)
+
+        let escalatedRetry = RecentSyncCoordinator.backfillFetchPolicyForTesting(lane: "retry", failureCount: 4)
+        XCTAssertEqual(escalatedRetry.pageSize, 25)
+        XCTAssertEqual(escalatedRetry.timeoutSeconds, 180)
+    }
+
     @MainActor
     func testRecentSyncBackfillCompletesOnePageGapBeforeAdvancingState() async throws {
         try await withTempDatabase { _ in
@@ -2970,6 +2988,7 @@ final class PidgyCoreTests: XCTestCase {
             XCTAssertTrue(storedMessages.contains { $0.id == 119 })
             XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0])
             XCTAssertEqual(telegramService.historyRequests.map(\.limit), [AppConstants.RecentSync.backfillPageSize])
+            XCTAssertEqual(telegramService.historyRequests.map(\.timeoutSeconds), [AppConstants.RecentSync.historyFetchTimeoutSeconds])
         }
     }
 
@@ -3365,7 +3384,7 @@ final class PidgyCoreTests: XCTestCase {
                     messagesFetched: 50,
                     status: "failed",
                     lastError: "timeout",
-                    failureCount: 2,
+                    failureCount: 1,
                     lastAttemptAt: now.addingTimeInterval(-120),
                     nextRetryAt: now.addingTimeInterval(-1)
                 )
@@ -3387,6 +3406,80 @@ final class PidgyCoreTests: XCTestCase {
             let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
             XCTAssertNil(backfillState)
             XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [1_051])
+            XCTAssertEqual(telegramService.historyRequests.map(\.limit), [100])
+            XCTAssertEqual(telegramService.historyRequests.map(\.timeoutSeconds), [45])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncRetryLaneUsesEscalatedTimeoutAndSmallerPageForDenseFailures() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_314
+            let now = Date()
+            let history = stride(from: Int64(1_100), through: Int64(1_000), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: chatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 1_100))
+                )
+            }
+            let chat = TGChat(
+                id: chatId,
+                title: "Dense Retry",
+                chatType: .privateChat(userId: 314),
+                unreadCount: 0,
+                lastMessage: history[0],
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 1_000,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            await DatabaseManager.shared.saveRecentBackfillState(
+                DatabaseManager.RecentBackfillStateRecord(
+                    chatId: chatId,
+                    targetMessageId: 1_100,
+                    stopMessageId: 1_000,
+                    cursorMessageId: 1_025,
+                    startedAt: now.addingTimeInterval(-300),
+                    updatedAt: now.addingTimeInterval(-120),
+                    pagesFetched: 3,
+                    messagesFetched: 75,
+                    status: "failed",
+                    lastError: "timeout",
+                    failureCount: 4,
+                    lastAttemptAt: now.addingTimeInterval(-120),
+                    nextRetryAt: now.addingTimeInterval(-1)
+                )
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: history]
+            )
+
+            let completed = await coordinator.syncSelectedChatsForTesting(
+                primaryChats: [],
+                retryChats: [chat],
+                using: telegramService
+            )
+
+            XCTAssertEqual(completed, [chatId])
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [1_025])
+            XCTAssertEqual(telegramService.historyRequests.map(\.limit), [25])
+            XCTAssertEqual(telegramService.historyRequests.map(\.timeoutSeconds), [180])
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 1_100)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            let storedMessages = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 200)
+            XCTAssertTrue(storedMessages.contains { $0.id == 1_000 })
+            XCTAssertTrue(storedMessages.contains { $0.id == 1_024 })
         }
     }
 
@@ -9554,6 +9647,7 @@ private final class PipelineTestTelegramService: TelegramService {
         let fromMessageId: Int64
         let limit: Int
         let onlyLocal: Bool
+        let timeoutSeconds: TimeInterval?
     }
 
     private(set) var historyRequests: [HistoryRequest] = []
@@ -9614,7 +9708,8 @@ private final class PipelineTestTelegramService: TelegramService {
             chatId: chatId,
             fromMessageId: fromMessageId,
             limit: limit,
-            onlyLocal: onlyLocal
+            onlyLocal: onlyLocal,
+            timeoutSeconds: timeoutSeconds
         ))
         if onlyLocal {
             if hangingLocalHistoryChatIds.contains(chatId) {

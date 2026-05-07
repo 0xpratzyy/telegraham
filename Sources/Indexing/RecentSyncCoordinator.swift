@@ -37,29 +37,9 @@ actor RecentSyncCoordinator {
         let lastBatchMessageCount: Int
     }
 
-    private struct HistoryFetchTimeoutError: LocalizedError {
-        let seconds: TimeInterval
-
-        var errorDescription: String? {
-            "recent sync history fetch timed out after \(Int(seconds)) seconds"
-        }
-    }
-
-    private final class TimeoutRace<T: Sendable>: @unchecked Sendable {
-        private let lock = NSLock()
-        private var didResume = false
-
-        func resume(_ result: Result<T, Error>, continuation: CheckedContinuation<T, Error>) {
-            lock.lock()
-            guard !didResume else {
-                lock.unlock()
-                return
-            }
-            didResume = true
-            lock.unlock()
-
-            continuation.resume(with: result)
-        }
+    private struct BackfillFetchPolicy: Sendable, Equatable {
+        let pageSize: Int
+        let timeoutSeconds: TimeInterval
     }
 
     final class ProgressState: ObservableObject {
@@ -533,15 +513,13 @@ actor RecentSyncCoordinator {
         using telegramService: TelegramService
     ) async -> RecentSyncOutcome {
         do {
-            let messages = try await withHistoryFetchTimeout {
-                try await telegramService.getChatHistory(
-                    chatId: chat.id,
-                    limit: AppConstants.RecentSync.latestWindowPerChat,
-                    onlyLocal: false,
-                    priority: .background,
-                    timeoutSeconds: AppConstants.RecentSync.historyFetchTimeoutSeconds
-                )
-            }
+            let messages = try await telegramService.getChatHistory(
+                chatId: chat.id,
+                limit: AppConstants.RecentSync.latestWindowPerChat,
+                onlyLocal: false,
+                priority: .background,
+                timeoutSeconds: AppConstants.RecentSync.historyFetchTimeoutSeconds
+            )
 
             if !messages.isEmpty {
                 await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: messages, append: false)
@@ -615,25 +593,26 @@ actor RecentSyncCoordinator {
         var pagesFetched = shouldResume ? (existing?.pagesFetched ?? 0) : 0
         var messagesFetched = shouldResume ? (existing?.messagesFetched ?? 0) : 0
         var passMessagesFetched = 0
-
+        let fetchPolicy = backfillFetchPolicy(
+            lane: lane,
+            failureCount: shouldResume ? (existing?.failureCount ?? 0) : 0
+        )
 
         do {
             for _ in 0..<maxPagesPerPass {
                 try Task.checkCancellation()
                 let requestCursor = cursor
-                let messages = try await withHistoryFetchTimeout {
-                    try await telegramService.getChatHistory(
-                        chatId: chat.id,
-                        fromMessageId: requestCursor,
-                        limit: AppConstants.RecentSync.backfillPageSize,
-                        onlyLocal: false,
-                        priority: .background,
-                        timeoutSeconds: AppConstants.RecentSync.historyFetchTimeoutSeconds
-                    )
-                }
+                let messages = try await telegramService.getChatHistory(
+                    chatId: chat.id,
+                    fromMessageId: requestCursor,
+                    limit: fetchPolicy.pageSize,
+                    onlyLocal: false,
+                    priority: .background,
+                    timeoutSeconds: fetchPolicy.timeoutSeconds
+                )
 
                 guard !messages.isEmpty else {
-                    let failedState = await saveFailedBackfillState(
+                    await saveFailedBackfillState(
                         existing: existing,
                         chatId: chat.id,
                         targetMessageId: targetMessageId,
@@ -679,7 +658,7 @@ actor RecentSyncCoordinator {
                 }
 
                 guard let minimumFetchedMessageId = minimumMessageId(in: messages), minimumFetchedMessageId != cursor else {
-                    let failedState = await saveFailedBackfillState(
+                    await saveFailedBackfillState(
                         existing: existing,
                         chatId: chat.id,
                         targetMessageId: targetMessageId,
@@ -740,7 +719,7 @@ actor RecentSyncCoordinator {
                 messageCount: passMessagesFetched
             )
         } catch {
-            let failedState = await saveFailedBackfillState(
+            await saveFailedBackfillState(
                 existing: existing,
                 chatId: chat.id,
                 targetMessageId: targetMessageId,
@@ -853,51 +832,24 @@ actor RecentSyncCoordinator {
         messages.map(\.id).min()
     }
 
-    private static func withHistoryFetchTimeout<T: Sendable>(
-        operation: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        let seconds = AppConstants.RecentSync.historyFetchTimeoutSeconds
-        guard seconds > 0 else {
-            throw HistoryFetchTimeoutError(seconds: seconds)
+    private nonisolated static func backfillFetchPolicy(
+        lane: String,
+        failureCount: Int
+    ) -> BackfillFetchPolicy {
+        guard lane == "retry" else {
+            return BackfillFetchPolicy(
+                pageSize: AppConstants.RecentSync.backfillPageSize,
+                timeoutSeconds: AppConstants.RecentSync.historyFetchTimeoutSeconds
+            )
         }
 
-        let nanoseconds = UInt64((seconds * 1_000_000_000).rounded(.up))
-        let operationTask = Task {
-            try await operation()
-        }
-        let timeoutTask = Task<T, Error> {
-            try await Task.sleep(nanoseconds: nanoseconds)
-            throw HistoryFetchTimeoutError(seconds: seconds)
-        }
-
-        defer {
-            operationTask.cancel()
-            timeoutTask.cancel()
-        }
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let race = TimeoutRace<T>()
-                Task {
-                    do {
-                        let value = try await operationTask.value
-                        race.resume(.success(value), continuation: continuation)
-                    } catch {
-                        race.resume(.failure(error), continuation: continuation)
-                    }
-                }
-                Task {
-                    do {
-                        let value = try await timeoutTask.value
-                        race.resume(.success(value), continuation: continuation)
-                    } catch {
-                        race.resume(.failure(error), continuation: continuation)
-                    }
-                }
-            }
-        } onCancel: {
-            operationTask.cancel()
-            timeoutTask.cancel()
+        switch max(0, failureCount) {
+        case 0...1:
+            return BackfillFetchPolicy(pageSize: 100, timeoutSeconds: 45)
+        case 2...3:
+            return BackfillFetchPolicy(pageSize: 50, timeoutSeconds: 90)
+        default:
+            return BackfillFetchPolicy(pageSize: 25, timeoutSeconds: 180)
         }
     }
 
@@ -1010,6 +962,14 @@ actor RecentSyncCoordinator {
             now: now
         )
         return (selection.primaryChats.map(\.id), selection.retryChats.map(\.id))
+    }
+
+    nonisolated static func backfillFetchPolicyForTesting(
+        lane: String,
+        failureCount: Int
+    ) -> (pageSize: Int, timeoutSeconds: TimeInterval) {
+        let policy = backfillFetchPolicy(lane: lane, failureCount: failureCount)
+        return (policy.pageSize, policy.timeoutSeconds)
     }
 #endif
 }
