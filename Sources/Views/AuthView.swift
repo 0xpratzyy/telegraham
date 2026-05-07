@@ -77,10 +77,6 @@ struct AuthView: View {
         .onAppear {
             apiId = (try? KeychainManager.retrieve(for: .apiId)) ?? ""
             apiHash = (try? KeychainManager.retrieve(for: .apiHash)) ?? ""
-            PidgyDebugLog.record(
-                "TelegramAuthUI",
-                "AuthView appeared authState=\(telegramService.authState.debugLabel) hasApiId=\(!apiId.isEmpty) apiHashLength=\(apiHash.count)"
-            )
         }
     }
 
@@ -102,10 +98,6 @@ struct AuthView: View {
                 .foregroundStyle(Color.Pidgy.accent)
 
             actionButton(title: "Connect") {
-                PidgyDebugLog.record(
-                    "TelegramAuthUI",
-                    "Connect tapped hasApiId=\(!apiId.isEmpty) apiHashLength=\(apiHash.count)"
-                )
                 guard !apiId.isEmpty, !apiHash.isEmpty else {
                     errorMessage = "Both API ID and API Hash are required"
                     return
@@ -122,7 +114,6 @@ struct AuthView: View {
                     telegramService.start(apiId: id, apiHash: apiHash)
                 } catch {
                     errorMessage = Self.extractErrorMessage(error)
-                    PidgyDebugLog.record("TelegramAuthUI", "Connect failed: \(errorMessage ?? error.localizedDescription)")
                 }
             }
         }
@@ -140,7 +131,6 @@ struct AuthView: View {
                 .foregroundStyle(Color.Pidgy.fg2)
 
             Button {
-                PidgyDebugLog.record("TelegramAuthUI", "Phone login fallback selected while requesting QR")
                 showPhoneLogin = true
             } label: {
                 Text("Log in with phone number instead")
@@ -151,18 +141,14 @@ struct AuthView: View {
         }
         .onAppear {
             guard !didRequestQrCode else {
-                PidgyDebugLog.record("TelegramAuthUI", "QR request view appeared; request already sent")
                 return
             }
             didRequestQrCode = true
             Task {
                 do {
-                    PidgyDebugLog.record("TelegramAuthUI", "Requesting QR code from AuthView")
                     try await telegramService.requestQrCodeAuth()
-                    PidgyDebugLog.record("TelegramAuthUI", "QR code request submitted")
                 } catch {
                     errorMessage = Self.extractErrorMessage(error)
-                    PidgyDebugLog.record("TelegramAuthUI", "QR code request failed: \(errorMessage ?? error.localizedDescription)")
                 }
             }
         }
@@ -202,7 +188,6 @@ struct AuthView: View {
             .multilineTextAlignment(.center)
 
             Button {
-                PidgyDebugLog.record("TelegramAuthUI", "Phone login fallback selected from QR view")
                 showPhoneLogin = true
             } label: {
                 Text("Log in with phone number instead")
@@ -226,11 +211,9 @@ struct AuthView: View {
             actionButton(title: "Send Code") {
                 do {
                     errorMessage = nil
-                    PidgyDebugLog.record("TelegramAuthUI", "Send code tapped phoneLength=\(phoneNumber.count)")
                     try await telegramService.setPhoneNumber(phoneNumber)
                 } catch {
                     errorMessage = Self.extractErrorMessage(error)
-                    PidgyDebugLog.record("TelegramAuthUI", "Send code failed: \(errorMessage ?? error.localizedDescription)")
                 }
             }
 
@@ -265,11 +248,9 @@ struct AuthView: View {
             actionButton(title: "Verify") {
                 do {
                     errorMessage = nil
-                    PidgyDebugLog.record("TelegramAuthUI", "Verify tapped codeLength=\(verificationCode.count)")
                     try await telegramService.submitVerificationCode(verificationCode)
                 } catch {
                     errorMessage = Self.extractErrorMessage(error)
-                    PidgyDebugLog.record("TelegramAuthUI", "Verify failed: \(errorMessage ?? error.localizedDescription)")
                 }
             }
         }
@@ -294,11 +275,9 @@ struct AuthView: View {
             actionButton(title: "Submit") {
                 do {
                     errorMessage = nil
-                    PidgyDebugLog.record("TelegramAuthUI", "2FA submit tapped passwordLength=\(password.count)")
                     try await telegramService.submitPassword(password)
                 } catch {
                     errorMessage = Self.extractErrorMessage(error)
-                    PidgyDebugLog.record("TelegramAuthUI", "2FA submit failed: \(errorMessage ?? error.localizedDescription)")
                 }
             }
         }

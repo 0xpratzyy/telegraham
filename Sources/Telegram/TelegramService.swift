@@ -37,21 +37,14 @@ class TelegramService: ObservableObject {
 
     func start(apiId: Int, apiHash: String) {
         let trimmedHash = apiHash.trimmingCharacters(in: .whitespacesAndNewlines)
-        PidgyDebugLog.record(
-            "TelegramAuth",
-            "start requested authState=\(authState.debugLabel) clientActive=\(client != nil) apiId=\(apiId) apiHashLength=\(trimmedHash.count)"
-        )
         errorMessage = nil
 
         if client != nil, activeAPIId == apiId, activeAPIHash == trimmedHash {
-            PidgyDebugLog.record("TelegramAuth", "active client already uses these credentials; skipping client recreation")
             if authState == .waitingForParameters {
                 Task {
                     do {
                         try await setTdlibParameters(apiId: apiId, apiHash: trimmedHash)
-                        PidgyDebugLog.record("TelegramAuth", "setTdlibParameters retried successfully")
                     } catch {
-                        PidgyDebugLog.record("TelegramAuth", "setTdlibParameters retry failed: \(Self.describe(error))")
                     }
                 }
             }
@@ -60,10 +53,6 @@ class TelegramService: ObservableObject {
 
         if client != nil {
             errorMessage = "Restart Pidgy before changing Telegram API credentials."
-            PidgyDebugLog.record(
-                "TelegramAuth",
-                "refusing to recreate active TDLib client with different credentials; restart required"
-            )
             return
         }
 
@@ -83,15 +72,12 @@ class TelegramService: ObservableObject {
         Task {
             do {
                 try await setTdlibParameters(apiId: apiId, apiHash: trimmedHash)
-                PidgyDebugLog.record("TelegramAuth", "setTdlibParameters completed")
             } catch {
-                PidgyDebugLog.record("TelegramAuth", "setTdlibParameters failed: \(Self.describe(error))")
             }
         }
     }
 
     func stop() {
-        PidgyDebugLog.record("TelegramAuth", "stop requested authState=\(authState.debugLabel)")
         updateTask?.cancel()
         updateTask = nil
         chatDiscoveryTask?.cancel()
@@ -121,10 +107,6 @@ class TelegramService: ObservableObject {
         guard let client else { throw TGError.clientNotInitialized }
 
         let dbPath = TDLibClientWrapper.databasePath()
-        PidgyDebugLog.record(
-            "TelegramAuth",
-            "setting TDLib parameters dbPath=\(dbPath) apiId=\(apiId) apiHashLength=\(apiHash.count)"
-        )
 
         _ = try await client.setTdlibParameters(
             apiHash: apiHash,
@@ -153,7 +135,6 @@ class TelegramService: ObservableObject {
             .replacingOccurrences(of: "-", with: "")
             .replacingOccurrences(of: "(", with: "")
             .replacingOccurrences(of: ")", with: "")
-        PidgyDebugLog.record("TelegramAuth", "submitting phone number length=\(cleanPhone.count)")
         _ = try await client.setAuthenticationPhoneNumber(
             phoneNumber: cleanPhone,
             settings: nil
@@ -162,25 +143,21 @@ class TelegramService: ObservableObject {
 
     func submitVerificationCode(_ code: String) async throws {
         guard let client else { throw TGError.clientNotInitialized }
-        PidgyDebugLog.record("TelegramAuth", "submitting verification code length=\(code.count)")
         _ = try await client.checkAuthenticationCode(code: code)
     }
 
     func submitPassword(_ password: String) async throws {
         guard let client else { throw TGError.clientNotInitialized }
-        PidgyDebugLog.record("TelegramAuth", "submitting 2FA password length=\(password.count)")
         _ = try await client.checkAuthenticationPassword(password: password)
     }
 
     func requestQrCodeAuth() async throws {
         guard let client else { throw TGError.clientNotInitialized }
-        PidgyDebugLog.record("TelegramAuth", "requesting QR code authentication")
         _ = try await client.requestQrCodeAuthentication(otherUserIds: [])
     }
 
     func logOut() async throws {
         guard let client else { throw TGError.clientNotInitialized }
-        PidgyDebugLog.record("TelegramAuth", "logout requested")
         _ = try await client.logOut()
     }
 
@@ -333,10 +310,6 @@ class TelegramService: ObservableObject {
             )
 
             do {
-                SyncDebugLog.record(
-                    "TelegramService",
-                    "getChatHistory start chatId=\(chatId) from=\(fromMessageId) limit=\(limit) onlyLocal=\(onlyLocal) priority=\(priority.rawValue) timeout=\(Int(seconds))"
-                )
                 let messages = try await withHistoryRequestTimeout(seconds: seconds) {
                     let result = try await client.getChatHistory(
                         chatId: chatId,
@@ -348,18 +321,10 @@ class TelegramService: ObservableObject {
                     return (result.messages ?? []).compactMap { self.mapMessage($0) }
                 }
                 await rateLimiter.releaseCall(method: "getChatHistory")
-                SyncDebugLog.record(
-                    "TelegramService",
-                    "getChatHistory complete chatId=\(chatId) from=\(fromMessageId) count=\(messages.count)"
-                )
                 return messages
             } catch let error as TDLibKit.Error {
                 await rateLimiter.releaseCall(method: "getChatHistory")
                 guard attempt < 3, let floodWaitSeconds = floodWaitSeconds(from: error) else {
-                    SyncDebugLog.record(
-                        "TelegramService",
-                        "getChatHistory failed chatId=\(chatId) from=\(fromMessageId) error=\(error.localizedDescription)"
-                    )
                     throw error
                 }
 
@@ -367,10 +332,6 @@ class TelegramService: ObservableObject {
                 await rateLimiter.recordFloodWait(method: "getChatHistory", seconds: floodWaitSeconds)
             } catch {
                 await rateLimiter.releaseCall(method: "getChatHistory")
-                SyncDebugLog.record(
-                    "TelegramService",
-                    "getChatHistory failed chatId=\(chatId) from=\(fromMessageId) released=true error=\(error.localizedDescription)"
-                )
                 throw error
             }
         }
@@ -798,7 +759,6 @@ class TelegramService: ObservableObject {
     }
 
     private func handleAuthState(_ state: AuthorizationState) {
-        PidgyDebugLog.record("TelegramAuth", "authorization update \(Self.describe(state))")
         switch state {
         case .authorizationStateWaitTdlibParameters:
             authState = .waitingForParameters
@@ -823,16 +783,12 @@ class TelegramService: ObservableObject {
             Task {
                 do {
                     try await loadChats()
-                    PidgyDebugLog.record("TelegramAuth", "initial loadChats completed visibleChats=\(visibleChats.count)")
                 } catch {
-                    PidgyDebugLog.record("TelegramAuth", "initial loadChats failed: \(Self.describe(error))")
                 }
                 startBackgroundChatDiscovery()
                 if let me = try? await fetchCurrentUser() {
                     currentUser = me
-                    PidgyDebugLog.record("TelegramAuth", "current user loaded id=\(me.id) displayNameLength=\(me.displayName.count)")
                 } else {
-                    PidgyDebugLog.record("TelegramAuth", "current user load skipped or failed")
                 }
             }
 
@@ -856,7 +812,6 @@ class TelegramService: ObservableObject {
     private func handleConnectionState(_ state: ConnectionState) {
         let previous = connectionState
         connectionState = state
-        PidgyDebugLog.record("TelegramAuth", "connection update \(Self.describe(state)) previous=\(Self.describe(previous))")
 
         guard Self.shouldTriggerRecoveryRefresh(
             previousConnectionState: previous,

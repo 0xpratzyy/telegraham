@@ -99,7 +99,6 @@ actor RecentSyncCoordinator {
         pendingImmediateRefresh = true
         recoveryChatIds.removeAll()
         lastRecoveryRefreshAt = nil
-        SyncDebugLog.record("RecentSync", "start requested")
 
         guard processingTask == nil else { return }
 
@@ -118,7 +117,6 @@ actor RecentSyncCoordinator {
     }
 
     func stop() async {
-        SyncDebugLog.record("RecentSync", "stop requested")
         let task = processingTask
         task?.cancel()
         processingTask = nil
@@ -151,11 +149,9 @@ actor RecentSyncCoordinator {
     func recoverNow() async {
         guard let telegramService else {
             pendingImmediateRefresh = true
-            SyncDebugLog.record("RecentSync", "recover queued before service attached")
             return
         }
         let visibleChats = await snapshot(using: telegramService)
-        SyncDebugLog.record("RecentSync", "recover requested visibleChats=\(visibleChats.count)")
         scheduleRecoveryRefresh(from: visibleChats)
     }
 
@@ -183,10 +179,6 @@ actor RecentSyncCoordinator {
                 recentSyncStates: recentSyncStates,
                 backfillStates: backfillStates,
                 now: Date()
-            )
-            SyncDebugLog.record(
-                "RecentSync",
-                "pass snapshot=\(snapshot.count) primaryCandidates=\(selection.primaryCandidates.count) primarySelected=\(selection.primaryChats.count) retryCandidates=\(selection.retryCandidates.count) retrySelected=\(selection.retryChats.count) queued=\(pendingImmediateRefresh)"
             )
 
             guard selection.selectedCount > 0 else {
@@ -359,10 +351,6 @@ actor RecentSyncCoordinator {
             if let backfillState,
                Self.isMatchingBackfill(backfillState, targetMessageId: latestChatMessageId, stopMessageId: state.latestSyncedMessageId),
                backfillState.status == "failed" {
-                SyncDebugLog.record(
-                    "RecentSync",
-                    "primary deferred-to-retry chatId=\(chat.id) latest=\(latestChatMessageId) stop=\(state.latestSyncedMessageId) failures=\(backfillState.failureCount) nextRetry=\(backfillState.nextRetryAt?.description ?? "nil")"
-                )
                 return false
             }
             return true
@@ -398,10 +386,6 @@ actor RecentSyncCoordinator {
         guard let nextRetryAt = backfillState.nextRetryAt else { return true }
         let isDue = nextRetryAt <= now
         if !isDue {
-            SyncDebugLog.record(
-                "RecentSync",
-                "retry deferred chatId=\(chat.id) latest=\(latestMessageId) stop=\(state.latestSyncedMessageId) failures=\(backfillState.failureCount) nextRetry=\(nextRetryAt)"
-            )
         }
         return isDue
     }
@@ -412,7 +396,6 @@ actor RecentSyncCoordinator {
            let lastRecoveryRefreshAt,
            now.timeIntervalSince(lastRecoveryRefreshAt) < AppConstants.RecentSync.recoveryRefreshCooldownSeconds {
             pendingImmediateRefresh = true
-            SyncDebugLog.record("RecentSync", "recovery refresh kept queued due to cooldown")
             return
         }
 
@@ -428,10 +411,6 @@ actor RecentSyncCoordinator {
         prependPrioritized(chatIds: recoveryTargets)
         pendingImmediateRefresh = true
         lastRecoveryRefreshAt = now
-        SyncDebugLog.record(
-            "RecentSync",
-            "recovery targets=\(recoveryTargets.map(String.init).joined(separator: ","))"
-        )
     }
 
     private func prependPrioritized(chatIds: [Int64]) {
@@ -458,15 +437,10 @@ actor RecentSyncCoordinator {
             let state = await DatabaseManager.shared.loadRecentSyncState(chatId: chat.id)
             if Self.needsBackfill(chat: chat, state: state) {
                 guard catchUpProcessed < AppConstants.RecentSync.maxBackfillChatsPerPass else {
-                    SyncDebugLog.record("RecentSync", "backfill deferred chatId=\(chat.id) reason=per-pass-limit")
                     continue
                 }
 
                 catchUpProcessed += 1
-                SyncDebugLog.record(
-                    "RecentSync",
-                    "backfill candidate chatId=\(chat.id) title=\"\(chat.title)\" local=\(state?.latestSyncedMessageId ?? 0) latest=\(chat.lastMessage?.id ?? 0)"
-                )
                 let outcome = await Self.syncRecentBackfill(
                     for: chat,
                     state: state,
@@ -511,10 +485,6 @@ actor RecentSyncCoordinator {
             let state = await DatabaseManager.shared.loadRecentSyncState(chatId: chat.id)
             guard Self.needsBackfill(chat: chat, state: state) else { continue }
             let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chat.id)
-            SyncDebugLog.record(
-                "RecentSync",
-                "retry candidate chatId=\(chat.id) title=\"\(chat.title)\" failures=\(backfillState?.failureCount ?? 0) nextRetry=\(backfillState?.nextRetryAt?.description ?? "nil") cursor=\(backfillState?.cursorMessageId ?? 0) target=\(backfillState?.targetMessageId ?? 0) stop=\(backfillState?.stopMessageId ?? 0)"
-            )
             let outcome = await Self.syncRecentBackfill(
                 for: chat,
                 state: state,
@@ -591,10 +561,6 @@ actor RecentSyncCoordinator {
                 messageCount: messages.count
             )
         } catch {
-            SyncDebugLog.record(
-                "RecentSync",
-                "latest-window failed chatId=\(chat.id) error=\(error.localizedDescription)"
-            )
             return RecentSyncOutcome(
                 chatId: chat.id,
                 chatTitle: chat.title,
@@ -632,10 +598,6 @@ actor RecentSyncCoordinator {
                 syncedAt: now
             )
             await DatabaseManager.shared.deleteRecentBackfillState(chatId: chat.id)
-            SyncDebugLog.record(
-                "RecentSync",
-                "backfill reconciled-latest-before-stop chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId)"
-            )
             return RecentSyncOutcome(
                 chatId: chat.id,
                 chatTitle: chat.title,
@@ -654,19 +616,11 @@ actor RecentSyncCoordinator {
         var messagesFetched = shouldResume ? (existing?.messagesFetched ?? 0) : 0
         var passMessagesFetched = 0
 
-        SyncDebugLog.record(
-            "RecentSync",
-            "backfill start lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) resume=\(shouldResume) failures=\(shouldResume ? (existing?.failureCount ?? 0) : 0) nextRetry=\(shouldResume ? (existing?.nextRetryAt?.description ?? "nil") : "nil")"
-        )
 
         do {
             for _ in 0..<maxPagesPerPass {
                 try Task.checkCancellation()
                 let requestCursor = cursor
-                SyncDebugLog.record(
-                    "RecentSync",
-                    "backfill page request lane=\(lane) chatId=\(chat.id) from=\(requestCursor) limit=\(AppConstants.RecentSync.backfillPageSize)"
-                )
                 let messages = try await withHistoryFetchTimeout {
                     try await telegramService.getChatHistory(
                         chatId: chat.id,
@@ -677,10 +631,6 @@ actor RecentSyncCoordinator {
                         timeoutSeconds: AppConstants.RecentSync.historyFetchTimeoutSeconds
                     )
                 }
-                SyncDebugLog.record(
-                    "RecentSync",
-                    "backfill page result lane=\(lane) chatId=\(chat.id) from=\(requestCursor) count=\(messages.count)"
-                )
 
                 guard !messages.isEmpty else {
                     let failedState = await saveFailedBackfillState(
@@ -693,10 +643,6 @@ actor RecentSyncCoordinator {
                         pagesFetched: pagesFetched,
                         messagesFetched: messagesFetched,
                         lastError: "empty page before stop marker"
-                    )
-                    SyncDebugLog.record(
-                        "RecentSync",
-                        "backfill moved-to-retry lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) failures=\(failedState.failureCount) nextRetry=\(failedState.nextRetryAt?.description ?? "nil") error=empty page before stop marker"
                     )
                     return RecentSyncOutcome(
                         chatId: chat.id,
@@ -723,10 +669,6 @@ actor RecentSyncCoordinator {
                         syncedAt: Date()
                     )
                     await DatabaseManager.shared.deleteRecentBackfillState(chatId: chat.id)
-                    SyncDebugLog.record(
-                        "RecentSync",
-                        "backfill complete chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) pages=\(pagesFetched) messages=\(messagesFetched)"
-                    )
                     return RecentSyncOutcome(
                         chatId: chat.id,
                         chatTitle: chat.title,
@@ -748,10 +690,6 @@ actor RecentSyncCoordinator {
                         messagesFetched: messagesFetched,
                         lastError: "cursor did not advance"
                     )
-                    SyncDebugLog.record(
-                        "RecentSync",
-                        "backfill moved-to-retry lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) failures=\(failedState.failureCount) nextRetry=\(failedState.nextRetryAt?.description ?? "nil") error=cursor did not advance"
-                    )
                     return RecentSyncOutcome(
                         chatId: chat.id,
                         chatTitle: chat.title,
@@ -768,10 +706,6 @@ actor RecentSyncCoordinator {
                         syncedAt: Date()
                     )
                     await DatabaseManager.shared.deleteRecentBackfillState(chatId: chat.id)
-                    SyncDebugLog.record(
-                        "RecentSync",
-                        "backfill reconciled-missing-stop chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) minFetched=\(minimumFetchedMessageId) pages=\(pagesFetched) messages=\(messagesFetched)"
-                    )
                     return RecentSyncOutcome(
                         chatId: chat.id,
                         chatTitle: chat.title,
@@ -798,10 +732,6 @@ actor RecentSyncCoordinator {
                 lastAttemptAt: now,
                 nextRetryAt: nil
             )
-            SyncDebugLog.record(
-                "RecentSync",
-                "backfill paused lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) pages=\(pagesFetched) messages=\(messagesFetched)"
-            )
             return RecentSyncOutcome(
                 chatId: chat.id,
                 chatTitle: chat.title,
@@ -820,10 +750,6 @@ actor RecentSyncCoordinator {
                 pagesFetched: pagesFetched,
                 messagesFetched: messagesFetched,
                 lastError: error.localizedDescription
-            )
-            SyncDebugLog.record(
-                "RecentSync",
-                "backfill moved-to-retry lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) failures=\(failedState.failureCount) nextRetry=\(failedState.nextRetryAt?.description ?? "nil") error=\(error.localizedDescription)"
             )
             return RecentSyncOutcome(
                 chatId: chat.id,

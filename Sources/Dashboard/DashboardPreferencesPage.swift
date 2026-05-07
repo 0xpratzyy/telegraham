@@ -309,7 +309,6 @@ struct DashboardPreferencesPage: View {
                         subtitle: telegramLoginInstruction
                     ) {
                         DashboardPreferenceButton(title: "Open Login Panel", systemImage: "qrcode.viewfinder") {
-                            PidgyDebugLog.record("TelegramAuthUI", "Open Login Panel tapped from Preferences authState=\(telegramService.authState.debugLabel)")
                             PreferencesRouting.requestLauncher()
                         }
                     }
@@ -819,13 +818,8 @@ struct DashboardPreferencesPage: View {
     private func saveCredentials() {
         let trimmedId = apiId.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedHash = apiHash.trimmingCharacters(in: .whitespacesAndNewlines)
-        PidgyDebugLog.record(
-            "TelegramAuthUI",
-            "Preferences save credentials tapped hasApiId=\(!trimmedId.isEmpty) apiHashLength=\(trimmedHash.count) authState=\(telegramService.authState.debugLabel)"
-        )
         guard !trimmedId.isEmpty, !trimmedHash.isEmpty else {
             setTelegramStatus(.error("Missing credentials"))
-            PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials blocked: missing credentials")
             return
         }
 
@@ -838,12 +832,10 @@ struct DashboardPreferencesPage: View {
                 telegramService.start(apiId: id, apiHash: trimmedHash)
             } else {
                 setTelegramStatus(.error("API ID must be numeric"))
-                PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials blocked: API ID not numeric")
                 return
             }
             if let serviceError = telegramService.errorMessage {
                 setTelegramStatus(.error(serviceError))
-                PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials service error: \(serviceError)")
             } else if telegramService.authState == .ready {
                 setTelegramStatus(.success("Saved and connected"))
             } else {
@@ -851,7 +843,6 @@ struct DashboardPreferencesPage: View {
             }
         } catch {
             setTelegramStatus(.error(error.localizedDescription))
-            PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials failed: \(error.localizedDescription)")
         }
     }
 

@@ -138,28 +138,16 @@ final class TaskIndexCoordinator: ObservableObject {
         )
 
         guard !isRefreshing else {
-            PidgyDebugLog.record(
-                "TaskIndex",
-                "refresh queued forceRescan=\(request.forceRescan) visibleChats=\(request.telegramService.visibleChats.count)"
-            )
             queueRefresh(request)
             return
         }
 
         let startedAt = Date()
-        PidgyDebugLog.record(
-            "TaskIndex",
-            "refresh start forceRescan=\(request.forceRescan) visibleChats=\(request.telegramService.visibleChats.count)"
-        )
         isRefreshing = true
 
         defer {
             isRefreshing = false
             let duration = Date().timeIntervalSince(startedAt)
-            PidgyDebugLog.record(
-                "TaskIndex",
-                "refresh finished duration=\(String(format: "%.2f", duration))s lastError=\(lastError ?? "none")"
-            )
         }
 
         var nextRequest: RefreshRequest? = request
@@ -193,10 +181,6 @@ final class TaskIndexCoordinator: ObservableObject {
         filteringTelegramService = telegramService
         lastError = nil
 
-        PidgyDebugLog.record(
-            "TaskIndex",
-            "performRefresh loadFromStore forceRescan=\(request.forceRescan)"
-        )
         await loadFromStore(
             telegramService: telegramService,
             includeBotsInAISearch: includeBotsInAISearch
@@ -204,30 +188,20 @@ final class TaskIndexCoordinator: ObservableObject {
 
         guard aiService.isConfigured else {
             lastError = "Connect an AI provider to extract tasks from Telegram."
-            PidgyDebugLog.record("TaskIndex", "performRefresh skipped ai not configured")
             return
         }
 
         guard telegramService.authState == .ready else {
             lastError = "Telegram is not ready yet."
-            PidgyDebugLog.record(
-                "TaskIndex",
-                "performRefresh skipped telegram authState=\(telegramService.authState.debugLabel)"
-            )
             return
         }
 
-        PidgyDebugLog.record(
-            "TaskIndex",
-            "performRefresh hydrateBotMetadata chats=\(telegramService.visibleChats.count)"
-        )
         await telegramService.ensureBotFilterMetadataReady(
             for: telegramService.visibleChats,
             includeBots: includeBotsInAISearch,
             priority: .userInitiated
         )
 
-        PidgyDebugLog.record("TaskIndex", "performRefresh refreshTopicsIfNeeded")
         let activeTopics = await refreshTopicsIfNeeded(
             telegramService: telegramService,
             aiService: aiService,
@@ -238,10 +212,6 @@ final class TaskIndexCoordinator: ObservableObject {
             from: telegramService.visibleChats,
             telegramService: telegramService,
             includeBotsInAISearch: includeBotsInAISearch
-        )
-        PidgyDebugLog.record(
-            "TaskIndex",
-            "performRefresh candidateChats=\(candidateChats.count) topics=\(activeTopics.count)"
         )
         let openTasks = await DatabaseManager.shared.loadDashboardTasks(status: .open, limit: 1_000)
         let openTaskEvidenceByTaskId = await DatabaseManager.shared.loadDashboardTaskEvidence(
@@ -256,10 +226,6 @@ final class TaskIndexCoordinator: ObservableObject {
             openTaskEvidenceByTaskId: openTaskEvidenceByTaskId,
             forceRescan: forceRescan
         )
-        PidgyDebugLog.record(
-            "TaskIndex",
-            "performRefresh pendingScans=\(pendingScans.count) openTasks=\(openTasks.count) forceRescan=\(forceRescan)"
-        )
 
         guard !pendingScans.isEmpty else {
             lastRefreshAt = Date()
@@ -271,22 +237,13 @@ final class TaskIndexCoordinator: ObservableObject {
 
         let triageByChatId: [Int64: DashboardTaskTriageResultDTO]
         do {
-            PidgyDebugLog.record(
-                "TaskIndex",
-                "performRefresh triage start pendingScans=\(pendingScans.count)"
-            )
             triageByChatId = try await Self.triagePendingTaskScans(
                 pendingScans,
                 aiService: aiService,
                 myUserId: myUserId
             )
-            PidgyDebugLog.record(
-                "TaskIndex",
-                "performRefresh triage finished decisions=\(triageByChatId.count)"
-            )
         } catch {
             lastError = "Task triage failed: \(error.localizedDescription)"
-            PidgyDebugLog.record("TaskIndex", "performRefresh triage failed error=\(error.localizedDescription)")
             return
         }
 
@@ -323,10 +280,6 @@ final class TaskIndexCoordinator: ObservableObject {
             do {
                 let resolvedMemberCount = await telegramService.resolvedMemberCount(for: pending.chat)
                 let effectiveChat = pending.chat.updating(memberCount: resolvedMemberCount ?? pending.chat.memberCount)
-                PidgyDebugLog.record(
-                    "TaskIndex",
-                    "performRefresh extraction start chatId=\(pending.chat.id) messages=\(pending.messages.count)"
-                )
                 let candidates = try await aiService.extractDashboardTasks(
                     chat: effectiveChat,
                     messages: pending.messages,
@@ -359,16 +312,8 @@ final class TaskIndexCoordinator: ObservableObject {
                     chatId: pending.chat.id,
                     latestMessageId: pending.latestMessageId
                 )
-                PidgyDebugLog.record(
-                    "TaskIndex",
-                    "performRefresh extraction finished chatId=\(pending.chat.id) candidates=\(candidates.count) retained=\(evidencedCandidates.count)"
-                )
             } catch {
                 lastError = "Task extraction failed for \(pending.chat.title): \(error.localizedDescription)"
-                PidgyDebugLog.record(
-                    "TaskIndex",
-                    "performRefresh extraction failed chatId=\(pending.chat.id) error=\(error.localizedDescription)"
-                )
                 continue
             }
         }

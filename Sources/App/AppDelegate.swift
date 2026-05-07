@@ -84,7 +84,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        SyncDebugLog.record("App", "applicationDidFinishLaunching")
         PidgyFontRegistrar.registerBundledFonts()
 
         if launchPresentationMode.activatesAsRegularApp {
@@ -139,11 +138,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                let apiHash = try? KeychainManager.retrieve(for: .apiHash),
                let apiId = Int(apiIdStr) {
                 logger.info("Starting Telegram service with stored credentials")
-                SyncDebugLog.record("App", "starting Telegram service with stored credentials")
                 telegramService.start(apiId: apiId, apiHash: apiHash)
             } else {
                 logger.warning("Telegram credentials missing; startup pipeline will wait")
-                SyncDebugLog.record("App", "Telegram credentials missing; startup pipeline waiting")
             }
         }
 
@@ -159,23 +156,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
             logger.info("Startup pipeline waiting for Telegram readiness")
-            SyncDebugLog.record("App", "startup pipeline waiting for Telegram readiness")
             await waitForGraphBuildReadiness()
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting recent sync")
-            SyncDebugLog.record("App", "startup pipeline starting recent sync")
             await RecentSyncCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting major chat coverage")
-            SyncDebugLog.record("App", "startup pipeline starting major chat coverage")
             await MajorChatCoverageCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting graph build")
-            SyncDebugLog.record("App", "startup pipeline starting graph build")
             await GraphBuilder.shared.buildIfNeeded(using: telegramService)
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting index scheduler")
-            SyncDebugLog.record("App", "startup pipeline starting index scheduler")
             await IndexScheduler.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             let includeBotsInAISearch = UserDefaults.standard.bool(
@@ -199,7 +191,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        SyncDebugLog.record("App", "applicationDidBecomeActive recovery requested")
         Task {
             await RecentSyncCoordinator.shared.recoverNow()
             await MajorChatCoverageCoordinator.shared.recoverNow()
