@@ -303,6 +303,18 @@ struct DashboardPreferencesPage: View {
                     )
                 }
 
+                if telegramService.authState != .ready {
+                    DashboardPreferenceRow(
+                        title: "Finish login",
+                        subtitle: telegramLoginInstruction
+                    ) {
+                        DashboardPreferenceButton(title: "Open Login Panel", systemImage: "qrcode.viewfinder") {
+                            PidgyDebugLog.record("TelegramAuthUI", "Open Login Panel tapped from Preferences authState=\(telegramService.authState.debugLabel)")
+                            PreferencesRouting.requestLauncher()
+                        }
+                    }
+                }
+
                 if let user = telegramService.currentUser {
                     DashboardPreferenceRow(title: "Account", subtitle: user.displayName) {
                         DashboardPreferenceDangerButton(title: "Log out", systemImage: "rectangle.portrait.and.arrow.right") {
@@ -807,8 +819,13 @@ struct DashboardPreferencesPage: View {
     private func saveCredentials() {
         let trimmedId = apiId.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedHash = apiHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        PidgyDebugLog.record(
+            "TelegramAuthUI",
+            "Preferences save credentials tapped hasApiId=\(!trimmedId.isEmpty) apiHashLength=\(trimmedHash.count) authState=\(telegramService.authState.debugLabel)"
+        )
         guard !trimmedId.isEmpty, !trimmedHash.isEmpty else {
             setTelegramStatus(.error("Missing credentials"))
+            PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials blocked: missing credentials")
             return
         }
 
@@ -819,10 +836,22 @@ struct DashboardPreferencesPage: View {
             apiHash = trimmedHash
             if let id = Int(trimmedId) {
                 telegramService.start(apiId: id, apiHash: trimmedHash)
+            } else {
+                setTelegramStatus(.error("API ID must be numeric"))
+                PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials blocked: API ID not numeric")
+                return
             }
-            setTelegramStatus(.success("Saved"))
+            if let serviceError = telegramService.errorMessage {
+                setTelegramStatus(.error(serviceError))
+                PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials service error: \(serviceError)")
+            } else if telegramService.authState == .ready {
+                setTelegramStatus(.success("Saved and connected"))
+            } else {
+                setTelegramStatus(.success("Saved. Open Login Panel."))
+            }
         } catch {
             setTelegramStatus(.error(error.localizedDescription))
+            PidgyDebugLog.record("TelegramAuthUI", "Preferences save credentials failed: \(error.localizedDescription)")
         }
     }
 
@@ -1008,6 +1037,27 @@ struct DashboardPreferencesPage: View {
         case .loggingOut: return "Logging out"
         case .closing: return "Closing"
         case .closed: return "Disconnected"
+        }
+    }
+
+    private var telegramLoginInstruction: String {
+        switch telegramService.authState {
+        case .waitingForQrCode:
+            return "Scan the QR code in the launcher panel, or use phone login there."
+        case .waitingForPhoneNumber:
+            return "Open the launcher panel to request a QR code or enter your phone number."
+        case .waitingForCode:
+            return "Open the launcher panel and enter the Telegram verification code."
+        case .waitingForPassword:
+            return "Open the launcher panel and enter your Telegram 2FA password."
+        case .waitingForParameters:
+            return "Telegram is applying your API credentials. Open the login panel if it does not advance."
+        case .uninitialized, .closed:
+            return "Save your API credentials, then open the login panel."
+        case .loggingOut, .closing:
+            return "Telegram is disconnecting. Try again after it finishes."
+        case .ready:
+            return "Connected."
         }
     }
 

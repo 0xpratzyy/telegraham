@@ -53,6 +53,22 @@ actor DatabaseManager {
         let lastRecentSyncAt: Date?
     }
 
+    struct RecentBackfillStateRecord: Sendable, Equatable {
+        let chatId: Int64
+        let targetMessageId: Int64
+        let stopMessageId: Int64
+        let cursorMessageId: Int64
+        let startedAt: Date
+        let updatedAt: Date
+        let pagesFetched: Int
+        let messagesFetched: Int
+        let status: String
+        let lastError: String?
+        let failureCount: Int
+        let lastAttemptAt: Date?
+        let nextRetryAt: Date?
+    }
+
     struct MessageCoverageRecord: Sendable, Equatable {
         let chatId: Int64
         let messageCount: Int
@@ -469,6 +485,10 @@ actor DatabaseManager {
                     arguments: [chatId]
                 )
                 try db.execute(
+                    sql: "DELETE FROM recent_backfill_state WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
+                try db.execute(
                     sql: "DELETE FROM chat_coverage_state WHERE chat_id = ?",
                     arguments: [chatId]
                 )
@@ -525,6 +545,52 @@ actor DatabaseManager {
             }
         } catch {
             print("[DatabaseManager] Failed to load recent sync states: \(error)")
+            return [:]
+        }
+    }
+
+    func loadRecentBackfillState(chatId: Int64) async -> RecentBackfillStateRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+
+        do {
+            return try await pool.read { db in
+                try Self.recentBackfillStateRecord(in: db, chatId: chatId)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load recent backfill state for chat \(chatId): \(error)")
+            return nil
+        }
+    }
+
+    func loadRecentBackfillStates(in chatIds: [Int64]) async -> [Int64: RecentBackfillStateRecord] {
+        guard !chatIds.isEmpty else { return [:] }
+        guard let pool = await ensureDatabase() else { return [:] }
+
+        do {
+            return try await pool.read { db in
+                let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
+                var arguments = StatementArguments()
+                for chatId in chatIds {
+                    arguments += [chatId]
+                }
+
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at
+                        FROM recent_backfill_state
+                        WHERE chat_id IN (\(placeholders))
+                        """,
+                    arguments: arguments
+                )
+
+                return Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+                    guard let record = Self.recentBackfillStateRecord(from: row) else { return nil }
+                    return (record.chatId, record)
+                })
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load recent backfill states: \(error)")
             return [:]
         }
     }
@@ -783,6 +849,33 @@ actor DatabaseManager {
         }
     }
 
+    func saveRecentBackfillState(_ record: RecentBackfillStateRecord) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try Self.saveRecentBackfillState(record, in: db)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to save recent backfill state for chat \(record.chatId): \(error)")
+        }
+    }
+
+    func deleteRecentBackfillState(chatId: Int64) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: "DELETE FROM recent_backfill_state WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to delete recent backfill state for chat \(chatId): \(error)")
+        }
+    }
+
     func loadPipelineCache(chatId: Int64) async -> PipelineCacheRecord? {
         guard let pool = await ensureDatabase() else { return nil }
 
@@ -884,6 +977,7 @@ actor DatabaseManager {
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM sync_state WHERE chat_id >= 0")
                 try db.execute(sql: "DELETE FROM recent_sync_state WHERE chat_id >= 0")
+                try db.execute(sql: "DELETE FROM recent_backfill_state WHERE chat_id >= 0")
                 try db.execute(sql: "DELETE FROM chat_coverage_state WHERE chat_id >= 0")
             }
             removeLegacyMessageCacheDirectory()
@@ -902,6 +996,7 @@ actor DatabaseManager {
                 try db.execute(sql: "DELETE FROM pipeline_cache")
                 try db.execute(sql: "DELETE FROM sync_state")
                 try db.execute(sql: "DELETE FROM recent_sync_state")
+                try db.execute(sql: "DELETE FROM recent_backfill_state")
                 try db.execute(sql: "DELETE FROM chat_coverage_state")
             }
             removeLegacyMessageCacheDirectory()
@@ -2289,6 +2384,47 @@ actor DatabaseManager {
         )
     }
 
+    private static func saveRecentBackfillState(
+        _ record: RecentBackfillStateRecord,
+        in db: Database
+    ) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO recent_backfill_state
+                (chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    target_message_id = excluded.target_message_id,
+                    stop_message_id = excluded.stop_message_id,
+                    cursor_message_id = excluded.cursor_message_id,
+                    started_at = excluded.started_at,
+                    updated_at = excluded.updated_at,
+                    pages_fetched = excluded.pages_fetched,
+                    messages_fetched = excluded.messages_fetched,
+                    status = excluded.status,
+                    last_error = excluded.last_error,
+                    failure_count = excluded.failure_count,
+                    last_attempt_at = excluded.last_attempt_at,
+                    next_retry_at = excluded.next_retry_at
+                """,
+            arguments: [
+                record.chatId,
+                record.targetMessageId,
+                record.stopMessageId,
+                record.cursorMessageId,
+                record.startedAt.timeIntervalSince1970,
+                record.updatedAt.timeIntervalSince1970,
+                record.pagesFetched,
+                record.messagesFetched,
+                record.status,
+                record.lastError,
+                record.failureCount,
+                record.lastAttemptAt?.timeIntervalSince1970,
+                record.nextRetryAt?.timeIntervalSince1970
+            ]
+        )
+    }
+
     private static func refreshRecentSyncState(
         in db: Database,
         chatId: Int64,
@@ -2372,6 +2508,50 @@ actor DatabaseManager {
             chatId: row["chat_id"],
             latestSyncedMessageId: row["latest_synced_message_id"],
             lastRecentSyncAt: lastRecentSyncAtSeconds.map(Date.init(timeIntervalSince1970:))
+        )
+    }
+
+    private static func recentBackfillStateRecord(
+        in db: Database,
+        chatId: Int64
+    ) throws -> RecentBackfillStateRecord? {
+        guard let row = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at
+                FROM recent_backfill_state
+                WHERE chat_id = ?
+                """,
+            arguments: [chatId]
+        ) else {
+            return nil
+        }
+
+        return recentBackfillStateRecord(from: row)
+    }
+
+    private static func recentBackfillStateRecord(from row: Row) -> RecentBackfillStateRecord? {
+        let startedAtSeconds: Double = row["started_at"]
+        let updatedAtSeconds: Double = row["updated_at"]
+        let pagesFetchedValue: Int64 = row["pages_fetched"]
+        let messagesFetchedValue: Int64 = row["messages_fetched"]
+        let failureCountValue: Int64 = row["failure_count"]
+        let lastAttemptAtSeconds: Double? = row["last_attempt_at"]
+        let nextRetryAtSeconds: Double? = row["next_retry_at"]
+        return RecentBackfillStateRecord(
+            chatId: row["chat_id"],
+            targetMessageId: row["target_message_id"],
+            stopMessageId: row["stop_message_id"],
+            cursorMessageId: row["cursor_message_id"],
+            startedAt: Date(timeIntervalSince1970: startedAtSeconds),
+            updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+            pagesFetched: Int(pagesFetchedValue),
+            messagesFetched: Int(messagesFetchedValue),
+            status: row["status"],
+            lastError: row["last_error"],
+            failureCount: Int(failureCountValue),
+            lastAttemptAt: lastAttemptAtSeconds.map(Date.init(timeIntervalSince1970:)),
+            nextRetryAt: nextRetryAtSeconds.map(Date.init(timeIntervalSince1970:))
         )
     }
 

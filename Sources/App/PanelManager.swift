@@ -97,6 +97,10 @@ final class PanelManager {
         show()
     }
 
+    func showLauncher() {
+        show()
+    }
+
     private func show() {
         if launcherWindow == nil {
             createLauncherWindow()

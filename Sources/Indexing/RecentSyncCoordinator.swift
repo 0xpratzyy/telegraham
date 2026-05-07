@@ -7,7 +7,19 @@ actor RecentSyncCoordinator {
         let chatId: Int64
         let chatTitle: String
         let refreshed: Bool
+        let completedSync: Bool
         let messageCount: Int
+    }
+
+    private struct SyncSelection {
+        let primaryCandidates: [TGChat]
+        let primaryChats: [TGChat]
+        let retryCandidates: [TGChat]
+        let retryChats: [TGChat]
+
+        var selectedCount: Int {
+            primaryChats.count + retryChats.count
+        }
     }
 
     private struct ProgressSnapshot {
@@ -23,6 +35,31 @@ actor RecentSyncCoordinator {
         let lastSyncAt: Date?
         let lastBatchRefreshedChats: Int
         let lastBatchMessageCount: Int
+    }
+
+    private struct HistoryFetchTimeoutError: LocalizedError {
+        let seconds: TimeInterval
+
+        var errorDescription: String? {
+            "recent sync history fetch timed out after \(Int(seconds)) seconds"
+        }
+    }
+
+    private final class TimeoutRace<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didResume = false
+
+        func resume(_ result: Result<T, Error>, continuation: CheckedContinuation<T, Error>) {
+            lock.lock()
+            guard !didResume else {
+                lock.unlock()
+                return
+            }
+            didResume = true
+            lock.unlock()
+
+            continuation.resume(with: result)
+        }
     }
 
     final class ProgressState: ObservableObject {
@@ -62,6 +99,7 @@ actor RecentSyncCoordinator {
         pendingImmediateRefresh = true
         recoveryChatIds.removeAll()
         lastRecoveryRefreshAt = nil
+        SyncDebugLog.record("RecentSync", "start requested")
 
         guard processingTask == nil else { return }
 
@@ -80,6 +118,7 @@ actor RecentSyncCoordinator {
     }
 
     func stop() async {
+        SyncDebugLog.record("RecentSync", "stop requested")
         let task = processingTask
         task?.cancel()
         processingTask = nil
@@ -112,9 +151,11 @@ actor RecentSyncCoordinator {
     func recoverNow() async {
         guard let telegramService else {
             pendingImmediateRefresh = true
+            SyncDebugLog.record("RecentSync", "recover queued before service attached")
             return
         }
         let visibleChats = await snapshot(using: telegramService)
+        SyncDebugLog.record("RecentSync", "recover requested visibleChats=\(visibleChats.count)")
         scheduleRecoveryRefresh(from: visibleChats)
     }
 
@@ -136,10 +177,19 @@ actor RecentSyncCoordinator {
             recoveryChatIds.formIntersection(Set(snapshot.map(\.id)))
             let orderedChats = orderedChats(from: snapshot)
             let recentSyncStates = await DatabaseManager.shared.loadRecentSyncStates(in: orderedChats.map(\.id))
-            let staleChats = orderedChats.filter { shouldRefresh(chat: $0, state: recentSyncStates[$0.id]) }
-            let nextChats = Array(staleChats.prefix(AppConstants.RecentSync.maxChatsPerPass))
+            let backfillStates = await DatabaseManager.shared.loadRecentBackfillStates(in: orderedChats.map(\.id))
+            let selection = selectSyncChats(
+                from: orderedChats,
+                recentSyncStates: recentSyncStates,
+                backfillStates: backfillStates,
+                now: Date()
+            )
+            SyncDebugLog.record(
+                "RecentSync",
+                "pass snapshot=\(snapshot.count) primaryCandidates=\(selection.primaryCandidates.count) primarySelected=\(selection.primaryChats.count) retryCandidates=\(selection.retryCandidates.count) retrySelected=\(selection.retryChats.count) queued=\(pendingImmediateRefresh)"
+            )
 
-            guard !nextChats.isEmpty else {
+            guard selection.selectedCount > 0 else {
                 activeRefreshes = 0
                 pendingImmediateRefresh = false
                 await publishProgress(totalVisibleChats: snapshot.count, staleVisibleChats: 0)
@@ -147,9 +197,16 @@ actor RecentSyncCoordinator {
                 continue
             }
 
-            activeRefreshes = nextChats.count
-            await publishProgress(totalVisibleChats: snapshot.count, staleVisibleChats: staleChats.count)
-            let refreshedChatIds = await sync(chats: nextChats, using: telegramService)
+            activeRefreshes = selection.selectedCount
+            await publishProgress(
+                totalVisibleChats: snapshot.count,
+                staleVisibleChats: selection.primaryCandidates.count + selection.retryCandidates.count
+            )
+            let refreshedChatIds = await sync(
+                primaryChats: selection.primaryChats,
+                retryChats: selection.retryChats,
+                using: telegramService
+            )
             if !refreshedChatIds.isEmpty {
                 prioritizedChatIds.removeAll { refreshedChatIds.contains($0) }
                 recoveryChatIds.subtract(refreshedChatIds)
@@ -162,7 +219,7 @@ actor RecentSyncCoordinator {
             pendingImmediateRefresh = false
             await publishProgress(
                 totalVisibleChats: snapshot.count,
-                staleVisibleChats: max(staleChats.count - refreshedChatIds.count, 0)
+                staleVisibleChats: max(selection.primaryCandidates.count + selection.retryCandidates.count - refreshedChatIds.count, 0)
             )
             try? await Task.sleep(for: .milliseconds(Int(sleepMs)))
         }
@@ -252,12 +309,110 @@ actor RecentSyncCoordinator {
         return Date().timeIntervalSince(lastRecentSyncAt) >= AppConstants.RecentSync.staleRefreshAgeSeconds
     }
 
+    private func selectSyncChats(
+        from orderedChats: [TGChat],
+        recentSyncStates: [Int64: DatabaseManager.RecentSyncStateRecord],
+        backfillStates: [Int64: DatabaseManager.RecentBackfillStateRecord],
+        now: Date
+    ) -> SyncSelection {
+        let primaryCandidates = orderedChats.filter {
+            shouldRefreshPrimary(
+                chat: $0,
+                state: recentSyncStates[$0.id],
+                backfillState: backfillStates[$0.id]
+            )
+        }
+        let primaryChats = Array(primaryCandidates.prefix(AppConstants.RecentSync.maxChatsPerPass))
+        let primaryIds = Set(primaryChats.map(\.id))
+        let retryCandidates = orderedChats.filter {
+            !primaryIds.contains($0.id) && shouldRetryBackfill(
+                chat: $0,
+                state: recentSyncStates[$0.id],
+                backfillState: backfillStates[$0.id],
+                now: now
+            )
+        }
+        let retryChats = Array(retryCandidates.prefix(AppConstants.RecentSync.maxRetryBackfillChatsPerPass))
+        return SyncSelection(
+            primaryCandidates: primaryCandidates,
+            primaryChats: primaryChats,
+            retryCandidates: retryCandidates,
+            retryChats: retryChats
+        )
+    }
+
+    private func shouldRefreshPrimary(
+        chat: TGChat,
+        state: DatabaseManager.RecentSyncStateRecord?,
+        backfillState: DatabaseManager.RecentBackfillStateRecord?
+    ) -> Bool {
+        let latestChatMessageId = chat.lastMessage?.id ?? 0
+        guard latestChatMessageId != 0 else { return false }
+
+        let isManual = recoveryChatIds.contains(chat.id) || prioritizedChatIds.contains(chat.id)
+        if isManual {
+            return shouldRefresh(chat: chat, state: state)
+        }
+
+        guard let state else { return true }
+        if latestChatMessageId != state.latestSyncedMessageId {
+            if let backfillState,
+               Self.isMatchingBackfill(backfillState, targetMessageId: latestChatMessageId, stopMessageId: state.latestSyncedMessageId),
+               backfillState.status == "failed" {
+                SyncDebugLog.record(
+                    "RecentSync",
+                    "primary deferred-to-retry chatId=\(chat.id) latest=\(latestChatMessageId) stop=\(state.latestSyncedMessageId) failures=\(backfillState.failureCount) nextRetry=\(backfillState.nextRetryAt?.description ?? "nil")"
+                )
+                return false
+            }
+            return true
+        }
+
+        guard let lastRecentSyncAt = state.lastRecentSyncAt else { return true }
+        return Date().timeIntervalSince(lastRecentSyncAt) >= AppConstants.RecentSync.staleRefreshAgeSeconds
+    }
+
+    private func shouldRetryBackfill(
+        chat: TGChat,
+        state: DatabaseManager.RecentSyncStateRecord?,
+        backfillState: DatabaseManager.RecentBackfillStateRecord?,
+        now: Date
+    ) -> Bool {
+        guard let latestMessageId = chat.lastMessage?.id, latestMessageId != 0,
+              let state,
+              state.latestSyncedMessageId != latestMessageId,
+              let backfillState,
+              backfillState.status == "failed",
+              Self.isMatchingBackfill(
+                  backfillState,
+                  targetMessageId: latestMessageId,
+                  stopMessageId: state.latestSyncedMessageId
+              ) else {
+            return false
+        }
+
+        if recoveryChatIds.contains(chat.id) || prioritizedChatIds.contains(chat.id) {
+            return true
+        }
+
+        guard let nextRetryAt = backfillState.nextRetryAt else { return true }
+        let isDue = nextRetryAt <= now
+        if !isDue {
+            SyncDebugLog.record(
+                "RecentSync",
+                "retry deferred chatId=\(chat.id) latest=\(latestMessageId) stop=\(state.latestSyncedMessageId) failures=\(backfillState.failureCount) nextRetry=\(nextRetryAt)"
+            )
+        }
+        return isDue
+    }
+
     private func scheduleRecoveryRefresh(from chats: [TGChat], ignoreCooldown: Bool = false) {
         let now = Date()
         if !ignoreCooldown,
            let lastRecoveryRefreshAt,
            now.timeIntervalSince(lastRecoveryRefreshAt) < AppConstants.RecentSync.recoveryRefreshCooldownSeconds {
             pendingImmediateRefresh = true
+            SyncDebugLog.record("RecentSync", "recovery refresh kept queued due to cooldown")
             return
         }
 
@@ -273,6 +428,10 @@ actor RecentSyncCoordinator {
         prependPrioritized(chatIds: recoveryTargets)
         pendingImmediateRefresh = true
         lastRecoveryRefreshAt = now
+        SyncDebugLog.record(
+            "RecentSync",
+            "recovery targets=\(recoveryTargets.map(String.init).joined(separator: ","))"
+        )
     }
 
     private func prependPrioritized(chatIds: [Int64]) {
@@ -285,10 +444,46 @@ actor RecentSyncCoordinator {
         }
     }
 
-    private func sync(chats: [TGChat], using telegramService: TelegramService) async -> Set<Int64> {
-        let batches = batchChats(chats, size: AppConstants.RecentSync.maxConcurrentChatFetches)
+    private func sync(
+        primaryChats: [TGChat],
+        retryChats: [TGChat],
+        using telegramService: TelegramService
+    ) async -> Set<Int64> {
+        var catchUpProcessed = 0
+        var latestWindowChats: [TGChat] = []
         var refreshedChatIds: Set<Int64> = []
 
+        for chat in primaryChats {
+            guard !Task.isCancelled else { break }
+            let state = await DatabaseManager.shared.loadRecentSyncState(chatId: chat.id)
+            if Self.needsBackfill(chat: chat, state: state) {
+                guard catchUpProcessed < AppConstants.RecentSync.maxBackfillChatsPerPass else {
+                    SyncDebugLog.record("RecentSync", "backfill deferred chatId=\(chat.id) reason=per-pass-limit")
+                    continue
+                }
+
+                catchUpProcessed += 1
+                SyncDebugLog.record(
+                    "RecentSync",
+                    "backfill candidate chatId=\(chat.id) title=\"\(chat.title)\" local=\(state?.latestSyncedMessageId ?? 0) latest=\(chat.lastMessage?.id ?? 0)"
+                )
+                let outcome = await Self.syncRecentBackfill(
+                    for: chat,
+                    state: state,
+                    using: telegramService,
+                    maxPagesPerPass: AppConstants.RecentSync.maxBackfillPagesPerPass,
+                    lane: "primary"
+                )
+                recordOutcome(outcome)
+                if outcome.completedSync {
+                    refreshedChatIds.insert(outcome.chatId)
+                }
+            } else {
+                latestWindowChats.append(chat)
+            }
+        }
+
+        let batches = batchChats(latestWindowChats, size: AppConstants.RecentSync.maxConcurrentChatFetches)
         for batch in batches {
             let batchOutcomes = await withTaskGroup(of: RecentSyncOutcome.self) { group in
                 for chat in batch {
@@ -304,20 +499,31 @@ actor RecentSyncCoordinator {
                 return outcomes
             }
 
-            let refreshedOutcomes = batchOutcomes.filter(\.refreshed)
-            if !refreshedOutcomes.isEmpty {
-                sessionRefreshedChats += refreshedOutcomes.count
-                let refreshedMessageCount = refreshedOutcomes.reduce(0) { $0 + $1.messageCount }
-                sessionRefreshedMessages += refreshedMessageCount
-                lastBatchRefreshedChats = refreshedOutcomes.count
-                lastBatchMessageCount = refreshedMessageCount
-                lastSyncAt = Date()
-                if let mostRecent = refreshedOutcomes.max(by: { $0.messageCount < $1.messageCount }) {
-                    lastSyncedChat = mostRecent.chatTitle
-                }
-            }
+            batchOutcomes.forEach(recordOutcome)
 
-            for outcome in batchOutcomes where outcome.refreshed {
+            for outcome in batchOutcomes where outcome.completedSync {
+                refreshedChatIds.insert(outcome.chatId)
+            }
+        }
+
+        for chat in retryChats {
+            guard !Task.isCancelled else { break }
+            let state = await DatabaseManager.shared.loadRecentSyncState(chatId: chat.id)
+            guard Self.needsBackfill(chat: chat, state: state) else { continue }
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chat.id)
+            SyncDebugLog.record(
+                "RecentSync",
+                "retry candidate chatId=\(chat.id) title=\"\(chat.title)\" failures=\(backfillState?.failureCount ?? 0) nextRetry=\(backfillState?.nextRetryAt?.description ?? "nil") cursor=\(backfillState?.cursorMessageId ?? 0) target=\(backfillState?.targetMessageId ?? 0) stop=\(backfillState?.stopMessageId ?? 0)"
+            )
+            let outcome = await Self.syncRecentBackfill(
+                for: chat,
+                state: state,
+                using: telegramService,
+                maxPagesPerPass: AppConstants.RecentSync.maxRetryBackfillPagesPerPass,
+                lane: "retry"
+            )
+            recordOutcome(outcome)
+            if outcome.completedSync {
                 refreshedChatIds.insert(outcome.chatId)
             }
         }
@@ -325,17 +531,47 @@ actor RecentSyncCoordinator {
         return refreshedChatIds
     }
 
+    private func recordOutcome(_ outcome: RecentSyncOutcome) {
+        guard outcome.refreshed else { return }
+        sessionRefreshedChats += outcome.completedSync ? 1 : 0
+        sessionRefreshedMessages += outcome.messageCount
+        lastBatchRefreshedChats = outcome.completedSync ? 1 : 0
+        lastBatchMessageCount = outcome.messageCount
+        lastSyncAt = Date()
+        lastSyncedChat = outcome.chatTitle
+    }
+
+    private nonisolated static func needsBackfill(
+        chat: TGChat,
+        state: DatabaseManager.RecentSyncStateRecord?
+    ) -> Bool {
+        guard let latestChatMessageId = chat.lastMessage?.id, latestChatMessageId != 0 else { return false }
+        guard let state else { return false }
+        return state.latestSyncedMessageId != latestChatMessageId
+    }
+
+    private nonisolated static func isMatchingBackfill(
+        _ backfillState: DatabaseManager.RecentBackfillStateRecord,
+        targetMessageId: Int64,
+        stopMessageId: Int64
+    ) -> Bool {
+        backfillState.targetMessageId == targetMessageId && backfillState.stopMessageId == stopMessageId
+    }
+
     private static func syncRecentWindow(
         for chat: TGChat,
         using telegramService: TelegramService
     ) async -> RecentSyncOutcome {
         do {
-            let messages = try await telegramService.getChatHistory(
-                chatId: chat.id,
-                limit: AppConstants.RecentSync.latestWindowPerChat,
-                onlyLocal: false,
-                priority: .background
-            )
+            let messages = try await withHistoryFetchTimeout {
+                try await telegramService.getChatHistory(
+                    chatId: chat.id,
+                    limit: AppConstants.RecentSync.latestWindowPerChat,
+                    onlyLocal: false,
+                    priority: .background,
+                    timeoutSeconds: AppConstants.RecentSync.historyFetchTimeoutSeconds
+                )
+            }
 
             if !messages.isEmpty {
                 await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: messages, append: false)
@@ -351,16 +587,405 @@ actor RecentSyncCoordinator {
                 chatId: chat.id,
                 chatTitle: chat.title,
                 refreshed: true,
+                completedSync: true,
                 messageCount: messages.count
             )
         } catch {
+            SyncDebugLog.record(
+                "RecentSync",
+                "latest-window failed chatId=\(chat.id) error=\(error.localizedDescription)"
+            )
             return RecentSyncOutcome(
                 chatId: chat.id,
                 chatTitle: chat.title,
                 refreshed: false,
+                completedSync: false,
                 messageCount: 0
             )
         }
+    }
+
+    private static func syncRecentBackfill(
+        for chat: TGChat,
+        state: DatabaseManager.RecentSyncStateRecord?,
+        using telegramService: TelegramService,
+        maxPagesPerPass: Int,
+        lane: String
+    ) async -> RecentSyncOutcome {
+        guard let targetMessageId = chat.lastMessage?.id, targetMessageId != 0, let state else {
+            return RecentSyncOutcome(
+                chatId: chat.id,
+                chatTitle: chat.title,
+                refreshed: false,
+                completedSync: false,
+                messageCount: 0
+            )
+        }
+
+        let stopMessageId = state.latestSyncedMessageId
+        let now = Date()
+
+        if targetMessageId < stopMessageId {
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chat.id,
+                latestSyncedMessageId: targetMessageId,
+                syncedAt: now
+            )
+            await DatabaseManager.shared.deleteRecentBackfillState(chatId: chat.id)
+            SyncDebugLog.record(
+                "RecentSync",
+                "backfill reconciled-latest-before-stop chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId)"
+            )
+            return RecentSyncOutcome(
+                chatId: chat.id,
+                chatTitle: chat.title,
+                refreshed: true,
+                completedSync: true,
+                messageCount: 0
+            )
+        }
+
+        let existing = await DatabaseManager.shared.loadRecentBackfillState(chatId: chat.id)
+        let shouldResume = existing?.targetMessageId == targetMessageId
+            && existing?.stopMessageId == stopMessageId
+        let startedAt = shouldResume ? (existing?.startedAt ?? now) : now
+        var cursor = shouldResume ? (existing?.cursorMessageId ?? 0) : 0
+        var pagesFetched = shouldResume ? (existing?.pagesFetched ?? 0) : 0
+        var messagesFetched = shouldResume ? (existing?.messagesFetched ?? 0) : 0
+        var passMessagesFetched = 0
+
+        SyncDebugLog.record(
+            "RecentSync",
+            "backfill start lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) resume=\(shouldResume) failures=\(shouldResume ? (existing?.failureCount ?? 0) : 0) nextRetry=\(shouldResume ? (existing?.nextRetryAt?.description ?? "nil") : "nil")"
+        )
+
+        do {
+            for _ in 0..<maxPagesPerPass {
+                try Task.checkCancellation()
+                let requestCursor = cursor
+                SyncDebugLog.record(
+                    "RecentSync",
+                    "backfill page request lane=\(lane) chatId=\(chat.id) from=\(requestCursor) limit=\(AppConstants.RecentSync.backfillPageSize)"
+                )
+                let messages = try await withHistoryFetchTimeout {
+                    try await telegramService.getChatHistory(
+                        chatId: chat.id,
+                        fromMessageId: requestCursor,
+                        limit: AppConstants.RecentSync.backfillPageSize,
+                        onlyLocal: false,
+                        priority: .background,
+                        timeoutSeconds: AppConstants.RecentSync.historyFetchTimeoutSeconds
+                    )
+                }
+                SyncDebugLog.record(
+                    "RecentSync",
+                    "backfill page result lane=\(lane) chatId=\(chat.id) from=\(requestCursor) count=\(messages.count)"
+                )
+
+                guard !messages.isEmpty else {
+                    let failedState = await saveFailedBackfillState(
+                        existing: existing,
+                        chatId: chat.id,
+                        targetMessageId: targetMessageId,
+                        stopMessageId: stopMessageId,
+                        cursorMessageId: cursor,
+                        startedAt: startedAt,
+                        pagesFetched: pagesFetched,
+                        messagesFetched: messagesFetched,
+                        lastError: "empty page before stop marker"
+                    )
+                    SyncDebugLog.record(
+                        "RecentSync",
+                        "backfill moved-to-retry lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) failures=\(failedState.failureCount) nextRetry=\(failedState.nextRetryAt?.description ?? "nil") error=empty page before stop marker"
+                    )
+                    return RecentSyncOutcome(
+                        chatId: chat.id,
+                        chatTitle: chat.title,
+                        refreshed: passMessagesFetched > 0,
+                        completedSync: false,
+                        messageCount: passMessagesFetched
+                    )
+                }
+
+                await DatabaseManager.shared.upsertLiveMessages(
+                    chatId: chat.id,
+                    messages: messages.map(Self.messageRecord(from:)),
+                    updateRecentSyncState: false
+                )
+                pagesFetched += 1
+                messagesFetched += messages.count
+                passMessagesFetched += messages.count
+
+                if messages.contains(where: { $0.id == stopMessageId }) {
+                    await DatabaseManager.shared.saveRecentSyncState(
+                        chatId: chat.id,
+                        latestSyncedMessageId: targetMessageId,
+                        syncedAt: Date()
+                    )
+                    await DatabaseManager.shared.deleteRecentBackfillState(chatId: chat.id)
+                    SyncDebugLog.record(
+                        "RecentSync",
+                        "backfill complete chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) pages=\(pagesFetched) messages=\(messagesFetched)"
+                    )
+                    return RecentSyncOutcome(
+                        chatId: chat.id,
+                        chatTitle: chat.title,
+                        refreshed: true,
+                        completedSync: true,
+                        messageCount: passMessagesFetched
+                    )
+                }
+
+                guard let minimumFetchedMessageId = minimumMessageId(in: messages), minimumFetchedMessageId != cursor else {
+                    let failedState = await saveFailedBackfillState(
+                        existing: existing,
+                        chatId: chat.id,
+                        targetMessageId: targetMessageId,
+                        stopMessageId: stopMessageId,
+                        cursorMessageId: cursor,
+                        startedAt: startedAt,
+                        pagesFetched: pagesFetched,
+                        messagesFetched: messagesFetched,
+                        lastError: "cursor did not advance"
+                    )
+                    SyncDebugLog.record(
+                        "RecentSync",
+                        "backfill moved-to-retry lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) failures=\(failedState.failureCount) nextRetry=\(failedState.nextRetryAt?.description ?? "nil") error=cursor did not advance"
+                    )
+                    return RecentSyncOutcome(
+                        chatId: chat.id,
+                        chatTitle: chat.title,
+                        refreshed: passMessagesFetched > 0,
+                        completedSync: false,
+                        messageCount: passMessagesFetched
+                    )
+                }
+
+                if minimumFetchedMessageId < stopMessageId {
+                    await DatabaseManager.shared.saveRecentSyncState(
+                        chatId: chat.id,
+                        latestSyncedMessageId: targetMessageId,
+                        syncedAt: Date()
+                    )
+                    await DatabaseManager.shared.deleteRecentBackfillState(chatId: chat.id)
+                    SyncDebugLog.record(
+                        "RecentSync",
+                        "backfill reconciled-missing-stop chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) minFetched=\(minimumFetchedMessageId) pages=\(pagesFetched) messages=\(messagesFetched)"
+                    )
+                    return RecentSyncOutcome(
+                        chatId: chat.id,
+                        chatTitle: chat.title,
+                        refreshed: true,
+                        completedSync: true,
+                        messageCount: passMessagesFetched
+                    )
+                }
+
+                cursor = minimumFetchedMessageId
+            }
+
+            await saveBackfillState(
+                chatId: chat.id,
+                targetMessageId: targetMessageId,
+                stopMessageId: stopMessageId,
+                cursorMessageId: cursor,
+                startedAt: startedAt,
+                pagesFetched: pagesFetched,
+                messagesFetched: messagesFetched,
+                status: "active",
+                lastError: nil,
+                failureCount: 0,
+                lastAttemptAt: now,
+                nextRetryAt: nil
+            )
+            SyncDebugLog.record(
+                "RecentSync",
+                "backfill paused lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) pages=\(pagesFetched) messages=\(messagesFetched)"
+            )
+            return RecentSyncOutcome(
+                chatId: chat.id,
+                chatTitle: chat.title,
+                refreshed: passMessagesFetched > 0,
+                completedSync: false,
+                messageCount: passMessagesFetched
+            )
+        } catch {
+            let failedState = await saveFailedBackfillState(
+                existing: existing,
+                chatId: chat.id,
+                targetMessageId: targetMessageId,
+                stopMessageId: stopMessageId,
+                cursorMessageId: cursor,
+                startedAt: startedAt,
+                pagesFetched: pagesFetched,
+                messagesFetched: messagesFetched,
+                lastError: error.localizedDescription
+            )
+            SyncDebugLog.record(
+                "RecentSync",
+                "backfill moved-to-retry lane=\(lane) chatId=\(chat.id) target=\(targetMessageId) stop=\(stopMessageId) cursor=\(cursor) failures=\(failedState.failureCount) nextRetry=\(failedState.nextRetryAt?.description ?? "nil") error=\(error.localizedDescription)"
+            )
+            return RecentSyncOutcome(
+                chatId: chat.id,
+                chatTitle: chat.title,
+                refreshed: passMessagesFetched > 0,
+                completedSync: false,
+                messageCount: passMessagesFetched
+            )
+        }
+    }
+
+    private static func saveBackfillState(
+        chatId: Int64,
+        targetMessageId: Int64,
+        stopMessageId: Int64,
+        cursorMessageId: Int64,
+        startedAt: Date,
+        pagesFetched: Int,
+        messagesFetched: Int,
+        status: String,
+        lastError: String?,
+        failureCount: Int,
+        lastAttemptAt: Date?,
+        nextRetryAt: Date?
+    ) async {
+        await DatabaseManager.shared.saveRecentBackfillState(
+            DatabaseManager.RecentBackfillStateRecord(
+                chatId: chatId,
+                targetMessageId: targetMessageId,
+                stopMessageId: stopMessageId,
+                cursorMessageId: cursorMessageId,
+                startedAt: startedAt,
+                updatedAt: Date(),
+                pagesFetched: pagesFetched,
+                messagesFetched: messagesFetched,
+                status: status,
+                lastError: lastError,
+                failureCount: failureCount,
+                lastAttemptAt: lastAttemptAt,
+                nextRetryAt: nextRetryAt
+            )
+        )
+    }
+
+    @discardableResult
+    private static func saveFailedBackfillState(
+        existing: DatabaseManager.RecentBackfillStateRecord?,
+        chatId: Int64,
+        targetMessageId: Int64,
+        stopMessageId: Int64,
+        cursorMessageId: Int64,
+        startedAt: Date,
+        pagesFetched: Int,
+        messagesFetched: Int,
+        lastError: String
+    ) async -> DatabaseManager.RecentBackfillStateRecord {
+        let now = Date()
+        let failureCount = Self.isMatchingBackfill(
+            existing,
+            targetMessageId: targetMessageId,
+            stopMessageId: stopMessageId
+        )
+            ? (existing?.failureCount ?? 0) + 1
+            : 1
+        let record = DatabaseManager.RecentBackfillStateRecord(
+            chatId: chatId,
+            targetMessageId: targetMessageId,
+            stopMessageId: stopMessageId,
+            cursorMessageId: cursorMessageId,
+            startedAt: startedAt,
+            updatedAt: now,
+            pagesFetched: pagesFetched,
+            messagesFetched: messagesFetched,
+            status: "failed",
+            lastError: lastError,
+            failureCount: failureCount,
+            lastAttemptAt: now,
+            nextRetryAt: now.addingTimeInterval(retryBackoffDelay(failureCount: failureCount))
+        )
+        await DatabaseManager.shared.saveRecentBackfillState(record)
+        return record
+    }
+
+    private nonisolated static func isMatchingBackfill(
+        _ backfillState: DatabaseManager.RecentBackfillStateRecord?,
+        targetMessageId: Int64,
+        stopMessageId: Int64
+    ) -> Bool {
+        guard let backfillState else { return false }
+        return isMatchingBackfill(backfillState, targetMessageId: targetMessageId, stopMessageId: stopMessageId)
+    }
+
+    private nonisolated static func retryBackoffDelay(failureCount: Int) -> TimeInterval {
+        let backoffs = AppConstants.RecentSync.retryBackoffSeconds
+        guard !backoffs.isEmpty else { return 0 }
+        let index = min(max(1, failureCount) - 1, backoffs.count - 1)
+        return backoffs[index]
+    }
+
+    private static func minimumMessageId(in messages: [TGMessage]) -> Int64? {
+        messages.map(\.id).min()
+    }
+
+    private static func withHistoryFetchTimeout<T: Sendable>(
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let seconds = AppConstants.RecentSync.historyFetchTimeoutSeconds
+        guard seconds > 0 else {
+            throw HistoryFetchTimeoutError(seconds: seconds)
+        }
+
+        let nanoseconds = UInt64((seconds * 1_000_000_000).rounded(.up))
+        let operationTask = Task {
+            try await operation()
+        }
+        let timeoutTask = Task<T, Error> {
+            try await Task.sleep(nanoseconds: nanoseconds)
+            throw HistoryFetchTimeoutError(seconds: seconds)
+        }
+
+        defer {
+            operationTask.cancel()
+            timeoutTask.cancel()
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let race = TimeoutRace<T>()
+                Task {
+                    do {
+                        let value = try await operationTask.value
+                        race.resume(.success(value), continuation: continuation)
+                    } catch {
+                        race.resume(.failure(error), continuation: continuation)
+                    }
+                }
+                Task {
+                    do {
+                        let value = try await timeoutTask.value
+                        race.resume(.success(value), continuation: continuation)
+                    } catch {
+                        race.resume(.failure(error), continuation: continuation)
+                    }
+                }
+            }
+        } onCancel: {
+            operationTask.cancel()
+            timeoutTask.cancel()
+        }
+    }
+
+    private nonisolated static func messageRecord(from message: TGMessage) -> DatabaseManager.MessageRecord {
+        DatabaseManager.MessageRecord(
+            id: message.id,
+            chatId: message.chatId,
+            senderUserId: message.senderUserId,
+            senderName: message.senderName,
+            date: message.date,
+            textContent: message.textContent,
+            mediaTypeRaw: message.mediaType?.rawValue,
+            isOutgoing: message.isOutgoing
+        )
     }
 
     nonisolated private static func isIndexable(_ chat: TGChat) -> Bool {
@@ -434,6 +1059,31 @@ actor RecentSyncCoordinator {
 
     func indexableChatsForTesting(using telegramService: TelegramService) async -> [TGChat] {
         await snapshot(using: telegramService)
+    }
+
+    func syncChatsForTesting(chats: [TGChat], using telegramService: TelegramService) async -> Set<Int64> {
+        await sync(primaryChats: chats, retryChats: [], using: telegramService)
+    }
+
+    func syncSelectedChatsForTesting(
+        primaryChats: [TGChat],
+        retryChats: [TGChat],
+        using telegramService: TelegramService
+    ) async -> Set<Int64> {
+        await sync(primaryChats: primaryChats, retryChats: retryChats, using: telegramService)
+    }
+
+    func selectedSyncChatIdsForTesting(chats: [TGChat], now: Date = Date()) async -> ([Int64], [Int64]) {
+        let orderedChats = orderedChats(from: chats)
+        let recentSyncStates = await DatabaseManager.shared.loadRecentSyncStates(in: orderedChats.map(\.id))
+        let backfillStates = await DatabaseManager.shared.loadRecentBackfillStates(in: orderedChats.map(\.id))
+        let selection = selectSyncChats(
+            from: orderedChats,
+            recentSyncStates: recentSyncStates,
+            backfillStates: backfillStates,
+            now: now
+        )
+        return (selection.primaryChats.map(\.id), selection.retryChats.map(\.id))
     }
 #endif
 }

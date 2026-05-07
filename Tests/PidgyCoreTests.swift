@@ -151,9 +151,9 @@ final class PidgyCoreTests: XCTestCase {
         let limiter = RateLimiter(maxTokens: 10, refillRate: 10)
         let secondCall = AsyncCompletionFlag()
 
-        await limiter.acquireCall(priority: .background, method: "getChatHistory")
+        try await limiter.acquireCall(priority: .background, method: "getChatHistory")
         let pending = Task {
-            await limiter.acquireCall(priority: .background, method: "getChatHistory")
+            try await limiter.acquireCall(priority: .background, method: "getChatHistory")
             await secondCall.markCompleted()
             await limiter.releaseCall(method: "getChatHistory")
         }
@@ -163,7 +163,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertFalse(completedBeforeRelease)
 
         await limiter.releaseCall(method: "getChatHistory")
-        _ = await pending.value
+        _ = try await pending.value
         let completedAfterRelease = await secondCall.isCompleted
         XCTAssertTrue(completedAfterRelease)
     }
@@ -2922,6 +2922,699 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertTrue(recoveryChatIds.contains(freshestChat.id))
         XCTAssertTrue(recoveryChatIds.contains(secondFreshestChat.id))
         XCTAssertFalse(recoveryChatIds.contains(oldestChat.id))
+    }
+
+    @MainActor
+    func testRecentSyncBackfillCompletesOnePageGapBeforeAdvancingState() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_301
+            let now = Date()
+            let history = stride(from: Int64(120), through: Int64(100), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: chatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 120))
+                )
+            }
+            let chat = TGChat(
+                id: chatId,
+                title: "Backfill One Page",
+                chatType: .privateChat(userId: 301),
+                unreadCount: 0,
+                lastMessage: history[0],
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 100,
+                syncedAt: now.addingTimeInterval(-300)
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: history]
+            )
+
+            let completed = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertEqual(completed, [chatId])
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 120)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            let storedMessages = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 100)
+            XCTAssertTrue(storedMessages.contains { $0.id == 119 })
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0])
+            XCTAssertEqual(telegramService.historyRequests.map(\.limit), [AppConstants.RecentSync.backfillPageSize])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncBackfillReconcilesDeletedStopMarkerAfterPagingPastIt() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_310
+            let now = Date()
+            let newerMessages = stride(from: Int64(200), through: Int64(151), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: chatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 200))
+                )
+            }
+            let olderMessages = stride(from: Int64(149), through: Int64(100), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: chatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 200))
+                )
+            }
+            let chat = TGChat(
+                id: chatId,
+                title: "Deleted Stop Marker",
+                chatType: .privateChat(userId: 310),
+                unreadCount: 0,
+                lastMessage: newerMessages[0],
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 150,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                scriptedHistoryByChatId: [
+                    chatId: [
+                        0: newerMessages,
+                        151: olderMessages
+                    ]
+                ]
+            )
+
+            let completed = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertEqual(completed, [chatId])
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 200)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            let storedMessages = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 200)
+            XCTAssertTrue(storedMessages.contains { $0.id == 151 })
+            XCTAssertTrue(storedMessages.contains { $0.id == 149 })
+            XCTAssertFalse(storedMessages.contains { $0.id == 150 })
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0, 151])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncBackfillPausesBeforeCrossingDeletedStopMarkerAndReconcilesOnResume() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_311
+            let now = Date()
+            func messages(from start: Int64, through end: Int64) -> [TGMessage] {
+                stride(from: start, through: end, by: -1).map { id in
+                    makeTGMessage(
+                        id: id,
+                        chatId: chatId,
+                        text: "message \(id)",
+                        date: now.addingTimeInterval(TimeInterval(id - 200))
+                    )
+                }
+            }
+
+            let firstPage = messages(from: 200, through: 181)
+            let secondPage = messages(from: 180, through: 161)
+            let thirdPage = messages(from: 160, through: 151)
+            let crossingPage = messages(from: 149, through: 100)
+            let chat = TGChat(
+                id: chatId,
+                title: "Deleted Stop Resume",
+                chatType: .privateChat(userId: 311),
+                unreadCount: 0,
+                lastMessage: firstPage[0],
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 150,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                scriptedHistoryByChatId: [
+                    chatId: [
+                        0: firstPage,
+                        181: secondPage,
+                        161: thirdPage,
+                        151: crossingPage
+                    ]
+                ]
+            )
+
+            let firstCompleted = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertTrue(firstCompleted.isEmpty)
+            var recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 150)
+            var backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertEqual(backfillState?.status, "active")
+            XCTAssertEqual(backfillState?.cursorMessageId, 151)
+            XCTAssertEqual(backfillState?.pagesFetched, 3)
+            XCTAssertEqual(backfillState?.messagesFetched, 50)
+
+            let secondCompleted = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertEqual(secondCompleted, [chatId])
+            recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 200)
+            backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0, 181, 161, 151])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncBackfillReconcilesLatestBeforeStoredStopMarker() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_312
+            let now = Date()
+            let latest = makeTGMessage(id: 180, chatId: chatId, text: "latest", date: now)
+            let chat = TGChat(
+                id: chatId,
+                title: "Latest Before Stop",
+                chatType: .privateChat(userId: 312),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 200,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:]
+            )
+
+            let completed = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertEqual(completed, [chatId])
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 180)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            XCTAssertTrue(telegramService.historyRequests.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testRecentSyncBackfillPersistsCursorWhenPageBudgetExhaustsAndResumes() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_302
+            let now = Date()
+            let history = stride(from: Int64(1_350), through: Int64(950), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: chatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 1_350))
+                )
+            }
+            let chat = TGChat(
+                id: chatId,
+                title: "Backfill Multi Page",
+                chatType: .privateChat(userId: 302),
+                unreadCount: 0,
+                lastMessage: history[0],
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 1_000,
+                syncedAt: now.addingTimeInterval(-3_600)
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: history]
+            )
+
+            let firstCompleted = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertTrue(firstCompleted.isEmpty)
+            var recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 1_000)
+            var backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertEqual(backfillState?.targetMessageId, 1_350)
+            XCTAssertEqual(backfillState?.stopMessageId, 1_000)
+            XCTAssertEqual(backfillState?.cursorMessageId, 1_051)
+            XCTAssertEqual(backfillState?.pagesFetched, 3)
+            XCTAssertEqual(backfillState?.messagesFetched, 300)
+
+            let secondCompleted = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertEqual(secondCompleted, [chatId])
+            recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 1_350)
+            backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0, 1_251, 1_151, 1_051])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncBackfillFailureDoesNotAdvanceRecentSyncState() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_303
+            let now = Date()
+            let latest = makeTGMessage(id: 500, chatId: chatId, text: "latest", date: now)
+            let chat = TGChat(
+                id: chatId,
+                title: "Failing Backfill",
+                chatType: .privateChat(userId: 303),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 450,
+                syncedAt: now.addingTimeInterval(-300)
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: [latest]],
+                failingHistoryChatIds: [chatId]
+            )
+
+            let completed = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertTrue(completed.isEmpty)
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 450)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertEqual(backfillState?.targetMessageId, 500)
+            XCTAssertEqual(backfillState?.stopMessageId, 450)
+            XCTAssertEqual(backfillState?.status, "failed")
+            XCTAssertNotNil(backfillState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testRecentSyncBackfillFailureContinuesToNextPrimaryChat() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let failingChatId: Int64 = 9_305
+            let succeedingChatId: Int64 = 9_306
+            let now = Date()
+            let failingLatest = makeTGMessage(id: 500, chatId: failingChatId, text: "latest", date: now)
+            let succeedingHistory = stride(from: Int64(220), through: Int64(200), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: succeedingChatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 220))
+                )
+            }
+            let failingChat = TGChat(
+                id: failingChatId,
+                title: "Primary Fail",
+                chatType: .privateChat(userId: 305),
+                unreadCount: 0,
+                lastMessage: failingLatest,
+                memberCount: nil,
+                order: 200,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let succeedingChat = TGChat(
+                id: succeedingChatId,
+                title: "Primary Continues",
+                chatType: .privateChat(userId: 306),
+                unreadCount: 0,
+                lastMessage: succeedingHistory[0],
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: failingChatId,
+                latestSyncedMessageId: 450,
+                syncedAt: now.addingTimeInterval(-300)
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: succeedingChatId,
+                latestSyncedMessageId: 200,
+                syncedAt: now.addingTimeInterval(-300)
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [
+                    failingChatId: [failingLatest],
+                    succeedingChatId: succeedingHistory
+                ],
+                failingHistoryChatIds: [failingChatId]
+            )
+
+            let completed = await coordinator.syncChatsForTesting(
+                chats: [failingChat, succeedingChat],
+                using: telegramService
+            )
+
+            XCTAssertEqual(completed, [succeedingChatId])
+            let failingRecentState = await DatabaseManager.shared.loadRecentSyncState(chatId: failingChatId)
+            XCTAssertEqual(failingRecentState?.latestSyncedMessageId, 450)
+            let failingBackfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: failingChatId)
+            XCTAssertEqual(failingBackfillState?.status, "failed")
+            XCTAssertEqual(failingBackfillState?.failureCount, 1)
+            XCTAssertNotNil(failingBackfillState?.nextRetryAt)
+            let succeedingRecentState = await DatabaseManager.shared.loadRecentSyncState(chatId: succeedingChatId)
+            XCTAssertEqual(succeedingRecentState?.latestSyncedMessageId, 220)
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [failingChatId, succeedingChatId])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncRetryLaneResumesFromSavedCursor() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_307
+            let now = Date()
+            let history = stride(from: Int64(1_100), through: Int64(1_000), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: chatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 1_100))
+                )
+            }
+            let chat = TGChat(
+                id: chatId,
+                title: "Retry Resume",
+                chatType: .privateChat(userId: 307),
+                unreadCount: 0,
+                lastMessage: history[0],
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 1_000,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            await DatabaseManager.shared.saveRecentBackfillState(
+                DatabaseManager.RecentBackfillStateRecord(
+                    chatId: chatId,
+                    targetMessageId: 1_100,
+                    stopMessageId: 1_000,
+                    cursorMessageId: 1_051,
+                    startedAt: now.addingTimeInterval(-300),
+                    updatedAt: now.addingTimeInterval(-120),
+                    pagesFetched: 1,
+                    messagesFetched: 50,
+                    status: "failed",
+                    lastError: "timeout",
+                    failureCount: 2,
+                    lastAttemptAt: now.addingTimeInterval(-120),
+                    nextRetryAt: now.addingTimeInterval(-1)
+                )
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: history]
+            )
+
+            let completed = await coordinator.syncSelectedChatsForTesting(
+                primaryChats: [],
+                retryChats: [chat],
+                using: telegramService
+            )
+
+            XCTAssertEqual(completed, [chatId])
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 1_100)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [1_051])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncRetryLaneReconcilesDeletedStopMarkerFromSavedCursor() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_313
+            let now = Date()
+            let latest = makeTGMessage(id: 200, chatId: chatId, text: "latest", date: now)
+            let crossingPage = stride(from: Int64(149), through: Int64(100), by: -1).map { id in
+                makeTGMessage(
+                    id: id,
+                    chatId: chatId,
+                    text: "message \(id)",
+                    date: now.addingTimeInterval(TimeInterval(id - 200))
+                )
+            }
+            let chat = TGChat(
+                id: chatId,
+                title: "Retry Deleted Stop",
+                chatType: .privateChat(userId: 313),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 150,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            await DatabaseManager.shared.saveRecentBackfillState(
+                DatabaseManager.RecentBackfillStateRecord(
+                    chatId: chatId,
+                    targetMessageId: 200,
+                    stopMessageId: 150,
+                    cursorMessageId: 151,
+                    startedAt: now.addingTimeInterval(-300),
+                    updatedAt: now.addingTimeInterval(-120),
+                    pagesFetched: 1,
+                    messagesFetched: 50,
+                    status: "failed",
+                    lastError: "timeout",
+                    failureCount: 2,
+                    lastAttemptAt: now.addingTimeInterval(-120),
+                    nextRetryAt: now.addingTimeInterval(-1)
+                )
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                scriptedHistoryByChatId: [
+                    chatId: [
+                        151: crossingPage
+                    ]
+                ]
+            )
+
+            let completed = await coordinator.syncSelectedChatsForTesting(
+                primaryChats: [],
+                retryChats: [chat],
+                using: telegramService
+            )
+
+            XCTAssertEqual(completed, [chatId])
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, 200)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [151])
+        }
+    }
+
+    @MainActor
+    func testRecentSyncRetryBackoffCapsAtThirtyTwoMinutes() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_308
+            let now = Date()
+            let latest = makeTGMessage(id: 900, chatId: chatId, text: "latest", date: now)
+            let chat = TGChat(
+                id: chatId,
+                title: "Retry Cap",
+                chatType: .privateChat(userId: 308),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 850,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            await DatabaseManager.shared.saveRecentBackfillState(
+                DatabaseManager.RecentBackfillStateRecord(
+                    chatId: chatId,
+                    targetMessageId: 900,
+                    stopMessageId: 850,
+                    cursorMessageId: 0,
+                    startedAt: now.addingTimeInterval(-600),
+                    updatedAt: now.addingTimeInterval(-300),
+                    pagesFetched: 0,
+                    messagesFetched: 0,
+                    status: "failed",
+                    lastError: "timeout",
+                    failureCount: 7,
+                    lastAttemptAt: now.addingTimeInterval(-300),
+                    nextRetryAt: now.addingTimeInterval(-1)
+                )
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: [latest]],
+                failingHistoryChatIds: [chatId]
+            )
+
+            let completed = await coordinator.syncSelectedChatsForTesting(
+                primaryChats: [],
+                retryChats: [chat],
+                using: telegramService
+            )
+
+            XCTAssertTrue(completed.isEmpty)
+            let loadedBackfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            let backfillState = try XCTUnwrap(loadedBackfillState)
+            XCTAssertEqual(backfillState.failureCount, 8)
+            XCTAssertEqual(backfillState.status, "failed")
+            let retryDelay = try XCTUnwrap(backfillState.nextRetryAt).timeIntervalSince(
+                try XCTUnwrap(backfillState.lastAttemptAt)
+            )
+            XCTAssertGreaterThanOrEqual(retryDelay, (32 * 60) - 1)
+            XCTAssertLessThanOrEqual(retryDelay, (32 * 60) + 1)
+        }
+    }
+
+    @MainActor
+    func testRecentSyncManualPriorityBypassesRetryDelay() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_309
+            let now = Date()
+            let latest = makeTGMessage(id: 950, chatId: chatId, text: "latest", date: now)
+            let chat = TGChat(
+                id: chatId,
+                title: "Retry Priority",
+                chatType: .privateChat(userId: 309),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            await DatabaseManager.shared.saveRecentSyncState(
+                chatId: chatId,
+                latestSyncedMessageId: 900,
+                syncedAt: now.addingTimeInterval(-600)
+            )
+            await DatabaseManager.shared.saveRecentBackfillState(
+                DatabaseManager.RecentBackfillStateRecord(
+                    chatId: chatId,
+                    targetMessageId: 950,
+                    stopMessageId: 900,
+                    cursorMessageId: 0,
+                    startedAt: now.addingTimeInterval(-600),
+                    updatedAt: now.addingTimeInterval(-300),
+                    pagesFetched: 0,
+                    messagesFetched: 0,
+                    status: "failed",
+                    lastError: "timeout",
+                    failureCount: 1,
+                    lastAttemptAt: now.addingTimeInterval(-300),
+                    nextRetryAt: now.addingTimeInterval(10 * 60)
+                )
+            )
+
+            var selected = await coordinator.selectedSyncChatIdsForTesting(chats: [chat], now: now)
+            XCTAssertTrue(selected.0.isEmpty)
+            XCTAssertTrue(selected.1.isEmpty)
+
+            await coordinator.prioritize(chatId: chatId)
+            selected = await coordinator.selectedSyncChatIdsForTesting(chats: [chat], now: now)
+
+            XCTAssertEqual(selected.0, [chatId])
+            XCTAssertTrue(selected.1.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testRecentSyncLatestWindowStillHandlesNewChatWithoutBackfillState() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = RecentSyncCoordinator()
+            let chatId: Int64 = 9_304
+            let now = Date()
+            let latest = makeTGMessage(id: 700, chatId: chatId, text: "latest", date: now)
+            let older = makeTGMessage(id: 690, chatId: chatId, text: "older", date: now.addingTimeInterval(-60))
+            let chat = TGChat(
+                id: chatId,
+                title: "New Recent Chat",
+                chatType: .privateChat(userId: 304),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: 100,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: [latest, older]]
+            )
+
+            let completed = await coordinator.syncChatsForTesting(chats: [chat], using: telegramService)
+
+            XCTAssertEqual(completed, [chatId])
+            let recentState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
+            XCTAssertEqual(recentState?.latestSyncedMessageId, latest.id)
+            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chatId)
+            XCTAssertNil(backfillState)
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0])
+            XCTAssertEqual(telegramService.historyRequests.map(\.limit), [AppConstants.RecentSync.latestWindowPerChat])
+        }
     }
 
     @MainActor
@@ -8872,6 +9565,7 @@ private final class PipelineTestTelegramService: TelegramService {
     private var scriptedLocalHistoryResponsesByChatId: [Int64: [Int64: [[TGMessage]]]]
     private let getChatById: [Int64: TGChat]
     private let resolvedMemberCounts: [Int64: Int]
+    private let failingHistoryChatIds: Set<Int64>
     private let hangingHistoryChatIds: Set<Int64>
     private let hangingLocalHistoryChatIds: Set<Int64>
     private let hangingHistoryDelayNanoseconds: UInt64
@@ -8884,6 +9578,7 @@ private final class PipelineTestTelegramService: TelegramService {
         scriptedLocalHistoryResponsesByChatId: [Int64: [Int64: [[TGMessage]]]] = [:],
         getChatById: [Int64: TGChat] = [:],
         resolvedMemberCounts: [Int64: Int] = [:],
+        failingHistoryChatIds: Set<Int64> = [],
         hangingHistoryChatIds: Set<Int64> = [],
         hangingLocalHistoryChatIds: Set<Int64> = [],
         hangingHistoryDelayNanoseconds: UInt64 = 5_000_000_000
@@ -8894,6 +9589,7 @@ private final class PipelineTestTelegramService: TelegramService {
         self.scriptedLocalHistoryResponsesByChatId = scriptedLocalHistoryResponsesByChatId
         self.getChatById = getChatById
         self.resolvedMemberCounts = resolvedMemberCounts
+        self.failingHistoryChatIds = failingHistoryChatIds
         self.hangingHistoryChatIds = hangingHistoryChatIds
         self.hangingLocalHistoryChatIds = hangingLocalHistoryChatIds
         self.hangingHistoryDelayNanoseconds = hangingHistoryDelayNanoseconds
@@ -8911,7 +9607,8 @@ private final class PipelineTestTelegramService: TelegramService {
         fromMessageId: Int64 = 0,
         limit: Int = 50,
         onlyLocal: Bool = false,
-        priority: RateLimiter.Priority = .userInitiated
+        priority: RateLimiter.Priority = .userInitiated,
+        timeoutSeconds: TimeInterval? = nil
     ) async throws -> [TGMessage] {
         historyRequests.append(HistoryRequest(
             chatId: chatId,
@@ -8937,6 +9634,9 @@ private final class PipelineTestTelegramService: TelegramService {
         if hangingHistoryChatIds.contains(chatId) {
             await sleepIgnoringCancellation(nanoseconds: hangingHistoryDelayNanoseconds)
             return []
+        }
+        if failingHistoryChatIds.contains(chatId) {
+            throw TGError.clientNotInitialized
         }
         if let scripted = scriptedHistoryByChatId[chatId]?[fromMessageId] {
             return Array(scripted.prefix(limit))

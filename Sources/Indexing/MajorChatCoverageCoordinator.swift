@@ -118,6 +118,7 @@ actor MajorChatCoverageCoordinator {
         self.telegramService = telegramService
         pendingImmediateReconcile = true
         logger.info("Major coverage start requested")
+        SyncDebugLog.record("MajorCoverage", "start requested")
 
         guard processingTask == nil else { return }
 
@@ -127,6 +128,7 @@ actor MajorChatCoverageCoordinator {
     }
 
     func stop() async {
+        SyncDebugLog.record("MajorCoverage", "stop requested")
         let task = processingTask
         task?.cancel()
         processingTask = nil
@@ -137,10 +139,12 @@ actor MajorChatCoverageCoordinator {
 
     func refreshNow() async {
         pendingImmediateReconcile = true
+        SyncDebugLog.record("MajorCoverage", "refresh requested")
     }
 
     func recoverNow() async {
         pendingImmediateReconcile = true
+        SyncDebugLog.record("MajorCoverage", "recover requested")
     }
 
     private func runLoop() async {
@@ -168,6 +172,10 @@ actor MajorChatCoverageCoordinator {
             logger.info(
                 "Major coverage pass scanned=\(summary.scannedChats) backfilled=\(summary.backfilledChats) fetched=\(summary.fetchedMessages) immediate=\(shouldRunNow)"
             )
+            SyncDebugLog.record(
+                "MajorCoverage",
+                "pass scanned=\(summary.scannedChats) backfilled=\(summary.backfilledChats) fetched=\(summary.fetchedMessages) immediate=\(shouldRunNow) cooldown=\(summary.historyCooldownUntil?.description ?? "nil")"
+            )
 
             let fallbackSleepMs = shouldRunNow
                 ? AppConstants.MajorChatCoverage.activePollIntervalMilliseconds
@@ -189,6 +197,10 @@ actor MajorChatCoverageCoordinator {
         if let historyCooldownUntil, historyCooldownUntil > now {
             logger.info(
                 "Major coverage pass deferred until \(historyCooldownUntil, privacy: .public)"
+            )
+            SyncDebugLog.record(
+                "MajorCoverage",
+                "pass deferred reason=history-cooldown until=\(historyCooldownUntil)"
             )
             return PassSummary(
                 scannedChats: 0,
@@ -221,6 +233,10 @@ actor MajorChatCoverageCoordinator {
         logger.info(
             "Major coverage reconcile candidates=\(majorChats.count) debt=\(debtChatIds.count) scanning=\(scanChats.count)"
         )
+        SyncDebugLog.record(
+            "MajorCoverage",
+            "reconcile candidates=\(majorChats.count) debt=\(debtChatIds.count) scanning=\(scanChats.count)"
+        )
 
         for chat in scanChats {
             guard !Task.isCancelled else { break }
@@ -228,6 +244,7 @@ actor MajorChatCoverageCoordinator {
             logger.info(
                 "Major coverage chat \(chat.id, privacy: .public) starting coverage"
             )
+            SyncDebugLog.record("MajorCoverage", "chat start chatId=\(chat.id) title=\"\(chat.title)\"")
             let outcome = await Self.ensureCoverage(
                 for: chat,
                 using: telegramService,
@@ -238,9 +255,17 @@ actor MajorChatCoverageCoordinator {
                 logger.error(
                     "Major coverage chat \(outcome.chatId, privacy: .public) failed error=\(errorDescription, privacy: .public)"
                 )
+                SyncDebugLog.record(
+                    "MajorCoverage",
+                    "chat failed chatId=\(outcome.chatId) error=\(errorDescription)"
+                )
             } else if outcome.fetchedMessages > 0 || outcome.reachedTarget {
                 logger.info(
                     "Major coverage chat \(outcome.chatId, privacy: .public) fetched=\(outcome.fetchedMessages) reachedTarget=\(outcome.reachedTarget)"
+                )
+                SyncDebugLog.record(
+                    "MajorCoverage",
+                    "chat complete chatId=\(outcome.chatId) fetched=\(outcome.fetchedMessages) reachedTarget=\(outcome.reachedTarget)"
                 )
             }
             if outcome.fetchedMessages > 0 {
@@ -256,6 +281,10 @@ actor MajorChatCoverageCoordinator {
             if outcome.shouldStopPass {
                 logger.info(
                     "Major coverage pass stopping early after chat \(outcome.chatId, privacy: .public)"
+                )
+                SyncDebugLog.record(
+                    "MajorCoverage",
+                    "pass stopping early chatId=\(outcome.chatId) cooldown=\(outcome.historyCooldownSeconds?.description ?? "nil")"
                 )
                 break
             }
@@ -286,6 +315,10 @@ actor MajorChatCoverageCoordinator {
             if state?.coverageVersion == AppConstants.MajorChatCoverage.coverageStateVersion,
                let nextRetryAt = state?.nextRetryAt,
                nextRetryAt > now {
+                SyncDebugLog.record(
+                    "MajorCoverage",
+                    "skip chatId=\(chat.id) reason=retry-backoff until=\(nextRetryAt)"
+                )
                 continue
             }
 

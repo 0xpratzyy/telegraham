@@ -42,15 +42,15 @@ actor RateLimiter {
     }
 
     /// Acquires a token, waiting if necessary.
-    func acquire() async {
-        await acquire(priority: .userInitiated, method: AppConstants.RateLimit.defaultMethod)
+    func acquire() async throws {
+        try await acquire(priority: .userInitiated, method: AppConstants.RateLimit.defaultMethod)
     }
 
     func acquire(
         priority: Priority,
         method: String,
         floodWaitSeconds: Int? = nil
-    ) async {
+    ) async throws {
         let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? AppConstants.RateLimit.defaultMethod
             : method
@@ -62,16 +62,27 @@ actor RateLimiter {
         incrementQueue(for: priority)
         defer { decrementQueue(for: priority) }
 
+        try await acquireToken(priority: priority, method: normalizedMethod)
+    }
+
+    private func acquireToken(
+        priority: Priority,
+        method normalizedMethod: String
+    ) async throws {
+        try Task.checkCancellation()
+
         while true {
+            try Task.checkCancellation()
+
             if let waitSeconds = cooldownWaitSeconds(for: normalizedMethod), waitSeconds > 0 {
                 logThrottle(priority: priority, method: normalizedMethod, waitSeconds: waitSeconds)
-                try? await Task.sleep(for: .milliseconds(Int(waitSeconds * 1000)))
+                try await Task.sleep(for: .milliseconds(Int(waitSeconds * 1000)))
                 continue
             }
 
             if priority == .background && queuedUserInitiated > 0 {
                 logThrottle(priority: priority, method: normalizedMethod, waitSeconds: nil)
-                try? await Task.sleep(
+                try await Task.sleep(
                     for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
                 )
                 continue
@@ -99,7 +110,7 @@ actor RateLimiter {
                 ? AppConstants.RateLimit.userPriorityPollIntervalMilliseconds
                 : AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds
             let sleepMilliseconds = max(Int(waitSeconds * 1000), Int(pollMilliseconds))
-            try? await Task.sleep(for: .milliseconds(sleepMilliseconds))
+            try await Task.sleep(for: .milliseconds(sleepMilliseconds))
         }
     }
 
@@ -107,11 +118,18 @@ actor RateLimiter {
         priority: Priority,
         method: String,
         floodWaitSeconds: Int? = nil
-    ) async {
+    ) async throws {
         let normalizedMethod = normalized(method)
-        await acquire(priority: priority, method: normalizedMethod, floodWaitSeconds: floodWaitSeconds)
+        if let floodWaitSeconds, floodWaitSeconds > 0 {
+            recordFloodWait(method: normalizedMethod, seconds: floodWaitSeconds)
+        }
+
+        incrementQueue(for: priority)
+        defer { decrementQueue(for: priority) }
+
+        try await acquireToken(priority: priority, method: normalizedMethod)
         if shouldSerializeInFlight(method: normalizedMethod) {
-            await acquireSerializedHistorySlot(priority: priority, method: normalizedMethod)
+            try await acquireSerializedHistorySlot(priority: priority, method: normalizedMethod)
         }
     }
 
@@ -131,14 +149,28 @@ actor RateLimiter {
         print("[RateLimiter] FLOOD_WAIT backoff \(String(format: "%.1f", backoffSeconds))s for \(normalizedMethod)")
     }
 
-    private func acquireSerializedHistorySlot(priority: Priority, method: String) async {
-        while isHistoryCallInFlight {
+    private func acquireSerializedHistorySlot(priority: Priority, method: String) async throws {
+        while true {
+            try Task.checkCancellation()
+
+            if !isHistoryCallInFlight {
+                if priority == .background && queuedUserInitiated > 0 {
+                    logThrottle(priority: priority, method: method, waitSeconds: nil)
+                    try await Task.sleep(
+                        for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
+                    )
+                    continue
+                }
+
+                isHistoryCallInFlight = true
+                return
+            }
+
             logThrottle(priority: priority, method: method, waitSeconds: nil)
-            try? await Task.sleep(
+            try await Task.sleep(
                 for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
             )
         }
-        isHistoryCallInFlight = true
     }
 
     private func shouldSerializeInFlight(method: String) -> Bool {

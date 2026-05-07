@@ -70,6 +70,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var dashboardWindow: NSWindow?
     private var graphBuildTask: Task<Void, Never>?
     private var preferencesOpenObserver: NSObjectProtocol?
+    private var launcherOpenObserver: NSObjectProtocol?
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
@@ -83,6 +84,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SyncDebugLog.record("App", "applicationDidFinishLaunching")
         PidgyFontRegistrar.registerBundledFonts()
 
         if launchPresentationMode.activatesAsRegularApp {
@@ -103,6 +105,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.openSettings()
+            }
+        }
+
+        launcherOpenObserver = NotificationCenter.default.addObserver(
+            forName: .pidgyShowLauncher,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.panelManager?.showLauncher()
             }
         }
 
@@ -127,9 +139,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                let apiHash = try? KeychainManager.retrieve(for: .apiHash),
                let apiId = Int(apiIdStr) {
                 logger.info("Starting Telegram service with stored credentials")
+                SyncDebugLog.record("App", "starting Telegram service with stored credentials")
                 telegramService.start(apiId: apiId, apiHash: apiHash)
             } else {
                 logger.warning("Telegram credentials missing; startup pipeline will wait")
+                SyncDebugLog.record("App", "Telegram credentials missing; startup pipeline waiting")
             }
         }
 
@@ -145,18 +159,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
             logger.info("Startup pipeline waiting for Telegram readiness")
+            SyncDebugLog.record("App", "startup pipeline waiting for Telegram readiness")
             await waitForGraphBuildReadiness()
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting recent sync")
+            SyncDebugLog.record("App", "startup pipeline starting recent sync")
             await RecentSyncCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting major chat coverage")
+            SyncDebugLog.record("App", "startup pipeline starting major chat coverage")
             await MajorChatCoverageCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting graph build")
+            SyncDebugLog.record("App", "startup pipeline starting graph build")
             await GraphBuilder.shared.buildIfNeeded(using: telegramService)
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting index scheduler")
+            SyncDebugLog.record("App", "startup pipeline starting index scheduler")
             await IndexScheduler.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             let includeBotsInAISearch = UserDefaults.standard.bool(
@@ -174,9 +193,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if let preferencesOpenObserver {
             NotificationCenter.default.removeObserver(preferencesOpenObserver)
         }
+        if let launcherOpenObserver {
+            NotificationCenter.default.removeObserver(launcherOpenObserver)
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        SyncDebugLog.record("App", "applicationDidBecomeActive recovery requested")
         Task {
             await RecentSyncCoordinator.shared.recoverNow()
             await MajorChatCoverageCoordinator.shared.recoverNow()
@@ -214,11 +237,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         hotkeyManager?.unregister()
         graphBuildTask?.cancel()
         TaskIndexCoordinator.shared.stop()
-        telegramService.stop()
         Task { @MainActor in
             await RecentSyncCoordinator.shared.stop()
             await MajorChatCoverageCoordinator.shared.stop()
             await IndexScheduler.shared.stop()
+            telegramService.stop()
             await DatabaseManager.shared.close()
             terminationCleanupCompleted = true
             onComplete?()
@@ -283,7 +306,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
             if isReady {
                 logger.info(
-                    "Startup readiness satisfied auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
+                    "Startup readiness satisfied auth=\(self.telegramService.authState.debugLabel, privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
                 )
                 return
             }
@@ -295,7 +318,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             if lastLoggedSecond != elapsedSecond, elapsedSecond % 2 == 0 || didTimeout {
                 lastLoggedSecond = elapsedSecond
                 logger.info(
-                    "Startup readiness waiting auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
+                    "Startup readiness waiting auth=\(self.telegramService.authState.debugLabel, privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
                 )
             }
 

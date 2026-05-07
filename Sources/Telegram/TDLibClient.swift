@@ -40,7 +40,12 @@ final class TDLibClientWrapper {
     }
 
     func start(apiId: Int, apiHash: String) {
+        PidgyDebugLog.record(
+            "TDLibClient",
+            "start requested clientActive=\(client != nil) managerActive=\(manager != nil) apiId=\(apiId) apiHashLength=\(apiHash.count)"
+        )
         if manager != nil || client != nil {
+            PidgyDebugLog.record("TDLibClient", "closing existing client before start")
             close()
         } else if updateContinuation == nil {
             resetUpdateStream()
@@ -54,18 +59,21 @@ final class TDLibClientWrapper {
                 let update = try client.decoder.decode(Update.self, from: data)
                 activeContinuation?.yield(update)
             } catch {
-                print("[TDLib] Failed to decode update: \(error)")
+                PidgyDebugLog.record("TDLibClient", "failed to decode update: \(error)")
             }
         })
+        PidgyDebugLog.record("TDLibClient", "client created=\(client != nil)")
     }
 
     func close() {
+        PidgyDebugLog.record("TDLibClient", "close requested clientActive=\(client != nil) managerActive=\(manager != nil)")
         updateContinuation?.finish()
         updateContinuation = nil
         manager?.closeClients()
         manager = nil
         client = nil
         resetUpdateStream()
+        PidgyDebugLog.record("TDLibClient", "close completed")
     }
 
     private func resetUpdateStream() {

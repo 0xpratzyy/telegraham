@@ -353,6 +353,50 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v13_recent_backfill_state") { db in
+            try db.execute(sql: """
+                CREATE TABLE recent_backfill_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    target_message_id INTEGER NOT NULL,
+                    stop_message_id INTEGER NOT NULL,
+                    cursor_message_id INTEGER NOT NULL DEFAULT 0,
+                    started_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    pages_fetched INTEGER NOT NULL DEFAULT 0,
+                    messages_fetched INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    last_error TEXT
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_recent_backfill_status_updated
+                ON recent_backfill_state(status, updated_at)
+                """)
+        }
+
+        migrator.registerMigration("v14_recent_backfill_retry_state") { db in
+            try db.execute(sql: """
+                ALTER TABLE recent_backfill_state
+                ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0
+                """)
+
+            try db.execute(sql: """
+                ALTER TABLE recent_backfill_state
+                ADD COLUMN last_attempt_at REAL
+                """)
+
+            try db.execute(sql: """
+                ALTER TABLE recent_backfill_state
+                ADD COLUMN next_retry_at REAL
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_recent_backfill_retry_due
+                ON recent_backfill_state(status, next_retry_at, updated_at)
+                """)
+        }
+
         return migrator
     }
 }
