@@ -108,7 +108,6 @@ actor MajorChatCoverageCoordinator {
     private var processingTask: Task<Void, Never>?
     private var pendingImmediateReconcile = true
     private var historyCooldownUntil: Date?
-    private static let historyFetchGate = HistoryFetchGate()
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
         category: "MajorChatCoverage"
@@ -184,7 +183,8 @@ actor MajorChatCoverageCoordinator {
         using telegramService: TelegramService,
         now: Date,
         limit: Int?,
-        historyFetchTimeoutSeconds: TimeInterval
+        historyFetchTimeoutSeconds: TimeInterval,
+        maxNetworkBatchesPerChatOverride: Int? = nil
     ) async -> PassSummary {
         if let historyCooldownUntil, historyCooldownUntil > now {
             logger.info(
@@ -232,7 +232,8 @@ actor MajorChatCoverageCoordinator {
                 for: chat,
                 using: telegramService,
                 now: now,
-                historyFetchTimeoutSeconds: historyFetchTimeoutSeconds
+                historyFetchTimeoutSeconds: historyFetchTimeoutSeconds,
+                maxNetworkBatchesPerChatOverride: maxNetworkBatchesPerChatOverride
             )
             if let errorDescription = outcome.errorDescription {
                 logger.error(
@@ -531,7 +532,8 @@ actor MajorChatCoverageCoordinator {
         for chat: TGChat,
         using telegramService: TelegramService,
         now: Date,
-        historyFetchTimeoutSeconds: TimeInterval
+        historyFetchTimeoutSeconds: TimeInterval,
+        maxNetworkBatchesPerChatOverride: Int? = nil
     ) async -> CoverageOutcome {
         let cutoff = coverageCutoff(now: now)
         let latestSeenMessageId = chat.lastMessage?.id ?? 0
@@ -650,7 +652,8 @@ actor MajorChatCoverageCoordinator {
                     bridgeState: bridgeState,
                     onlyLocal: false,
                     historyFetchTimeoutSeconds: AppConstants.MajorChatCoverage.networkHistoryFetchTimeoutSeconds,
-                    maxBatches: AppConstants.MajorChatCoverage.maxNetworkBatchesPerChat,
+                    maxBatches: maxNetworkBatchesPerChatOverride
+                        ?? AppConstants.MajorChatCoverage.maxNetworkBatchesPerChat,
                     emptyPageRetryCount: 0,
                     interBatchDelayMilliseconds: AppConstants.MajorChatCoverage.networkBatchSpacingMilliseconds,
                     startingProgress: progress
@@ -704,7 +707,7 @@ actor MajorChatCoverageCoordinator {
                 fetchedMessages: progress.fetchedMessages,
                 reachedTarget: progress.reachedTarget,
                 errorDescription: nil,
-                shouldStopPass: progress.didTimeout || progress.didEncounterHistoryBusy,
+                shouldStopPass: progress.didEncounterHistoryBusy,
                 historyCooldownSeconds: progress.didEncounterHistoryBusy
                     ? AppConstants.MajorChatCoverage.transientHistoryFailureCooldownSeconds
                     : nil
@@ -1047,16 +1050,19 @@ actor MajorChatCoverageCoordinator {
         seconds: TimeInterval,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        guard await historyFetchGate.tryAcquire() else {
-            throw CoverageHistoryBusyError()
-        }
         guard seconds > 0 else {
-            await historyFetchGate.release()
             throw CoverageTimeoutError(seconds: seconds)
         }
         let nanoseconds = UInt64((seconds * 1_000_000_000).rounded(.up))
 
-        let operationTask = Task {
+        // We rely on RateLimiter.isHistoryCallInFlight (held inside
+        // TelegramService.withRateLimitedCall until TDLib actually responds)
+        // for serialization between successive history fetches. After a
+        // timeout the underlying TDLibKit call keeps running; the next
+        // backfill request blocks at the rate-limiter until that call drains,
+        // which prevents a pile-up of in-flight TDLib requests without us
+        // having to hold any extra coordinator-level gate.
+        let operationTask = Task<T, Error> {
             try await operation()
         }
         let timeoutTask = Task<T, Error> {
@@ -1071,11 +1077,9 @@ actor MajorChatCoverageCoordinator {
                     do {
                         let value = try await operationTask.value
                         timeoutTask.cancel()
-                        await historyFetchGate.release()
                         race.resume(.success(value), continuation: continuation)
                     } catch {
                         timeoutTask.cancel()
-                        await historyFetchGate.release()
                         race.resume(.failure(error), continuation: continuation)
                     }
                 }
@@ -1084,11 +1088,12 @@ actor MajorChatCoverageCoordinator {
                         let value = try await timeoutTask.value
                         race.resume(.success(value), continuation: continuation)
                     } catch is CancellationError {
-                        // The operation completed first and cancelled the timer; do not turn
-                        // that timer cancellation into a failed history fetch.
+                        // The operation completed first and cancelled the timer.
                     } catch {
-                        operationTask.cancel()
-                        await historyFetchGate.release()
+                        // Timer fired before TDLib responded. Surface the
+                        // timeout to the caller; operationTask keeps running
+                        // until TDLib drains, holding the rate-limiter slot
+                        // so the next caller blocks naturally.
                         race.resume(.failure(error), continuation: continuation)
                     }
                 }
@@ -1096,9 +1101,6 @@ actor MajorChatCoverageCoordinator {
         } onCancel: {
             operationTask.cancel()
             timeoutTask.cancel()
-            Task {
-                await historyFetchGate.release()
-            }
         }
     }
 
@@ -1158,12 +1160,17 @@ actor MajorChatCoverageCoordinator {
     }
 
 #if DEBUG
-    func reconcileOnceForTesting(using telegramService: TelegramService, now: Date) async -> PassSummary {
+    func reconcileOnceForTesting(
+        using telegramService: TelegramService,
+        now: Date,
+        maxNetworkBatchesPerChatOverride: Int? = nil
+    ) async -> PassSummary {
         await reconcileOnce(
             using: telegramService,
             now: now,
             limit: nil,
-            historyFetchTimeoutSeconds: AppConstants.MajorChatCoverage.historyFetchTimeoutSeconds
+            historyFetchTimeoutSeconds: AppConstants.MajorChatCoverage.historyFetchTimeoutSeconds,
+            maxNetworkBatchesPerChatOverride: maxNetworkBatchesPerChatOverride
         )
     }
 
@@ -1207,7 +1214,9 @@ actor MajorChatCoverageCoordinator {
     }
 
     static func resetHistoryFetchGateForTesting() async {
-        await historyFetchGate.release()
+        // No-op since the dedicated coordinator gate was removed in favour of
+        // the rate-limiter's in-flight serialization. Kept for source compat
+        // with existing test helpers.
     }
 #endif
 }

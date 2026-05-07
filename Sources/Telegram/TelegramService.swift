@@ -267,7 +267,15 @@ class TelegramService: ObservableObject {
         onlyLocal: Bool = false,
         priority: RateLimiter.Priority = .userInitiated
     ) async throws -> [TGMessage] {
-        let result = try await withRateLimitedCall(priority: priority, method: "getChatHistory") { client in
+        // only_local=true calls never hit the network and don't have a flood
+        // concern, so we route them through a separate rate-limit bucket that
+        // is NOT serialized with network history calls. Otherwise a stuck
+        // (timed-out at the coordinator level) network getChatHistory holds
+        // the in-flight slot and blocks every subsequent local cache fetch
+        // at the rate limiter, even when the chat already has months of
+        // local history that the local pass would happily mark as covered.
+        let method = onlyLocal ? "getChatHistoryLocal" : "getChatHistory"
+        let result = try await withRateLimitedCall(priority: priority, method: method) { client in
             try await client.getChatHistory(
                 chatId: chatId,
                 fromMessageId: fromMessageId,

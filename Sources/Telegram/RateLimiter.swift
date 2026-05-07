@@ -30,7 +30,8 @@ actor RateLimiter {
     private var queuedBackground = 0
     private var globalCooldownUntil: Date?
     private var methodCooldownUntil: [String: Date] = [:]
-    private var isHistoryCallInFlight = false
+    private var historyCallsInFlight = 0
+    private static let maxHistoryCallsInFlight = 2
 
     /// - Parameters:
     ///   - maxTokens: Maximum burst capacity
@@ -118,7 +119,7 @@ actor RateLimiter {
     func releaseCall(method: String) {
         let normalizedMethod = normalized(method)
         guard shouldSerializeInFlight(method: normalizedMethod) else { return }
-        isHistoryCallInFlight = false
+        historyCallsInFlight = max(0, historyCallsInFlight - 1)
     }
 
     func recordFloodWait(method: String, seconds: Int) {
@@ -132,13 +133,21 @@ actor RateLimiter {
     }
 
     private func acquireSerializedHistorySlot(priority: Priority, method: String) async {
-        while isHistoryCallInFlight {
+        // We allow up to `maxHistoryCallsInFlight` concurrent in-flight history
+        // calls. The coordinator already serializes per-chat work in its for
+        // loop, but TDLibKit history calls cannot be cancelled — when the
+        // coordinator times out, the underlying TDLib call keeps running and
+        // holds an in-flight slot until TDLib drains. A single stuck call
+        // would otherwise cascade-block every subsequent chat. Allowing a
+        // second concurrent slot leaves headroom for the next fresh chat to
+        // proceed while the abandoned one drains.
+        while historyCallsInFlight >= Self.maxHistoryCallsInFlight {
             logThrottle(priority: priority, method: method, waitSeconds: nil)
             try? await Task.sleep(
                 for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
             )
         }
-        isHistoryCallInFlight = true
+        historyCallsInFlight += 1
     }
 
     private func shouldSerializeInFlight(method: String) -> Bool {
@@ -186,7 +195,11 @@ actor RateLimiter {
         case "searchMessages":
             return 3
         case "getChatHistory":
-            return 1
+            return 3
+        case "getChatHistoryLocal":
+            // Local-only TDLib reads don't hit the network. They share the
+            // global token bucket but don't need a tight per-method cap.
+            return 20
         case "searchChatMessages", "loadChats":
             return 5
         default:

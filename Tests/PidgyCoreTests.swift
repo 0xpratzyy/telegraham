@@ -147,25 +147,31 @@ final class PidgyCoreTests: XCTestCase {
         }
     }
 
-    func testRateLimiterSerializesGetChatHistoryInFlightCalls() async throws {
+    func testRateLimiterCapsConcurrentGetChatHistoryCalls() async throws {
+        // The rate limiter caps concurrent in-flight history calls at 2 — that
+        // gives the coordinator headroom to start the next chat while an
+        // abandoned (timed-out) TDLib call from the previous chat drains. A
+        // THIRD acquire must block until one of the first two releases.
         let limiter = RateLimiter(maxTokens: 10, refillRate: 10)
-        let secondCall = AsyncCompletionFlag()
+        let thirdCall = AsyncCompletionFlag()
 
+        await limiter.acquireCall(priority: .background, method: "getChatHistory")
         await limiter.acquireCall(priority: .background, method: "getChatHistory")
         let pending = Task {
             await limiter.acquireCall(priority: .background, method: "getChatHistory")
-            await secondCall.markCompleted()
+            await thirdCall.markCompleted()
             await limiter.releaseCall(method: "getChatHistory")
         }
 
         try await Task.sleep(nanoseconds: 50_000_000)
-        let completedBeforeRelease = await secondCall.isCompleted
+        let completedBeforeRelease = await thirdCall.isCompleted
         XCTAssertFalse(completedBeforeRelease)
 
         await limiter.releaseCall(method: "getChatHistory")
         _ = await pending.value
-        let completedAfterRelease = await secondCall.isCompleted
+        let completedAfterRelease = await thirdCall.isCompleted
         XCTAssertTrue(completedAfterRelease)
+        await limiter.releaseCall(method: "getChatHistory")
     }
 
     func testOlderHistoryAppendDoesNotMoveRecentSyncStateBackward() async throws {
@@ -3316,7 +3322,14 @@ final class PidgyCoreTests: XCTestCase {
             )
             telegramService.chats = [chat]
 
-            let firstSummary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+            // Cap pass 1 to a single network batch so we genuinely test cross-pass
+            // cursor resume. With production pacing (8 batches/pass) this chat would
+            // complete in one pass, which defeats the test's purpose.
+            let firstSummary = await coordinator.reconcileOnceForTesting(
+                using: telegramService,
+                now: now,
+                maxNetworkBatchesPerChatOverride: 1
+            )
             let partialState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
             let secondSummary = await coordinator.reconcileOnceForTesting(using: telegramService, now: retryNow)
             let completedState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
@@ -4417,11 +4430,19 @@ final class PidgyCoreTests: XCTestCase {
             let healthyState = await DatabaseManager.shared.loadChatCoverageState(chatId: healthyChatId)
             let healthyStored = await DatabaseManager.shared.loadMessages(chatId: healthyChatId, limit: 20)
 
-            XCTAssertLessThan(elapsed, 0.25)
-            XCTAssertEqual(summary.scannedChats, 1)
-            XCTAssertEqual(summary.backfilledChats, 0)
+            XCTAssertLessThan(elapsed, 0.5)
+            XCTAssertEqual(summary.scannedChats, 2)
+            XCTAssertEqual(summary.backfilledChats, 1)
             XCTAssertNil(summary.historyCooldownUntil)
-            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [hungChatId])
+            // Hung chat fires exactly one history request (the inner batch loop breaks on
+            // timeout so we never pile retries against the same chat). The healthy chat is
+            // still processed in the same pass — a single timeout no longer halts the
+            // scheduler.
+            XCTAssertEqual(
+                telegramService.historyRequests.filter { $0.chatId == hungChatId }.count,
+                1
+            )
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [hungChatId, healthyChatId])
             XCTAssertEqual(hungState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
             XCTAssertEqual(hungState?.lastError, "chat history fetch timed out after 0 seconds")
             XCTAssertEqual(hungState?.failureCount, 1)
@@ -4430,8 +4451,10 @@ final class PidgyCoreTests: XCTestCase {
                 now.addingTimeInterval(AppConstants.MajorChatCoverage.retryBackoffSeconds[0]).timeIntervalSince1970,
                 accuracy: 0.001
             )
-            XCTAssertNil(healthyState)
-            XCTAssertTrue(healthyStored.isEmpty)
+            XCTAssertEqual(healthyState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertNil(healthyState?.lastError)
+            XCTAssertNil(healthyState?.nextRetryAt)
+            XCTAssertTrue(Set(healthyStored.map(\.id)).isSuperset(of: [900, 700]))
         }
     }
 
@@ -4475,9 +4498,15 @@ final class PidgyCoreTests: XCTestCase {
                 limit: 1,
                 historyFetchTimeoutSeconds: 0.01
             )
+            // Pass 2 must happen while the hung chat is still inside its retry
+            // backoff window so it isn't re-scanned. Tying the offset to the
+            // first backoff makes the test robust to constant tweaks.
+            let secondPassNow = now.addingTimeInterval(
+                AppConstants.MajorChatCoverage.retryBackoffSeconds[0] - 1
+            )
             let secondSummary = await coordinator.reconcileOnceForTesting(
                 using: telegramService,
-                now: now.addingTimeInterval(60),
+                now: secondPassNow,
                 limit: 1,
                 historyFetchTimeoutSeconds: 0.01
             )
