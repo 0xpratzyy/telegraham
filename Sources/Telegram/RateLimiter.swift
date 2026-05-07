@@ -75,13 +75,11 @@ actor RateLimiter {
             try Task.checkCancellation()
 
             if let waitSeconds = cooldownWaitSeconds(for: normalizedMethod), waitSeconds > 0 {
-                logThrottle(priority: priority, method: normalizedMethod, waitSeconds: waitSeconds)
                 try await Task.sleep(for: .milliseconds(Int(waitSeconds * 1000)))
                 continue
             }
 
             if priority == .background && queuedUserInitiated > 0 {
-                logThrottle(priority: priority, method: normalizedMethod, waitSeconds: nil)
                 try await Task.sleep(
                     for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
                 )
@@ -104,7 +102,6 @@ actor RateLimiter {
             let globalWaitSeconds = globalBucket.tokens >= 1 ? 0 : max((1.0 - globalBucket.tokens) / globalBucket.refillRate, 0.05)
             let waitSeconds = max(methodWaitSeconds, globalWaitSeconds, 0.05)
             methodBuckets[normalizedMethod] = bucket
-            logThrottle(priority: priority, method: normalizedMethod, waitSeconds: waitSeconds)
 
             let pollMilliseconds = priority == .userInitiated
                 ? AppConstants.RateLimit.userPriorityPollIntervalMilliseconds
@@ -146,7 +143,6 @@ actor RateLimiter {
         let cooldownUntil = Date().addingTimeInterval(backoffSeconds)
         globalCooldownUntil = max(globalCooldownUntil ?? .distantPast, cooldownUntil)
         methodCooldownUntil[normalizedMethod] = max(methodCooldownUntil[normalizedMethod] ?? .distantPast, cooldownUntil)
-        print("[RateLimiter] FLOOD_WAIT backoff \(String(format: "%.1f", backoffSeconds))s for \(normalizedMethod)")
     }
 
     private func acquireSerializedHistorySlot(priority: Priority, method: String) async throws {
@@ -155,7 +151,6 @@ actor RateLimiter {
 
             if !isHistoryCallInFlight {
                 if priority == .background && queuedUserInitiated > 0 {
-                    logThrottle(priority: priority, method: method, waitSeconds: nil)
                     try await Task.sleep(
                         for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
                     )
@@ -166,7 +161,6 @@ actor RateLimiter {
                 return
             }
 
-            logThrottle(priority: priority, method: method, waitSeconds: nil)
             try await Task.sleep(
                 for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
             )
@@ -249,22 +243,6 @@ actor RateLimiter {
             queuedUserInitiated = max(0, queuedUserInitiated - 1)
         case .background:
             queuedBackground = max(0, queuedBackground - 1)
-        }
-    }
-
-    private func logThrottle(priority: Priority, method: String, waitSeconds: Double?) {
-        let queueDepth = queuedUserInitiated + queuedBackground
-        if let waitSeconds {
-            print(
-                "[RateLimiter] throttled method=\(method) priority=\(priority.rawValue) " +
-                "queueDepth=\(queueDepth) globalTokens=\(String(format: "%.2f", globalBucket.tokens)) " +
-                "wait=\(String(format: "%.2f", waitSeconds))s"
-            )
-        } else {
-            print(
-                "[RateLimiter] yielding background work method=\(method) priority=\(priority.rawValue) " +
-                "queueDepth=\(queueDepth)"
-            )
         }
     }
 }

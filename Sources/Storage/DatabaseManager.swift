@@ -557,7 +557,6 @@ actor DatabaseManager {
                 try Self.recentBackfillStateRecord(in: db, chatId: chatId)
             }
         } catch {
-            print("[DatabaseManager] Failed to load recent backfill state for chat \(chatId): \(error)")
             return nil
         }
     }
@@ -590,7 +589,6 @@ actor DatabaseManager {
                 })
             }
         } catch {
-            print("[DatabaseManager] Failed to load recent backfill states: \(error)")
             return [:]
         }
     }
@@ -688,7 +686,6 @@ actor DatabaseManager {
                 )
             }
         } catch {
-            print("[DatabaseManager] Failed to load message coverage for chat \(chatId): \(error)")
             return nil
         }
     }
@@ -729,7 +726,6 @@ actor DatabaseManager {
                 )
             }
         } catch {
-            print("[DatabaseManager] Failed to load chat coverage state for chat \(chatId): \(error)")
             return nil
         }
     }
@@ -783,7 +779,6 @@ actor DatabaseManager {
                 )
             }
         } catch {
-            print("[DatabaseManager] Failed to load major coverage debt chat ids: \(error)")
             return []
         }
     }
@@ -824,7 +819,6 @@ actor DatabaseManager {
                 )
             }
         } catch {
-            print("[DatabaseManager] Failed to save chat coverage state for chat \(record.chatId): \(error)")
         }
     }
 
@@ -857,7 +851,6 @@ actor DatabaseManager {
                 try Self.saveRecentBackfillState(record, in: db)
             }
         } catch {
-            print("[DatabaseManager] Failed to save recent backfill state for chat \(record.chatId): \(error)")
         }
     }
 
@@ -872,7 +865,6 @@ actor DatabaseManager {
                 )
             }
         } catch {
-            print("[DatabaseManager] Failed to delete recent backfill state for chat \(chatId): \(error)")
         }
     }
 

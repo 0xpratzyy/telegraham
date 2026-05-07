@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 
 actor MajorChatCoverageCoordinator {
     static let shared = MajorChatCoverageCoordinator()
@@ -109,15 +108,10 @@ actor MajorChatCoverageCoordinator {
     private var pendingImmediateReconcile = true
     private var historyCooldownUntil: Date?
     private static let historyFetchGate = HistoryFetchGate()
-    private let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
-        category: "MajorChatCoverage"
-    )
 
     func start(using telegramService: TelegramService) async {
         self.telegramService = telegramService
         pendingImmediateReconcile = true
-        logger.info("Major coverage start requested")
 
         guard processingTask == nil else { return }
 
@@ -165,9 +159,6 @@ actor MajorChatCoverageCoordinator {
                     : AppConstants.MajorChatCoverage.maxChatsPerPass,
                 historyFetchTimeoutSeconds: AppConstants.MajorChatCoverage.historyFetchTimeoutSeconds
             )
-            logger.info(
-                "Major coverage pass scanned=\(summary.scannedChats) backfilled=\(summary.backfilledChats) fetched=\(summary.fetchedMessages) immediate=\(shouldRunNow)"
-            )
 
             let fallbackSleepMs = shouldRunNow
                 ? AppConstants.MajorChatCoverage.activePollIntervalMilliseconds
@@ -187,9 +178,6 @@ actor MajorChatCoverageCoordinator {
         historyFetchTimeoutSeconds: TimeInterval
     ) async -> PassSummary {
         if let historyCooldownUntil, historyCooldownUntil > now {
-            logger.info(
-                "Major coverage pass deferred until \(historyCooldownUntil, privacy: .public)"
-            )
             return PassSummary(
                 scannedChats: 0,
                 backfilledChats: 0,
@@ -218,31 +206,15 @@ actor MajorChatCoverageCoordinator {
         var backfilledChats = 0
         var fetchedMessages = 0
 
-        logger.info(
-            "Major coverage reconcile candidates=\(majorChats.count) debt=\(debtChatIds.count) scanning=\(scanChats.count)"
-        )
-
         for chat in scanChats {
             guard !Task.isCancelled else { break }
             scannedChats += 1
-            logger.info(
-                "Major coverage chat \(chat.id, privacy: .public) starting coverage"
-            )
             let outcome = await Self.ensureCoverage(
                 for: chat,
                 using: telegramService,
                 now: now,
                 historyFetchTimeoutSeconds: historyFetchTimeoutSeconds
             )
-            if let errorDescription = outcome.errorDescription {
-                logger.error(
-                    "Major coverage chat \(outcome.chatId, privacy: .public) failed error=\(errorDescription, privacy: .public)"
-                )
-            } else if outcome.fetchedMessages > 0 || outcome.reachedTarget {
-                logger.info(
-                    "Major coverage chat \(outcome.chatId, privacy: .public) fetched=\(outcome.fetchedMessages) reachedTarget=\(outcome.reachedTarget)"
-                )
-            }
             if outcome.fetchedMessages > 0 {
                 backfilledChats += 1
                 fetchedMessages += outcome.fetchedMessages
@@ -254,9 +226,6 @@ actor MajorChatCoverageCoordinator {
                 }
             }
             if outcome.shouldStopPass {
-                logger.info(
-                    "Major coverage pass stopping early after chat \(outcome.chatId, privacy: .public)"
-                )
                 break
             }
         }
@@ -392,11 +361,7 @@ actor MajorChatCoverageCoordinator {
                     chatsById[chat.id] = chat
                     continue
                 }
-            } catch {
-                logger.error(
-                    "Major coverage debt hydrate chat \(chatId, privacy: .public) failed error=\(error.localizedDescription, privacy: .public)"
-                )
-            }
+            } catch {}
             chatsById[chatId] = await syntheticDebtChat(chatId: chatId)
         }
 

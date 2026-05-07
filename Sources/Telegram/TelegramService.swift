@@ -328,7 +328,6 @@ class TelegramService: ObservableObject {
                     throw error
                 }
 
-                print("[TelegramService] FLOOD_WAIT detected for getChatHistory: \(floodWaitSeconds)s")
                 await rateLimiter.recordFloodWait(method: "getChatHistory", seconds: floodWaitSeconds)
             } catch {
                 await rateLimiter.releaseCall(method: "getChatHistory")
