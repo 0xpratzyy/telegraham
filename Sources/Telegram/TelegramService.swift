@@ -616,13 +616,18 @@ class TelegramService: ObservableObject {
             }
 
         case .updateDeleteMessages(let deleteUpdate):
-            Task {
-                await MessageCacheService.shared.deleteMessages(
-                    chatId: deleteUpdate.chatId,
-                    messageIds: deleteUpdate.messageIds
-                )
-                // Deletions can alter conversation state; avoid stale cached AI category.
-                await MessageCacheService.shared.invalidatePipelineCategory(chatId: deleteUpdate.chatId)
+            if Self.shouldRemoveLocalMessagesForDeleteUpdate(
+                fromCache: deleteUpdate.fromCache,
+                isPermanent: deleteUpdate.isPermanent
+            ) {
+                Task {
+                    await MessageCacheService.shared.deleteMessages(
+                        chatId: deleteUpdate.chatId,
+                        messageIds: deleteUpdate.messageIds
+                    )
+                    // Deletions can alter conversation state; avoid stale cached AI category.
+                    await MessageCacheService.shared.invalidatePipelineCategory(chatId: deleteUpdate.chatId)
+                }
             }
 
         case .updateChatPosition(let posUpdate):
@@ -763,6 +768,7 @@ class TelegramService: ObservableObject {
             )
             startBackgroundChatDiscovery()
             await RecentSyncCoordinator.shared.recoverNow()
+            await MajorChatCoverageCoordinator.shared.recoverNow()
         }
     }
 
@@ -777,6 +783,13 @@ class TelegramService: ObservableObject {
             && newConnectionState == .connectionStateReady
     }
 
+    nonisolated private static func shouldRemoveLocalMessagesForDeleteUpdate(
+        fromCache: Bool,
+        isPermanent: Bool
+    ) -> Bool {
+        return isPermanent || !fromCache
+    }
+
 #if DEBUG
     nonisolated static func shouldTriggerRecoveryRefreshForTesting(
         previousConnectionState: ConnectionState?,
@@ -787,6 +800,16 @@ class TelegramService: ObservableObject {
             previousConnectionState: previousConnectionState,
             newConnectionState: newConnectionState,
             authState: authState
+        )
+    }
+
+    nonisolated static func shouldRemoveLocalMessagesForDeleteUpdateForTesting(
+        fromCache: Bool,
+        isPermanent: Bool
+    ) -> Bool {
+        shouldRemoveLocalMessagesForDeleteUpdate(
+            fromCache: fromCache,
+            isPermanent: isPermanent
         )
     }
 #endif
@@ -1114,25 +1137,29 @@ class TelegramService: ObservableObject {
         guard let client else { throw TGError.clientNotInitialized }
 
         var attempt = 0
-        var pendingFloodWaitSeconds: Int?
         while true {
             attempt += 1
-            await rateLimiter.acquire(
+            await rateLimiter.acquireCall(
                 priority: priority,
                 method: method,
-                floodWaitSeconds: pendingFloodWaitSeconds
+                floodWaitSeconds: nil
             )
-            pendingFloodWaitSeconds = nil
 
             do {
-                return try await operation(client)
+                let value = try await operation(client)
+                await rateLimiter.releaseCall(method: method)
+                return value
             } catch let error as TDLibKit.Error {
+                await rateLimiter.releaseCall(method: method)
                 guard attempt < 3, let floodWaitSeconds = floodWaitSeconds(from: error) else {
                     throw error
                 }
 
                 print("[TelegramService] FLOOD_WAIT detected for \(method): \(floodWaitSeconds)s")
-                pendingFloodWaitSeconds = floodWaitSeconds
+                await rateLimiter.recordFloodWait(method: method, seconds: floodWaitSeconds)
+            } catch {
+                await rateLimiter.releaseCall(method: method)
+                throw error
             }
         }
     }

@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import SwiftUI
 
 enum AppLaunchPresentationMode: Equatable {
@@ -73,6 +74,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
     private var terminationCleanupCompleted = false
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
+        category: "Startup"
+    )
     private var isRunningTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
@@ -121,7 +126,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             if let apiIdStr = try? KeychainManager.retrieve(for: .apiId),
                let apiHash = try? KeychainManager.retrieve(for: .apiHash),
                let apiId = Int(apiIdStr) {
+                logger.info("Starting Telegram service with stored credentials")
                 telegramService.start(apiId: apiId, apiHash: apiHash)
+            } else {
+                logger.warning("Telegram credentials missing; startup pipeline will wait")
             }
         }
 
@@ -136,12 +144,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
+            logger.info("Startup pipeline waiting for Telegram readiness")
             await waitForGraphBuildReadiness()
             guard !Task.isCancelled else { return }
+            logger.info("Startup pipeline starting recent sync")
             await RecentSyncCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
+            logger.info("Startup pipeline starting major chat coverage")
+            await MajorChatCoverageCoordinator.shared.start(using: telegramService)
+            guard !Task.isCancelled else { return }
+            logger.info("Startup pipeline starting graph build")
             await GraphBuilder.shared.buildIfNeeded(using: telegramService)
             guard !Task.isCancelled else { return }
+            logger.info("Startup pipeline starting index scheduler")
             await IndexScheduler.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             let includeBotsInAISearch = UserDefaults.standard.bool(
@@ -164,6 +179,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidBecomeActive(_ notification: Notification) {
         Task {
             await RecentSyncCoordinator.shared.recoverNow()
+            await MajorChatCoverageCoordinator.shared.recoverNow()
         }
     }
 
@@ -201,6 +217,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         telegramService.stop()
         Task { @MainActor in
             await RecentSyncCoordinator.shared.stop()
+            await MajorChatCoverageCoordinator.shared.stop()
             await IndexScheduler.shared.stop()
             await DatabaseManager.shared.close()
             terminationCleanupCompleted = true
@@ -252,22 +269,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func waitForGraphBuildReadiness() async {
         let timeoutAt = Date().addingTimeInterval(AppConstants.Graph.startupReadinessTimeoutSeconds)
+        var lastLoggedSecond: Int?
 
         while !Task.isCancelled {
-            let isReady = telegramService.authState == .ready && telegramService.currentUser != nil
-            let chatsLoaded = !telegramService.visibleChats.isEmpty || !telegramService.isLoading
+            let didTimeout = Date() >= timeoutAt
+            let isReady = Self.isStartupPipelineReady(
+                authState: telegramService.authState,
+                hasCurrentUser: telegramService.currentUser != nil,
+                hasVisibleChats: !telegramService.visibleChats.isEmpty,
+                isLoading: telegramService.isLoading,
+                didTimeout: didTimeout
+            )
 
-            if isReady && chatsLoaded {
+            if isReady {
+                logger.info(
+                    "Startup readiness satisfied auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
+                )
                 return
             }
 
-            if Date() >= timeoutAt, isReady {
-                return
+            let elapsedSecond = max(
+                0,
+                Int(AppConstants.Graph.startupReadinessTimeoutSeconds - timeoutAt.timeIntervalSinceNow)
+            )
+            if lastLoggedSecond != elapsedSecond, elapsedSecond % 2 == 0 || didTimeout {
+                lastLoggedSecond = elapsedSecond
+                logger.info(
+                    "Startup readiness waiting auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
+                )
             }
 
             try? await Task.sleep(
                 for: .milliseconds(Int(AppConstants.Graph.startupReadinessPollMilliseconds))
             )
         }
+    }
+
+    nonisolated static func isStartupPipelineReady(
+        authState: AuthState,
+        hasCurrentUser: Bool,
+        hasVisibleChats: Bool,
+        isLoading: Bool,
+        didTimeout: Bool
+    ) -> Bool {
+        guard authState == .ready else { return false }
+        guard hasVisibleChats || !isLoading else { return false }
+        return hasCurrentUser || didTimeout
     }
 }

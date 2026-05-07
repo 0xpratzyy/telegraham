@@ -45,6 +45,30 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(PidgyDashboardTheme.selectedRowCornerRadius, PidgyRadius.md)
     }
 
+    func testStartupPipelineReadinessAllowsBackfillAfterTelegramReadyTimeout() {
+        XCTAssertFalse(AppDelegate.isStartupPipelineReady(
+            authState: .ready,
+            hasCurrentUser: false,
+            hasVisibleChats: true,
+            isLoading: false,
+            didTimeout: false
+        ))
+        XCTAssertTrue(AppDelegate.isStartupPipelineReady(
+            authState: .ready,
+            hasCurrentUser: false,
+            hasVisibleChats: true,
+            isLoading: false,
+            didTimeout: true
+        ))
+        XCTAssertFalse(AppDelegate.isStartupPipelineReady(
+            authState: .waitingForPhoneNumber,
+            hasCurrentUser: false,
+            hasVisibleChats: true,
+            isLoading: false,
+            didTimeout: true
+        ))
+    }
+
     func testDurableHistorySurvivesLiveUpdateAndDelete() async throws {
         try await withTempDatabase { _ in
             let chatId: Int64 = 42
@@ -121,6 +145,27 @@ final class PidgyCoreTests: XCTestCase {
             let recentSyncState = await DatabaseManager.shared.loadRecentSyncState(chatId: chatId)
             XCTAssertEqual(recentSyncState?.latestSyncedMessageId, 401)
         }
+    }
+
+    func testRateLimiterSerializesGetChatHistoryInFlightCalls() async throws {
+        let limiter = RateLimiter(maxTokens: 10, refillRate: 10)
+        let secondCall = AsyncCompletionFlag()
+
+        await limiter.acquireCall(priority: .background, method: "getChatHistory")
+        let pending = Task {
+            await limiter.acquireCall(priority: .background, method: "getChatHistory")
+            await secondCall.markCompleted()
+            await limiter.releaseCall(method: "getChatHistory")
+        }
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let completedBeforeRelease = await secondCall.isCompleted
+        XCTAssertFalse(completedBeforeRelease)
+
+        await limiter.releaseCall(method: "getChatHistory")
+        _ = await pending.value
+        let completedAfterRelease = await secondCall.isCompleted
+        XCTAssertTrue(completedAfterRelease)
     }
 
     func testOlderHistoryAppendDoesNotMoveRecentSyncStateBackward() async throws {
@@ -2880,6 +2925,1578 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testMajorChatCoverageBackfillsActiveChatUntilThirtyDayWindow() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2401
+            let chat = makeChat(
+                id: chatId,
+                title: "Major Chat",
+                chatType: .privateChat(userId: 99),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            let history = [
+                makeTGMessage(id: 900, chatId: chatId, text: "today", date: now),
+                makeTGMessage(id: 800, chatId: chatId, text: "five days", date: now.addingTimeInterval(-5 * 86_400)),
+                makeTGMessage(id: 700, chatId: chatId, text: "twelve days", date: now.addingTimeInterval(-12 * 86_400)),
+                makeTGMessage(id: 600, chatId: chatId, text: "twenty days", date: now.addingTimeInterval(-20 * 86_400)),
+                makeTGMessage(id: 500, chatId: chatId, text: "thirty one days", date: now.addingTimeInterval(-31 * 86_400)),
+                makeTGMessage(id: 400, chatId: chatId, text: "forty five days", date: now.addingTimeInterval(-45 * 86_400))
+            ]
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: [
+                    makeRecord(id: 900, chatId: chatId, text: "today", date: now),
+                    makeRecord(id: 800, chatId: chatId, text: "five days", date: now.addingTimeInterval(-5 * 86_400))
+                ]
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                localOnlyHistoryByChatId: [chatId: history]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 20)
+            let coverage = await DatabaseManager.shared.loadMessageCoverage(chatId: chatId)
+            let coverageState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertGreaterThanOrEqual(summary.fetchedMessages, 3)
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [900, 800, 700, 600, 500]))
+            XCTAssertLessThanOrEqual(
+                coverage?.oldestMessageDate?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertEqual(coverageState?.isMajor, true)
+            XCTAssertEqual(coverageState?.latestSeenMessageId, chat.lastMessage?.id)
+            XCTAssertNil(coverageState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageSkipsAlreadyCoveredActiveChat() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2402
+            let chat = makeChat(
+                id: chatId,
+                title: "Covered Chat",
+                chatType: .privateChat(userId: 100),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: [
+                    makeRecord(id: 900, chatId: chatId, text: "today", date: now),
+                    makeRecord(id: 700, chatId: chatId, text: "covered", date: now.addingTimeInterval(-35 * 86_400))
+                ]
+            )
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: chatId,
+                    oldestCoveredAt: now.addingTimeInterval(-35 * 86_400),
+                    latestSeenMessageId: chat.lastMessage?.id ?? 0,
+                    lastCheckedAt: now,
+                    isMajor: true,
+                    lastError: nil,
+                    failureCount: 0,
+                    nextRetryAt: nil,
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion
+                )
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 20)
+            let coverageState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 0)
+            XCTAssertEqual(summary.fetchedMessages, 0)
+            XCTAssertEqual(telegramService.historyRequests, [])
+            XCTAssertEqual(Set(stored.map(\.id)), [900, 700])
+            XCTAssertEqual(coverageState?.isMajor, true)
+            XCTAssertNil(coverageState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageFetchesHistoryBeforeTrustingLocalDatabaseCoverage() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2412
+            let latest = makeTGMessage(id: 1_200, chatId: chatId, text: "latest", date: now)
+            let history: [TGMessage] = (0..<10).map { index in
+                makeTGMessage(
+                    id: latest.id - Int64(index),
+                    chatId: chatId,
+                    text: "local \(index)",
+                    date: now.addingTimeInterval(-Double(index) * 2 * 86_400)
+                )
+            } + [
+                makeTGMessage(id: 900, chatId: chatId, text: "already local", date: now.addingTimeInterval(-35 * 86_400))
+            ]
+            let chat = TGChat(
+                id: chatId,
+                title: "SQLite Covered Core",
+                chatType: .privateChat(userId: 112),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: history.map { message in
+                    makeRecord(
+                        id: message.id,
+                        chatId: message.chatId,
+                        text: message.textContent ?? "",
+                        date: message.date,
+                        isOutgoing: message.isOutgoing,
+                        senderUserId: message.senderUserId ?? 1,
+                        senderName: message.senderName
+                    )
+                }
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                localOnlyHistoryByChatId: [chatId: history]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let coverageState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(summary.fetchedMessages, history.count)
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [true])
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0])
+            XCTAssertEqual(coverageState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertEqual(coverageState?.latestSeenMessageId, latest.id)
+            XCTAssertLessThanOrEqual(
+                coverageState?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertNil(coverageState?.lastError)
+            XCTAssertEqual(coverageState?.failureCount, 0)
+            XCTAssertNil(coverageState?.nextRetryAt)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageBackfillsSparseLocalRowsEvenWhenLatestAndOldestLookCovered() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2413
+            let latest = makeTGMessage(id: 1_200, chatId: chatId, text: "latest", date: now)
+            let missingMiddle = makeTGMessage(id: 1_050, chatId: chatId, text: "missing middle", date: now.addingTimeInterval(-3 * 86_400))
+            let covered = makeTGMessage(id: 900, chatId: chatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            let chat = TGChat(
+                id: chatId,
+                title: "Sparse False Pass",
+                chatType: .privateChat(userId: 113),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            let sparseLocalRecords: [DatabaseManager.MessageRecord] = [
+                makeRecord(id: latest.id, chatId: chatId, text: "latest", date: latest.date),
+                makeRecord(id: 800, chatId: chatId, text: "old local anchor", date: now.addingTimeInterval(-35 * 86_400))
+            ] + (1...10).map { index in
+                makeRecord(
+                    id: latest.id - Int64(index),
+                    chatId: chatId,
+                    text: "recent island \(index)",
+                    date: now.addingTimeInterval(-Double(index + 10) * 86_400)
+                )
+            }
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: sparseLocalRecords
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                localOnlyHistoryByChatId: [chatId: [latest, missingMiddle, covered]]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 50)
+            let coverageState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0])
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [latest.id, missingMiddle.id, covered.id]))
+            XCTAssertLessThanOrEqual(
+                coverageState?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertNil(coverageState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageBackfillsSparseLocalHistoryFromLatestCursor() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2403
+            let latest = makeTGMessage(id: 1_000, chatId: chatId, text: "latest", date: now)
+            let tenDays = makeTGMessage(id: 900, chatId: chatId, text: "ten days", date: now.addingTimeInterval(-10 * 86_400))
+            let twentyDays = makeTGMessage(id: 800, chatId: chatId, text: "twenty days", date: now.addingTimeInterval(-20 * 86_400))
+            let thirtyOneDays = makeTGMessage(id: 700, chatId: chatId, text: "thirty one days", date: now.addingTimeInterval(-31 * 86_400))
+            let chat = TGChat(
+                id: chatId,
+                title: "Sparse Core",
+                chatType: .privateChat(userId: 103),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: [
+                    makeRecord(id: latest.id, chatId: chatId, text: "latest", date: latest.date),
+                    makeRecord(id: 100, chatId: chatId, text: "old local island", date: now.addingTimeInterval(-60 * 86_400))
+                ]
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                scriptedLocalHistoryResponsesByChatId: [
+                    chatId: [
+                        0: [[latest]],
+                        latest.id: [[tenDays, twentyDays, thirtyOneDays]]
+                    ]
+                ]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 20)
+            let coverageState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [true])
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [latest.id])
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [latest.id, tenDays.id, twentyDays.id, thirtyOneDays.id]))
+            XCTAssertEqual(coverageState?.latestSeenMessageId, latest.id)
+            XCTAssertLessThanOrEqual(
+                coverageState?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertNil(coverageState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageFallsBackToNetworkFromCachedLatestCursorWhenLocalSparse() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2404
+            let latest = makeTGMessage(id: 1_000, chatId: chatId, text: "latest", date: now)
+            let tenDays = makeTGMessage(id: 900, chatId: chatId, text: "ten days", date: now.addingTimeInterval(-10 * 86_400))
+            let twentyDays = makeTGMessage(id: 800, chatId: chatId, text: "twenty days", date: now.addingTimeInterval(-20 * 86_400))
+            let thirtyOneDays = makeTGMessage(id: 700, chatId: chatId, text: "thirty one days", date: now.addingTimeInterval(-31 * 86_400))
+            let chat = TGChat(
+                id: chatId,
+                title: "Sparse Network Cursor",
+                chatType: .privateChat(userId: 104),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: [
+                    makeRecord(id: latest.id, chatId: chatId, text: "latest", date: latest.date)
+                ]
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: [latest, tenDays, twentyDays, thirtyOneDays]],
+                scriptedLocalHistoryResponsesByChatId: [
+                    chatId: [
+                        0: [[latest]],
+                        latest.id: [[], []]
+                    ]
+                ]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 20)
+            let coverageState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [true, true, false])
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [latest.id, latest.id, latest.id])
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [latest.id, tenDays.id, twentyDays.id, thirtyOneDays.id]))
+            XCTAssertEqual(coverageState?.oldestCoveredMessageId, thirtyOneDays.id)
+            XCTAssertLessThanOrEqual(
+                coverageState?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertNil(coverageState?.lastError)
+            XCTAssertNil(coverageState?.nextRetryAt)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageResumesDurableCursorAcrossReconcileRuns() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let retryNow = now.addingTimeInterval(AppConstants.MajorChatCoverage.incompleteLocalRetryDelaySeconds + 1)
+            let chatId: Int64 = 2405
+            let latest = makeTGMessage(id: 1_000, chatId: chatId, text: "latest", date: now)
+            let tenDays = makeTGMessage(id: 900, chatId: chatId, text: "ten days", date: now.addingTimeInterval(-10 * 86_400))
+            let twentyDays = makeTGMessage(id: 800, chatId: chatId, text: "twenty days", date: now.addingTimeInterval(-20 * 86_400))
+            let thirtyOneDays = makeTGMessage(id: 700, chatId: chatId, text: "thirty one days", date: now.addingTimeInterval(-31 * 86_400))
+            let chat = TGChat(
+                id: chatId,
+                title: "Durable Cursor",
+                chatType: .privateChat(userId: 105),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                scriptedHistoryByChatId: [
+                    chatId: [
+                        0: [latest, tenDays],
+                        tenDays.id: [twentyDays, thirtyOneDays]
+                    ]
+                ]
+            )
+            telegramService.chats = [chat]
+
+            let firstSummary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+            let partialState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            let secondSummary = await coordinator.reconcileOnceForTesting(using: telegramService, now: retryNow)
+            let completedState = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            let networkRequests = telegramService.historyRequests.filter { !$0.onlyLocal }
+
+            XCTAssertEqual(firstSummary.scannedChats, 1)
+            XCTAssertEqual(firstSummary.backfilledChats, 1)
+            XCTAssertEqual(partialState?.oldestCoveredMessageId, tenDays.id)
+            XCTAssertEqual(
+                partialState?.nextRetryAt?.timeIntervalSince1970 ?? 0,
+                now.addingTimeInterval(AppConstants.MajorChatCoverage.incompleteLocalRetryDelaySeconds).timeIntervalSince1970,
+                accuracy: 0.001
+            )
+            XCTAssertNil(partialState?.lastError)
+            XCTAssertEqual(partialState?.failureCount, 0)
+            XCTAssertEqual(secondSummary.scannedChats, 1)
+            XCTAssertEqual(secondSummary.backfilledChats, 1)
+            XCTAssertEqual(networkRequests.map(\.fromMessageId), [0, tenDays.id])
+            XCTAssertEqual(completedState?.oldestCoveredMessageId, thirtyOneDays.id)
+            XCTAssertNil(completedState?.nextRetryAt)
+            XCTAssertLessThanOrEqual(
+                completedState?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageTargetsActiveEligibleVisibleChatsOnly() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let activeDM = makeChat(
+                id: 2501,
+                title: "Active DM",
+                chatType: .privateChat(userId: 501),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            let staleDM = makeChat(
+                id: 2502,
+                title: "Stale DM",
+                chatType: .privateChat(userId: 502),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-45 * 86_400)
+            )
+            let unreadStaleDM = makeChat(
+                id: 2503,
+                title: "Unread Stale DM",
+                chatType: .privateChat(userId: 503),
+                unreadCount: 2,
+                lastMessageDate: now.addingTimeInterval(-45 * 86_400)
+            )
+            let smallGroup = makeChat(
+                id: 2504,
+                title: "Small Group",
+                chatType: .supergroup(supergroupId: 504, isChannel: false),
+                unreadCount: 0,
+                lastMessageDate: now,
+                memberCount: nil
+            )
+            let largeGroup = makeChat(
+                id: 2505,
+                title: "Large Group",
+                chatType: .supergroup(supergroupId: 505, isChannel: false),
+                unreadCount: 0,
+                lastMessageDate: now,
+                memberCount: nil
+            )
+            let channel = makeChat(
+                id: 2506,
+                title: "Announcements",
+                chatType: .supergroup(supergroupId: 506, isChannel: true),
+                unreadCount: 0,
+                lastMessageDate: now,
+                memberCount: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                resolvedMemberCounts: [
+                    smallGroup.id: 12,
+                    largeGroup.id: AppConstants.Indexing.maxIndexedGroupMembers + 1
+                ]
+            )
+            telegramService.chats = [activeDM, staleDM, unreadStaleDM, smallGroup, largeGroup, channel]
+
+            let majorChats = await coordinator.majorChatsForTesting(using: telegramService, now: now)
+
+            XCTAssertEqual(Set(majorChats.map(\.id)), [activeDM.id, unreadStaleDM.id, smallGroup.id, largeGroup.id])
+            XCTAssertEqual(telegramService.resolvedMemberCountRequests, [])
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageUsesLocalHistoryBeforeNetworkFetch() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2600
+            let chat = makeChat(
+                id: chatId,
+                title: "Local Cache Chat",
+                chatType: .privateChat(userId: 500),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            let localHistory = [
+                makeTGMessage(id: 900, chatId: chatId, text: "latest", date: now),
+                makeTGMessage(id: 700, chatId: chatId, text: "covered locally", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                localOnlyHistoryByChatId: [chatId: localHistory],
+                hangingHistoryChatIds: [chatId],
+                hangingHistoryDelayNanoseconds: 500_000_000
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(
+                using: telegramService,
+                now: now,
+                historyFetchTimeoutSeconds: 0.01
+            )
+
+            let state = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 20)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [true])
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [900, 700]))
+            XCTAssertNil(state?.lastError)
+            XCTAssertEqual(state?.failureCount, 0)
+            XCTAssertNil(state?.nextRetryAt)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageRetriesTransientEmptyLocalPageBeforeDeferring() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2601
+            let latest = makeTGMessage(id: 1_000, chatId: chatId, text: "latest", date: now)
+            let older = makeTGMessage(id: 900, chatId: chatId, text: "older", date: now.addingTimeInterval(-20 * 86_400))
+            let target = makeTGMessage(id: 800, chatId: chatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            let chat = TGChat(
+                id: chatId,
+                title: "Transient Local Empty",
+                chatType: .privateChat(userId: 501),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                scriptedLocalHistoryResponsesByChatId: [
+                    chatId: [
+                        0: [[latest]],
+                        latest.id: [[], [older, target]]
+                    ]
+                ]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let state = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 20)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [true, true, true])
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [0, latest.id, latest.id])
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [latest.id, older.id, target.id]))
+            XCTAssertLessThanOrEqual(
+                state?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertNil(state?.lastError)
+            XCTAssertEqual(state?.failureCount, 0)
+            XCTAssertNil(state?.nextRetryAt)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageCompletesWhenNetworkHistoryEndsInsideThirtyDays() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2602
+            let latest = makeTGMessage(id: 1_000, chatId: chatId, text: "latest", date: now)
+            let tenDays = makeTGMessage(id: 900, chatId: chatId, text: "ten days", date: now.addingTimeInterval(-10 * 86_400))
+            let chat = TGChat(
+                id: chatId,
+                title: "Incomplete Local",
+                chatType: .privateChat(userId: 502),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: []],
+                scriptedLocalHistoryResponsesByChatId: [
+                    chatId: [
+                        0: [[latest, tenDays]],
+                        tenDays.id: [[], []]
+                    ]
+                ]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let state = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [true, true, true, false])
+            XCTAssertNil(state?.lastError)
+            XCTAssertEqual(state?.failureCount, 0)
+            XCTAssertNil(state?.nextRetryAt)
+            XCTAssertLessThanOrEqual(
+                state?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageFallsBackToNetworkWhenLocalHistoryIsSparse() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let chatId: Int64 = 2604
+            let latest = makeTGMessage(id: 1_000, chatId: chatId, text: "latest", date: now)
+            let tenDays = makeTGMessage(id: 900, chatId: chatId, text: "ten days", date: now.addingTimeInterval(-10 * 86_400))
+            let twentyDays = makeTGMessage(id: 800, chatId: chatId, text: "twenty days", date: now.addingTimeInterval(-20 * 86_400))
+            let thirtyOneDays = makeTGMessage(id: 700, chatId: chatId, text: "thirty one days", date: now.addingTimeInterval(-31 * 86_400))
+            let chat = TGChat(
+                id: chatId,
+                title: "Network Fill",
+                chatType: .privateChat(userId: 504),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: chatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [chatId: [latest, tenDays, twentyDays, thirtyOneDays]],
+                scriptedLocalHistoryResponsesByChatId: [
+                    chatId: [
+                        0: [[latest, tenDays]],
+                        tenDays.id: [[], []]
+                    ]
+                ]
+            )
+            telegramService.chats = [chat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let stored = await DatabaseManager.shared.loadMessages(chatId: chatId, limit: 20)
+            let state = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [true, true, true, false])
+            XCTAssertEqual(telegramService.historyRequests.last?.fromMessageId, tenDays.id)
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [latest.id, tenDays.id, twentyDays.id, thirtyOneDays.id]))
+            XCTAssertLessThanOrEqual(
+                state?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertNil(state?.lastError)
+            XCTAssertEqual(state?.failureCount, 0)
+            XCTAssertNil(state?.nextRetryAt)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageSkipsChatsStillInRetryBackoff() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let backedOffChatId: Int64 = 2611
+            let healthyChatId: Int64 = 2612
+            let backedOffChat = makeChat(
+                id: backedOffChatId,
+                title: "Backed Off Chat",
+                chatType: .privateChat(userId: 501),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            let healthyChat = makeChat(
+                id: healthyChatId,
+                title: "Healthy Chat",
+                chatType: .privateChat(userId: 502),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-60)
+            )
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: backedOffChatId,
+                    oldestCoveredAt: nil,
+                    latestSeenMessageId: backedOffChat.lastMessage?.id ?? 0,
+                    lastCheckedAt: now.addingTimeInterval(-60),
+                    isMajor: true,
+                    lastError: "chat history fetch timed out after 30 seconds",
+                    failureCount: 2,
+                    nextRetryAt: now.addingTimeInterval(3_600),
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion
+                )
+            )
+            let healthyHistory = [
+                makeTGMessage(id: 900, chatId: healthyChatId, text: "today", date: now),
+                makeTGMessage(id: 700, chatId: healthyChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [healthyChatId: []],
+                localOnlyHistoryByChatId: [healthyChatId: healthyHistory]
+            )
+            telegramService.chats = [backedOffChat, healthyChat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now)
+
+            let backedOffState = await DatabaseManager.shared.loadChatCoverageState(chatId: backedOffChatId)
+            let healthyState = await DatabaseManager.shared.loadChatCoverageState(chatId: healthyChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [healthyChatId])
+            XCTAssertEqual(backedOffState?.failureCount, 2)
+            XCTAssertEqual(
+                backedOffState?.nextRetryAt?.timeIntervalSince1970,
+                now.addingTimeInterval(3_600).timeIntervalSince1970
+            )
+            XCTAssertNil(healthyState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoveragePrioritizesExistingSparseCoverageDebtBeforeNewVisibleChats() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let debtChatId: Int64 = 2621
+            let newChatId: Int64 = 2622
+            let debtChat = makeChat(
+                id: debtChatId,
+                title: "Sparse Debt Chat",
+                chatType: .privateChat(userId: 511),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-3 * 86_400)
+            )
+            let newChat = makeChat(
+                id: newChatId,
+                title: "Newer Visible Chat",
+                chatType: .privateChat(userId: 512),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: debtChatId,
+                    oldestCoveredAt: now.addingTimeInterval(-5 * 86_400),
+                    latestSeenMessageId: debtChat.lastMessage?.id ?? 0,
+                    lastCheckedAt: now.addingTimeInterval(-6 * 3_600),
+                    isMajor: true,
+                    lastError: nil,
+                    failureCount: 0,
+                    nextRetryAt: nil,
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                )
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: debtChatId,
+                messages: [
+                    makeRecord(id: 6201, chatId: debtChatId, text: "only one cached row", date: now.addingTimeInterval(-2 * 86_400))
+                ]
+            )
+            let debtHistory = [
+                makeTGMessage(id: 900, chatId: debtChatId, text: "today-ish", date: now.addingTimeInterval(-3 * 86_400)),
+                makeTGMessage(id: 700, chatId: debtChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let newHistory = [
+                makeTGMessage(id: 901, chatId: newChatId, text: "new today", date: now),
+                makeTGMessage(id: 701, chatId: newChatId, text: "new covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                localOnlyHistoryByChatId: [
+                    debtChatId: debtHistory,
+                    newChatId: newHistory
+                ]
+            )
+            telegramService.chats = [newChat, debtChat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let debtState = await DatabaseManager.shared.loadChatCoverageState(chatId: debtChatId)
+            let newState = await DatabaseManager.shared.loadChatCoverageState(chatId: newChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [debtChatId])
+            XCTAssertEqual(debtState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertNil(debtState?.lastError)
+            XCTAssertNil(newState)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoveragePrioritizesRecentSparseCoverageDebtBeforeOlderDebt() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let staleDebtChatId: Int64 = 2631
+            let recentDebtChatId: Int64 = 2632
+            let staleDebtChat = makeChat(
+                id: staleDebtChatId,
+                title: "Stale Sparse Debt",
+                chatType: .privateChat(userId: 521),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-20 * 86_400)
+            )
+            let recentDebtChat = makeChat(
+                id: recentDebtChatId,
+                title: "Recent Sparse Debt",
+                chatType: .privateChat(userId: 522),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-2 * 86_400)
+            )
+            for (chat, checkedAt) in [
+                (staleDebtChat, now.addingTimeInterval(-10 * 3_600)),
+                (recentDebtChat, now.addingTimeInterval(-1 * 3_600))
+            ] {
+                await DatabaseManager.shared.saveChatCoverageState(
+                    DatabaseManager.ChatCoverageStateRecord(
+                        chatId: chat.id,
+                        oldestCoveredAt: now.addingTimeInterval(-5 * 86_400),
+                        latestSeenMessageId: chat.lastMessage?.id ?? 0,
+                        lastCheckedAt: checkedAt,
+                        isMajor: true,
+                        lastError: nil,
+                        failureCount: 0,
+                        nextRetryAt: nil,
+                        coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                    )
+                )
+                await DatabaseManager.shared.upsertLiveMessages(
+                    chatId: chat.id,
+                    messages: [
+                        makeRecord(id: chat.id * 10, chatId: chat.id, text: "single sparse row", date: chat.lastActivityDate ?? now)
+                    ]
+                )
+                await RelationGraph.shared.upsertNode(
+                    entityId: chat.id,
+                    type: AppConstants.Graph.userEntityType,
+                    name: chat.title,
+                    username: nil
+                )
+                try await DatabaseManager.shared.write { db in
+                    try db.execute(
+                        sql: """
+                            UPDATE nodes
+                            SET last_interaction_at = ?, interaction_score = ?
+                            WHERE entity_id = ?
+                            """,
+                        arguments: [
+                            (chat.lastActivityDate ?? now).timeIntervalSince1970,
+                            10,
+                            chat.id
+                        ]
+                    )
+                }
+            }
+            let staleHistory = [
+                makeTGMessage(id: 900, chatId: staleDebtChatId, text: "stale latest", date: now.addingTimeInterval(-20 * 86_400)),
+                makeTGMessage(id: 700, chatId: staleDebtChatId, text: "stale covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let recentHistory = [
+                makeTGMessage(id: 901, chatId: recentDebtChatId, text: "recent latest", date: now.addingTimeInterval(-2 * 86_400)),
+                makeTGMessage(id: 701, chatId: recentDebtChatId, text: "recent covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                localOnlyHistoryByChatId: [
+                    staleDebtChatId: staleHistory,
+                    recentDebtChatId: recentHistory
+                ]
+            )
+            telegramService.chats = [staleDebtChat, recentDebtChat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let recentState = await DatabaseManager.shared.loadChatCoverageState(chatId: recentDebtChatId)
+            let staleState = await DatabaseManager.shared.loadChatCoverageState(chatId: staleDebtChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [recentDebtChatId])
+            XCTAssertEqual(recentState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertEqual(staleState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion - 1)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoveragePrioritizesCurrentIncompleteRetryBeforeOldVersionDebt() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let oldVersionDebtChatId: Int64 = 2635
+            let currentIncompleteChatId: Int64 = 2636
+            let oldVersionDebtChat = makeChat(
+                id: oldVersionDebtChatId,
+                title: "Old Version Debt",
+                chatType: .basicGroup(groupId: 1635),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-3 * 86_400)
+            )
+            let currentIncompleteChat = makeChat(
+                id: currentIncompleteChatId,
+                title: "Current Incomplete Retry",
+                chatType: .basicGroup(groupId: 1636),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: oldVersionDebtChatId,
+                    oldestCoveredAt: now.addingTimeInterval(-4 * 86_400),
+                    latestSeenMessageId: oldVersionDebtChat.lastMessage?.id ?? 0,
+                    lastCheckedAt: now.addingTimeInterval(-2 * 3_600),
+                    isMajor: true,
+                    lastError: nil,
+                    failureCount: 0,
+                    nextRetryAt: nil,
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                )
+            )
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: currentIncompleteChatId,
+                    oldestCoveredAt: now.addingTimeInterval(-3 * 86_400),
+                    latestSeenMessageId: currentIncompleteChat.lastMessage?.id ?? 0,
+                    lastCheckedAt: now.addingTimeInterval(-10 * 60),
+                    isMajor: true,
+                    lastError: nil,
+                    failureCount: 0,
+                    nextRetryAt: now.addingTimeInterval(-60),
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion
+                )
+            )
+            for chat in [oldVersionDebtChat, currentIncompleteChat] {
+                let cachedRows: [DatabaseManager.MessageRecord]
+                if chat.id == currentIncompleteChatId {
+                    cachedRows = (0..<12).map { index in
+                        makeRecord(
+                            id: (chat.lastMessage?.id ?? chat.id) - Int64(index),
+                            chatId: chat.id,
+                            text: "recent cached row \(index)",
+                            date: now.addingTimeInterval(-Double(index) * 60)
+                        )
+                    }
+                } else {
+                    cachedRows = [
+                        makeRecord(
+                            id: chat.lastMessage?.id ?? chat.id,
+                            chatId: chat.id,
+                            text: "sparse cached row",
+                            date: chat.lastActivityDate ?? now
+                        )
+                    ]
+                }
+                await DatabaseManager.shared.upsertLiveMessages(
+                    chatId: chat.id,
+                    messages: cachedRows
+                )
+                await RelationGraph.shared.upsertNode(
+                    entityId: chat.id,
+                    type: AppConstants.Graph.groupEntityType,
+                    name: chat.title,
+                    username: nil
+                )
+            }
+            try await DatabaseManager.shared.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE nodes
+                        SET last_interaction_at = ?, interaction_score = ?
+                        WHERE entity_id = ?
+                        """,
+                    arguments: [now.addingTimeInterval(-2 * 86_400).timeIntervalSince1970, 10, oldVersionDebtChatId]
+                )
+                try db.execute(
+                    sql: """
+                        UPDATE nodes
+                        SET last_interaction_at = ?, interaction_score = ?
+                        WHERE entity_id = ?
+                        """,
+                    arguments: [now.timeIntervalSince1970, 10, currentIncompleteChatId]
+                )
+            }
+
+            let oldVersionHistory = [
+                makeTGMessage(id: 900, chatId: oldVersionDebtChatId, text: "old version latest", date: now.addingTimeInterval(-3 * 86_400)),
+                makeTGMessage(id: 700, chatId: oldVersionDebtChatId, text: "old version covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let currentIncompleteHistory = [
+                makeTGMessage(id: 901, chatId: currentIncompleteChatId, text: "retry latest", date: now),
+                makeTGMessage(id: 701, chatId: currentIncompleteChatId, text: "retry covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                localOnlyHistoryByChatId: [
+                    oldVersionDebtChatId: oldVersionHistory,
+                    currentIncompleteChatId: currentIncompleteHistory
+                ]
+            )
+            telegramService.chats = [currentIncompleteChat, oldVersionDebtChat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let oldVersionState = await DatabaseManager.shared.loadChatCoverageState(chatId: oldVersionDebtChatId)
+            let currentIncompleteState = await DatabaseManager.shared.loadChatCoverageState(chatId: currentIncompleteChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(Set(telegramService.historyRequests.map(\.chatId)), [currentIncompleteChatId])
+            XCTAssertEqual(oldVersionState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion - 1)
+            XCTAssertEqual(currentIncompleteState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertEqual(
+                currentIncompleteState?.lastCheckedAt?.timeIntervalSince1970 ?? 0,
+                now.timeIntervalSince1970,
+                accuracy: 0.001
+            )
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageDoesNotResolveUnselectedSupergroupsBeforeDebtChat() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let debtChatId: Int64 = 2641
+            let debtChat = makeChat(
+                id: debtChatId,
+                title: "Sparse Private Debt",
+                chatType: .privateChat(userId: 541),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-2 * 86_400)
+            )
+            var unrelatedSupergroups: [TGChat] = []
+            var largeMemberCounts: [Int64: Int] = [:]
+            for index in 0..<5 {
+                let chat = makeChat(
+                    id: Int64(2_700 + index),
+                    title: "Unrelated Loaded Supergroup \(index)",
+                    chatType: .supergroup(supergroupId: Int64(7_000 + index), isChannel: false),
+                    unreadCount: 0,
+                    lastMessageDate: now.addingTimeInterval(-Double(index) * 60),
+                    memberCount: nil
+                )
+                unrelatedSupergroups.append(chat)
+                largeMemberCounts[chat.id] = AppConstants.Indexing.maxIndexedGroupMembers + 1
+            }
+
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: debtChatId,
+                    oldestCoveredAt: now.addingTimeInterval(-4 * 86_400),
+                    latestSeenMessageId: debtChat.lastMessage?.id ?? 0,
+                    lastCheckedAt: now.addingTimeInterval(-2 * 3_600),
+                    isMajor: true,
+                    lastError: nil,
+                    failureCount: 0,
+                    nextRetryAt: nil,
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                )
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: debtChatId,
+                messages: [
+                    makeRecord(id: 6401, chatId: debtChatId, text: "single cached row", date: now.addingTimeInterval(-2 * 86_400))
+                ]
+            )
+            let debtHistory = [
+                makeTGMessage(id: 900, chatId: debtChatId, text: "recent", date: now.addingTimeInterval(-2 * 86_400)),
+                makeTGMessage(id: 700, chatId: debtChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                localOnlyHistoryByChatId: [debtChatId: debtHistory],
+                resolvedMemberCounts: largeMemberCounts
+            )
+            telegramService.chats = unrelatedSupergroups + [debtChat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let debtState = await DatabaseManager.shared.loadChatCoverageState(chatId: debtChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [debtChatId])
+            XCTAssertEqual(telegramService.resolvedMemberCountRequests, [])
+            XCTAssertEqual(debtState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertNil(debtState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageHydratesUnloadedSparseDebtChatById() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let debtChatId: Int64 = 2645
+            let latest = makeTGMessage(id: 1_000, chatId: debtChatId, text: "latest", date: now.addingTimeInterval(-2 * 86_400))
+            let older = makeTGMessage(id: 700, chatId: debtChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            let unloadedDebtChat = TGChat(
+                id: debtChatId,
+                title: "Unloaded Sparse Debt",
+                chatType: .privateChat(userId: 545),
+                unreadCount: 0,
+                lastMessage: latest,
+                memberCount: nil,
+                order: debtChatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+            let loadedNewChat = makeChat(
+                id: 2646,
+                title: "Loaded New Chat",
+                chatType: .privateChat(userId: 546),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: debtChatId,
+                    oldestCoveredAt: now.addingTimeInterval(-4 * 86_400),
+                    latestSeenMessageId: latest.id,
+                    lastCheckedAt: now.addingTimeInterval(-2 * 3_600),
+                    isMajor: true,
+                    lastError: nil,
+                    failureCount: 0,
+                    nextRetryAt: nil,
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                )
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: debtChatId,
+                messages: [
+                    makeRecord(id: latest.id, chatId: debtChatId, text: "latest", date: latest.date)
+                ]
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                localOnlyHistoryByChatId: [debtChatId: [latest, older]],
+                getChatById: [debtChatId: unloadedDebtChat]
+            )
+            telegramService.chats = [loadedNewChat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let debtState = await DatabaseManager.shared.loadChatCoverageState(chatId: debtChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(telegramService.getChatRequests, [debtChatId])
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [debtChatId])
+            XCTAssertEqual(debtState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertNil(debtState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageFallsBackToDebtChatIdWhenMetadataHydrationMisses() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let debtChatId: Int64 = -5_200_000_001
+            let latest = makeTGMessage(id: 1_000, chatId: debtChatId, text: "latest", date: now.addingTimeInterval(-2 * 86_400))
+            let older = makeTGMessage(id: 700, chatId: debtChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: debtChatId,
+                    oldestCoveredAt: now.addingTimeInterval(-4 * 86_400),
+                    latestSeenMessageId: latest.id,
+                    lastCheckedAt: now.addingTimeInterval(-2 * 3_600),
+                    isMajor: true,
+                    lastError: nil,
+                    failureCount: 0,
+                    nextRetryAt: nil,
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                )
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: debtChatId,
+                messages: [
+                    makeRecord(id: latest.id, chatId: debtChatId, text: "latest", date: latest.date)
+                ]
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                localOnlyHistoryByChatId: [debtChatId: [latest, older]]
+            )
+            telegramService.chats = []
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let debtState = await DatabaseManager.shared.loadChatCoverageState(chatId: debtChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(telegramService.getChatRequests, [debtChatId])
+            XCTAssertEqual(Set(telegramService.historyRequests.map(\.chatId)), [debtChatId])
+            XCTAssertEqual(debtState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertNil(debtState?.lastError)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageCountsOnlyRecentRowsForDebtHydration() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let debtChatId: Int64 = -5_200_000_002
+            let recent = makeTGMessage(id: 1_000, chatId: debtChatId, text: "recent", date: now.addingTimeInterval(-2 * 86_400))
+            let covered = makeTGMessage(id: 700, chatId: debtChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            var cachedRows: [DatabaseManager.MessageRecord] = [
+                makeRecord(id: recent.id, chatId: debtChatId, text: "single recent row", date: recent.date)
+            ]
+            for index in 0..<20 {
+                cachedRows.append(
+                    makeRecord(
+                        id: Int64(200 + index),
+                        chatId: debtChatId,
+                        text: "old cached row \(index)",
+                        date: now.addingTimeInterval(-Double(60 + index) * 86_400)
+                    )
+                )
+            }
+            await DatabaseManager.shared.upsertLiveMessages(chatId: debtChatId, messages: cachedRows)
+            await DatabaseManager.shared.saveChatCoverageState(
+                DatabaseManager.ChatCoverageStateRecord(
+                    chatId: debtChatId,
+                    oldestCoveredAt: nil,
+                    latestSeenMessageId: recent.id,
+                    lastCheckedAt: now.addingTimeInterval(-2 * 3_600),
+                    isMajor: true,
+                    lastError: "chat history fetch timed out after 30 seconds",
+                    failureCount: 1,
+                    nextRetryAt: now.addingTimeInterval(-60),
+                    coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                )
+            )
+            await RelationGraph.shared.upsertNode(
+                entityId: debtChatId,
+                type: AppConstants.Graph.groupEntityType,
+                name: "Recent Sparse With Old Cache",
+                username: nil
+            )
+            try await DatabaseManager.shared.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE nodes
+                        SET last_interaction_at = ?, interaction_score = ?
+                        WHERE entity_id = ?
+                        """,
+                    arguments: [
+                        recent.date.timeIntervalSince1970,
+                        10,
+                        debtChatId
+                    ]
+                )
+            }
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [debtChatId: [recent, covered]],
+                hangingLocalHistoryChatIds: [debtChatId],
+                hangingHistoryDelayNanoseconds: 500_000_000
+            )
+            telegramService.chats = []
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let debtState = await DatabaseManager.shared.loadChatCoverageState(chatId: debtChatId)
+            let stored = await DatabaseManager.shared.loadMessages(chatId: debtChatId, limit: 50)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.getChatRequests, [debtChatId])
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [debtChatId])
+            XCTAssertEqual(telegramService.historyRequests.map(\.onlyLocal), [false])
+            XCTAssertEqual(telegramService.historyRequests.map(\.fromMessageId), [recent.id])
+            XCTAssertTrue(Set(stored.map(\.id)).isSuperset(of: [recent.id, covered.id]))
+            XCTAssertEqual(debtState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertLessThanOrEqual(
+                debtState?.oldestCoveredAt?.timeIntervalSince1970 ?? now.timeIntervalSince1970,
+                now.addingTimeInterval(-30 * 86_400).timeIntervalSince1970
+            )
+            XCTAssertNil(debtState?.lastError)
+            XCTAssertNil(debtState?.nextRetryAt)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageHonorsDebtRankAfterHydratingUnloadedChat() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let rankedDebtChatId: Int64 = 2647
+            let noisyLoadedDebtChatId: Int64 = 2648
+            let rankedDebtChat = makeChat(
+                id: rankedDebtChatId,
+                title: "Ranked Sparse Debt",
+                chatType: .basicGroup(groupId: 1647),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-20 * 86_400)
+            )
+            let noisyLoadedDebtChat = makeChat(
+                id: noisyLoadedDebtChatId,
+                title: "Noisy Loaded Sparse Debt",
+                chatType: .basicGroup(groupId: 1648),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+
+            for chat in [rankedDebtChat, noisyLoadedDebtChat] {
+                await DatabaseManager.shared.saveChatCoverageState(
+                    DatabaseManager.ChatCoverageStateRecord(
+                        chatId: chat.id,
+                        oldestCoveredAt: now.addingTimeInterval(-4 * 86_400),
+                        latestSeenMessageId: chat.lastMessage?.id ?? 0,
+                        lastCheckedAt: now.addingTimeInterval(-2 * 3_600),
+                        isMajor: true,
+                        lastError: nil,
+                        failureCount: 0,
+                        nextRetryAt: nil,
+                        coverageVersion: AppConstants.MajorChatCoverage.coverageStateVersion - 1
+                    )
+                )
+                await DatabaseManager.shared.upsertLiveMessages(
+                    chatId: chat.id,
+                    messages: [
+                        makeRecord(
+                            id: chat.lastMessage?.id ?? chat.id,
+                            chatId: chat.id,
+                            text: "sparse cached row",
+                            date: chat.lastActivityDate ?? now
+                        )
+                    ]
+                )
+                await RelationGraph.shared.upsertNode(
+                    entityId: chat.id,
+                    type: AppConstants.Graph.groupEntityType,
+                    name: chat.title,
+                    username: nil
+                )
+            }
+            try await DatabaseManager.shared.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE nodes
+                        SET last_interaction_at = ?, interaction_score = ?
+                        WHERE entity_id = ?
+                        """,
+                    arguments: [now.addingTimeInterval(-1 * 86_400).timeIntervalSince1970, 10, rankedDebtChatId]
+                )
+                try db.execute(
+                    sql: """
+                        UPDATE nodes
+                        SET last_interaction_at = ?, interaction_score = ?
+                        WHERE entity_id = ?
+                        """,
+                    arguments: [now.addingTimeInterval(-15 * 86_400).timeIntervalSince1970, 10, noisyLoadedDebtChatId]
+                )
+            }
+
+            let rankedHistory = [
+                makeTGMessage(id: 900, chatId: rankedDebtChatId, text: "ranked latest", date: now.addingTimeInterval(-20 * 86_400)),
+                makeTGMessage(id: 700, chatId: rankedDebtChatId, text: "ranked covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let noisyHistory = [
+                makeTGMessage(id: 901, chatId: noisyLoadedDebtChatId, text: "noisy latest", date: now),
+                makeTGMessage(id: 701, chatId: noisyLoadedDebtChatId, text: "noisy covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [:],
+                localOnlyHistoryByChatId: [
+                    rankedDebtChatId: rankedHistory,
+                    noisyLoadedDebtChatId: noisyHistory
+                ],
+                getChatById: [rankedDebtChatId: rankedDebtChat]
+            )
+            telegramService.chats = [noisyLoadedDebtChat]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let rankedState = await DatabaseManager.shared.loadChatCoverageState(chatId: rankedDebtChatId)
+            let noisyState = await DatabaseManager.shared.loadChatCoverageState(chatId: noisyLoadedDebtChatId)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(telegramService.getChatRequests, [rankedDebtChatId])
+            XCTAssertEqual(Set(telegramService.historyRequests.map(\.chatId)), [rankedDebtChatId])
+            XCTAssertEqual(rankedState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertEqual(noisyState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion - 1)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageValidatesSelectedUnknownSupergroupBeforeHistoryFetch() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let largeGroup = makeChat(
+                id: 2651,
+                title: "Large Unknown Group",
+                chatType: .supergroup(supergroupId: 5651, isChannel: false),
+                unreadCount: 0,
+                lastMessageDate: now,
+                memberCount: nil
+            )
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [largeGroup.id: [
+                    makeTGMessage(id: 900, chatId: largeGroup.id, text: "latest", date: now),
+                    makeTGMessage(id: 700, chatId: largeGroup.id, text: "older", date: now.addingTimeInterval(-31 * 86_400))
+                ]],
+                resolvedMemberCounts: [
+                    largeGroup.id: AppConstants.Indexing.maxIndexedGroupMembers + 1
+                ]
+            )
+            telegramService.chats = [largeGroup]
+
+            let summary = await coordinator.reconcileOnceForTesting(using: telegramService, now: now, limit: 1)
+
+            let state = await DatabaseManager.shared.loadChatCoverageState(chatId: largeGroup.id)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 0)
+            XCTAssertEqual(telegramService.resolvedMemberCountRequests, [largeGroup.id])
+            XCTAssertEqual(telegramService.historyRequests, [])
+            XCTAssertEqual(state?.isMajor, false)
+            XCTAssertEqual(state?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertGreaterThan(state?.nextRetryAt?.timeIntervalSince1970 ?? 0, now.timeIntervalSince1970)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageDefersTimeoutWithoutPilingUpHistoryFetches() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let hungChatId: Int64 = 2611
+            let healthyChatId: Int64 = 2612
+            let hungChat = makeChat(
+                id: hungChatId,
+                title: "Hung Chat",
+                chatType: .privateChat(userId: 501),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            let healthyChat = makeChat(
+                id: healthyChatId,
+                title: "Healthy Chat",
+                chatType: .privateChat(userId: 502),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-60)
+            )
+            let healthyHistory = [
+                makeTGMessage(id: 900, chatId: healthyChatId, text: "today", date: now),
+                makeTGMessage(id: 700, chatId: healthyChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [healthyChatId: []],
+                localOnlyHistoryByChatId: [healthyChatId: healthyHistory],
+                hangingLocalHistoryChatIds: [hungChatId],
+                hangingHistoryDelayNanoseconds: 500_000_000
+            )
+            telegramService.chats = [hungChat, healthyChat]
+
+            let startedAt = Date()
+            let summary = await coordinator.reconcileOnceForTesting(
+                using: telegramService,
+                now: now,
+                historyFetchTimeoutSeconds: 0.01
+            )
+            let elapsed = Date().timeIntervalSince(startedAt)
+
+            let hungState = await DatabaseManager.shared.loadChatCoverageState(chatId: hungChatId)
+            let healthyState = await DatabaseManager.shared.loadChatCoverageState(chatId: healthyChatId)
+            let healthyStored = await DatabaseManager.shared.loadMessages(chatId: healthyChatId, limit: 20)
+
+            XCTAssertLessThan(elapsed, 0.25)
+            XCTAssertEqual(summary.scannedChats, 1)
+            XCTAssertEqual(summary.backfilledChats, 0)
+            XCTAssertNil(summary.historyCooldownUntil)
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [hungChatId])
+            XCTAssertEqual(hungState?.coverageVersion, AppConstants.MajorChatCoverage.coverageStateVersion)
+            XCTAssertEqual(hungState?.lastError, "chat history fetch timed out after 0 seconds")
+            XCTAssertEqual(hungState?.failureCount, 1)
+            XCTAssertEqual(
+                hungState?.nextRetryAt?.timeIntervalSince1970 ?? 0,
+                now.addingTimeInterval(AppConstants.MajorChatCoverage.retryBackoffSeconds[0]).timeIntervalSince1970,
+                accuracy: 0.001
+            )
+            XCTAssertNil(healthyState)
+            XCTAssertTrue(healthyStored.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testMajorChatCoverageRetriesNextChatAfterTimeoutWithoutGlobalCooldown() async throws {
+        try await withTempDatabase { _ in
+            let coordinator = MajorChatCoverageCoordinator()
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let hungChatId: Int64 = 2613
+            let healthyChatId: Int64 = 2614
+            let hungChat = makeChat(
+                id: hungChatId,
+                title: "Hung Gate Chat",
+                chatType: .privateChat(userId: 513),
+                unreadCount: 0,
+                lastMessageDate: now
+            )
+            let healthyChat = makeChat(
+                id: healthyChatId,
+                title: "Post Timeout Healthy",
+                chatType: .privateChat(userId: 514),
+                unreadCount: 0,
+                lastMessageDate: now.addingTimeInterval(-60)
+            )
+            let healthyHistory = [
+                makeTGMessage(id: 900, chatId: healthyChatId, text: "today", date: now),
+                makeTGMessage(id: 700, chatId: healthyChatId, text: "covered", date: now.addingTimeInterval(-31 * 86_400))
+            ]
+            let telegramService = PipelineTestTelegramService(
+                currentUser: nil,
+                historyByChatId: [healthyChatId: []],
+                localOnlyHistoryByChatId: [healthyChatId: healthyHistory],
+                hangingLocalHistoryChatIds: [hungChatId],
+                hangingHistoryDelayNanoseconds: 500_000_000
+            )
+            telegramService.chats = [hungChat, healthyChat]
+
+            let firstSummary = await coordinator.reconcileOnceForTesting(
+                using: telegramService,
+                now: now,
+                limit: 1,
+                historyFetchTimeoutSeconds: 0.01
+            )
+            let secondSummary = await coordinator.reconcileOnceForTesting(
+                using: telegramService,
+                now: now.addingTimeInterval(60),
+                limit: 1,
+                historyFetchTimeoutSeconds: 0.01
+            )
+
+            let healthyState = await DatabaseManager.shared.loadChatCoverageState(chatId: healthyChatId)
+            let healthyStored = await DatabaseManager.shared.loadMessages(chatId: healthyChatId, limit: 20)
+
+            XCTAssertEqual(firstSummary.scannedChats, 1)
+            XCTAssertNil(firstSummary.historyCooldownUntil)
+            XCTAssertEqual(secondSummary.scannedChats, 1)
+            XCTAssertEqual(secondSummary.backfilledChats, 1)
+            XCTAssertEqual(telegramService.historyRequests.map(\.chatId), [hungChatId, healthyChatId])
+            XCTAssertTrue(Set(healthyStored.map(\.id)).isSuperset(of: [900, 700]))
+            XCTAssertNil(healthyState?.lastError)
+            XCTAssertNil(healthyState?.nextRetryAt)
+        }
+    }
+
+    @MainActor
     func testIndexingAndRecentSyncResolveUnknownSupergroupMemberCounts() async throws {
         let smallSupergroup = makeChat(
             id: 1901,
@@ -2944,6 +4561,27 @@ final class PidgyCoreTests: XCTestCase {
                 previousConnectionState: .connectionStateConnecting,
                 newConnectionState: .connectionStateReady,
                 authState: .waitingForPhoneNumber
+            )
+        )
+    }
+
+    func testTelegramServiceDoesNotRemoveDurableRowsForTDLibCacheEviction() {
+        XCTAssertFalse(
+            TelegramService.shouldRemoveLocalMessagesForDeleteUpdateForTesting(
+                fromCache: true,
+                isPermanent: false
+            )
+        )
+        XCTAssertTrue(
+            TelegramService.shouldRemoveLocalMessagesForDeleteUpdateForTesting(
+                fromCache: false,
+                isPermanent: true
+            )
+        )
+        XCTAssertTrue(
+            TelegramService.shouldRemoveLocalMessagesForDeleteUpdateForTesting(
+                fromCache: false,
+                isPermanent: false
             )
         )
     }
@@ -6935,10 +8573,12 @@ final class PidgyCoreTests: XCTestCase {
         await DatabaseManager.shared.initialize()
         await MessageCacheService.shared.invalidateAllLocalData()
         await MessageCacheService.shared.invalidateAll()
+        await MajorChatCoverageCoordinator.resetHistoryFetchGateForTesting()
 
         do {
             try await body(databaseURL)
         } catch {
+            await MajorChatCoverageCoordinator.resetHistoryFetchGateForTesting()
             await MessageCacheService.shared.resetInMemoryCachesForTesting()
             await DatabaseManager.shared.close()
             await DatabaseManager.shared.configureForTesting(
@@ -6949,6 +8589,7 @@ final class PidgyCoreTests: XCTestCase {
             throw error
         }
 
+        await MajorChatCoverageCoordinator.resetHistoryFetchGateForTesting()
         await MessageCacheService.shared.resetInMemoryCachesForTesting()
         await DatabaseManager.shared.close()
         await DatabaseManager.shared.configureForTesting(
@@ -7178,6 +8819,18 @@ private extension RelationGraph.Node {
     }
 }
 
+private actor AsyncCompletionFlag {
+    private var completed = false
+
+    var isCompleted: Bool {
+        completed
+    }
+
+    func markCompleted() {
+        completed = true
+    }
+}
+
 @MainActor
 private final class TestTelegramService: TelegramService {
     private let stubScoredHits: [LocalMessageSearchHit]
@@ -7203,18 +8856,54 @@ private final class TestTelegramService: TelegramService {
 
 @MainActor
 private final class PipelineTestTelegramService: TelegramService {
+    struct HistoryRequest: Equatable {
+        let chatId: Int64
+        let fromMessageId: Int64
+        let limit: Int
+        let onlyLocal: Bool
+    }
+
+    private(set) var historyRequests: [HistoryRequest] = []
+    private(set) var resolvedMemberCountRequests: [Int64] = []
+    private(set) var getChatRequests: [Int64] = []
     private let historyByChatId: [Int64: [TGMessage]]
+    private let localOnlyHistoryByChatId: [Int64: [TGMessage]]
+    private let scriptedHistoryByChatId: [Int64: [Int64: [TGMessage]]]
+    private var scriptedLocalHistoryResponsesByChatId: [Int64: [Int64: [[TGMessage]]]]
+    private let getChatById: [Int64: TGChat]
     private let resolvedMemberCounts: [Int64: Int]
+    private let hangingHistoryChatIds: Set<Int64>
+    private let hangingLocalHistoryChatIds: Set<Int64>
+    private let hangingHistoryDelayNanoseconds: UInt64
 
     init(
         currentUser: TGUser?,
         historyByChatId: [Int64: [TGMessage]],
-        resolvedMemberCounts: [Int64: Int] = [:]
+        localOnlyHistoryByChatId: [Int64: [TGMessage]] = [:],
+        scriptedHistoryByChatId: [Int64: [Int64: [TGMessage]]] = [:],
+        scriptedLocalHistoryResponsesByChatId: [Int64: [Int64: [[TGMessage]]]] = [:],
+        getChatById: [Int64: TGChat] = [:],
+        resolvedMemberCounts: [Int64: Int] = [:],
+        hangingHistoryChatIds: Set<Int64> = [],
+        hangingLocalHistoryChatIds: Set<Int64> = [],
+        hangingHistoryDelayNanoseconds: UInt64 = 5_000_000_000
     ) {
         self.historyByChatId = historyByChatId
+        self.localOnlyHistoryByChatId = localOnlyHistoryByChatId
+        self.scriptedHistoryByChatId = scriptedHistoryByChatId
+        self.scriptedLocalHistoryResponsesByChatId = scriptedLocalHistoryResponsesByChatId
+        self.getChatById = getChatById
         self.resolvedMemberCounts = resolvedMemberCounts
+        self.hangingHistoryChatIds = hangingHistoryChatIds
+        self.hangingLocalHistoryChatIds = hangingLocalHistoryChatIds
+        self.hangingHistoryDelayNanoseconds = hangingHistoryDelayNanoseconds
         super.init()
         self.currentUser = currentUser
+    }
+
+    override func getChat(id: Int64) async throws -> TGChat? {
+        getChatRequests.append(id)
+        return getChatById[id]
     }
 
     override func getChatHistory(
@@ -7224,7 +8913,39 @@ private final class PipelineTestTelegramService: TelegramService {
         onlyLocal: Bool = false,
         priority: RateLimiter.Priority = .userInitiated
     ) async throws -> [TGMessage] {
-        let sorted = (historyByChatId[chatId] ?? []).sorted { lhs, rhs in
+        historyRequests.append(HistoryRequest(
+            chatId: chatId,
+            fromMessageId: fromMessageId,
+            limit: limit,
+            onlyLocal: onlyLocal
+        ))
+        if onlyLocal {
+            if hangingLocalHistoryChatIds.contains(chatId) {
+                await sleepIgnoringCancellation(nanoseconds: hangingHistoryDelayNanoseconds)
+                return []
+            }
+            if var chatScript = scriptedLocalHistoryResponsesByChatId[chatId],
+               var responses = chatScript[fromMessageId],
+               !responses.isEmpty {
+                let response = responses.removeFirst()
+                chatScript[fromMessageId] = responses
+                scriptedLocalHistoryResponsesByChatId[chatId] = chatScript
+                return Array(response.prefix(limit))
+            }
+            return pagedHistory(localOnlyHistoryByChatId[chatId] ?? [], fromMessageId: fromMessageId, limit: limit)
+        }
+        if hangingHistoryChatIds.contains(chatId) {
+            await sleepIgnoringCancellation(nanoseconds: hangingHistoryDelayNanoseconds)
+            return []
+        }
+        if let scripted = scriptedHistoryByChatId[chatId]?[fromMessageId] {
+            return Array(scripted.prefix(limit))
+        }
+        return pagedHistory(historyByChatId[chatId] ?? [], fromMessageId: fromMessageId, limit: limit)
+    }
+
+    private func pagedHistory(_ history: [TGMessage], fromMessageId: Int64, limit: Int) -> [TGMessage] {
+        let sorted = history.sorted { lhs, rhs in
             if lhs.date != rhs.date {
                 return lhs.date > rhs.date
             }
@@ -7243,7 +8964,19 @@ private final class PipelineTestTelegramService: TelegramService {
         return Array(older.prefix(limit))
     }
 
+    private func sleepIgnoringCancellation(nanoseconds: UInt64) async {
+        let deadline = Date().addingTimeInterval(Double(nanoseconds) / 1_000_000_000)
+        while Date() < deadline {
+            do {
+                try await Task.sleep(nanoseconds: min(nanoseconds, 25_000_000))
+            } catch {
+                await Task.yield()
+            }
+        }
+    }
+
     override func resolvedMemberCount(for chat: TGChat) async -> Int? {
+        resolvedMemberCountRequests.append(chat.id)
         if let count = resolvedMemberCounts[chat.id] {
             return count
         }

@@ -183,6 +183,7 @@ struct PreferencesResetService {
 
         TaskIndexCoordinator.shared.stop()
         await RecentSyncCoordinator.shared.stop()
+        await MajorChatCoverageCoordinator.shared.stop()
         await IndexScheduler.shared.stop()
         telegramService.stop()
         await MessageCacheService.shared.invalidateAllLocalData()

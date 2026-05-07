@@ -159,6 +159,34 @@ enum AppConstants {
         static let recoveryRefreshCooldownSeconds: TimeInterval = 90
     }
 
+    enum MajorChatCoverage {
+        static let coverageStateVersion = 8
+        static let coverageWindowDays: TimeInterval = 30
+        static let historyBatchSize = 100
+        static let maxChatsPerPass = 1
+        static let recoveryMaxChatsPerPass = 1
+        static let debtCandidateLimit = 48
+        static let debtHydrationLimit = 16
+        static let maxBatchesPerChat = 20
+        static let maxNetworkBatchesPerChat = 1
+        static let minTrustedLocalCoverageMessages = 10
+        static let historyFetchTimeoutSeconds: TimeInterval = 12
+        static let networkHistoryFetchTimeoutSeconds: TimeInterval = 25
+        static let networkBatchSpacingMilliseconds: UInt64 = 2_000
+        static let memberCountResolutionTimeoutSeconds: TimeInterval = 3
+        static let localEmptyPageRetryCount = 1
+        static let localEmptyPageRetryDelayMilliseconds: UInt64 = 250
+        static let incompleteLocalRetryDelaySeconds: TimeInterval = 10 * 60
+        static let retryBackoffSeconds: [TimeInterval] = [
+            30 * 60,
+            2 * 60 * 60,
+            12 * 60 * 60
+        ]
+        static let transientHistoryFailureCooldownSeconds: TimeInterval = 10 * 60
+        static let idlePollIntervalMilliseconds: UInt64 = 60_000
+        static let activePollIntervalMilliseconds: UInt64 = 30_000
+    }
+
     enum Search {
         enum Pattern {
             static let maxSearchableMessages = 12_000

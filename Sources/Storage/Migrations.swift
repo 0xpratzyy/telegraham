@@ -299,6 +299,60 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v9_chat_coverage_state") { db in
+            try db.execute(sql: """
+                CREATE TABLE chat_coverage_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    oldest_covered_at REAL,
+                    latest_seen_message_id INTEGER NOT NULL DEFAULT 0,
+                    last_checked_at REAL NOT NULL DEFAULT 0,
+                    is_major INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_chat_coverage_major_checked
+                ON chat_coverage_state(is_major, last_checked_at DESC)
+                """)
+        }
+
+        migrator.registerMigration("v10_chat_coverage_state_version") { db in
+            try db.execute(sql: """
+                ALTER TABLE chat_coverage_state
+                ADD COLUMN coverage_version INTEGER NOT NULL DEFAULT 0
+                """)
+        }
+
+        migrator.registerMigration("v11_chat_coverage_retry_state") { db in
+            try db.execute(sql: """
+                ALTER TABLE chat_coverage_state
+                ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0
+                """)
+
+            try db.execute(sql: """
+                ALTER TABLE chat_coverage_state
+                ADD COLUMN next_retry_at REAL
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_chat_coverage_retry
+                ON chat_coverage_state(is_major, next_retry_at, last_checked_at DESC)
+                """)
+        }
+
+        migrator.registerMigration("v12_chat_coverage_cursor_state") { db in
+            try db.execute(sql: """
+                ALTER TABLE chat_coverage_state
+                ADD COLUMN oldest_covered_message_id INTEGER NOT NULL DEFAULT 0
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_chat_coverage_debt
+                ON chat_coverage_state(is_major, coverage_version, oldest_covered_at, next_retry_at)
+                """)
+        }
+
         return migrator
     }
 }
