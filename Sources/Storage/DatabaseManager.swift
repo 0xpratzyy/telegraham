@@ -53,6 +53,68 @@ actor DatabaseManager {
         let lastRecentSyncAt: Date?
     }
 
+    struct RecentBackfillStateRecord: Sendable, Equatable {
+        let chatId: Int64
+        let targetMessageId: Int64
+        let stopMessageId: Int64
+        let cursorMessageId: Int64
+        let startedAt: Date
+        let updatedAt: Date
+        let pagesFetched: Int
+        let messagesFetched: Int
+        let status: String
+        let lastError: String?
+        let failureCount: Int
+        let lastAttemptAt: Date?
+        let nextRetryAt: Date?
+    }
+
+    struct MessageCoverageRecord: Sendable, Equatable {
+        let chatId: Int64
+        let messageCount: Int
+        let oldestMessageId: Int64?
+        let oldestMessageDate: Date?
+        let latestMessageId: Int64?
+        let latestMessageDate: Date?
+    }
+
+    struct ChatCoverageStateRecord: Sendable, Equatable {
+        let chatId: Int64
+        let oldestCoveredAt: Date?
+        let oldestCoveredMessageId: Int64
+        let latestSeenMessageId: Int64
+        let lastCheckedAt: Date?
+        let isMajor: Bool
+        let lastError: String?
+        let failureCount: Int
+        let nextRetryAt: Date?
+        let coverageVersion: Int
+
+        init(
+            chatId: Int64,
+            oldestCoveredAt: Date?,
+            oldestCoveredMessageId: Int64 = 0,
+            latestSeenMessageId: Int64,
+            lastCheckedAt: Date?,
+            isMajor: Bool,
+            lastError: String?,
+            failureCount: Int,
+            nextRetryAt: Date?,
+            coverageVersion: Int
+        ) {
+            self.chatId = chatId
+            self.oldestCoveredAt = oldestCoveredAt
+            self.oldestCoveredMessageId = oldestCoveredMessageId
+            self.latestSeenMessageId = latestSeenMessageId
+            self.lastCheckedAt = lastCheckedAt
+            self.isMajor = isMajor
+            self.lastError = lastError
+            self.failureCount = failureCount
+            self.nextRetryAt = nextRetryAt
+            self.coverageVersion = coverageVersion
+        }
+    }
+
     struct DashboardTaskSyncStateRecord: Sendable, Equatable {
         let chatId: Int64
         let latestMessageId: Int64
@@ -422,6 +484,14 @@ actor DatabaseManager {
                     sql: "DELETE FROM recent_sync_state WHERE chat_id = ?",
                     arguments: [chatId]
                 )
+                try db.execute(
+                    sql: "DELETE FROM recent_backfill_state WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
+                try db.execute(
+                    sql: "DELETE FROM chat_coverage_state WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
             }
         } catch {
             print("[DatabaseManager] Failed to delete cached messages for chat \(chatId): \(error)")
@@ -479,6 +549,304 @@ actor DatabaseManager {
         }
     }
 
+    func loadRecentBackfillState(chatId: Int64) async -> RecentBackfillStateRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+
+        do {
+            return try await pool.read { db in
+                try Self.recentBackfillStateRecord(in: db, chatId: chatId)
+            }
+        } catch {
+            return nil
+        }
+    }
+
+    func loadRecentBackfillStates(in chatIds: [Int64]) async -> [Int64: RecentBackfillStateRecord] {
+        guard !chatIds.isEmpty else { return [:] }
+        guard let pool = await ensureDatabase() else { return [:] }
+
+        do {
+            return try await pool.read { db in
+                let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
+                var arguments = StatementArguments()
+                for chatId in chatIds {
+                    arguments += [chatId]
+                }
+
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at
+                        FROM recent_backfill_state
+                        WHERE chat_id IN (\(placeholders))
+                        """,
+                    arguments: arguments
+                )
+
+                return Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+                    guard let record = Self.recentBackfillStateRecord(from: row) else { return nil }
+                    return (record.chatId, record)
+                })
+            }
+        } catch {
+            return [:]
+        }
+    }
+
+    func loadRecentBackfillDiagnostics(limit: Int = 50) async -> [RecentBackfillStateRecord] {
+        guard limit > 0 else { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at
+                        FROM recent_backfill_state
+                        WHERE status = 'failed'
+                        ORDER BY COALESCE(next_retry_at, updated_at) ASC, updated_at ASC, chat_id ASC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+
+                return rows.compactMap(Self.recentBackfillStateRecord(from:))
+            }
+        } catch {
+            return []
+        }
+    }
+
+    func loadMessageCoverage(chatId: Int64, since minimumDate: Date? = nil) async -> MessageCoverageRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+
+        do {
+            return try await pool.read { db in
+                let count: Int
+                if let minimumDate {
+                    count = try Int.fetchOne(
+                        db,
+                        sql: "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND date >= ?",
+                        arguments: [chatId, minimumDate.timeIntervalSince1970]
+                    ) ?? 0
+                } else {
+                    count = try Int.fetchOne(
+                        db,
+                        sql: "SELECT COUNT(*) FROM messages WHERE chat_id = ?",
+                        arguments: [chatId]
+                    ) ?? 0
+                }
+
+                guard count > 0 else {
+                    return MessageCoverageRecord(
+                        chatId: chatId,
+                        messageCount: 0,
+                        oldestMessageId: nil,
+                        oldestMessageDate: nil,
+                        latestMessageId: nil,
+                        latestMessageDate: nil
+                    )
+                }
+
+                let oldest: Row?
+                let latest: Row?
+                if let minimumDate {
+                    oldest = try Row.fetchOne(
+                        db,
+                        sql: """
+                            SELECT id, date
+                            FROM messages
+                            WHERE chat_id = ? AND date >= ?
+                            ORDER BY date ASC, id ASC
+                            LIMIT 1
+                            """,
+                        arguments: [chatId, minimumDate.timeIntervalSince1970]
+                    )
+                    latest = try Row.fetchOne(
+                        db,
+                        sql: """
+                            SELECT id, date
+                            FROM messages
+                            WHERE chat_id = ? AND date >= ?
+                            ORDER BY date DESC, id DESC
+                            LIMIT 1
+                            """,
+                        arguments: [chatId, minimumDate.timeIntervalSince1970]
+                    )
+                } else {
+                    oldest = try Row.fetchOne(
+                        db,
+                        sql: """
+                            SELECT id, date
+                            FROM messages
+                            WHERE chat_id = ?
+                            ORDER BY date ASC, id ASC
+                            LIMIT 1
+                            """,
+                        arguments: [chatId]
+                    )
+                    latest = try Row.fetchOne(
+                        db,
+                        sql: """
+                            SELECT id, date
+                            FROM messages
+                            WHERE chat_id = ?
+                            ORDER BY date DESC, id DESC
+                            LIMIT 1
+                            """,
+                        arguments: [chatId]
+                    )
+                }
+
+                let oldestSeconds: Double? = oldest?["date"]
+                let latestSeconds: Double? = latest?["date"]
+                return MessageCoverageRecord(
+                    chatId: chatId,
+                    messageCount: count,
+                    oldestMessageId: oldest?["id"],
+                    oldestMessageDate: oldestSeconds.map(Date.init(timeIntervalSince1970:)),
+                    latestMessageId: latest?["id"],
+                    latestMessageDate: latestSeconds.map(Date.init(timeIntervalSince1970:))
+                )
+            }
+        } catch {
+            return nil
+        }
+    }
+
+    func loadChatCoverageState(chatId: Int64) async -> ChatCoverageStateRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+
+        do {
+            return try await pool.read { db in
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT chat_id, oldest_covered_at, oldest_covered_message_id, latest_seen_message_id, last_checked_at, is_major, last_error, failure_count, next_retry_at, coverage_version
+                        FROM chat_coverage_state
+                        WHERE chat_id = ?
+                        """,
+                    arguments: [chatId]
+                ) else {
+                    return nil
+                }
+
+                let oldestSeconds: Double? = row["oldest_covered_at"]
+                let checkedSeconds: Double? = row["last_checked_at"]
+                let nextRetrySeconds: Double? = row["next_retry_at"]
+                let failureCountValue: Int64 = row["failure_count"]
+                let isMajorValue: Int64 = row["is_major"]
+                return ChatCoverageStateRecord(
+                    chatId: row["chat_id"],
+                    oldestCoveredAt: oldestSeconds.map(Date.init(timeIntervalSince1970:)),
+                    oldestCoveredMessageId: row["oldest_covered_message_id"],
+                    latestSeenMessageId: row["latest_seen_message_id"],
+                    lastCheckedAt: checkedSeconds.map(Date.init(timeIntervalSince1970:)),
+                    isMajor: isMajorValue != 0,
+                    lastError: row["last_error"],
+                    failureCount: Int(failureCountValue),
+                    nextRetryAt: nextRetrySeconds.map(Date.init(timeIntervalSince1970:)),
+                    coverageVersion: row["coverage_version"]
+                )
+            }
+        } catch {
+            return nil
+        }
+    }
+
+    func loadMajorCoverageDebtChatIds(
+        limit: Int,
+        now: Date,
+        cutoff: Date,
+        coverageVersion: Int,
+        minMessageCount _: Int
+    ) async -> [Int64] {
+        guard limit > 0, let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                try Int64.fetchAll(
+                    db,
+                    sql: """
+                        SELECT s.chat_id
+                        FROM chat_coverage_state s
+                        LEFT JOIN nodes n ON n.entity_id = s.chat_id
+                        WHERE s.is_major = 1
+                          AND (s.next_retry_at IS NULL OR s.next_retry_at <= ?)
+                          AND (
+                              s.coverage_version < ?
+                              OR s.oldest_covered_at IS NULL
+                              OR s.oldest_covered_at > ?
+                          )
+                        ORDER BY
+                            CASE
+                                WHEN s.coverage_version >= ?
+                                  AND (s.oldest_covered_at IS NULL OR s.oldest_covered_at > ?)
+                                  THEN 0
+                                WHEN s.coverage_version < ? THEN 1
+                                ELSE 2
+                            END ASC,
+                            COALESCE(n.last_interaction_at, 0) DESC,
+                            s.last_checked_at ASC,
+                            s.chat_id ASC
+                        LIMIT ?
+                    """,
+                    arguments: [
+                        now.timeIntervalSince1970,
+                        coverageVersion,
+                        cutoff.timeIntervalSince1970,
+                        coverageVersion,
+                        cutoff.timeIntervalSince1970,
+                        coverageVersion,
+                        limit
+                    ]
+                )
+            }
+        } catch {
+            return []
+        }
+    }
+
+    func saveChatCoverageState(_ record: ChatCoverageStateRecord) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO chat_coverage_state
+                        (chat_id, oldest_covered_at, oldest_covered_message_id, latest_seen_message_id, last_checked_at, is_major, last_error, failure_count, next_retry_at, coverage_version)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            oldest_covered_at = excluded.oldest_covered_at,
+                            oldest_covered_message_id = excluded.oldest_covered_message_id,
+                            latest_seen_message_id = excluded.latest_seen_message_id,
+                            last_checked_at = excluded.last_checked_at,
+                            is_major = excluded.is_major,
+                            last_error = excluded.last_error,
+                            failure_count = excluded.failure_count,
+                            next_retry_at = excluded.next_retry_at,
+                            coverage_version = excluded.coverage_version
+                        """,
+                    arguments: [
+                        record.chatId,
+                        record.oldestCoveredAt?.timeIntervalSince1970,
+                        record.oldestCoveredMessageId,
+                        record.latestSeenMessageId,
+                        record.lastCheckedAt?.timeIntervalSince1970 ?? 0,
+                        record.isMajor ? 1 : 0,
+                        record.lastError,
+                        record.failureCount,
+                        record.nextRetryAt?.timeIntervalSince1970,
+                        record.coverageVersion
+                    ]
+                )
+            }
+        } catch {
+        }
+    }
+
     func saveRecentSyncState(
         chatId: Int64,
         latestSyncedMessageId: Int64,
@@ -497,6 +865,31 @@ actor DatabaseManager {
             }
         } catch {
             print("[DatabaseManager] Failed to save recent sync state for chat \(chatId): \(error)")
+        }
+    }
+
+    func saveRecentBackfillState(_ record: RecentBackfillStateRecord) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try Self.saveRecentBackfillState(record, in: db)
+            }
+        } catch {
+        }
+    }
+
+    func deleteRecentBackfillState(chatId: Int64) async {
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: "DELETE FROM recent_backfill_state WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
+            }
+        } catch {
         }
     }
 
@@ -601,6 +994,8 @@ actor DatabaseManager {
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM sync_state WHERE chat_id >= 0")
                 try db.execute(sql: "DELETE FROM recent_sync_state WHERE chat_id >= 0")
+                try db.execute(sql: "DELETE FROM recent_backfill_state WHERE chat_id >= 0")
+                try db.execute(sql: "DELETE FROM chat_coverage_state WHERE chat_id >= 0")
             }
             removeLegacyMessageCacheDirectory()
         } catch {
@@ -618,6 +1013,8 @@ actor DatabaseManager {
                 try db.execute(sql: "DELETE FROM pipeline_cache")
                 try db.execute(sql: "DELETE FROM sync_state")
                 try db.execute(sql: "DELETE FROM recent_sync_state")
+                try db.execute(sql: "DELETE FROM recent_backfill_state")
+                try db.execute(sql: "DELETE FROM chat_coverage_state")
             }
             removeLegacyMessageCacheDirectory()
             removeLegacyPipelineCacheDirectory()
@@ -2004,6 +2401,47 @@ actor DatabaseManager {
         )
     }
 
+    private static func saveRecentBackfillState(
+        _ record: RecentBackfillStateRecord,
+        in db: Database
+    ) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO recent_backfill_state
+                (chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    target_message_id = excluded.target_message_id,
+                    stop_message_id = excluded.stop_message_id,
+                    cursor_message_id = excluded.cursor_message_id,
+                    started_at = excluded.started_at,
+                    updated_at = excluded.updated_at,
+                    pages_fetched = excluded.pages_fetched,
+                    messages_fetched = excluded.messages_fetched,
+                    status = excluded.status,
+                    last_error = excluded.last_error,
+                    failure_count = excluded.failure_count,
+                    last_attempt_at = excluded.last_attempt_at,
+                    next_retry_at = excluded.next_retry_at
+                """,
+            arguments: [
+                record.chatId,
+                record.targetMessageId,
+                record.stopMessageId,
+                record.cursorMessageId,
+                record.startedAt.timeIntervalSince1970,
+                record.updatedAt.timeIntervalSince1970,
+                record.pagesFetched,
+                record.messagesFetched,
+                record.status,
+                record.lastError,
+                record.failureCount,
+                record.lastAttemptAt?.timeIntervalSince1970,
+                record.nextRetryAt?.timeIntervalSince1970
+            ]
+        )
+    }
+
     private static func refreshRecentSyncState(
         in db: Database,
         chatId: Int64,
@@ -2087,6 +2525,50 @@ actor DatabaseManager {
             chatId: row["chat_id"],
             latestSyncedMessageId: row["latest_synced_message_id"],
             lastRecentSyncAt: lastRecentSyncAtSeconds.map(Date.init(timeIntervalSince1970:))
+        )
+    }
+
+    private static func recentBackfillStateRecord(
+        in db: Database,
+        chatId: Int64
+    ) throws -> RecentBackfillStateRecord? {
+        guard let row = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at
+                FROM recent_backfill_state
+                WHERE chat_id = ?
+                """,
+            arguments: [chatId]
+        ) else {
+            return nil
+        }
+
+        return recentBackfillStateRecord(from: row)
+    }
+
+    private static func recentBackfillStateRecord(from row: Row) -> RecentBackfillStateRecord? {
+        let startedAtSeconds: Double = row["started_at"]
+        let updatedAtSeconds: Double = row["updated_at"]
+        let pagesFetchedValue: Int64 = row["pages_fetched"]
+        let messagesFetchedValue: Int64 = row["messages_fetched"]
+        let failureCountValue: Int64 = row["failure_count"]
+        let lastAttemptAtSeconds: Double? = row["last_attempt_at"]
+        let nextRetryAtSeconds: Double? = row["next_retry_at"]
+        return RecentBackfillStateRecord(
+            chatId: row["chat_id"],
+            targetMessageId: row["target_message_id"],
+            stopMessageId: row["stop_message_id"],
+            cursorMessageId: row["cursor_message_id"],
+            startedAt: Date(timeIntervalSince1970: startedAtSeconds),
+            updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+            pagesFetched: Int(pagesFetchedValue),
+            messagesFetched: Int(messagesFetchedValue),
+            status: row["status"],
+            lastError: row["last_error"],
+            failureCount: Int(failureCountValue),
+            lastAttemptAt: lastAttemptAtSeconds.map(Date.init(timeIntervalSince1970:)),
+            nextRetryAt: nextRetryAtSeconds.map(Date.init(timeIntervalSince1970:))
         )
     }
 

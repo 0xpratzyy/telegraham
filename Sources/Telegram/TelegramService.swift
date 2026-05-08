@@ -25,6 +25,8 @@ class TelegramService: ObservableObject {
     private var botMetadataWarmTask: Task<Void, Never>?
     private var userCache: [Int64: TGUser] = [:]
     private var chatCache: [Int64: TGChat] = [:]
+    private var activeAPIId: Int?
+    private var activeAPIHash: String?
 
     /// The underlying TDLibKit client for direct API calls
     private var client: TDLibKit.TDLibClient? {
@@ -34,6 +36,26 @@ class TelegramService: ObservableObject {
     // MARK: - Lifecycle
 
     func start(apiId: Int, apiHash: String) {
+        let trimmedHash = apiHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        errorMessage = nil
+
+        if client != nil, activeAPIId == apiId, activeAPIHash == trimmedHash {
+            if authState == .waitingForParameters {
+                Task {
+                    do {
+                        try await setTdlibParameters(apiId: apiId, apiHash: trimmedHash)
+                    } catch {
+                    }
+                }
+            }
+            return
+        }
+
+        if client != nil {
+            errorMessage = "Restart Pidgy before changing Telegram API credentials."
+            return
+        }
+
         updateTask?.cancel()
         updateTask = nil
         chatDiscoveryTask?.cancel()
@@ -41,12 +63,17 @@ class TelegramService: ObservableObject {
         botMetadataWarmTask?.cancel()
         botMetadataWarmTask = nil
 
-        tdClient.start(apiId: apiId, apiHash: apiHash)
+        activeAPIId = apiId
+        activeAPIHash = trimmedHash
+        tdClient.start(apiId: apiId, apiHash: trimmedHash)
         startListeningForUpdates()
 
         // Set TDLib parameters
         Task {
-            try? await setTdlibParameters(apiId: apiId, apiHash: apiHash)
+            do {
+                try await setTdlibParameters(apiId: apiId, apiHash: trimmedHash)
+            } catch {
+            }
         }
     }
 
@@ -58,6 +85,8 @@ class TelegramService: ObservableObject {
         botMetadataWarmTask?.cancel()
         botMetadataWarmTask = nil
         tdClient.close()
+        activeAPIId = nil
+        activeAPIHash = nil
     }
 
     private func startListeningForUpdates() {
@@ -265,19 +294,46 @@ class TelegramService: ObservableObject {
         fromMessageId: Int64 = 0,
         limit: Int = 50,
         onlyLocal: Bool = false,
-        priority: RateLimiter.Priority = .userInitiated
+        priority: RateLimiter.Priority = .userInitiated,
+        timeoutSeconds: TimeInterval? = nil
     ) async throws -> [TGMessage] {
-        let result = try await withRateLimitedCall(priority: priority, method: "getChatHistory") { client in
-            try await client.getChatHistory(
-                chatId: chatId,
-                fromMessageId: fromMessageId,
-                limit: limit,
-                offset: 0,
-                onlyLocal: onlyLocal
-            )
-        }
+        guard let client else { throw TGError.clientNotInitialized }
 
-        return (result.messages ?? []).compactMap { mapMessage($0) }
+        let seconds = timeoutSeconds ?? AppConstants.RecentSync.historyFetchTimeoutSeconds
+        var attempt = 0
+        while true {
+            attempt += 1
+            try await rateLimiter.acquireCall(
+                priority: priority,
+                method: "getChatHistory",
+                floodWaitSeconds: nil
+            )
+
+            do {
+                let messages = try await withHistoryRequestTimeout(seconds: seconds) {
+                    let result = try await client.getChatHistory(
+                        chatId: chatId,
+                        fromMessageId: fromMessageId,
+                        limit: limit,
+                        offset: 0,
+                        onlyLocal: onlyLocal
+                    )
+                    return (result.messages ?? []).compactMap { self.mapMessage($0) }
+                }
+                await rateLimiter.releaseCall(method: "getChatHistory")
+                return messages
+            } catch let error as TDLibKit.Error {
+                await rateLimiter.releaseCall(method: "getChatHistory")
+                guard attempt < 3, let floodWaitSeconds = floodWaitSeconds(from: error) else {
+                    throw error
+                }
+
+                await rateLimiter.recordFloodWait(method: "getChatHistory", seconds: floodWaitSeconds)
+            } catch {
+                await rateLimiter.releaseCall(method: "getChatHistory")
+                throw error
+            }
+        }
     }
 
     // MARK: - Search (read-only)
@@ -616,13 +672,18 @@ class TelegramService: ObservableObject {
             }
 
         case .updateDeleteMessages(let deleteUpdate):
-            Task {
-                await MessageCacheService.shared.deleteMessages(
-                    chatId: deleteUpdate.chatId,
-                    messageIds: deleteUpdate.messageIds
-                )
-                // Deletions can alter conversation state; avoid stale cached AI category.
-                await MessageCacheService.shared.invalidatePipelineCategory(chatId: deleteUpdate.chatId)
+            if Self.shouldRemoveLocalMessagesForDeleteUpdate(
+                fromCache: deleteUpdate.fromCache,
+                isPermanent: deleteUpdate.isPermanent
+            ) {
+                Task {
+                    await MessageCacheService.shared.deleteMessages(
+                        chatId: deleteUpdate.chatId,
+                        messageIds: deleteUpdate.messageIds
+                    )
+                    // Deletions can alter conversation state; avoid stale cached AI category.
+                    await MessageCacheService.shared.invalidatePipelineCategory(chatId: deleteUpdate.chatId)
+                }
             }
 
         case .updateChatPosition(let posUpdate):
@@ -719,10 +780,14 @@ class TelegramService: ObservableObject {
         case .authorizationStateReady:
             authState = .ready
             Task {
-                try? await loadChats()
+                do {
+                    try await loadChats()
+                } catch {
+                }
                 startBackgroundChatDiscovery()
                 if let me = try? await fetchCurrentUser() {
                     currentUser = me
+                } else {
                 }
             }
 
@@ -763,6 +828,7 @@ class TelegramService: ObservableObject {
             )
             startBackgroundChatDiscovery()
             await RecentSyncCoordinator.shared.recoverNow()
+            await MajorChatCoverageCoordinator.shared.recoverNow()
         }
     }
 
@@ -777,6 +843,60 @@ class TelegramService: ObservableObject {
             && newConnectionState == .connectionStateReady
     }
 
+    nonisolated private static func describe(_ error: Swift.Error) -> String {
+        if let tdError = error as? TDLibKit.Error {
+            return "TDLibError(code=\(tdError.code), message=\(tdError.message))"
+        }
+        return error.localizedDescription
+    }
+
+    nonisolated private static func describe(_ state: AuthorizationState) -> String {
+        switch state {
+        case .authorizationStateWaitTdlibParameters:
+            return "waitTdlibParameters"
+        case .authorizationStateWaitPhoneNumber:
+            return "waitPhoneNumber"
+        case .authorizationStateWaitOtherDeviceConfirmation(let info):
+            return "waitOtherDeviceConfirmation(linkLength=\(info.link.count))"
+        case .authorizationStateWaitCode(let info):
+            return "waitCode(phoneLength=\(info.codeInfo.phoneNumber.count), timeout=\(info.codeInfo.timeout))"
+        case .authorizationStateWaitPassword(let info):
+            return "waitPassword(hintLength=\(info.passwordHint.count))"
+        case .authorizationStateReady:
+            return "ready"
+        case .authorizationStateLoggingOut:
+            return "loggingOut"
+        case .authorizationStateClosing:
+            return "closing"
+        case .authorizationStateClosed:
+            return "closed"
+        default:
+            return "other"
+        }
+    }
+
+    nonisolated private static func describe(_ state: ConnectionState) -> String {
+        switch state {
+        case .connectionStateConnecting:
+            return "connecting"
+        case .connectionStateConnectingToProxy:
+            return "connectingToProxy"
+        case .connectionStateReady:
+            return "ready"
+        case .connectionStateUpdating:
+            return "updating"
+        case .connectionStateWaitingForNetwork:
+            return "waitingForNetwork"
+        }
+    }
+
+    nonisolated private static func shouldRemoveLocalMessagesForDeleteUpdate(
+        fromCache: Bool,
+        isPermanent: Bool
+    ) -> Bool {
+        return isPermanent || !fromCache
+    }
+
 #if DEBUG
     nonisolated static func shouldTriggerRecoveryRefreshForTesting(
         previousConnectionState: ConnectionState?,
@@ -787,6 +907,16 @@ class TelegramService: ObservableObject {
             previousConnectionState: previousConnectionState,
             newConnectionState: newConnectionState,
             authState: authState
+        )
+    }
+
+    nonisolated static func shouldRemoveLocalMessagesForDeleteUpdateForTesting(
+        fromCache: Bool,
+        isPermanent: Bool
+    ) -> Bool {
+        shouldRemoveLocalMessagesForDeleteUpdate(
+            fromCache: fromCache,
+            isPermanent: isPermanent
         )
     }
 #endif
@@ -1114,26 +1244,103 @@ class TelegramService: ObservableObject {
         guard let client else { throw TGError.clientNotInitialized }
 
         var attempt = 0
-        var pendingFloodWaitSeconds: Int?
         while true {
             attempt += 1
-            await rateLimiter.acquire(
+            try await rateLimiter.acquireCall(
                 priority: priority,
                 method: method,
-                floodWaitSeconds: pendingFloodWaitSeconds
+                floodWaitSeconds: nil
             )
-            pendingFloodWaitSeconds = nil
 
             do {
-                return try await operation(client)
+                let value = try await operation(client)
+                await rateLimiter.releaseCall(method: method)
+                return value
             } catch let error as TDLibKit.Error {
+                await rateLimiter.releaseCall(method: method)
                 guard attempt < 3, let floodWaitSeconds = floodWaitSeconds(from: error) else {
                     throw error
                 }
 
                 print("[TelegramService] FLOOD_WAIT detected for \(method): \(floodWaitSeconds)s")
-                pendingFloodWaitSeconds = floodWaitSeconds
+                await rateLimiter.recordFloodWait(method: method, seconds: floodWaitSeconds)
+            } catch {
+                await rateLimiter.releaseCall(method: method)
+                throw error
             }
+        }
+    }
+
+    private struct HistoryRequestTimeoutError: LocalizedError {
+        let seconds: TimeInterval
+
+        var errorDescription: String? {
+            "getChatHistory timed out after \(Int(seconds)) seconds"
+        }
+    }
+
+    private final class HistoryRequestTimeoutRace: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didResume = false
+
+        func resume(_ result: Result<[TGMessage], Swift.Error>, continuation: CheckedContinuation<[TGMessage], Swift.Error>) {
+            lock.lock()
+            guard !didResume else {
+                lock.unlock()
+                return
+            }
+            didResume = true
+            lock.unlock()
+
+            continuation.resume(with: result)
+        }
+    }
+
+    private func withHistoryRequestTimeout(
+        seconds: TimeInterval,
+        operation: @escaping () async throws -> [TGMessage]
+    ) async throws -> [TGMessage] {
+        guard seconds > 0 else {
+            return try await operation()
+        }
+
+        let nanoseconds = UInt64((seconds * 1_000_000_000).rounded(.up))
+        let operationTask = Task {
+            try await operation()
+        }
+        let timeoutTask = Task<[TGMessage], Swift.Error> {
+            try await Task.sleep(nanoseconds: nanoseconds)
+            throw HistoryRequestTimeoutError(seconds: seconds)
+        }
+
+        defer {
+            operationTask.cancel()
+            timeoutTask.cancel()
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let race = HistoryRequestTimeoutRace()
+                Task {
+                    do {
+                        let value = try await operationTask.value
+                        race.resume(.success(value), continuation: continuation)
+                    } catch {
+                        race.resume(.failure(error), continuation: continuation)
+                    }
+                }
+                Task {
+                    do {
+                        let value = try await timeoutTask.value
+                        race.resume(.success(value), continuation: continuation)
+                    } catch {
+                        race.resume(.failure(error), continuation: continuation)
+                    }
+                }
+            }
+        } onCancel: {
+            operationTask.cancel()
+            timeoutTask.cancel()
         }
     }
 

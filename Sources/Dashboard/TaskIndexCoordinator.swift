@@ -142,10 +142,12 @@ final class TaskIndexCoordinator: ObservableObject {
             return
         }
 
+        let startedAt = Date()
         isRefreshing = true
 
         defer {
             isRefreshing = false
+            let duration = Date().timeIntervalSince(startedAt)
         }
 
         var nextRequest: RefreshRequest? = request
@@ -197,7 +199,7 @@ final class TaskIndexCoordinator: ObservableObject {
         await telegramService.ensureBotFilterMetadataReady(
             for: telegramService.visibleChats,
             includeBots: includeBotsInAISearch,
-            priority: .background
+            priority: .userInitiated
         )
 
         let activeTopics = await refreshTopicsIfNeeded(

@@ -28,6 +28,9 @@ actor RateLimiter {
     private var methodBuckets: [String: Bucket] = [:]
     private var queuedUserInitiated = 0
     private var queuedBackground = 0
+    private var globalCooldownUntil: Date?
+    private var methodCooldownUntil: [String: Date] = [:]
+    private var isHistoryCallInFlight = false
 
     /// - Parameters:
     ///   - maxTokens: Maximum burst capacity
@@ -39,32 +42,45 @@ actor RateLimiter {
     }
 
     /// Acquires a token, waiting if necessary.
-    func acquire() async {
-        await acquire(priority: .userInitiated, method: AppConstants.RateLimit.defaultMethod)
+    func acquire() async throws {
+        try await acquire(priority: .userInitiated, method: AppConstants.RateLimit.defaultMethod)
     }
 
     func acquire(
         priority: Priority,
         method: String,
         floodWaitSeconds: Int? = nil
-    ) async {
+    ) async throws {
         let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? AppConstants.RateLimit.defaultMethod
             : method
 
         if let floodWaitSeconds, floodWaitSeconds > 0 {
-            let backoffSeconds = Double(floodWaitSeconds) * AppConstants.RateLimit.floodWaitBackoffMultiplier
-            print("[RateLimiter] FLOOD_WAIT backoff \(String(format: "%.1f", backoffSeconds))s for \(normalizedMethod)")
-            try? await Task.sleep(for: .milliseconds(Int(backoffSeconds * 1000)))
+            recordFloodWait(method: normalizedMethod, seconds: floodWaitSeconds)
         }
 
         incrementQueue(for: priority)
         defer { decrementQueue(for: priority) }
 
+        try await acquireToken(priority: priority, method: normalizedMethod)
+    }
+
+    private func acquireToken(
+        priority: Priority,
+        method normalizedMethod: String
+    ) async throws {
+        try Task.checkCancellation()
+
         while true {
+            try Task.checkCancellation()
+
+            if let waitSeconds = cooldownWaitSeconds(for: normalizedMethod), waitSeconds > 0 {
+                try await Task.sleep(for: .milliseconds(Int(waitSeconds * 1000)))
+                continue
+            }
+
             if priority == .background && queuedUserInitiated > 0 {
-                logThrottle(priority: priority, method: normalizedMethod, waitSeconds: nil)
-                try? await Task.sleep(
+                try await Task.sleep(
                     for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
                 )
                 continue
@@ -86,14 +102,96 @@ actor RateLimiter {
             let globalWaitSeconds = globalBucket.tokens >= 1 ? 0 : max((1.0 - globalBucket.tokens) / globalBucket.refillRate, 0.05)
             let waitSeconds = max(methodWaitSeconds, globalWaitSeconds, 0.05)
             methodBuckets[normalizedMethod] = bucket
-            logThrottle(priority: priority, method: normalizedMethod, waitSeconds: waitSeconds)
 
             let pollMilliseconds = priority == .userInitiated
                 ? AppConstants.RateLimit.userPriorityPollIntervalMilliseconds
                 : AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds
             let sleepMilliseconds = max(Int(waitSeconds * 1000), Int(pollMilliseconds))
-            try? await Task.sleep(for: .milliseconds(sleepMilliseconds))
+            try await Task.sleep(for: .milliseconds(sleepMilliseconds))
         }
+    }
+
+    func acquireCall(
+        priority: Priority,
+        method: String,
+        floodWaitSeconds: Int? = nil
+    ) async throws {
+        let normalizedMethod = normalized(method)
+        if let floodWaitSeconds, floodWaitSeconds > 0 {
+            recordFloodWait(method: normalizedMethod, seconds: floodWaitSeconds)
+        }
+
+        incrementQueue(for: priority)
+        defer { decrementQueue(for: priority) }
+
+        try await acquireToken(priority: priority, method: normalizedMethod)
+        if shouldSerializeInFlight(method: normalizedMethod) {
+            try await acquireSerializedHistorySlot(priority: priority, method: normalizedMethod)
+        }
+    }
+
+    func releaseCall(method: String) {
+        let normalizedMethod = normalized(method)
+        guard shouldSerializeInFlight(method: normalizedMethod) else { return }
+        isHistoryCallInFlight = false
+    }
+
+    func recordFloodWait(method: String, seconds: Int) {
+        let normalizedMethod = normalized(method)
+        let backoffSeconds = Double(max(seconds, 0)) * AppConstants.RateLimit.floodWaitBackoffMultiplier
+        guard backoffSeconds > 0 else { return }
+        let cooldownUntil = Date().addingTimeInterval(backoffSeconds)
+        globalCooldownUntil = max(globalCooldownUntil ?? .distantPast, cooldownUntil)
+        methodCooldownUntil[normalizedMethod] = max(methodCooldownUntil[normalizedMethod] ?? .distantPast, cooldownUntil)
+    }
+
+    private func acquireSerializedHistorySlot(priority: Priority, method: String) async throws {
+        while true {
+            try Task.checkCancellation()
+
+            if !isHistoryCallInFlight {
+                if priority == .background && queuedUserInitiated > 0 {
+                    try await Task.sleep(
+                        for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
+                    )
+                    continue
+                }
+
+                isHistoryCallInFlight = true
+                return
+            }
+
+            try await Task.sleep(
+                for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
+            )
+        }
+    }
+
+    private func shouldSerializeInFlight(method: String) -> Bool {
+        method == "getChatHistory"
+    }
+
+    private func normalized(_ method: String) -> String {
+        method.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? AppConstants.RateLimit.defaultMethod
+            : method
+    }
+
+    private func cooldownWaitSeconds(for method: String) -> Double? {
+        let now = Date()
+        let globalWait = globalCooldownUntil.map { $0.timeIntervalSince(now) } ?? 0
+        let methodWait = methodCooldownUntil[method].map { $0.timeIntervalSince(now) } ?? 0
+        let waitSeconds = max(globalWait, methodWait)
+        if waitSeconds <= 0 {
+            if let globalCooldownUntil, globalCooldownUntil <= now {
+                self.globalCooldownUntil = nil
+            }
+            if let methodCooldown = methodCooldownUntil[method], methodCooldown <= now {
+                methodCooldownUntil.removeValue(forKey: method)
+            }
+            return nil
+        }
+        return waitSeconds
     }
 
     private func bucket(for method: String) -> Bucket {
@@ -114,7 +212,7 @@ actor RateLimiter {
         case "searchMessages":
             return 3
         case "getChatHistory":
-            return 5
+            return 1
         case "searchChatMessages", "loadChats":
             return 5
         default:
@@ -145,22 +243,6 @@ actor RateLimiter {
             queuedUserInitiated = max(0, queuedUserInitiated - 1)
         case .background:
             queuedBackground = max(0, queuedBackground - 1)
-        }
-    }
-
-    private func logThrottle(priority: Priority, method: String, waitSeconds: Double?) {
-        let queueDepth = queuedUserInitiated + queuedBackground
-        if let waitSeconds {
-            print(
-                "[RateLimiter] throttled method=\(method) priority=\(priority.rawValue) " +
-                "queueDepth=\(queueDepth) globalTokens=\(String(format: "%.2f", globalBucket.tokens)) " +
-                "wait=\(String(format: "%.2f", waitSeconds))s"
-            )
-        } else {
-            print(
-                "[RateLimiter] yielding background work method=\(method) priority=\(priority.rawValue) " +
-                "queueDepth=\(queueDepth)"
-            )
         }
     }
 }

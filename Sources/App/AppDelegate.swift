@@ -69,6 +69,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var dashboardWindow: NSWindow?
     private var graphBuildTask: Task<Void, Never>?
     private var preferencesOpenObserver: NSObjectProtocol?
+    private var launcherOpenObserver: NSObjectProtocol?
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
@@ -98,6 +99,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.openSettings()
+            }
+        }
+
+        launcherOpenObserver = NotificationCenter.default.addObserver(
+            forName: .pidgyShowLauncher,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.panelManager?.showLauncher()
             }
         }
 
@@ -140,6 +151,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             guard !Task.isCancelled else { return }
             await RecentSyncCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
+            await MajorChatCoverageCoordinator.shared.start(using: telegramService)
+            guard !Task.isCancelled else { return }
             await GraphBuilder.shared.buildIfNeeded(using: telegramService)
             guard !Task.isCancelled else { return }
             await IndexScheduler.shared.start(using: telegramService)
@@ -159,11 +172,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if let preferencesOpenObserver {
             NotificationCenter.default.removeObserver(preferencesOpenObserver)
         }
+        if let launcherOpenObserver {
+            NotificationCenter.default.removeObserver(launcherOpenObserver)
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         Task {
             await RecentSyncCoordinator.shared.recoverNow()
+            await MajorChatCoverageCoordinator.shared.recoverNow()
         }
     }
 
@@ -198,10 +215,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         hotkeyManager?.unregister()
         graphBuildTask?.cancel()
         TaskIndexCoordinator.shared.stop()
-        telegramService.stop()
         Task { @MainActor in
             await RecentSyncCoordinator.shared.stop()
+            await MajorChatCoverageCoordinator.shared.stop()
             await IndexScheduler.shared.stop()
+            telegramService.stop()
             await DatabaseManager.shared.close()
             terminationCleanupCompleted = true
             onComplete?()
@@ -254,14 +272,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let timeoutAt = Date().addingTimeInterval(AppConstants.Graph.startupReadinessTimeoutSeconds)
 
         while !Task.isCancelled {
-            let isReady = telegramService.authState == .ready && telegramService.currentUser != nil
-            let chatsLoaded = !telegramService.visibleChats.isEmpty || !telegramService.isLoading
+            let didTimeout = Date() >= timeoutAt
+            let isReady = Self.isStartupPipelineReady(
+                authState: telegramService.authState,
+                hasCurrentUser: telegramService.currentUser != nil,
+                hasVisibleChats: !telegramService.visibleChats.isEmpty,
+                isLoading: telegramService.isLoading,
+                didTimeout: didTimeout
+            )
 
-            if isReady && chatsLoaded {
-                return
-            }
-
-            if Date() >= timeoutAt, isReady {
+            if isReady {
                 return
             }
 
@@ -269,5 +289,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 for: .milliseconds(Int(AppConstants.Graph.startupReadinessPollMilliseconds))
             )
         }
+    }
+
+    nonisolated static func isStartupPipelineReady(
+        authState: AuthState,
+        hasCurrentUser: Bool,
+        hasVisibleChats: Bool,
+        isLoading: Bool,
+        didTimeout: Bool
+    ) -> Bool {
+        guard authState == .ready else { return false }
+        guard hasVisibleChats || !isLoading else { return false }
+        return hasCurrentUser || didTimeout
     }
 }

@@ -12,6 +12,7 @@ struct AuthView: View {
     @State private var errorMessage: String?
     @State private var isSubmitting = false
     @State private var showPhoneLogin = false
+    @State private var didRequestQrCode = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -109,7 +110,8 @@ struct AuthView: View {
                         return
                     }
                     errorMessage = nil
-                    await telegramService.start(apiId: id, apiHash: apiHash)
+                    didRequestQrCode = false
+                    telegramService.start(apiId: id, apiHash: apiHash)
                 } catch {
                     errorMessage = Self.extractErrorMessage(error)
                 }
@@ -127,8 +129,21 @@ struct AuthView: View {
             Text("Requesting QR code...")
                 .font(Font.Pidgy.body)
                 .foregroundStyle(Color.Pidgy.fg2)
+
+            Button {
+                showPhoneLogin = true
+            } label: {
+                Text("Log in with phone number instead")
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.accent)
+            }
+            .buttonStyle(.plain)
         }
         .onAppear {
+            guard !didRequestQrCode else {
+                return
+            }
+            didRequestQrCode = true
             Task {
                 do {
                     try await telegramService.requestQrCodeAuth()
@@ -203,6 +218,7 @@ struct AuthView: View {
             }
 
             Button {
+                didRequestQrCode = false
                 showPhoneLogin = false
             } label: {
                 Text("Log in with QR code instead")
@@ -334,8 +350,9 @@ struct AuthView: View {
 
     private func actionButton(title: String, action: @escaping () async -> Void) -> some View {
         Button {
+            guard !isSubmitting else { return }
             isSubmitting = true
-            Task {
+            Task { @MainActor in
                 await action()
                 isSubmitting = false
             }

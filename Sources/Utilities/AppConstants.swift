@@ -152,11 +152,57 @@ enum AppConstants {
         static let latestWindowPerChat = 50
         static let maxChatsPerPass = 12
         static let maxConcurrentChatFetches = 4
+        static let backfillPageSize = 100
+        static let maxBackfillPagesPerPass = 3
+        static let maxBackfillChatsPerPass = 4
+        static let maxRetryBackfillPagesPerPass = 1
+        static let maxRetryBackfillChatsPerPass = 2
+        static let historyFetchTimeoutSeconds: TimeInterval = 25
+        static let retryLaneWallClockBudgetSeconds: TimeInterval = 60
+        static let retryLaneLongAttemptThresholdSeconds: TimeInterval = 60
+        static let floodWaitRetryJitterMaxSeconds: TimeInterval = 2
+        static let retryBackoffSeconds: [TimeInterval] = [
+            30,
+            60,
+            2 * 60,
+            4 * 60,
+            8 * 60,
+            16 * 60,
+            32 * 60
+        ]
         static let idlePollIntervalMilliseconds: UInt64 = 2_000
         static let activePollIntervalMilliseconds: UInt64 = 500
         static let staleRefreshAgeSeconds: TimeInterval = 10 * 60
         static let recoveryRefreshChatLimit = 8
         static let recoveryRefreshCooldownSeconds: TimeInterval = 90
+    }
+
+    enum MajorChatCoverage {
+        static let coverageStateVersion = 8
+        static let coverageWindowDays: TimeInterval = 30
+        static let historyBatchSize = 100
+        static let maxChatsPerPass = 1
+        static let recoveryMaxChatsPerPass = 1
+        static let debtCandidateLimit = 48
+        static let debtHydrationLimit = 16
+        static let maxBatchesPerChat = 20
+        static let maxNetworkBatchesPerChat = 1
+        static let minTrustedLocalCoverageMessages = 10
+        static let historyFetchTimeoutSeconds: TimeInterval = 12
+        static let networkHistoryFetchTimeoutSeconds: TimeInterval = 25
+        static let networkBatchSpacingMilliseconds: UInt64 = 2_000
+        static let memberCountResolutionTimeoutSeconds: TimeInterval = 3
+        static let localEmptyPageRetryCount = 1
+        static let localEmptyPageRetryDelayMilliseconds: UInt64 = 250
+        static let incompleteLocalRetryDelaySeconds: TimeInterval = 10 * 60
+        static let retryBackoffSeconds: [TimeInterval] = [
+            30 * 60,
+            2 * 60 * 60,
+            12 * 60 * 60
+        ]
+        static let transientHistoryFailureCooldownSeconds: TimeInterval = 10 * 60
+        static let idlePollIntervalMilliseconds: UInt64 = 60_000
+        static let activePollIntervalMilliseconds: UInt64 = 30_000
     }
 
     enum Search {

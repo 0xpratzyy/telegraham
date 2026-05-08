@@ -54,7 +54,6 @@ final class TDLibClientWrapper {
                 let update = try client.decoder.decode(Update.self, from: data)
                 activeContinuation?.yield(update)
             } catch {
-                print("[TDLib] Failed to decode update: \(error)")
             }
         })
     }
