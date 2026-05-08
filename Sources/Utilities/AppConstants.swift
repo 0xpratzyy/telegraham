@@ -158,6 +158,9 @@ enum AppConstants {
         static let maxRetryBackfillPagesPerPass = 1
         static let maxRetryBackfillChatsPerPass = 2
         static let historyFetchTimeoutSeconds: TimeInterval = 25
+        static let retryLaneWallClockBudgetSeconds: TimeInterval = 60
+        static let retryLaneLongAttemptThresholdSeconds: TimeInterval = 60
+        static let floodWaitRetryJitterMaxSeconds: TimeInterval = 2
         static let retryBackoffSeconds: [TimeInterval] = [
             30,
             60,

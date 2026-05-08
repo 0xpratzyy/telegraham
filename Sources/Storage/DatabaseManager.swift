@@ -593,6 +593,31 @@ actor DatabaseManager {
         }
     }
 
+    func loadRecentBackfillDiagnostics(limit: Int = 50) async -> [RecentBackfillStateRecord] {
+        guard limit > 0 else { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT chat_id, target_message_id, stop_message_id, cursor_message_id, started_at, updated_at, pages_fetched, messages_fetched, status, last_error, failure_count, last_attempt_at, next_retry_at
+                        FROM recent_backfill_state
+                        WHERE status = 'failed'
+                        ORDER BY COALESCE(next_retry_at, updated_at) ASC, updated_at ASC, chat_id ASC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+
+                return rows.compactMap(Self.recentBackfillStateRecord(from:))
+            }
+        } catch {
+            return []
+        }
+    }
+
     func loadMessageCoverage(chatId: Int64, since minimumDate: Date? = nil) async -> MessageCoverageRecord? {
         guard let pool = await ensureDatabase() else { return nil }
 

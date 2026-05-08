@@ -406,7 +406,9 @@ actor RecentSyncCoordinator {
     private func sync(
         primaryChats: [TGChat],
         retryChats: [TGChat],
-        using telegramService: TelegramService
+        using telegramService: TelegramService,
+        retryLaneWallClockBudgetSeconds: TimeInterval = AppConstants.RecentSync.retryLaneWallClockBudgetSeconds,
+        retryLaneLongAttemptThresholdSeconds: TimeInterval = AppConstants.RecentSync.retryLaneLongAttemptThresholdSeconds
     ) async -> Set<Int64> {
         var catchUpProcessed = 0
         var latestWindowChats: [TGChat] = []
@@ -460,11 +462,18 @@ actor RecentSyncCoordinator {
             }
         }
 
+        let retryLaneStartedAt = Date()
+        var retryAttempts = 0
         for chat in retryChats {
             guard !Task.isCancelled else { break }
+            if retryAttempts > 0,
+               Date().timeIntervalSince(retryLaneStartedAt) >= retryLaneWallClockBudgetSeconds {
+                break
+            }
+
             let state = await DatabaseManager.shared.loadRecentSyncState(chatId: chat.id)
             guard Self.needsBackfill(chat: chat, state: state) else { continue }
-            let backfillState = await DatabaseManager.shared.loadRecentBackfillState(chatId: chat.id)
+            let attemptStartedAt = Date()
             let outcome = await Self.syncRecentBackfill(
                 for: chat,
                 state: state,
@@ -472,9 +481,13 @@ actor RecentSyncCoordinator {
                 maxPagesPerPass: AppConstants.RecentSync.maxRetryBackfillPagesPerPass,
                 lane: "retry"
             )
+            retryAttempts += 1
             recordOutcome(outcome)
             if outcome.completedSync {
                 refreshedChatIds.insert(outcome.chatId)
+            }
+            if Date().timeIntervalSince(attemptStartedAt) >= retryLaneLongAttemptThresholdSeconds {
+                break
             }
         }
 
@@ -621,7 +634,8 @@ actor RecentSyncCoordinator {
                         startedAt: startedAt,
                         pagesFetched: pagesFetched,
                         messagesFetched: messagesFetched,
-                        lastError: "empty page before stop marker"
+                        lastError: "empty page before stop marker",
+                        floodWaitSeconds: nil
                     )
                     return RecentSyncOutcome(
                         chatId: chat.id,
@@ -667,7 +681,8 @@ actor RecentSyncCoordinator {
                         startedAt: startedAt,
                         pagesFetched: pagesFetched,
                         messagesFetched: messagesFetched,
-                        lastError: "cursor did not advance"
+                        lastError: "cursor did not advance",
+                        floodWaitSeconds: nil
                     )
                     return RecentSyncOutcome(
                         chatId: chat.id,
@@ -728,7 +743,8 @@ actor RecentSyncCoordinator {
                 startedAt: startedAt,
                 pagesFetched: pagesFetched,
                 messagesFetched: messagesFetched,
-                lastError: error.localizedDescription
+                lastError: error.localizedDescription,
+                floodWaitSeconds: floodWaitSeconds(from: error)
             )
             return RecentSyncOutcome(
                 chatId: chat.id,
@@ -783,16 +799,25 @@ actor RecentSyncCoordinator {
         startedAt: Date,
         pagesFetched: Int,
         messagesFetched: Int,
-        lastError: String
+        lastError: String,
+        floodWaitSeconds: TimeInterval?
     ) async -> DatabaseManager.RecentBackfillStateRecord {
         let now = Date()
-        let failureCount = Self.isMatchingBackfill(
+        let matchedExisting = Self.isMatchingBackfill(
             existing,
             targetMessageId: targetMessageId,
             stopMessageId: stopMessageId
         )
-            ? (existing?.failureCount ?? 0) + 1
-            : 1
+        let existingFailureCount = matchedExisting ? (existing?.failureCount ?? 0) : 0
+        let failureCount = floodWaitSeconds == nil
+            ? existingFailureCount + 1
+            : existingFailureCount
+        let retryDelay: TimeInterval
+        if let floodWaitSeconds {
+            retryDelay = max(0, floodWaitSeconds) + floodWaitRetryJitter(chatId: chatId)
+        } else {
+            retryDelay = retryBackoffDelay(failureCount: failureCount)
+        }
         let record = DatabaseManager.RecentBackfillStateRecord(
             chatId: chatId,
             targetMessageId: targetMessageId,
@@ -806,7 +831,7 @@ actor RecentSyncCoordinator {
             lastError: lastError,
             failureCount: failureCount,
             lastAttemptAt: now,
-            nextRetryAt: now.addingTimeInterval(retryBackoffDelay(failureCount: failureCount))
+            nextRetryAt: now.addingTimeInterval(retryDelay)
         )
         await DatabaseManager.shared.saveRecentBackfillState(record)
         return record
@@ -826,6 +851,57 @@ actor RecentSyncCoordinator {
         guard !backoffs.isEmpty else { return 0 }
         let index = min(max(1, failureCount) - 1, backoffs.count - 1)
         return backoffs[index]
+    }
+
+    private nonisolated static func floodWaitRetryJitter(chatId: Int64) -> TimeInterval {
+        let maxJitter = max(0, Int(AppConstants.RecentSync.floodWaitRetryJitterMaxSeconds))
+        guard maxJitter > 0 else { return 0 }
+        return TimeInterval(chatId.magnitude % UInt64(maxJitter + 1))
+    }
+
+    private nonisolated static func floodWaitSeconds(from error: Error) -> TimeInterval? {
+        let localizedError = error as? LocalizedError
+        let candidates = [
+            localizedError?.errorDescription,
+            localizedError?.failureReason,
+            localizedError?.recoverySuggestion,
+            error.localizedDescription,
+            String(describing: error)
+        ]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+
+        for candidate in candidates {
+            if let seconds = floodWaitSeconds(from: candidate) {
+                return seconds
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func floodWaitSeconds(from message: String) -> TimeInterval? {
+        let uppercased = message.uppercased()
+        for marker in ["FLOOD_WAIT_", "FLOOD_WAIT ", "RETRY_AFTER_", "RETRY AFTER "] {
+            if let seconds = integerAfter(marker: marker, in: uppercased) {
+                return TimeInterval(seconds)
+            }
+        }
+
+        guard uppercased.contains("420") || uppercased.contains("FLOOD") else { return nil }
+        for marker in ["WAIT_", "WAIT ", "AFTER_", "AFTER "] {
+            if let seconds = integerAfter(marker: marker, in: uppercased) {
+                return TimeInterval(seconds)
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func integerAfter(marker: String, in message: String) -> Int? {
+        guard let markerRange = message.range(of: marker) else { return nil }
+        let suffix = message[markerRange.upperBound...]
+        let digits = suffix.prefix { $0.isNumber }
+        guard !digits.isEmpty else { return nil }
+        return Int(digits)
     }
 
     private static func minimumMessageId(in messages: [TGMessage]) -> Int64? {
@@ -946,9 +1022,17 @@ actor RecentSyncCoordinator {
     func syncSelectedChatsForTesting(
         primaryChats: [TGChat],
         retryChats: [TGChat],
-        using telegramService: TelegramService
+        using telegramService: TelegramService,
+        retryLaneWallClockBudgetSeconds: TimeInterval = AppConstants.RecentSync.retryLaneWallClockBudgetSeconds,
+        retryLaneLongAttemptThresholdSeconds: TimeInterval = AppConstants.RecentSync.retryLaneLongAttemptThresholdSeconds
     ) async -> Set<Int64> {
-        await sync(primaryChats: primaryChats, retryChats: retryChats, using: telegramService)
+        await sync(
+            primaryChats: primaryChats,
+            retryChats: retryChats,
+            using: telegramService,
+            retryLaneWallClockBudgetSeconds: retryLaneWallClockBudgetSeconds,
+            retryLaneLongAttemptThresholdSeconds: retryLaneLongAttemptThresholdSeconds
+        )
     }
 
     func selectedSyncChatIdsForTesting(chats: [TGChat], now: Date = Date()) async -> ([Int64], [Int64]) {
