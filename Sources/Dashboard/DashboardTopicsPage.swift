@@ -359,20 +359,12 @@ struct DashboardTopicsPage: View {
     }
 
     private func topicHero(_ topic: DashboardTopicOption) -> some View {
-        VStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(topic.tint.opacity(0.18))
-                .frame(width: 34, height: 34)
-                .overlay(
-                    Image(systemName: "folder.fill")
-                        .font(PidgyDashboardTheme.detailBodyFont.weight(.semibold))
-                        .foregroundStyle(topic.tint)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(topic.tint.opacity(0.30))
-                )
-
+        // Centered hero — Newsreader display title, then a compact
+        // "N chats · X tasks · Y replies" meta line. Dropped the folder
+        // tile (per design) and the rationale paragraph (it crowded the
+        // hero and rarely had useful content). Anything that needs to go
+        // somewhere lives in the rationale chip below the title now.
+        VStack(spacing: 8) {
             Text(topic.name)
                 .font(PidgyDashboardTheme.topicDisplayTitleFont)
                 .foregroundStyle(PidgyDashboardTheme.primary)
@@ -380,23 +372,41 @@ struct DashboardTopicsPage: View {
                 .lineLimit(2)
 
             HStack(spacing: 8) {
-                Image(systemName: "person.2")
-                    .font(PidgyDashboardTheme.metadataMediumFont)
-                Text(summaryLine(for: topic))
-                    .font(PidgyDashboardTheme.metadataMediumFont)
+                topicMetaItem(icon: "person.2", text: chatCountLine(for: topic))
+                Text("·").foregroundStyle(PidgyDashboardTheme.tertiary)
+                topicMetaItem(text: taskCountLine(for: topic))
+                Text("·").foregroundStyle(PidgyDashboardTheme.tertiary)
+                topicMetaItem(text: replyCountLine(for: topic))
             }
-            .foregroundStyle(PidgyDashboardTheme.secondary)
+            .font(PidgyDashboardTheme.metadataFont)
+            .foregroundStyle(PidgyDashboardTheme.tertiary)
             .lineLimit(1)
-
-            if !topic.rationale.isEmpty {
-                Text(topic.rationale)
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .frame(maxWidth: 560)
-            }
         }
+    }
+
+    private func topicMetaItem(icon: String? = nil, text: String) -> some View {
+        HStack(spacing: 5) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+            }
+            Text(text)
+        }
+    }
+
+    private func chatCountLine(for topic: DashboardTopicOption) -> String {
+        let count = semanticScopeChatSignals.count
+        return "\(count) chat\(count == 1 ? "" : "s")"
+    }
+
+    private func taskCountLine(for topic: DashboardTopicOption) -> String {
+        let count = taskCount(for: topic)
+        return "\(count) task\(count == 1 ? "" : "s")"
+    }
+
+    private func replyCountLine(for topic: DashboardTopicOption) -> String {
+        let count = replyCount(for: topic)
+        return "\(count) repl\(count == 1 ? "y" : "ies")"
     }
 
     private func searchBox(_ topic: DashboardTopicOption) -> some View {
@@ -415,30 +425,34 @@ struct DashboardTopicsPage: View {
     }
 
     private var commandRow: some View {
-        HStack(spacing: 8) {
+        // Centered tab row, generous gap, accent color on the active
+        // tab — matches the design's "gap: 28" with no chrome / pill.
+        HStack(spacing: 28) {
             ForEach(DashboardTopicCommand.allCases) { command in
                 Button {
                     selectedCommand = command
                 } label: {
                     HStack(spacing: 7) {
                         Image(systemName: command.systemImage)
-                            .font(PidgyDashboardTheme.metadataMediumFont)
+                            .font(PidgyDashboardTheme.metadataFont)
                         Text(command.label)
                             .font(PidgyDashboardTheme.metadataMediumFont)
                         if let count = commandCount(command), count > 0 {
                             Text("\(count)")
                                 .font(PidgyDashboardTheme.monoCaptionFont)
+                                .opacity(0.7)
                         }
                     }
                     .foregroundStyle(selectedCommand == command ? PidgyDashboardTheme.blue : PidgyDashboardTheme.secondary)
                     .padding(.horizontal, 4)
-                    .frame(height: 28)
-                    .background(Color.clear)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                    .animation(PidgyMotion.easeOutFast, value: selectedCommand)
                 }
                 .buttonStyle(.plain)
             }
         }
-        .frame(maxWidth: 620)
+        .frame(maxWidth: .infinity)
     }
 
     private var contentSections: some View {
