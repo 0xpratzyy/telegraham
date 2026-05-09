@@ -68,6 +68,55 @@ enum PidgyDashboardTheme {
     }
 }
 
+/// Sidebar shortcut button that opens the launcher panel. Has a subtle
+/// hover state — bg lightens to bg-4 and label text steps up from
+/// tertiary to secondary — matching the design's hover treatment.
+struct SidebarLauncherShortcutButton: View {
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                Text("Jump to anything…")
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("⌘K")
+                    .font(Font.Pidgy.monoSm)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(PidgyDashboardTheme.sidebar)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .stroke(PidgyDashboardTheme.rule, lineWidth: 1)
+                            )
+                    )
+            }
+            .foregroundStyle(isHovering ? PidgyDashboardTheme.secondary : PidgyDashboardTheme.tertiary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovering ? Color.Pidgy.bg4 : PidgyDashboardTheme.raised)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.Pidgy.border1, lineWidth: 1)
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(PidgyMotion.easeOutFast, value: isHovering)
+        .help("Jump to anything (⌘K)")
+    }
+}
+
 /// Soft hand-drawn squiggle divider used under the dashboard / topic page
 /// titles. Pure SwiftUI so the line is crisp at any width.
 struct DashboardSquiggleDivider: View {

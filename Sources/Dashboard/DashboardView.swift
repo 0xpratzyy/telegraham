@@ -66,7 +66,13 @@ struct DashboardView: View {
                 selectedPageView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(PidgyDashboardTheme.paper)
+                    .id(currentPage)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .offset(y: 4)),
+                        removal: .opacity
+                    ))
             }
+            .animation(PidgyMotion.easeOut, value: currentPage)
         }
         .preferredColorScheme(.dark)
         .frame(minWidth: 1120, minHeight: 720)
@@ -697,44 +703,9 @@ struct DashboardSidebar: View {
     }
 
     private var sidebarLauncherShortcut: some View {
-        Button {
+        SidebarLauncherShortcutButton {
             NotificationCenter.default.post(name: .requestLauncherToggle, object: nil)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11, weight: .medium))
-                Text("Jump to anything…")
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Text("⌘K")
-                    .font(Font.Pidgy.monoSm)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(PidgyDashboardTheme.sidebar)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .stroke(PidgyDashboardTheme.rule, lineWidth: 1)
-                            )
-                    )
-            }
-            .foregroundStyle(PidgyDashboardTheme.tertiary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(PidgyDashboardTheme.raised)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .stroke(Color.Pidgy.border1, lineWidth: 1)
-                    )
-            )
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help("Jump to anything (⌘K)")
     }
 
     private func sidebarButton(_ page: DashboardPage, count: Int?) -> some View {
@@ -763,6 +734,7 @@ struct DashboardSidebar: View {
                     .fill(selection == page ? Color.Pidgy.bg4 : Color.clear)
             )
             .contentShape(Rectangle())
+            .animation(PidgyMotion.easeOutFast, value: selection)
         }
         .buttonStyle(.plain)
     }
@@ -829,6 +801,7 @@ struct DashboardSidebar: View {
                                     .fill(isTopicSelected(item) ? Color.Pidgy.bg4 : Color.clear)
                             )
                             .contentShape(Rectangle())
+                            .animation(PidgyMotion.easeOutFast, value: isTopicSelected(item))
                         }
                         .buttonStyle(.plain)
                     }
