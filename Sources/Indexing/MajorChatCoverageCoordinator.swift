@@ -43,7 +43,6 @@ actor MajorChatCoverageCoordinator {
         var reachedTarget = false
         var shouldRetryIncompleteLocalScan = false
         var didTimeout = false
-        var didEncounterHistoryBusy = false
         var didReachHistoryStart = false
         var oldestCoveredAt: Date?
         var oldestCoveredMessageId: Int64 = 0
@@ -57,6 +56,7 @@ actor MajorChatCoverageCoordinator {
         let hasCoverageState: Bool
         let isSparse: Bool
         let debtRank: Int?
+        let hasError: Bool
     }
 
     private struct CoverageTimeoutError: LocalizedError {
@@ -64,26 +64,6 @@ actor MajorChatCoverageCoordinator {
 
         var errorDescription: String? {
             "chat history fetch timed out after \(Int(seconds)) seconds"
-        }
-    }
-
-    private struct CoverageHistoryBusyError: LocalizedError {
-        var errorDescription: String? {
-            "chat history fetch already in progress"
-        }
-    }
-
-    private actor HistoryFetchGate {
-        private var isBusy = false
-
-        func tryAcquire() -> Bool {
-            guard !isBusy else { return false }
-            isBusy = true
-            return true
-        }
-
-        func release() {
-            isBusy = false
         }
     }
 
@@ -303,7 +283,8 @@ actor MajorChatCoverageCoordinator {
                 lastCheckedAt: state?.lastCheckedAt,
                 hasCoverageState: state != nil,
                 isSparse: (messageCoverage?.messageCount ?? 0) < AppConstants.MajorChatCoverage.minTrustedLocalCoverageMessages,
-                debtRank: debtRankByChatId[chat.id]
+                debtRank: debtRankByChatId[chat.id],
+                hasError: state?.lastError != nil
             ))
         }
 
@@ -313,6 +294,15 @@ actor MajorChatCoverageCoordinator {
             }
 
             if lhs.needsCoverage {
+                // Always prefer chats that don't currently have an error.
+                // These tend to succeed in 1-2s via the local pass against
+                // TDLib's cache. Putting them first means the user sees
+                // steady progress instead of waiting through 25+ slow
+                // network-timeout retries before any quick win lands.
+                if lhs.hasError != rhs.hasError {
+                    return !lhs.hasError
+                }
+
                 let lhsDebtRank = lhs.debtRank ?? Int.max
                 let rhsDebtRank = rhs.debtRank ?? Int.max
                 let lhsHasDebt = lhs.debtRank != nil
@@ -632,18 +622,7 @@ actor MajorChatCoverageCoordinator {
                 )
             }
 
-            if progress.didEncounterHistoryBusy, progress.fetchedMessages == 0, progress.oldestCoveredAt == nil {
-                return CoverageOutcome(
-                    chatId: coverageChat.id,
-                    fetchedMessages: 0,
-                    reachedTarget: false,
-                    errorDescription: nil,
-                    shouldStopPass: true,
-                    historyCooldownSeconds: AppConstants.MajorChatCoverage.transientHistoryFailureCooldownSeconds
-                )
-            }
-
-            if !progress.reachedTarget, !progress.didTimeout, !progress.didEncounterHistoryBusy {
+            if !progress.reachedTarget, !progress.didTimeout {
                 progress.shouldRetryIncompleteLocalScan = false
                 progress = try await fetchCoverageBatches(
                     for: coverageChat,
@@ -660,23 +639,22 @@ actor MajorChatCoverageCoordinator {
                 )
             }
 
-            if progress.didEncounterHistoryBusy, progress.fetchedMessages == 0, progress.oldestCoveredAt == nil {
-                return CoverageOutcome(
-                    chatId: coverageChat.id,
-                    fetchedMessages: 0,
-                    reachedTarget: false,
-                    errorDescription: nil,
-                    shouldStopPass: true,
-                    historyCooldownSeconds: AppConstants.MajorChatCoverage.transientHistoryFailureCooldownSeconds
-                )
-            }
-
             if let oldestCoveredAt = progress.oldestCoveredAt, oldestCoveredAt <= cutoff {
                 progress.reachedTarget = true
             }
-            let coverageBoundary = progress.reachedTarget
-                ? Self.earliest(progress.oldestCoveredAt, cutoff)
-                : progress.oldestCoveredAt
+            // If this pass produced nothing (timeout, empty network, etc.) but
+            // the previous state already had a valid oldest_covered_at, keep
+            // it. Re-validating a v5/v7/v8 row whose local cache is now slow
+            // shouldn't *delete* the prior coverage — that's exactly what was
+            // turning previously-complete chats into NULL-oldest rows.
+            let coverageBoundary: Date?
+            if progress.reachedTarget {
+                coverageBoundary = Self.earliest(progress.oldestCoveredAt, cutoff)
+            } else if let progressOldest = progress.oldestCoveredAt {
+                coverageBoundary = progressOldest
+            } else {
+                coverageBoundary = state?.oldestCoveredAt
+            }
             let transientError = progress.transientErrorDescription
             let savedFailureCount = transientError == nil
                 ? 0
@@ -706,11 +684,7 @@ actor MajorChatCoverageCoordinator {
                 chatId: coverageChat.id,
                 fetchedMessages: progress.fetchedMessages,
                 reachedTarget: progress.reachedTarget,
-                errorDescription: nil,
-                shouldStopPass: progress.didEncounterHistoryBusy,
-                historyCooldownSeconds: progress.didEncounterHistoryBusy
-                    ? AppConstants.MajorChatCoverage.transientHistoryFailureCooldownSeconds
-                    : nil
+                errorDescription: nil
             )
         } catch {
             let failureCount = max(0, state?.failureCount ?? 0) + 1
@@ -784,11 +758,6 @@ actor MajorChatCoverageCoordinator {
                 progress.transientErrorDescription = error.localizedDescription
                 progress.shouldRetryIncompleteLocalScan = !progress.reachedTarget
                 break
-            } catch let error as CoverageHistoryBusyError {
-                progress.didEncounterHistoryBusy = true
-                progress.transientErrorDescription = error.localizedDescription
-                progress.shouldRetryIncompleteLocalScan = !progress.reachedTarget
-                break
             }
 
             guard !messages.isEmpty else {
@@ -852,7 +821,6 @@ actor MajorChatCoverageCoordinator {
 
         if !progress.reachedTarget,
            !progress.didTimeout,
-           !progress.didEncounterHistoryBusy,
            !progress.didReachHistoryStart {
             progress.shouldRetryIncompleteLocalScan = true
         }
@@ -903,11 +871,18 @@ actor MajorChatCoverageCoordinator {
         guard latestSeenMessageId != 0,
               let state,
               state.coverageVersion == AppConstants.MajorChatCoverage.coverageStateVersion,
-              state.latestSeenMessageId == latestSeenMessageId,
               state.lastError == nil,
               let oldestCoveredAt = state.oldestCoveredAt else {
             return false
         }
+        // We deliberately do NOT require state.latestSeenMessageId == latestSeenMessageId.
+        // New messages arriving via live updates change `latestSeenMessageId` and used
+        // to force a full re-validation through TDLib, which sometimes timed out on
+        // large chats and flipped them OK -> FAIL even when the durable cursor was
+        // still well past the 30-day cutoff. The new live messages flow into pidgy.db
+        // through the normal update pipeline, so coverage stays valid as long as the
+        // saved oldest is past cutoff. The wrapping caller refreshes the saved
+        // latestSeenMessageId every time we hit this path so the state stays in sync.
         return oldestCoveredAt <= cutoff
     }
 
@@ -982,10 +957,12 @@ actor MajorChatCoverageCoordinator {
     }
 
     private static func coverageDateAfterFailure(chatId: Int64) async -> Date? {
+        // Return the previously-saved oldest_covered_at regardless of
+        // coverage_version. The semantic of this field has been stable across
+        // all versions (= oldest message we've confirmed coverage for) so a
+        // transient failure during version migration shouldn't drop us back
+        // to "no coverage" if we already had a valid value.
         let state = await DatabaseManager.shared.loadChatCoverageState(chatId: chatId)
-        guard state?.coverageVersion == AppConstants.MajorChatCoverage.coverageStateVersion else {
-            return nil
-        }
         return state?.oldestCoveredAt
     }
 

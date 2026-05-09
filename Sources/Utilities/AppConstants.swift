@@ -163,15 +163,28 @@ enum AppConstants {
         static let coverageStateVersion = 12
         static let coverageWindowDays: TimeInterval = 30
         static let historyBatchSize = 100
-        static let maxChatsPerPass = 2
-        static let recoveryMaxChatsPerPass = 3
-        static let debtCandidateLimit = 48
-        static let debtHydrationLimit = 16
+        // No artificial pass cap — every major chat is in scope every pass.
+        // The rate limiter (2 concurrent in-flight + 3 tokens/sec for
+        // getChatHistory + separate 20/sec bucket for getChatHistoryLocal)
+        // is the real backpressure; the per-pass count is just an upper
+        // bound. Setting these high so we sweep the whole 176-chat pool
+        // each pass instead of getting stuck cycling through 2 debt chats.
+        static let maxChatsPerPass = 250
+        static let recoveryMaxChatsPerPass = 250
+        // Same idea for the debt pool — let every chat with debt be a
+        // candidate, not just the first 48.
+        static let debtCandidateLimit = 500
+        static let debtHydrationLimit = 64
         static let maxBatchesPerChat = 20
-        static let maxNetworkBatchesPerChat = 3
+        static let maxNetworkBatchesPerChat = 6
         static let minTrustedLocalCoverageMessages = 10
-        static let historyFetchTimeoutSeconds: TimeInterval = 30
-        static let networkHistoryFetchTimeoutSeconds: TimeInterval = 75
+        static let historyFetchTimeoutSeconds: TimeInterval = 60
+        // 5 minutes per network fetch attempt. We accept slow passes (a chat
+        // timing out wastes 5 min) in exchange for actually completing the
+        // deep-history fetches that 150s wasn't long enough for. With ~30
+        // remaining failing chats, a worst-case all-timeout pass is ~2.5h —
+        // tolerable for users who left the app running overnight.
+        static let networkHistoryFetchTimeoutSeconds: TimeInterval = 300
         static let networkBatchSpacingMilliseconds: UInt64 = 500
         static let memberCountResolutionTimeoutSeconds: TimeInterval = 3
         static let localEmptyPageRetryCount = 1
