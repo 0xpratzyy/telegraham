@@ -80,32 +80,40 @@ extension NSColor {
 
 extension Font {
     enum Pidgy {
-        // ── Display (Newsreader) ──────────────────────────────────────────────
-        // Newsreader medium is reserved for serif headlines: hero pages, page
-        // titles, section heads, drawer titles, stat values, and brand wordmark.
-        // Sized variants below match the design system handoff exactly. Always
-        // pair with a -0.02em letterSpacing at the call-site (`.tracking(-0.4)`
-        // for 22pt and up, `.tracking(-0.2)` for smaller). Use the semantic
-        // aliases (heroTitle / pageTitle / brand / sectionTitle / statValue)
-        // unless you need a one-off size — those stay consistent across pages.
-        static let display19 = Font.custom("NewsreaderRoman-Medium", size: 19)
-            .leading(.tight)
-        static let display22 = Font.custom("NewsreaderRoman-Medium", size: 22)
-            .leading(.tight)
-        static let display24 = Font.custom("NewsreaderRoman-Medium", size: 24)
-            .leading(.tight)
-        static let display26 = Font.custom("NewsreaderRoman-Medium", size: 26)
-            .leading(.tight)
-        static let display28 = Font.custom("NewsreaderRoman-Medium", size: 28)
-            .leading(.tight)
-        static let display32 = Font.custom("NewsreaderRoman-Medium", size: 32)
-            .leading(.tight)
-        static let display36 = Font.custom("NewsreaderRoman-Medium", size: 36)
-            .leading(.tight)
+        // We bundle three variable fonts. SwiftUI loads them by family name
+        // (the typographic family, not the per-instance PostScript name) and
+        // then applies the requested weight via `.weight(...)`. The PostScript
+        // name of the bundled Newsreader is "Newsreader16pt-Regular" — using
+        // it directly would give Regular only and silently fall back to Inter
+        // for any "Medium" lookups. Always go through these tokens.
+        private static let newsreaderFamily = "Newsreader"
+        private static let interFamily = "Inter"
+        private static let monoFamily = "JetBrains Mono"
 
-        // Semantic aliases — prefer these so call sites read intent-first.
+        private static func newsreader(size: CGFloat) -> Font {
+            Font.custom(newsreaderFamily, size: size).weight(.medium).leading(.tight)
+        }
+
+        private static func inter(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+            Font.custom(interFamily, size: size).weight(weight)
+        }
+
+        // ── Display (Newsreader Medium) ───────────────────────────────────────
+        // Reserved for serif headlines. Sizes match the design system handoff
+        // exactly — pair with -0.02em letter spacing at the call site
+        // (`.tracking(-0.4)` for 22pt+, `-0.6` for 32pt, `-0.7` for 36pt).
+        // Prefer the semantic aliases below.
+        static let display19 = newsreader(size: 19)
+        static let display22 = newsreader(size: 22)
+        static let display24 = newsreader(size: 24)
+        static let display26 = newsreader(size: 26)
+        static let display28 = newsreader(size: 28)
+        static let display32 = newsreader(size: 32)
+        static let display36 = newsreader(size: 36)
+
+        // Semantic aliases — call sites should read intent-first.
         static let brand = display19          // sidebar "Pidgy" wordmark
-        static let sectionTitle = display22   // SectionHead, drawer titles, hl in CatchMeUp
+        static let sectionTitle = display22   // SectionHead, drawer titles, CatchMeUp hl
         static let taskDetailTitle = display24
         static let statValue = display26      // StatTile, Donut label
         static let pageTitle = display32      // Reply queue / Tasks / People / About / Pricing big values
@@ -116,20 +124,17 @@ extension Font {
         static let displayH2 = display28
 
         // ── UI body (Inter) ───────────────────────────────────────────────────
-        static let h2 = Font.custom("Inter-Regular_SemiBold", size: 20)
-        static let h3 = Font.custom("Inter-Regular_SemiBold", size: 16)
-        static let body = Font.custom("Inter-Regular", size: 14)
-        static let bodyMd = Font.custom("Inter-Regular_Medium", size: 14)
-        static let bodySm = Font.custom("Inter-Regular", size: 13)
-        static let meta = Font.custom("Inter-Regular", size: 11)
-
-        // All-caps eyebrow. Apply tracking at the call site when needed.
-        static let eyebrow = Font.custom("Inter-Regular_SemiBold", size: 10)
+        static let h2 = inter(size: 20, weight: .semibold)
+        static let h3 = inter(size: 16, weight: .semibold)
+        static let body = inter(size: 14)
+        static let bodyMd = inter(size: 14, weight: .medium)
+        static let bodySm = inter(size: 13)
+        static let meta = inter(size: 11)
+        static let eyebrow = inter(size: 10, weight: .semibold)
 
         // ── Mono (JetBrains Mono) ─────────────────────────────────────────────
-        // URLs, IDs, kbd hints, tabular numbers.
-        static let mono = Font.custom("JetBrainsMono-Regular", size: 13)
-        static let monoSm = Font.custom("JetBrainsMono-Regular", size: 11)
+        static let mono = Font.custom(monoFamily, size: 13)
+        static let monoSm = Font.custom(monoFamily, size: 11)
     }
 }
 
