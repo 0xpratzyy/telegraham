@@ -59,7 +59,12 @@ final class AIService: ObservableObject {
 
     // MARK: - Configuration
 
-    func configure(type: AIProviderConfig.ProviderType, apiKey: String, model: String? = nil) {
+    func configure(
+        type: AIProviderConfig.ProviderType,
+        apiKey: String,
+        model: String? = nil,
+        persist: Bool = true
+    ) {
         let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedModel = normalizedModel(
             type: type,
@@ -80,7 +85,13 @@ final class AIService: ObservableObject {
         providerModel = resolvedModel
         configuredAPIKey = apiKey
         isConfigured = type != .none && !apiKey.isEmpty
-        saveConfiguration(type: type, apiKey: apiKey, model: resolvedModel)
+        // The bundled-key bootstrap calls this with `persist: false` so the
+        // baked-in beta key never lands in the user's Keychain — that way
+        // rotating the key in a follow-up build actually takes effect, and
+        // "Reset all local data" doesn't leave a stale key behind.
+        if persist {
+            saveConfiguration(type: type, apiKey: apiKey, model: resolvedModel)
+        }
     }
 
     // MARK: - High-Level AI Operations
@@ -437,6 +448,10 @@ final class AIService: ObservableObject {
 
         guard let providerType = storedType,
               let type = AIProviderConfig.ProviderType(rawValue: providerType) else {
+            // Nothing in Keychain. If this beta build ships with a baked-in
+            // OpenAI key, auto-configure so the dashboard's AI features work
+            // on first launch without the user pasting anything.
+            applyBundledOpenAIKeyIfAvailable()
             return
         }
 
@@ -453,15 +468,27 @@ final class AIService: ObservableObject {
         // One-time migration path from the old shared AI key slots.
         let legacyApiKey = (((try? KeychainManager.retrieve(for: .aiApiKey)) ?? nil) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !legacyApiKey.isEmpty else { return }
+        if !legacyApiKey.isEmpty {
+            let legacyModel = (((try? KeychainManager.retrieve(for: .aiModel)) ?? nil) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedLegacyModel = normalizedModel(
+                type: type,
+                model: legacyModel.isEmpty ? type.defaultModel : legacyModel
+            )
+            configure(type: type, apiKey: legacyApiKey, model: normalizedLegacyModel)
+            return
+        }
 
-        let legacyModel = (((try? KeychainManager.retrieve(for: .aiModel)) ?? nil) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedLegacyModel = normalizedModel(
-            type: type,
-            model: legacyModel.isEmpty ? type.defaultModel : legacyModel
-        )
-        configure(type: type, apiKey: legacyApiKey, model: normalizedLegacyModel)
+        // Provider was set but its key is missing — likely a fresh keychain
+        // on a beta tester's machine. Fall back to the bundled key so the
+        // dashboard isn't stuck in "AI not configured".
+        applyBundledOpenAIKeyIfAvailable()
+    }
+
+    private func applyBundledOpenAIKeyIfAvailable() {
+        guard let bundled = BundledSecrets.openAIApiKey else { return }
+        let model = normalizedModel(type: .openai, model: AppConstants.AI.defaultOpenAIModel)
+        configure(type: .openai, apiKey: bundled, model: model, persist: false)
     }
 
     private func saveConfiguration(type: AIProviderConfig.ProviderType, apiKey: String, model: String) {

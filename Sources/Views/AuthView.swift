@@ -16,7 +16,7 @@ struct AuthView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            VStack(spacing: 8) {
+            VStack(spacing: PidgySpace.s2) {
                 PidgyMascotMark(size: 58)
                 Text("Pidgy")
                     .font(Font.Pidgy.h2)
@@ -74,20 +74,25 @@ struct AuthView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.Pidgy.bg1)
         .onAppear {
-            apiId = (try? KeychainManager.retrieve(for: .apiId)) ?? ""
-            apiHash = (try? KeychainManager.retrieve(for: .apiHash)) ?? ""
+            // Prefer values the user has already pasted; otherwise fall back
+            // to anything baked into this beta build via BundledSecrets so
+            // testers don't need to copy/paste an api_id at all.
+            let storedId = (try? KeychainManager.retrieve(for: .apiId)) ?? ""
+            let storedHash = (try? KeychainManager.retrieve(for: .apiHash)) ?? ""
+            apiId = storedId.isEmpty ? (BundledSecrets.telegramApiId.map(String.init) ?? "") : storedId
+            apiHash = storedHash.isEmpty ? (BundledSecrets.telegramApiHash ?? "") : storedHash
         }
     }
 
     // MARK: - Credential Input
 
     private var credentialsView: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: PidgySpace.s4) {
             Text("Enter your Telegram API credentials")
                 .font(Font.Pidgy.body)
                 .foregroundStyle(Color.Pidgy.fg2)
 
-            VStack(spacing: 12) {
+            VStack(spacing: PidgySpace.s3) {
                 inputField(title: "API ID", text: $apiId, placeholder: "e.g., 12345678")
                 inputField(title: "API Hash", text: $apiHash, placeholder: "e.g., abc123def456...", isSecure: true)
             }
@@ -120,7 +125,7 @@ struct AuthView: View {
     // MARK: - QR Code Login
 
     private var qrCodeRequestView: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: PidgySpace.s4) {
             ProgressView()
                 .controlSize(.regular)
 
@@ -140,7 +145,7 @@ struct AuthView: View {
     }
 
     private func qrCodeView(link: String) -> some View {
-        VStack(spacing: 20) {
+        VStack(spacing: PidgySpace.s5) {
             Text("Scan with Telegram")
                 .font(Font.Pidgy.h3)
                 .foregroundStyle(Color.Pidgy.fg1)
@@ -151,9 +156,9 @@ struct AuthView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 200, height: 200)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .clipShape(RoundedRectangle(cornerRadius: PidgyRadius.lg))
             } else {
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: PidgyRadius.lg)
                     .fill(Color.Pidgy.bg4)
                     .frame(width: 200, height: 200)
                     .overlay {
@@ -163,7 +168,7 @@ struct AuthView: View {
                     }
             }
 
-            VStack(spacing: 6) {
+            VStack(spacing: PidgySpace.s1) {
                 Text("Open Telegram on your phone")
                 Text("Go to **Settings → Devices → Link Desktop Device**")
                 Text("Point your phone at this QR code")
@@ -186,7 +191,7 @@ struct AuthView: View {
     // MARK: - Phone Number
 
     private var phoneNumberView: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: PidgySpace.s4) {
             Text("Enter your phone number")
                 .font(Font.Pidgy.body)
                 .foregroundStyle(Color.Pidgy.fg2)
@@ -216,7 +221,7 @@ struct AuthView: View {
     // MARK: - Verification Code
 
     private func verificationCodeView(codeInfo: CodeInfo?) -> some View {
-        VStack(spacing: 16) {
+        VStack(spacing: PidgySpace.s4) {
             Text("Enter the verification code")
                 .font(Font.Pidgy.body)
                 .foregroundStyle(Color.Pidgy.fg2)
@@ -243,7 +248,7 @@ struct AuthView: View {
     // MARK: - Password (2FA)
 
     private func passwordView(hint: String?) -> some View {
-        VStack(spacing: 16) {
+        VStack(spacing: PidgySpace.s4) {
             Text("Enter your two-factor authentication password")
                 .font(Font.Pidgy.body)
                 .foregroundStyle(Color.Pidgy.fg2)
@@ -270,7 +275,7 @@ struct AuthView: View {
     // MARK: - Authenticated
 
     private var readyView: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: PidgySpace.s3) {
             Image(systemName: "checkmark.circle.fill")
                 .font(Font.Pidgy.displayH1)
                 .foregroundStyle(Color.Pidgy.success)
@@ -307,7 +312,7 @@ struct AuthView: View {
     // MARK: - Reusable Components
 
     private func inputField(title: String, text: Binding<String>, placeholder: String, isSecure: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: PidgySpace.s1) {
             Text(title)
                 .font(Font.Pidgy.eyebrow)
                 .foregroundStyle(Color.Pidgy.fg3)
@@ -352,7 +357,7 @@ struct AuthView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, PidgySpace.s3)
             .background(Color.Pidgy.accent)
-            .foregroundColor(Color.white)
+            .foregroundStyle(Color.Pidgy.fg1)
             .cornerRadius(PidgyRadius.sm)
         }
         .buttonStyle(.plain)

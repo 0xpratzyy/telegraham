@@ -132,12 +132,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
             guard !isRunningTests else { return }
 
-            // Start TDLib if credentials exist
+            // Start TDLib if credentials exist. Prefer Keychain (the user's
+            // own pasted values) over the bundled defaults so a tester who
+            // signs in with their own api_id doesn't get re-paired to the
+            // app's beta credentials on every launch.
             if let apiIdStr = try? KeychainManager.retrieve(for: .apiId),
                let apiHash = try? KeychainManager.retrieve(for: .apiHash),
                let apiId = Int(apiIdStr) {
                 logger.info("Starting Telegram service with stored credentials")
                 telegramService.start(apiId: apiId, apiHash: apiHash)
+            } else if let bundledId = BundledSecrets.telegramApiId,
+                      let bundledHash = BundledSecrets.telegramApiHash {
+                logger.info("Starting Telegram service with bundled beta credentials")
+                telegramService.start(apiId: Int(bundledId), apiHash: bundledHash)
             } else {
                 logger.warning("Telegram credentials missing; startup pipeline will wait")
             }

@@ -23,10 +23,32 @@ targets:
     dependencies:
       - package: TDLibKit
       - package: GRDB
+    configFiles:
+      Debug: Config/BetaSecrets.xcconfig
+      Release: Config/BetaSecrets.xcconfig
     info:
       path: Sources/App/Info.plist
       properties:
         ATSApplicationFontsPath: Fonts
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        PidgyBundledTelegramApiId: $(PIDGY_TG_API_ID)
+        PidgyBundledTelegramApiHash: $(PIDGY_TG_API_HASH)
+        PidgyBundledOpenAIApiKey: $(PIDGY_BUNDLED_OPENAI_API_KEY)
+        PidgyBuildCommitSHA: $(PIDGY_BUILD_COMMIT_SHA)
+    postBuildScripts:
+      - name: Stamp commit SHA into built Info.plist
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          BUILT_PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          if [ ! -f "$BUILT_PLIST" ]; then
+            echo "warning: built Info.plist not found at $BUILT_PLIST"
+            exit 0
+          fi
+          COMMIT_SHA=$(git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+          /usr/libexec/PlistBuddy -c "Set :PidgyBuildCommitSHA ${COMMIT_SHA}" "$BUILT_PLIST" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :PidgyBuildCommitSHA string ${COMMIT_SHA}" "$BUILT_PLIST"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pidgy.app

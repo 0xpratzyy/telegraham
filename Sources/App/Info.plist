@@ -17,8 +17,16 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>PidgyBuildCommitSHA</key>
+	<string>$(PIDGY_BUILD_COMMIT_SHA)</string>
+	<key>PidgyBundledOpenAIApiKey</key>
+	<string>$(PIDGY_BUNDLED_OPENAI_API_KEY)</string>
+	<key>PidgyBundledTelegramApiHash</key>
+	<string>$(PIDGY_TG_API_HASH)</string>
+	<key>PidgyBundledTelegramApiId</key>
+	<string>$(PIDGY_TG_API_ID)</string>
 </dict>
 </plist>

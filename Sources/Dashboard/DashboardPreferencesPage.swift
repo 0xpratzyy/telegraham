@@ -934,6 +934,12 @@ struct DashboardPreferencesPage: View {
                         dot: .blue
                     )
                     PrefStatTile(
+                        eyebrow: "Build",
+                        value: BundledSecrets.buildCommitSHA,
+                        hint: "Reference this in bug reports",
+                        dot: .blue
+                    )
+                    PrefStatTile(
                         eyebrow: "Hotkey",
                         value: "⌘ ⇧ T",
                         hint: "Open the quick launcher",
