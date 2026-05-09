@@ -150,7 +150,8 @@ enum PreferencesResetPlan {
     static let userDefaultsKeysToDelete: [String] = [
         AppConstants.Preferences.includeBotsInAISearchKey,
         AppConstants.Preferences.dashboardTaskTriageContextVersionKey,
-        AppConstants.Preferences.dashboardTaskPinnedOwnersKey
+        AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
+        AppConstants.Preferences.didCompleteOnboardingKey
     ]
 
     static func pidgyDataDirectory(in applicationSupportDirectory: URL?) -> URL? {

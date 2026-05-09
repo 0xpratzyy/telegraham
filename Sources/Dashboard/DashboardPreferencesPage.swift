@@ -948,13 +948,30 @@ struct DashboardPreferencesPage: View {
                 }
             }
 
-            PrefSection(bottomBorder: false) {
+            PrefSection {
                 PrefSectionHead(title: "Local-first posture")
                 Text("Pidgy reads Telegram data locally, stores credentials locally, and uses your configured AI provider only when an AI feature needs it.")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.Pidgy.fg2)
                     .lineSpacing(3)
                     .frame(maxWidth: 640, alignment: .leading)
+            }
+
+            PrefSection(bottomBorder: false) {
+                HStack(alignment: .center, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Replay onboarding")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        Text("Walk through the welcome, tour, and connection screens again.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                    }
+                    Spacer(minLength: 12)
+                    PrefGhostButton(title: "Replay", systemImage: "arrow.counterclockwise") {
+                        NotificationCenter.default.post(name: .pidgyReplayOnboarding, object: nil)
+                    }
+                }
             }
         }
     }

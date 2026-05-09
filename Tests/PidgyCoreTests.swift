@@ -5470,7 +5470,8 @@ final class PidgyCoreTests: XCTestCase {
             Set([
                 AppConstants.Preferences.includeBotsInAISearchKey,
                 AppConstants.Preferences.dashboardTaskTriageContextVersionKey,
-                AppConstants.Preferences.dashboardTaskPinnedOwnersKey
+                AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
+                AppConstants.Preferences.didCompleteOnboardingKey
             ])
         )
 

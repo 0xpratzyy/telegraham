@@ -68,8 +68,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var panelManager: PanelManager?
     private var hotkeyManager: HotkeyManager?
     private var dashboardWindow: NSWindow?
+    private var onboardingController: OnboardingWindowController?
     private var graphBuildTask: Task<Void, Never>?
     private var preferencesOpenObserver: NSObjectProtocol?
+    private var replayOnboardingObserver: NSObjectProtocol?
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
@@ -116,6 +118,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
+        replayOnboardingObserver = NotificationCenter.default.addObserver(
+            forName: .pidgyReplayOnboarding,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                UserDefaults.standard.removeObject(
+                    forKey: AppConstants.Preferences.didCompleteOnboardingKey
+                )
+                self?.presentOnboardingIfNeeded(force: true)
+            }
+        }
+
         menuBarManager = MenuBarManager(
             onTogglePanel: { [weak self] in self?.panelManager?.toggle() },
             onOpenDashboard: { [weak self] in self?.openDashboard() },
@@ -159,6 +174,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             openDashboard()
         }
 
+        // First-launch onboarding modal. We show it whenever the user hasn't
+        // completed the flow yet AND Telegram isn't already authenticated. If
+        // they're already signed in (e.g. dev rebuilds, Keychain still holds
+        // the session) we just mark onboarding done so the modal never pops.
+        presentOnboardingIfNeeded(force: false)
+
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
             logger.info("Startup pipeline waiting for Telegram readiness")
@@ -191,6 +212,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if let preferencesOpenObserver {
             NotificationCenter.default.removeObserver(preferencesOpenObserver)
         }
+        if let replayOnboardingObserver {
+            NotificationCenter.default.removeObserver(replayOnboardingObserver)
+        }
+    }
+
+    private func presentOnboardingIfNeeded(force: Bool) {
+        let defaults = UserDefaults.standard
+        let didComplete = defaults.bool(
+            forKey: AppConstants.Preferences.didCompleteOnboardingKey
+        )
+
+        if !force && didComplete { return }
+
+        // If TDLib is already authenticated (existing user reopening the app),
+        // there's nothing to onboard — just mark the flag so we never bother
+        // them again.
+        if !force && telegramService.authState == .ready {
+            defaults.set(true, forKey: AppConstants.Preferences.didCompleteOnboardingKey)
+            return
+        }
+
+        let controller = OnboardingWindowController(
+            telegramService: telegramService,
+            aiService: aiService,
+            onComplete: { [weak self] in
+                guard let self else { return }
+                // After onboarding completes successfully, surface the
+                // dashboard so the user lands somewhere useful.
+                self.openDashboard()
+            }
+        )
+        onboardingController = controller
+        controller.show()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {

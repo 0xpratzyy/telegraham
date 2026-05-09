@@ -265,5 +265,6 @@ enum AppConstants {
         static let persistReplyQueueCandidateSnapshotsKey = "persistReplyQueueCandidateSnapshots"
         static let dashboardTaskTriageContextVersionKey = "dashboardTaskTriageContextVersion"
         static let dashboardTaskPinnedOwnersKey = "dashboardTaskPinnedOwners"
+        static let didCompleteOnboardingKey = "pidgyDidCompleteOnboarding"
     }
 }
