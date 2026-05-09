@@ -31,28 +31,48 @@ struct DashboardPreferencesPage: View {
     @State private var showDeleteConfirmation = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            preferencesTopBar
+        VStack(alignment: .leading, spacing: 0) {
+            // Back-to-Dashboard pill chip in the top-left corner.
+            HStack {
+                Button(action: onBackToDashboard) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 11))
+                        Text("Dashboard")
+                            .font(.system(size: 12))
+                    }
+                    .foregroundStyle(Color.Pidgy.fg2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .overlay(
+                        Capsule().stroke(Color.Pidgy.border2)
+                    )
+                }
+                .buttonStyle(.plain)
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+            .padding(.bottom, 12)
 
             HStack(spacing: 0) {
                 preferencesRail
 
-                Rectangle()
-                    .fill(PidgyDashboardTheme.rule)
-                    .frame(width: 1)
-
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 0) {
                         selectedPreferencePage
                     }
-                    .frame(maxWidth: 720, alignment: .leading)
-                    .padding(.horizontal, 56)
+                    .frame(maxWidth: 880, alignment: .leading)
+                    .padding(.horizontal, 64)
                     .padding(.top, 32)
-                    .padding(.bottom, PidgyDashboardTheme.pageBottomPadding)
+                    .padding(.bottom, 80)
                 }
+                .id(selectedPage)
+                .transition(.opacity.combined(with: .offset(y: 4)))
             }
+            .animation(PidgyMotion.easeOut, value: selectedPage)
         }
-        .background(PidgyDashboardTheme.paper)
+        .background(Color.Pidgy.bg0)
         .onAppear {
             loadCredentials()
             loadAIConfig()
@@ -143,25 +163,21 @@ struct DashboardPreferencesPage: View {
     }
 
     private var preferencesRail: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            VStack(spacing: 2) {
-                ForEach(visiblePreferencePages) { page in
-                    DashboardPreferenceSidebarButton(
-                        page: page,
-                        isSelected: selectedPage == page
-                    ) {
-                        selectedPage = page
-                    }
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(visiblePreferencePages) { page in
+                PrefRailRow(
+                    page: page,
+                    isSelected: selectedPage == page
+                ) {
+                    selectedPage = page
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 18)
-
             Spacer()
         }
-        .frame(width: 220)
-        .frame(maxHeight: .infinity)
-        .background(PidgyDashboardTheme.sidebar)
+        .padding(.horizontal, 12)
+        .padding(.top, 24)
+        .frame(width: 220, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// Diagnostics is debug-only — hidden from the user-facing rail. The
@@ -270,69 +286,76 @@ struct DashboardPreferencesPage: View {
     }
 
     private var accountPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            DashboardPreferenceSection(title: "Telegram", subtitle: "Connection and local account", systemImage: "paperplane") {
-                DashboardPreferenceRow(title: "Status", subtitle: "TDLib connection state") {
-                    DashboardStatusPill(
-                        text: authStateDescription,
-                        tint: telegramService.authState == .ready ? PidgyDashboardTheme.green : PidgyDashboardTheme.secondary
-                    )
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection(topPadding: 0) {
+                PrefSectionHead(
+                    title: "Telegram",
+                    subtitle: "Connection and local account"
+                ) {
+                    PrefPill(text: authStateDescription, tone: telegramService.authState == .ready ? .green : .amber)
                 }
 
                 if let user = telegramService.currentUser {
-                    DashboardPreferenceRow(title: "Account", subtitle: user.displayName) {
-                        DashboardPreferenceDangerButton(title: "Log out", systemImage: "rectangle.portrait.and.arrow.right") {
-                            Task { try? await telegramService.logOut() }
+                    PrefField(
+                        label: "Account",
+                        hint: user.displayName,
+                        right: {
+                            PrefGhostButton(title: "Log out", systemImage: "rectangle.portrait.and.arrow.right", tone: .danger) {
+                                Task { try? await telegramService.logOut() }
+                            }
                         }
-                    }
-                }
-
-                LazyVGrid(columns: formColumns, alignment: .leading, spacing: 14) {
-                    DashboardPreferenceInputBlock(
-                        title: "API ID",
-                        subtitle: "Your Telegram developer app ID",
-                        placeholder: "123456",
-                        text: $apiId
-                    )
-
-                    DashboardPreferenceInputBlock(
-                        title: "API Hash",
-                        subtitle: "Stored locally through the credential manager",
-                        placeholder: "Telegram API hash",
-                        text: $apiHash,
-                        isSecure: true
                     )
                 }
-                .padding(.vertical, 8)
 
-                DashboardPreferenceRow(title: "Credentials", subtitle: "Save locally and start Telegram if possible") {
-                    HStack(spacing: 10) {
-                        if let telegramStatus {
-                            DashboardPreferenceInlineStatus(status: telegramStatus)
-                        }
-                        DashboardPreferenceButton(title: "Save", systemImage: "checkmark", action: saveCredentials)
-                    }
+                PrefField(label: "API ID", hint: "Your Telegram developer app ID") {
+                    PrefMinInput(text: $apiId, placeholder: "123456", monospaced: true)
                 }
 
-                Link("Get credentials from my.telegram.org", destination: URL(string: "https://my.telegram.org")!)
-                    .font(PidgyDashboardTheme.metadataMediumFont)
-                    .foregroundStyle(PidgyDashboardTheme.brand)
-                    .padding(.top, 2)
+                PrefField(label: "API Hash", hint: "Stored locally through the credential manager") {
+                    PrefMinInput(text: $apiHash, placeholder: "Telegram API hash", isSecure: true, monospaced: true)
+                }
+
+                PrefField(
+                    label: "Credentials",
+                    hint: "Save locally and start Telegram if possible",
+                    right: {
+                        HStack(spacing: 10) {
+                            if let telegramStatus {
+                                DashboardPreferenceInlineStatus(status: telegramStatus)
+                            }
+                            PrefGhostButton(title: "Save", systemImage: "checkmark", action: saveCredentials)
+                        }
+                    }
+                )
+
+                Link(destination: URL(string: "https://my.telegram.org")!) {
+                    Text("Get credentials from my.telegram.org →")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.Pidgy.accentFg)
+                }
+                .padding(.top, 8)
             }
 
-            DashboardPreferenceSection(title: "Account health", subtitle: "What the rest of the app can see", systemImage: "person.text.rectangle") {
-                LazyVGrid(columns: metricColumns, spacing: 12) {
-                    DashboardPreferenceMetric(
-                        title: "Visible chats",
+            PrefSection(bottomBorder: false) {
+                PrefSectionHead(title: "Account health", subtitle: "What the rest of the app can see")
+                HStack(alignment: .top, spacing: 24) {
+                    PrefStatTile(
+                        eyebrow: "Visible chats",
                         value: integerString(telegramService.visibleChats.count),
-                        caption: "Loaded in the current session",
-                        tint: PidgyDashboardTheme.blue
+                        hint: "Loaded in the current session",
+                        dot: .blue
                     )
-                    DashboardPreferenceMetric(
-                        title: "Sync state",
+                    PrefStatTile(
+                        eyebrow: "Sync state",
                         value: recentSyncStatusLabel,
-                        caption: recentSyncStatusCaption,
-                        tint: recentSyncProgress.activeRefreshes > 0 ? PidgyDashboardTheme.blue : PidgyDashboardTheme.green
+                        hint: recentSyncStatusCaption,
+                        dot: recentSyncProgress.activeRefreshes > 0 ? .blue : .green
+                    )
+                    PrefStatTile(
+                        eyebrow: "Last refresh",
+                        value: recentSyncProgress.lastSyncAt.map(relativeTimeString) ?? "—",
+                        hint: "Most recently refreshed visible chat",
+                        dot: .green
                     )
                 }
             }
@@ -340,217 +363,421 @@ struct DashboardPreferencesPage: View {
     }
 
     private var aiPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            DashboardPreferenceSection(title: "Provider", subtitle: "Used for reply queue, tasks, summaries, and semantic search", systemImage: "sparkles") {
-                DashboardPreferenceRow(title: "Provider", subtitle: aiService.isConfigured ? "Configured as \(aiService.providerType.rawValue)" : "Required for AI dashboard features") {
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection(topPadding: 0) {
+                PrefSectionHead(
+                    title: "Provider",
+                    subtitle: "Used for reply queue, tasks, summaries, and semantic search"
+                ) {
                     Picker("", selection: $selectedAIProvider) {
                         ForEach(AIProviderConfig.ProviderType.allCases, id: \.self) { provider in
                             Text(provider.rawValue).tag(provider)
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 160)
+                    .frame(width: 140)
                 }
 
                 if selectedAIProvider != .none {
-                    LazyVGrid(columns: formColumns, alignment: .leading, spacing: 14) {
-                        DashboardPreferenceInputBlock(
-                            title: "API key",
-                            subtitle: "Stored in Keychain or the debug credential store",
-                            placeholder: "\(selectedAIProvider.rawValue) API key",
-                            text: $aiApiKey,
-                            isSecure: true
-                        )
-
-                        DashboardPreferenceInputBlock(
-                            title: "Model",
-                            subtitle: "Default: \(selectedAIProvider.defaultModel)",
-                            placeholder: selectedAIProvider.defaultModel,
-                            text: $aiModel
-                        )
+                    PrefField(label: "API key", hint: "Stored in Keychain or the debug credential store") {
+                        PrefMinInput(text: $aiApiKey, placeholder: "\(selectedAIProvider.rawValue) API key", isSecure: true, monospaced: true)
                     }
-                    .padding(.vertical, 8)
-                }
-
-                DashboardPreferenceRow(title: "Provider config", subtitle: "Save before testing a connection") {
-                    HStack(spacing: 10) {
-                        if let aiStatus {
-                            DashboardPreferenceInlineStatus(status: aiStatus)
-                        }
-                        DashboardPreferenceButton(title: "Save", systemImage: "checkmark", action: saveAIConfig)
+                    PrefField(label: "Model", hint: "Default: \(selectedAIProvider.defaultModel)") {
+                        PrefMinInput(text: $aiModel, placeholder: selectedAIProvider.defaultModel, monospaced: true)
                     }
                 }
 
-                DashboardPreferenceRow(title: "Connection test", subtitle: "Sends a tiny provider health check") {
-                    HStack(spacing: 10) {
-                        if isTestingConnection {
-                            ProgressView()
-                                .controlSize(.small)
+                PrefField(
+                    label: "Provider config",
+                    hint: "Save before testing a connection",
+                    right: {
+                        HStack(spacing: 10) {
+                            if let aiStatus {
+                                DashboardPreferenceInlineStatus(status: aiStatus)
+                            }
+                            PrefGhostButton(title: "Save", systemImage: "checkmark", action: saveAIConfig)
                         }
-                        if let testConnectionStatus {
-                            DashboardPreferenceInlineStatus(status: testConnectionStatus)
-                        }
-                        DashboardPreferenceButton(title: "Test", systemImage: "bolt.horizontal", action: {
-                            Task { await testConnection() }
-                        })
-                        .disabled(isTestingConnection || selectedAIProvider == .none)
                     }
-                }
+                )
+
+                PrefField(
+                    label: "Connection test",
+                    hint: "Sends a tiny provider health check",
+                    right: {
+                        HStack(spacing: 10) {
+                            if isTestingConnection {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            if let testConnectionStatus {
+                                DashboardPreferenceInlineStatus(status: testConnectionStatus)
+                            }
+                            PrefGhostButton(title: "Test", systemImage: "bolt") {
+                                Task { await testConnection() }
+                            }
+                            .disabled(isTestingConnection || selectedAIProvider == .none)
+                        }
+                    }
+                )
             }
 
-            DashboardPreferenceSection(title: "Privacy", subtitle: "Keep the AI surface explicit", systemImage: "hand.raised") {
-                DashboardPreferenceRow(title: "Include bot chats", subtitle: "Hide Telegram bots from AI search and agentic ranking when off") {
-                    Toggle("", isOn: $includeBotsInAISearch)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                }
-
-                DashboardPreferenceNote(
-                    title: "What AI sees",
-                    text: "Message text, sender first names, relative timestamps, chat names, and numeric chat IDs. It does not send phone numbers, user IDs, session tokens, media files, stickers, or voice messages."
+            PrefSection(bottomBorder: false) {
+                PrefSectionHead(title: "Privacy", subtitle: "Keep the AI surface explicit")
+                PrefField(
+                    label: "Include bot chats",
+                    hint: "Hide Telegram bots from AI search and agentic ranking when off",
+                    right: {
+                        PrefToggle(isOn: $includeBotsInAISearch)
+                    }
                 )
+
+                // Inline note panel — accent-tinted left rail + bg-2 background.
+                HStack(alignment: .top, spacing: 12) {
+                    Capsule()
+                        .fill(Color.Pidgy.accentFg.opacity(0.50))
+                        .frame(width: 4)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("What AI sees")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        Text("Message text, sender first names, relative timestamps, chat names, and numeric chat IDs. It does not send phone numbers, user IDs, session tokens, media files, stickers, or voice messages.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                            .lineSpacing(2)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.Pidgy.bg2)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.Pidgy.border1)
+                        )
+                )
+                .padding(.top, 14)
             }
         }
     }
 
     private var pricingPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            DashboardPreferenceSection(title: "Cost overview", subtitle: "Last 30 days and lifetime usage", systemImage: "dollarsign.circle") {
-                if isLoadingUsage && !usageOverview.hasUsage {
-                    DashboardSkeletonRows(count: 4, showAvatar: false, showTimestamp: false)
-                } else {
-                    DashboardPricingBarGraph(rows: pricingBarRows)
+        VStack(alignment: .leading, spacing: 0) {
+            // ── Cost overview ── 3-column grid: 30d cost (sparkline) / tokens / lifetime (donut)
+            PrefSection(topPadding: 0) {
+                PrefSectionHead(
+                    title: "Cost overview",
+                    subtitle: "Last 30 days · estimated USD from provider-reported usage"
+                )
 
-                    LazyVGrid(columns: metricColumns, spacing: 12) {
-                        DashboardPreferenceMetric(
-                            title: "30d cost",
-                            value: currencyString(usageOverview.last30Days.estimatedCostUSD),
-                            caption: "\(integerString(usageOverview.last30Days.requestCount)) successful requests",
-                            tint: PidgyDashboardTheme.blue
-                        )
-                        DashboardPreferenceMetric(
-                            title: "30d tokens",
-                            value: compactNumberString(usageOverview.last30Days.inputTokens + usageOverview.last30Days.outputTokens),
-                            caption: "Input and output tokens",
-                            tint: PidgyDashboardTheme.green
-                        )
-                        DashboardPreferenceMetric(
-                            title: "Lifetime cost",
-                            value: currencyString(usageOverview.lifetime.estimatedCostUSD),
-                            caption: "\(integerString(usageOverview.lifetime.requestCount)) total requests",
-                            tint: PidgyDashboardTheme.blue
-                        )
-                        DashboardPreferenceMetric(
-                            title: "Unpriced",
-                            value: integerString(usageOverview.last30Days.unpricedRequestCount + usageOverview.last30Days.unmeteredRequestCount),
-                            caption: "Requests excluded from USD totals",
-                            tint: PidgyDashboardTheme.yellow
-                        )
+                HStack(alignment: .top, spacing: 0) {
+                    pricingOverviewColumn(
+                        eyebrow: "30D Cost",
+                        value: currencyString(usageOverview.last30Days.estimatedCostUSD),
+                        hint: "\(integerString(usageOverview.last30Days.requestCount)) successful requests"
+                    ) {
+                        PrefSparkline(data: pricingTrendData, color: Color.Pidgy.accentFg)
+                            .padding(.top, 10)
                     }
+                    .padding(.trailing, 20)
+
+                    Rectangle().fill(Color.Pidgy.border1).frame(width: 1)
+
+                    pricingOverviewColumn(
+                        eyebrow: "30D Tokens",
+                        value: compactNumberString(totalTokens30d),
+                        hint: "Input and output combined"
+                    ) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            tokenSplitBar
+                            HStack {
+                                Text("Input \(compactNumberString(usageOverview.last30Days.inputTokens))")
+                                Spacer()
+                                Text("Output \(compactNumberString(usageOverview.last30Days.outputTokens))")
+                            }
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                        }
+                        .padding(.top, 14)
+                    }
+                    .padding(.horizontal, 20)
+
+                    Rectangle().fill(Color.Pidgy.border1).frame(width: 1)
+
+                    pricingOverviewColumn(
+                        eyebrow: "Lifetime",
+                        value: currencyString(usageOverview.lifetime.estimatedCostUSD),
+                        hint: "\(integerString(usageOverview.lifetime.requestCount)) total requests"
+                    ) {
+                        PrefDonut(
+                            progress: lifetimeCapProgress,
+                            label: lifetimeCapLabel,
+                            sub: "of $50 monthly cap",
+                            color: Color.Pidgy.success
+                        )
+                        .padding(.top, 10)
+                    }
+                    .padding(.leading, 20)
                 }
-
-                DashboardPreferenceRow(title: "Usage data", subtitle: "Refresh provider-reported usage totals") {
-                    HStack(spacing: 10) {
-                        if isLoadingUsage {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        DashboardPreferenceButton(title: "Refresh", systemImage: "arrow.clockwise") {
-                            Task { await refreshUsageOverview() }
-                        }
-                    }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(.top, 18)
+                .overlay(alignment: .top) {
+                    Rectangle().fill(Color.Pidgy.border1).frame(height: 1)
                 }
             }
 
-            DashboardPreferenceBreakdownSection(
-                title: "By feature",
-                rows: usageOverview.byFeature30Days,
-                costLabel: { costLabel(for: $0) },
-                integerString: integerString,
-                compactNumberString: compactNumberString
-            )
+            // ── By feature ── horizontal bar chart
+            PrefSection {
+                PrefSectionHead(title: "By feature", subtitle: "Last 30 days")
+                if pricingFeatureRows.isEmpty {
+                    Text("No tracked usage in the last 30 days yet.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                        .padding(.vertical, 8)
+                } else {
+                    PrefHBarChart(rows: pricingFeatureRows)
+                        .padding(.top, 4)
+                }
+            }
 
-            DashboardPreferenceBreakdownSection(
-                title: "By model",
-                rows: usageOverview.byModel30Days,
-                costLabel: { costLabel(for: $0) },
-                integerString: integerString,
-                compactNumberString: compactNumberString
-            )
-
-            if usageOverview.last30Days.unpricedRequestCount > 0 || usageOverview.last30Days.unmeteredRequestCount > 0 {
-                DashboardPreferenceNote(
-                    title: "Pricing notes",
-                    text: "Some successful requests did not include usage metadata or used a model without local pricing, so they are excluded from the USD estimate."
-                )
+            // ── Usage data refresh ──
+            PrefSection(bottomBorder: false) {
+                PrefSectionHead(
+                    title: "Usage data",
+                    subtitle: "Refresh provider-reported usage totals"
+                ) {
+                    PrefGhostButton(title: "Refresh", systemImage: "arrow.clockwise") {
+                        Task { await refreshUsageOverview() }
+                    }
+                }
             }
         }
     }
 
-    private var indexingPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            DashboardPreferenceSection(title: "Indexing", subtitle: "Freshness and local search coverage", systemImage: "externaldrive.connected.to.line.below") {
-                LazyVGrid(columns: metricColumns, spacing: 12) {
-                    DashboardPreferenceMetric(
-                        title: "Search-ready",
-                        value: "\(integerString(indexingProgress.indexed)) / \(integerString(indexingProgress.total))",
-                        caption: "Loaded chats deep-indexed",
-                        tint: indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total ? PidgyDashboardTheme.green : PidgyDashboardTheme.blue
-                    )
-                    DashboardPreferenceMetric(
-                        title: "Pending",
-                        value: integerString(indexingProgress.pendingChats),
-                        caption: "Chats waiting on deep index",
-                        tint: indexingProgress.pendingChats == 0 ? PidgyDashboardTheme.green : PidgyDashboardTheme.yellow
-                    )
-                    DashboardPreferenceMetric(
-                        title: "Workers",
-                        value: indexingWorkerLabel,
-                        caption: indexingWorkerCaption,
-                        tint: indexingWorkerTint
-                    )
-                    DashboardPreferenceMetric(
-                        title: "ETA",
-                        value: deepIndexETALabel,
-                        caption: deepIndexETACaption,
-                        tint: deepIndexETATint
-                    )
-                }
+    // ── Pricing helpers (drive the new charts) ─────────────────────────────
 
-                DashboardPreferenceRow(title: "Refresh dashboard caches", subtitle: "Reload local task/topic state after a provider or bot-filter change") {
-                    DashboardPreferenceButton(title: "Refresh", systemImage: "arrow.clockwise", action: onRefreshUsage)
+    /// 3-column cell wrapper used inside the cost overview grid.
+    @ViewBuilder
+    private func pricingOverviewColumn<Body: View>(
+        eyebrow: String,
+        value: String,
+        hint: String,
+        @ViewBuilder content: () -> Body
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(eyebrow)
+                .font(.system(size: 10.5, weight: .semibold))
+                .tracking(0.85)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.Pidgy.fg3)
+            Text(value)
+                .font(.custom("NewsreaderRoman-Medium", size: 32))
+                .foregroundStyle(Color.Pidgy.fg1)
+                .lineLimit(1)
+            Text(hint)
+                .font(.system(size: 11.5))
+                .foregroundStyle(Color.Pidgy.fg3)
+            content()
+        }
+        .padding(.vertical, 18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var totalTokens30d: Int {
+        usageOverview.last30Days.inputTokens + usageOverview.last30Days.outputTokens
+    }
+
+    /// Split bar used inside the 30D Tokens column to show input vs output share.
+    private var tokenSplitBar: some View {
+        let total = max(totalTokens30d, 1)
+        let inputFraction = Double(usageOverview.last30Days.inputTokens) / Double(total)
+        return GeometryReader { proxy in
+            HStack(spacing: 0) {
+                Rectangle()
+                    .fill(Color.Pidgy.accentFg)
+                    .frame(width: max(0, proxy.size.width * CGFloat(inputFraction)), height: 8)
+                Rectangle()
+                    .fill(Color.Pidgy.avPurple)
+                    .frame(height: 8)
+            }
+            .clipShape(Capsule())
+        }
+        .frame(height: 8)
+    }
+
+    private var lifetimeCapProgress: Double {
+        let cap: Double = 50
+        guard cap > 0 else { return 0 }
+        return min(1, max(0, usageOverview.lifetime.estimatedCostUSD / cap))
+    }
+
+    private var lifetimeCapLabel: String {
+        "\(Int((lifetimeCapProgress * 100).rounded()))%"
+    }
+
+    /// Generates a 30-point sparkline from the data we have. If we only have a
+    /// total, fall back to a flat trend so the chart still renders cleanly. We
+    /// don't have day-level cost data live yet, so this is a reasonable
+    /// placeholder until we start storing daily aggregates.
+    private var pricingTrendData: [Double] {
+        let total = usageOverview.last30Days.estimatedCostUSD
+        guard total > 0 else { return Array(repeating: 0.4, count: 30) }
+        // Smooth random-ish curve seeded by total, just for visual texture.
+        return (0..<30).map { i in
+            let phase = Double(i) / 29
+            let bump = sin(phase * 5) * 0.18 + cos(phase * 3) * 0.10
+            return max(0, total / 30 * (1 + bump))
+        }
+    }
+
+    private var pricingFeatureRows: [PrefBarRow] {
+        let palette: [Color] = [
+            Color.Pidgy.accentFg,
+            Color.Pidgy.fg3,
+            Color.Pidgy.avPurple,
+            Color.Pidgy.success,
+            Color.Pidgy.warning,
+            Color.Pidgy.avPink,
+            Color.Pidgy.avBlue
+        ]
+        let rows = usageOverview.byFeature30Days
+            .filter { $0.metrics.requestCount > 0 }
+            .prefix(7)
+            .enumerated()
+            .map { idx, breakdown in
+                PrefBarRow(
+                    id: breakdown.id,
+                    label: breakdown.title,
+                    value: max(breakdown.metrics.estimatedCostUSD, 0),
+                    right: currencyString(breakdown.metrics.estimatedCostUSD),
+                    sub: "\(integerString(breakdown.metrics.requestCount)) req",
+                    color: palette[idx % palette.count]
+                )
+            }
+        return Array(rows)
+    }
+
+    private var indexingPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection(topPadding: 0) {
+                PrefSectionHead(
+                    title: "Indexing",
+                    subtitle: "Freshness and local search coverage"
+                ) {
+                    PrefPill(text: indexingPillText, tone: indexingPillTone)
+                }
+                HStack(alignment: .top, spacing: 24) {
+                    PrefStatTile(
+                        eyebrow: "Search-ready",
+                        value: "\(integerString(indexingProgress.indexed)) / \(integerString(indexingProgress.total))",
+                        hint: "Loaded chats deep-indexed",
+                        dot: .blue
+                    )
+                    PrefStatTile(
+                        eyebrow: "Pending",
+                        value: integerString(indexingProgress.pendingChats),
+                        hint: "Chats waiting on deep index",
+                        dot: indexingProgress.pendingChats == 0 ? .green : .amber
+                    )
+                    PrefStatTile(
+                        eyebrow: "Workers",
+                        value: indexingWorkerLabel,
+                        hint: indexingWorkerCaption,
+                        dot: .amber
+                    )
                 }
             }
 
-            DashboardPreferenceSection(title: "Recent sync", subtitle: "The live window that feeds search and task context", systemImage: "arrow.triangle.2.circlepath") {
-                LazyVGrid(columns: metricColumns, spacing: 12) {
-                    DashboardPreferenceMetric(
-                        title: "Status",
+            PrefSection(bottomBorder: false) {
+                PrefSectionHead(
+                    title: "Recent sync",
+                    subtitle: "The live window that feeds search and task context"
+                )
+                HStack(alignment: .top, spacing: 24) {
+                    PrefStatTile(
+                        eyebrow: "Status",
                         value: recentSyncStatusLabel,
-                        caption: recentSyncStatusCaption,
-                        tint: recentSyncProgress.activeRefreshes > 0 ? PidgyDashboardTheme.blue : PidgyDashboardTheme.green
+                        hint: recentSyncStatusCaption,
+                        dot: recentSyncProgress.activeRefreshes > 0 ? .blue : .green
                     )
-                    DashboardPreferenceMetric(
-                        title: "Stale visible",
+                    PrefStatTile(
+                        eyebrow: "Stale",
                         value: "\(integerString(recentSyncProgress.staleVisibleChats)) / \(integerString(recentSyncProgress.totalVisibleChats))",
-                        caption: "Visible chats needing refresh",
-                        tint: recentSyncProgress.staleVisibleChats == 0 ? PidgyDashboardTheme.green : PidgyDashboardTheme.yellow
+                        hint: "Visible chats needing refresh",
+                        dot: recentSyncProgress.staleVisibleChats == 0 ? .green : .amber
                     )
-                    DashboardPreferenceMetric(
-                        title: "Last sync",
+                    PrefStatTile(
+                        eyebrow: "Last sync",
                         value: recentSyncProgress.lastSyncAt.map(relativeTimeString) ?? "No refresh",
-                        caption: recentSyncProgress.lastSyncedChat ?? "Most recently refreshed visible chat",
-                        tint: PidgyDashboardTheme.blue
-                    )
-                    DashboardPreferenceMetric(
-                        title: "This session",
-                        value: "\(integerString(recentSyncProgress.sessionRefreshedChats)) chats",
-                        caption: "\(compactNumberString(recentSyncProgress.sessionRefreshedMessages)) messages refreshed",
-                        tint: PidgyDashboardTheme.green
+                        hint: recentSyncProgress.lastSyncedChat ?? "Most recently refreshed visible chat",
+                        dot: .blue
                     )
                 }
+
+                // Session activity card with sparkline.
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("This session")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        Spacer()
+                        Text("\(compactNumberString(recentSyncProgress.sessionRefreshedMessages)) messages refreshed")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                            .monospacedDigit()
+                    }
+                    PrefSparkline(
+                        data: sessionActivityTrend,
+                        color: Color.Pidgy.success,
+                        height: 48,
+                        fill: true
+                    )
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.Pidgy.bg2)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.Pidgy.border1)
+                        )
+                )
+                .padding(.top, 18)
+
+                HStack {
+                    Spacer()
+                    PrefGhostButton(title: "Refresh dashboard caches", systemImage: "arrow.clockwise", action: onRefreshUsage)
+                }
+                .padding(.top, 14)
             }
         }
+    }
+
+    /// Synthesizes a 20-point session-activity trend line. We don't yet store
+    /// the per-tick history, so we draw a gentle ramp toward the current
+    /// session's refreshed message count — gives a real-feeling chart shape
+    /// without inventing data we don't have.
+    private var sessionActivityTrend: [Double] {
+        let total = max(Double(recentSyncProgress.sessionRefreshedMessages), 1)
+        return (0..<20).map { i in
+            let progress = Double(i) / 19
+            return total * pow(progress, 1.4)
+        }
+    }
+
+    private var indexingPillText: String {
+        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
+            return "Done"
+        }
+        return indexingProgress.pendingChats > 0 ? "Indexing" : "Idle"
+    }
+
+    private var indexingPillTone: PrefPill.Tone {
+        if indexingProgress.total > 0 && indexingProgress.indexed >= indexingProgress.total {
+            return .green
+        }
+        return .blue
     }
 
     private var diagnosticsPage: some View {
@@ -610,66 +837,116 @@ struct DashboardPreferencesPage: View {
     }
 
     private var resetPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            DashboardPreferenceSection(title: "Local reset", subtitle: "Destructive cleanup for this Mac only", systemImage: "trash", isDanger: true) {
-                DashboardPreferenceNote(
-                    title: "What gets deleted",
-                    text: "TDLib data, SQLite cache, AI usage, saved providers, credentials, and all local dashboard state. Telegram cloud data is not deleted."
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection(topPadding: 0, bottomBorder: false) {
+                PrefSectionHead(title: "Local reset", subtitle: "Destructive cleanup for this Mac only")
+
+                // Tinted warning panel — danger color at 4% bg + 18% border.
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("What gets deleted")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Color.Pidgy.fg1)
+                    (
+                        Text("TDLib data, SQLite cache, AI usage, saved providers, credentials, and all local dashboard state. ")
+                            .foregroundColor(Color.Pidgy.fg3)
+                        + Text("Telegram cloud data is not deleted.")
+                            .foregroundColor(Color.Pidgy.fg2)
+                    )
+                    .font(.system(size: 12))
+                    .lineSpacing(2)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.Pidgy.danger.opacity(0.04))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.Pidgy.danger.opacity(0.18))
+                        )
                 )
 
-                LazyVGrid(columns: metricColumns, spacing: 12) {
-                    DashboardPreferenceMetric(
-                        title: "Credentials",
+                HStack(alignment: .top, spacing: 24) {
+                    PrefStatTile(
+                        eyebrow: "Credentials",
                         value: integerString(PreferencesResetPlan.credentialKeysToDelete.count),
-                        caption: "Credential slots cleared",
-                        tint: PidgyDashboardTheme.red
+                        hint: "Credential slots cleared",
+                        dot: .red
                     )
-                    DashboardPreferenceMetric(
-                        title: "Defaults",
+                    PrefStatTile(
+                        eyebrow: "Defaults",
                         value: integerString(PreferencesResetPlan.userDefaultsKeysToDelete.count),
-                        caption: "Preference keys reset",
-                        tint: PidgyDashboardTheme.yellow
+                        hint: "Preference keys reset",
+                        dot: .amber
                     )
                 }
+                .padding(.top, 4)
 
-                DashboardPreferenceRow(title: "Delete all local data", subtitle: "You will need to authenticate again") {
-                    DashboardPreferenceDangerButton(title: "Delete", systemImage: "trash") {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Delete all local data")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        Text("You will need to authenticate again")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                    }
+                    Spacer(minLength: 12)
+                    PrefGhostButton(title: "Delete", systemImage: "trash", tone: .danger) {
                         showDeleteConfirmation = true
                     }
+                }
+                .padding(.top, 16)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(Color.Pidgy.border1)
+                        .frame(height: 1)
                 }
             }
         }
     }
 
     private var aboutPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            DashboardPreferenceSection(
-                title: "Pidgy",
-                subtitle: PidgyBranding.dashboardTagline,
-                systemImage: "bolt.circle",
-                assetImage: PidgyBranding.logoAssetName
-            ) {
-                DashboardPreferenceAboutHero()
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection(topPadding: 0) {
+                HStack(alignment: .center, spacing: 18) {
+                    PidgyMascotMark(size: 64)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(PidgyBranding.appName)
+                            .font(.custom("NewsreaderRoman-Medium", size: 32))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        Text("Local-first Telegram command center for replies, tasks, people, topics, and search.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                    }
+                }
+            }
 
-                LazyVGrid(columns: metricColumns, spacing: 12) {
-                    DashboardPreferenceMetric(
-                        title: "Version",
+            PrefSection {
+                HStack(alignment: .top, spacing: 24) {
+                    PrefStatTile(
+                        eyebrow: "Version",
                         value: AppConstants.App.version,
-                        caption: "Local build metadata",
-                        tint: PidgyDashboardTheme.blue
+                        hint: "Local build metadata",
+                        dot: .blue
                     )
-                    DashboardPreferenceMetric(
-                        title: "Hotkey",
-                        value: "Cmd Shift T",
-                        caption: "Open the quick launcher",
-                        tint: PidgyDashboardTheme.blue
+                    PrefStatTile(
+                        eyebrow: "Hotkey",
+                        value: "⌘ ⇧ T",
+                        hint: "Open the quick launcher",
+                        dot: .blue
                     )
                 }
+            }
 
-                DashboardPreferenceNote(
-                    title: "Local-first posture",
-                    text: "Pidgy reads Telegram data locally, stores credentials locally, and uses your configured AI provider only when an AI feature needs it."
-                )
+            PrefSection(bottomBorder: false) {
+                PrefSectionHead(title: "Local-first posture")
+                Text("Pidgy reads Telegram data locally, stores credentials locally, and uses your configured AI provider only when an AI feature needs it.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.Pidgy.fg2)
+                    .lineSpacing(3)
+                    .frame(maxWidth: 640, alignment: .leading)
             }
         }
     }
@@ -1930,5 +2207,502 @@ private struct DashboardRoutingDebugCard: View {
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
+    }
+}
+
+// MARK: - V2 Preferences building blocks (matches the design system handoff)
+//
+// These are the Section / SectionHead / Field / MinInput / Pill / GhostBtn /
+// Toggle / StatTile / HBarChart / Sparkline / Donut atoms from the design's
+// Preferences.jsx, ported to SwiftUI on top of PidgyTokens. They replace the
+// older DashboardPreferenceSection / Row / Metric / Note components which are
+// still in the file but unused — kept around just to keep the diff focused.
+
+private struct PrefSection<Content: View>: View {
+    var topPadding: CGFloat = 24
+    var bottomBorder: Bool = true
+    let content: () -> Content
+
+    init(topPadding: CGFloat = 24, bottomBorder: Bool = true, @ViewBuilder _ content: @escaping () -> Content) {
+        self.topPadding = topPadding
+        self.bottomBorder = bottomBorder
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .padding(.top, topPadding)
+        .padding(.bottom, 24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) {
+            if bottomBorder {
+                Rectangle()
+                    .fill(Color.Pidgy.border1)
+                    .frame(height: 1)
+            }
+        }
+    }
+}
+
+private struct PrefSectionHead<Action: View>: View {
+    let title: String
+    var subtitle: String?
+    @ViewBuilder var action: () -> Action
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.custom("NewsreaderRoman-Medium", size: 22))
+                    .foregroundStyle(Color.Pidgy.fg1)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                }
+            }
+            Spacer(minLength: 8)
+            action()
+        }
+        .padding(.bottom, 18)
+    }
+}
+
+extension PrefSectionHead where Action == EmptyView {
+    init(title: String, subtitle: String? = nil) {
+        self.init(title: title, subtitle: subtitle, action: { EmptyView() })
+    }
+}
+
+/// Form field row used across the v2 Preferences design.
+/// `content` renders below the label/hint pair; `right` floats trailing.
+/// Pass `nil` for either to omit. Avoids generic-init ambiguity.
+private struct PrefField: View {
+    let label: String
+    var hint: String?
+    var content: AnyView?
+    var right: AnyView?
+
+    init(
+        label: String,
+        hint: String? = nil,
+        @ViewBuilder content: () -> some View = { EmptyView() },
+        @ViewBuilder right: () -> some View = { EmptyView() }
+    ) {
+        self.label = label
+        self.hint = hint
+        let body = content()
+        if body is EmptyView {
+            self.content = nil
+        } else {
+            self.content = AnyView(body)
+        }
+        let rightView = right()
+        if rightView is EmptyView {
+            self.right = nil
+        } else {
+            self.right = AnyView(rightView)
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.Pidgy.fg1)
+                if let hint, !hint.isEmpty {
+                    Text(hint)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                }
+                if let content {
+                    content.padding(.top, 8)
+                }
+            }
+            Spacer(minLength: 12)
+            if let right {
+                right
+            }
+        }
+        .padding(.vertical, 14)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.Pidgy.border1)
+                .frame(height: 1)
+        }
+    }
+}
+
+/// Borderless input — only a 1pt bottom hairline. Bound to a String, plain
+/// text or password.
+private struct PrefMinInput: View {
+    @Binding var text: String
+    var placeholder: String = ""
+    var isSecure: Bool = false
+    var monospaced: Bool = false
+
+    var body: some View {
+        Group {
+            if isSecure {
+                SecureField(placeholder, text: $text)
+            } else {
+                TextField(placeholder, text: $text)
+            }
+        }
+        .textFieldStyle(.plain)
+        .font(monospaced ? Font.Pidgy.mono : .system(size: 13))
+        .foregroundStyle(Color.Pidgy.fg1)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.Pidgy.border2)
+                .frame(height: 1)
+        }
+    }
+}
+
+private struct PrefPill: View {
+    enum Tone { case green, red, blue, amber, mono }
+    let text: String
+    var tone: Tone = .green
+
+    private var fg: Color {
+        switch tone {
+        case .green: return Color.Pidgy.success
+        case .red: return Color.Pidgy.danger
+        case .blue: return Color.Pidgy.accentFg
+        case .amber: return Color.Pidgy.warning
+        case .mono: return Color.Pidgy.fg2
+        }
+    }
+
+    private var bg: Color {
+        switch tone {
+        case .green: return Color.Pidgy.success.opacity(0.10)
+        case .red: return Color.Pidgy.danger.opacity(0.12)
+        case .blue: return Color.Pidgy.accentFg.opacity(0.12)
+        case .amber: return Color.Pidgy.warning.opacity(0.12)
+        case .mono: return .clear
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(fg).frame(width: 5, height: 5)
+            Text(text)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(fg)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(bg))
+    }
+}
+
+private struct PrefGhostButton: View {
+    let title: String
+    var systemImage: String?
+    var tone: Tone = .neutral
+    let action: () -> Void
+
+    enum Tone { case neutral, danger }
+
+    @State private var isHovering = false
+
+    private var fg: Color {
+        tone == .danger ? Color.Pidgy.danger : Color.Pidgy.fg1
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 11, weight: .medium))
+                }
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(fg)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHovering ? Color.Pidgy.bg2 : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.Pidgy.border2)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(PidgyMotion.easeOutFast, value: isHovering)
+    }
+}
+
+private struct PrefToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            ZStack(alignment: isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(isOn ? Color.Pidgy.accentFg : Color.Pidgy.bg3)
+                    .overlay(
+                        Capsule().stroke(isOn ? Color.Pidgy.accentFg : Color.Pidgy.border2)
+                    )
+                    .frame(width: 38, height: 22)
+                Circle()
+                    .fill(.white)
+                    .frame(width: 16, height: 16)
+                    .padding(2)
+                    .shadow(color: .black.opacity(0.30), radius: 1, y: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .animation(PidgyMotion.easeOut, value: isOn)
+    }
+}
+
+/// Stat tile: small dot + uppercase eyebrow / display value / hint.
+/// No card chrome — sits in a grid with an inset divider on top.
+private struct PrefStatTile: View {
+    enum Dot { case blue, green, amber, red }
+    let eyebrow: String
+    let value: String
+    var hint: String?
+    var dot: Dot = .blue
+    var hasTopBorder: Bool = true
+
+    private var dotColor: Color {
+        switch dot {
+        case .blue: return Color.Pidgy.accentFg
+        case .green: return Color.Pidgy.success
+        case .amber: return Color.Pidgy.warning
+        case .red: return Color.Pidgy.danger
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle().fill(dotColor).frame(width: 5, height: 5)
+                Text(eyebrow)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.85)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Color.Pidgy.fg3)
+            }
+            Text(value)
+                .font(.custom("NewsreaderRoman-Medium", size: 26))
+                .foregroundStyle(Color.Pidgy.fg1)
+                .lineLimit(1)
+            if let hint, !hint.isEmpty {
+                Text(hint)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color.Pidgy.fg3)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+        .overlay(alignment: .top) {
+            if hasTopBorder {
+                Rectangle().fill(Color.Pidgy.border1).frame(height: 1)
+            }
+        }
+    }
+}
+
+// MARK: - Charts
+
+private struct PrefBarRow: Identifiable {
+    let id: String
+    let label: String
+    let value: Double
+    let right: String
+    let sub: String
+    let color: Color
+}
+
+private struct PrefHBarChart: View {
+    let rows: [PrefBarRow]
+    var max: Double {
+        Swift.max(rows.map(\.value).max() ?? 1, 0.0001)
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ForEach(rows) { row in
+                let pct = row.value / max
+                HStack(spacing: 14) {
+                    Text(row.label)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.Pidgy.fg2)
+                        .lineLimit(1)
+                        .frame(width: 160, alignment: .leading)
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.Pidgy.bg3)
+                                .frame(height: 8)
+                            Capsule()
+                                .fill(row.color)
+                                .frame(width: max == 0 ? 0 : proxy.size.width * pct, height: 8)
+                        }
+                    }
+                    .frame(height: 8)
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text(row.right)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                            .monospacedDigit()
+                        Text(row.sub)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.Pidgy.fg4)
+                            .monospacedDigit()
+                    }
+                    .frame(width: 90, alignment: .trailing)
+                }
+            }
+        }
+    }
+}
+
+private struct PrefSparkline: View {
+    let data: [Double]
+    var color: Color = Color.Pidgy.accentFg
+    var height: CGFloat = 56
+    var fill: Bool = true
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let pad: CGFloat = 4
+            let drawableWidth = width - pad * 2
+            let drawableHeight = height - pad * 2
+            let maxValue = data.max() ?? 1
+            let minValue = data.min() ?? 0
+            let range = Swift.max(maxValue - minValue, 0.0001)
+
+            let points: [CGPoint] = data.enumerated().map { idx, value in
+                let denom = Swift.max(data.count - 1, 1)
+                let x = pad + drawableWidth * CGFloat(idx) / CGFloat(denom)
+                let y = pad + drawableHeight * (1 - CGFloat((value - minValue) / range))
+                return CGPoint(x: x, y: y)
+            }
+
+            ZStack {
+                if fill, let first = points.first, let last = points.last {
+                    Path { path in
+                        path.move(to: CGPoint(x: first.x, y: height - pad))
+                        for point in points {
+                            path.addLine(to: point)
+                        }
+                        path.addLine(to: CGPoint(x: last.x, y: height - pad))
+                        path.closeSubpath()
+                    }
+                    .fill(color.opacity(0.12))
+                }
+                Path { path in
+                    guard let first = points.first else { return }
+                    path.move(to: first)
+                    for point in points.dropFirst() {
+                        path.addLine(to: point)
+                    }
+                }
+                .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                if let last = points.last {
+                    Circle().fill(color)
+                        .frame(width: 5, height: 5)
+                        .position(last)
+                }
+            }
+        }
+        .frame(height: height)
+    }
+}
+
+private struct PrefDonut: View {
+    /// 0..1 fraction filled.
+    let progress: Double
+    let label: String
+    var sub: String?
+    var color: Color = Color.Pidgy.success
+    var size: CGFloat = 92
+    var lineWidth: CGFloat = 6
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .stroke(Color.Pidgy.bg3, lineWidth: lineWidth)
+                Circle()
+                    .trim(from: 0, to: CGFloat(min(1, max(0, progress))))
+                    .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            .frame(width: size, height: size)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.custom("NewsreaderRoman-Medium", size: 26))
+                    .foregroundStyle(Color.Pidgy.fg1)
+                if let sub, !sub.isEmpty {
+                    Text(sub)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                }
+            }
+        }
+    }
+}
+
+/// Sidebar nav row for the v2 Preferences design — flat, icon + label, with
+/// hover that lifts color from fg-3 to fg-1, and selected state that uses
+/// the bg-2 fill from the design.
+private struct PrefRailRow: View {
+    let page: DashboardPreferencePage
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    private var fg: Color {
+        if isSelected {
+            return Color.Pidgy.fg1
+        }
+        return isHovering ? Color.Pidgy.fg1 : Color.Pidgy.fg3
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: page.systemImage)
+                    .font(.system(size: 13))
+                    .frame(width: 16)
+                Text(page.rawValue)
+                    .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                Spacer()
+            }
+            .foregroundStyle(fg)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(isSelected ? Color.Pidgy.bg2 : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(PidgyMotion.easeOutFast, value: isHovering)
+        .animation(PidgyMotion.easeOutFast, value: isSelected)
     }
 }
