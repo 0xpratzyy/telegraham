@@ -50,12 +50,30 @@ xcodebuild -project Pidgy.xcodeproj -scheme Pidgy \
   -destination 'platform=macOS,arch=arm64' test
 ```
 
+### Package a beta `.dmg`
+
+```bash
+# Ad-hoc signed (testers see Gatekeeper "unverified developer" once)
+scripts/make_dmg.sh
+
+# Signed with your Developer ID (no Gatekeeper warning)
+scripts/make_dmg.sh --sign "Developer ID Application: Your Name (TEAMID)"
+
+# Signed and notarized (the gold standard)
+xcrun notarytool store-credentials pidgy-beta            # one-time, uses an app-specific password
+scripts/make_dmg.sh --sign "Developer ID Application: Your Name (TEAMID)" --notarize
+```
+
+Output lands in `dist/Pidgy-<short-sha>.dmg` (gitignored). Send that file to your tester. The dmg name carries the commit so you can correlate any bug report back to the exact build.
+
 ## For beta testers
 
-You should have received a `.app` bundle in a `.zip`. To install:
+You should have received a `Pidgy-<sha>.dmg` file. To install:
 
-1. Move `Pidgy.app` into `/Applications`.
-2. The first time you launch, macOS Gatekeeper may say *"Pidgy" cannot be opened because the developer cannot be verified.* Right-click the app → **Open** → confirm. (This is because the build is signed with an ad-hoc identity for the cohort, not a Developer ID — a notarized build will land before public release.)
+1. Double-click the `.dmg` to mount it. A window opens with `Pidgy.app` and an `Applications` shortcut — drag the app onto the shortcut to install. Then eject the dmg (right-click the volume on your desktop → **Eject**).
+2. The first launch may trigger macOS Gatekeeper. There are two flavors of warning:
+   - **"Apple cannot verify Pidgy is free of malware"** — open System Settings → Privacy & Security → scroll to the bottom → click **Open Anyway** next to the Pidgy entry. (This appears for ad-hoc-signed beta builds; a notarized build won't show it.)
+   - **"Pidgy is damaged and can't be opened"** — only happens if your Mac stripped the quarantine flag oddly. Run once: `xattr -dr com.apple.quarantine /Applications/Pidgy.app`.
 3. The app lives in your menu bar (the bird icon). Open the dashboard from the menu bar item or with **⌘ ⇧ T**.
 4. On first launch you'll either:
    - Sign into Telegram via QR code (recommended) or phone number, then start using the dashboard. **No api_id / api_hash entry required** — that's baked into the build for this beta cohort.
