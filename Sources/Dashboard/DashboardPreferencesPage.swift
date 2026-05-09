@@ -43,12 +43,11 @@ struct DashboardPreferencesPage: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        preferencesStatusStrip
                         selectedPreferencePage
                     }
-                    .frame(maxWidth: 1040, alignment: .leading)
-                    .padding(.horizontal, 38)
-                    .padding(.top, 28)
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .padding(.horizontal, 56)
+                    .padding(.top, 32)
                     .padding(.bottom, PidgyDashboardTheme.pageBottomPadding)
                 }
             }
@@ -92,59 +91,37 @@ struct DashboardPreferencesPage: View {
     private var preferencesTopBar: some View {
         HStack(spacing: 14) {
             Button(action: onBackToDashboard) {
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     Image(systemName: "chevron.left")
                     Text("Dashboard")
                 }
                 .font(PidgyDashboardTheme.metadataMediumFont)
-                .frame(height: 30)
-                .padding(.horizontal, 11)
-                .background(DashboardCapsuleBackground())
+                .foregroundStyle(PidgyDashboardTheme.secondary)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(PidgyDashboardTheme.primary)
-
-            PidgyMascotMark(size: 28)
-
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text("Preferences")
-                        .font(PidgyDashboardTheme.metadataMediumFont)
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                    Text("· \(selectedPage.rawValue)")
-                        .font(PidgyDashboardTheme.metadataFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                }
-                Text(selectedPage.subtitle)
-                    .font(PidgyDashboardTheme.captionFont)
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    .lineLimit(1)
-            }
 
             Spacer()
 
-            Button(action: refreshCurrentPreferencePage) {
-                HStack(spacing: 7) {
-                    if isCurrentPageRefreshing {
-                        ProgressView()
-                            .controlSize(.small)
-                            .scaleEffect(0.72)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
+            if showsRefreshControl {
+                Button(action: refreshCurrentPreferencePage) {
+                    HStack(spacing: 6) {
+                        if isCurrentPageRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.72)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text(isCurrentPageRefreshing ? "Refreshing" : "Refresh")
                     }
-                    Text(isCurrentPageRefreshing ? "Refreshing" : "Refresh")
+                    .font(PidgyDashboardTheme.metadataMediumFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
                 }
-                .font(PidgyDashboardTheme.metadataMediumFont)
-                .frame(height: 30)
-                .padding(.horizontal, 12)
-                .background(DashboardCapsuleBackground())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(PidgyDashboardTheme.primary)
         }
         .padding(.horizontal, 22)
-        .frame(height: 54)
+        .frame(height: 50)
         .background(PidgyDashboardTheme.paper)
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -153,22 +130,22 @@ struct DashboardPreferencesPage: View {
         }
     }
 
-    private var preferencesRail: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("CONTROL CENTER")
-                    .font(PidgyDashboardTheme.captionMediumFont)
-                    .tracking(0.8)
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-                Text("Setup, cost, and local health")
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 20)
+    /// Refresh only meaningful when the page actually has freshness data
+    /// to pull (pricing usage, indexing). Hides the button on static pages
+    /// like account, reset, about.
+    private var showsRefreshControl: Bool {
+        switch selectedPage {
+        case .pricing, .indexing, .diagnostics:
+            return true
+        case .account, .ai, .reset, .about:
+            return false
+        }
+    }
 
-            VStack(spacing: 3) {
-                ForEach(DashboardPreferencePage.allCases) { page in
+    private var preferencesRail: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            VStack(spacing: 2) {
+                ForEach(visiblePreferencePages) { page in
                     DashboardPreferenceSidebarButton(
                         page: page,
                         isSelected: selectedPage == page
@@ -177,22 +154,21 @@ struct DashboardPreferencesPage: View {
                     }
                 }
             }
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 10)
+            .padding(.top, 18)
 
             Spacer()
-
-            DashboardPreferenceSidebarSummary(
-                title: aiService.isConfigured ? aiService.providerType.rawValue : "No provider",
-                subtitle: pricingSummarySubtitle,
-                systemImage: aiService.isConfigured ? "checkmark.seal" : "exclamationmark.triangle",
-                tint: aiService.isConfigured ? PidgyDashboardTheme.green : PidgyDashboardTheme.yellow
-            )
-            .padding(.horizontal, 12)
-            .padding(.bottom, 16)
         }
-        .frame(width: 258)
+        .frame(width: 220)
         .frame(maxHeight: .infinity)
         .background(PidgyDashboardTheme.sidebar)
+    }
+
+    /// Diagnostics is debug-only — hidden from the user-facing rail. The
+    /// underlying page is still rendered if `selectedPage` somehow lands
+    /// there (defensive), but you can't navigate to it from the UI.
+    private var visiblePreferencePages: [DashboardPreferencePage] {
+        DashboardPreferencePage.allCases.filter { $0 != .diagnostics }
     }
 
     private var preferencesStatusStrip: some View {
@@ -1331,29 +1307,21 @@ private struct DashboardPreferenceSidebarButton: View {
             HStack(spacing: 10) {
                 Image(systemName: page.systemImage)
                     .font(PidgyDashboardTheme.metadataMediumFont)
-                    .foregroundStyle(isSelected ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
-                    .frame(width: 24, height: 24)
-                    .background(isSelected ? Color.Pidgy.bg4 : PidgyDashboardTheme.raised.opacity(0.75))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(page.rawValue)
-                        .font(PidgyDashboardTheme.metadataMediumFont)
-                        .lineLimit(1)
-                    Text(page.subtitle)
-                        .font(PidgyDashboardTheme.captionFont)
-                        .foregroundStyle(isSelected ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                }
+                    .frame(width: 18)
+                Text(page.rawValue)
+                    .font(PidgyDashboardTheme.detailBodyFont.weight(.semibold))
+                    .lineLimit(1)
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(isSelected ? PidgyDashboardTheme.brand : PidgyDashboardTheme.primary)
-            .padding(.horizontal, 9)
-            .frame(height: 48)
+            .foregroundStyle(isSelected ? Color.white : PidgyDashboardTheme.primary)
+            .padding(.horizontal, 10)
+            .frame(height: PidgyDashboardTheme.sidebarRowHeight)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isSelected ? Color.Pidgy.bg4 : Color.clear)
             )
             .contentShape(Rectangle())
+            .animation(PidgyMotion.easeOutFast, value: isSelected)
         }
         .buttonStyle(DashboardPreferencePressStyle())
     }
