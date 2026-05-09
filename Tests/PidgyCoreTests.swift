@@ -5469,7 +5469,8 @@ final class PidgyCoreTests: XCTestCase {
             Set(PreferencesResetPlan.userDefaultsKeysToDelete),
             Set([
                 AppConstants.Preferences.includeBotsInAISearchKey,
-                AppConstants.Preferences.dashboardTaskTriageContextVersionKey
+                AppConstants.Preferences.dashboardTaskTriageContextVersionKey,
+                AppConstants.Preferences.dashboardTaskPinnedOwnersKey
             ])
         )
 

@@ -264,5 +264,6 @@ enum AppConstants {
         static let includeBotsInAISearchKey = "includeBotsInAISearch"
         static let persistReplyQueueCandidateSnapshotsKey = "persistReplyQueueCandidateSnapshots"
         static let dashboardTaskTriageContextVersionKey = "dashboardTaskTriageContextVersion"
+        static let dashboardTaskPinnedOwnersKey = "dashboardTaskPinnedOwners"
     }
 }

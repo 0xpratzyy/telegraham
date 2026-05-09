@@ -16,6 +16,10 @@ struct DashboardTasksPage: View {
     @State private var selectedOwnerFilter: DashboardTaskOwnerFilter = .mine
     @State private var isOwnerPickerPresented = false
     @State private var ownerSearchQuery = ""
+    @State private var cachedSearchBase: [DashboardTaskOwnerSearchOption] = []
+    @State private var liveSearchHits: [DashboardTaskOwnerSearchOption] = []
+    @State private var liveSearchTask: Task<Void, Never>?
+    @StateObject private var pinsStore = DashboardOwnerPinsStore.shared
 
     private var filteredTasks: [DashboardTask] {
         DashboardTaskListFilters.filteredTasks(
@@ -30,19 +34,22 @@ struct DashboardTasksPage: View {
         selectedTaskId.flatMap { id in tasks.first { $0.id == id } }
     }
 
-    private var baseOwnerOptions: [DashboardTaskOwnerOption] {
-        DashboardTaskListFilters.ownerChips(
-            for: tasksForSelectedStatus,
+    // Chips shown in the strip: always "For me", then anything the user has
+    // pinned via the "+" picker. Counts come from the currently-visible tasks.
+    private var ownerOptions: [DashboardTaskOwnerOption] {
+        let pinned = DashboardTaskListFilters.pinnedOwnerChips(
+            pinnedNames: pinsStore.pinnedNames,
+            tasks: tasksForSelectedStatus,
             currentUser: currentUser
         )
-    }
 
-    private var ownerOptions: [DashboardTaskOwnerOption] {
-        let options = baseOwnerOptions
-        guard !options.contains(where: { $0.filter.id == selectedOwnerFilter.id }),
+        // If the user has the chip strip filtered to a specific owner that
+        // isn't pinned (e.g. they tapped a result in the picker without
+        // pinning), surface a transient chip so the active filter is visible.
+        guard !pinned.contains(where: { $0.filter.id == selectedOwnerFilter.id }),
               case .owner(let selectedOwner) = selectedOwnerFilter
         else {
-            return options
+            return pinned
         }
 
         let selectedCount = DashboardTaskListFilters.count(
@@ -51,7 +58,7 @@ struct DashboardTasksPage: View {
             ownerFilter: selectedOwnerFilter,
             currentUser: currentUser
         )
-        return options + [
+        return pinned + [
             DashboardTaskOwnerOption(
                 filter: selectedOwnerFilter,
                 label: selectedOwner,
@@ -60,14 +67,58 @@ struct DashboardTasksPage: View {
         ]
     }
 
+    // Computing the full search candidate list iterates every task × every
+    // person in the People directory and builds normalized alias sets — on
+    // a typical account that's 100–500 ms of work and used to run on every
+    // popover render (and every keystroke), which made the "+" button feel
+    // janky. We now compute the unfiltered base list off the main actor when
+    // inputs change, cache it, and filter in-memory by the search query.
+    //
+    // For queries we ALSO hit the SQLite-backed RelationGraph directly via
+    // `searchContacts(query:)`, because the cache only holds people the
+    // dashboard loaded up-front (top 200 + stale + grouped) plus task-derived
+    // owners. Anyone with a low interaction_score (e.g. an old contact you
+    // haven't messaged in months) wouldn't be in either set, so we union the
+    // SQL hits in to make the picker behave like an actual address-book
+    // search.
     private var ownerSearchOptions: [DashboardTaskOwnerSearchOption] {
-        DashboardTaskListFilters.ownerSearchOptions(
-            visibleOptions: ownerOptions,
-            allTasks: tasks,
-            people: ownerPeople,
-            currentUser: currentUser,
-            query: ownerSearchQuery
-        )
+        let normalizedQuery = DashboardTaskOwnership.normalizedOwnerName(ownerSearchQuery)
+        if normalizedQuery.isEmpty {
+            return Array(cachedSearchBase.prefix(40))
+        }
+        let cacheHits = cachedSearchBase.filter { option in
+            DashboardTaskOwnership
+                .normalizedOwnerName(option.label)
+                .contains(normalizedQuery)
+        }
+        guard !liveSearchHits.isEmpty else { return cacheHits }
+
+        // Merge — cache hits first (they have task counts / archived
+        // subtitles), then live SQL hits we haven't already shown.
+        var seen = Set(cacheHits.map { DashboardTaskOwnership.normalizedOwnerName($0.label) })
+        var merged = cacheHits
+        for hit in liveSearchHits {
+            let normalized = DashboardTaskOwnership.normalizedOwnerName(hit.label)
+            if seen.insert(normalized).inserted {
+                merged.append(hit)
+            }
+        }
+        return merged
+    }
+
+    // Snapshot key used to rebuild the cache only when the inputs that
+    // actually drive the search results change.
+    private var searchSnapshotKey: Int {
+        var hasher = Hasher()
+        hasher.combine(tasks.count)
+        hasher.combine(tasks.first?.id)
+        hasher.combine(tasks.last?.id)
+        hasher.combine(ownerPeople.count)
+        hasher.combine(ownerPeople.first?.entityId)
+        hasher.combine(ownerPeople.last?.entityId)
+        hasher.combine(currentUser?.id)
+        hasher.combine(pinsStore.pinnedNames)
+        return hasher.finalize()
     }
 
     private var shouldShowTaskSkeleton: Bool {
@@ -97,24 +148,39 @@ struct DashboardTasksPage: View {
     }
 
     var body: some View {
-        if let selectedTask {
-            HStack(spacing: 0) {
-                compactList
-                    .frame(minWidth: 500)
+        Group {
+            if let selectedTask {
+                HStack(spacing: 0) {
+                    compactList
+                        .frame(minWidth: 500)
 
-                DashboardTaskDetail(
-                    task: selectedTask,
-                    evidence: evidenceByTaskId[selectedTask.id] ?? [],
-                    isRefreshing: isRefreshing,
-                    onRefresh: onRefresh,
-                    onUpdateStatus: onUpdateStatus,
-                    onOpenChat: onOpenChat,
-                    onClose: { selectedTaskId = nil }
-                )
-                .frame(width: 420)
+                    DashboardTaskDetail(
+                        task: selectedTask,
+                        evidence: evidenceByTaskId[selectedTask.id] ?? [],
+                        isRefreshing: isRefreshing,
+                        onRefresh: onRefresh,
+                        onUpdateStatus: onUpdateStatus,
+                        onOpenChat: onOpenChat,
+                        onClose: { selectedTaskId = nil }
+                    )
+                    .frame(width: 420)
+                }
+            } else {
+                centeredList
             }
-        } else {
-            centeredList
+        }
+        .task(id: searchSnapshotKey) {
+            await refreshSearchCandidates()
+        }
+        .onChange(of: ownerSearchQuery) { _, newValue in
+            scheduleLiveSearch(query: newValue)
+        }
+        .onChange(of: isOwnerPickerPresented) { _, presented in
+            if !presented {
+                ownerSearchQuery = ""
+                liveSearchHits = []
+                liveSearchTask?.cancel()
+            }
         }
     }
 
@@ -226,6 +292,15 @@ struct DashboardTasksPage: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        if case .owner(let name) = option.filter {
+                            Button(role: .destructive) {
+                                removePinned(name: name)
+                            } label: {
+                                Label("Remove from filter", systemImage: "minus.circle")
+                            }
+                        }
+                    }
                 }
 
                 Button {
@@ -258,7 +333,7 @@ struct DashboardTasksPage: View {
                 Image(systemName: "magnifyingglass")
                     .font(PidgyDashboardTheme.captionMediumFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
-                TextField("Search owner", text: $ownerSearchQuery)
+                TextField("Add a person to filter", text: $ownerSearchQuery)
                     .font(PidgyDashboardTheme.metadataFont)
                     .textFieldStyle(.plain)
             }
@@ -270,7 +345,7 @@ struct DashboardTasksPage: View {
                 LazyVStack(spacing: 2) {
                     if ownerSearchOptions.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(ownerSearchQuery.isEmpty ? "No other owners yet" : "No owner found")
+                            Text(ownerSearchQuery.isEmpty ? "No suggestions yet" : "No matches")
                                 .font(PidgyDashboardTheme.metadataMediumFont)
                                 .foregroundStyle(PidgyDashboardTheme.primary)
                             Text(ownerSearchQuery.isEmpty ? "Try after People finishes loading." : "Try another name from your Telegram contacts.")
@@ -282,9 +357,7 @@ struct DashboardTasksPage: View {
                     } else {
                         ForEach(ownerSearchOptions) { option in
                             Button {
-                                selectedOwnerFilter = option.filter
-                                ownerSearchQuery = ""
-                                isOwnerPickerPresented = false
+                                pinAndSelect(option: option)
                             } label: {
                                 HStack(spacing: 9) {
                                     DashboardInitialsAvatar(label: option.label, size: 24)
@@ -370,5 +443,94 @@ struct DashboardTasksPage: View {
 
     private func isOwnerSelected(_ option: DashboardTaskOwnerOption) -> Bool {
         selectedOwnerFilter.id == option.filter.id
+    }
+
+    private func pinAndSelect(option: DashboardTaskOwnerSearchOption) {
+        if case .owner(let name) = option.filter {
+            pinsStore.pin(name)
+        }
+        selectedOwnerFilter = option.filter
+        ownerSearchQuery = ""
+        isOwnerPickerPresented = false
+    }
+
+    private func removePinned(name: String) {
+        pinsStore.unpin(name)
+        if case .owner(let selected) = selectedOwnerFilter,
+           DashboardTaskOwnership.normalizedOwnerName(selected) ==
+            DashboardTaskOwnership.normalizedOwnerName(name) {
+            selectedOwnerFilter = .mine
+        }
+    }
+
+    private func scheduleLiveSearch(query: String) {
+        liveSearchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            liveSearchHits = []
+            return
+        }
+        let visibleSnapshot = ownerOptions
+        let user = currentUser
+        liveSearchTask = Task { @MainActor in
+            // Tiny debounce so we don't fire SQL on every keystroke.
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            if Task.isCancelled { return }
+
+            let nodes = await RelationGraph.shared.searchContacts(query: trimmed, limit: 80)
+            if Task.isCancelled { return }
+
+            let visibleIds = Set(visibleSnapshot.map(\.id))
+            let mineAliases = Set(visibleSnapshot
+                .compactMap { option -> String? in
+                    if case .mine = option.filter { return option.label } else { return nil }
+                })
+
+            liveSearchHits = nodes.compactMap { node -> DashboardTaskOwnerSearchOption? in
+                let display = node.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let username = node.username?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = [display, username].compactMap { value -> String? in
+                    guard let value, !value.isEmpty else { return nil }
+                    return value
+                }.first
+                guard let label else { return nil }
+                guard DashboardTaskOwnership.isKnownOwner(label) else { return nil }
+                guard !DashboardTaskOwnership.isMine(ownerName: label, currentUser: user) else { return nil }
+                guard !mineAliases.contains(where: { $0 == label }) else { return nil }
+                guard !visibleIds.contains(DashboardTaskOwnerFilter.owner(label).id) else { return nil }
+
+                let subtitle = username.flatMap { username -> String? in
+                    guard !username.isEmpty, username != display else { return nil }
+                    return "@\(username)"
+                }
+                return DashboardTaskOwnerSearchOption(
+                    filter: .owner(label),
+                    label: label,
+                    count: 0,
+                    subtitle: subtitle
+                )
+            }
+        }
+    }
+
+    private func refreshSearchCandidates() async {
+        let visibleOptions = ownerOptions
+        let allTasks = tasks
+        let people = ownerPeople
+        let user = currentUser
+
+        let computed = await Task.detached(priority: .userInitiated) {
+            DashboardTaskListFilters.ownerSearchOptions(
+                visibleOptions: visibleOptions,
+                allTasks: allTasks,
+                people: people,
+                currentUser: user,
+                query: "",
+                limit: .max
+            )
+        }.value
+
+        guard !Task.isCancelled else { return }
+        cachedSearchBase = computed
     }
 }

@@ -473,6 +473,54 @@ enum DashboardTaskListFilters {
         }
     }
 
+    /// Build the chip strip for the Tasks page: always "For me" first, then a
+    /// chip for every owner the user has explicitly pinned (with the current
+    /// matching-task count). Unlike ``ownerChips(for:currentUser:limit:)``,
+    /// this never auto-derives a chip from current task data — chips only
+    /// appear here once the user adds them via the "+" picker, so the strip
+    /// stays stable across syncs and refreshes.
+    static func pinnedOwnerChips(
+        pinnedNames: [String],
+        tasks: [DashboardTask],
+        currentUser: TGUser?
+    ) -> [DashboardTaskOwnerOption] {
+        let mineCount = count(
+            tasks,
+            status: nil,
+            ownerFilter: .mine,
+            currentUser: currentUser
+        )
+
+        var seen: Set<String> = []
+        var chips: [DashboardTaskOwnerOption] = [
+            DashboardTaskOwnerOption(filter: .mine, label: "For me", count: mineCount)
+        ]
+
+        for rawName in pinnedNames {
+            let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let normalized = DashboardTaskOwnership.normalizedOwnerName(trimmed)
+            guard !normalized.isEmpty, !seen.contains(normalized) else { continue }
+            seen.insert(normalized)
+
+            let chipCount = count(
+                tasks,
+                status: nil,
+                ownerFilter: .owner(trimmed),
+                currentUser: currentUser
+            )
+            chips.append(
+                DashboardTaskOwnerOption(
+                    filter: .owner(trimmed),
+                    label: trimmed,
+                    count: chipCount
+                )
+            )
+        }
+
+        return chips
+    }
+
     static func ownerAddOptions(
         visibleOptions: [DashboardTaskOwnerOption],
         allTasks: [DashboardTask],

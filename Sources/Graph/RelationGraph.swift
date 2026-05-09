@@ -385,6 +385,43 @@ actor RelationGraph {
         }
     }
 
+    /// Substring search across all user nodes — used by the Tasks page "+"
+    /// owner picker so the user can pin anyone they've ever exchanged
+    /// messages with, not just the top-N contacts the dashboard loads
+    /// up-front. Matches display_name or username case-insensitively.
+    func searchContacts(query: String, limit: Int = 80) async -> [Node] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let pattern = "%\(trimmed)%"
+        do {
+            return try await DatabaseManager.shared.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT entity_id, entity_type, display_name, username, category, category_source,
+                               interaction_score, last_interaction_at, first_seen_at, metadata
+                        FROM nodes
+                        WHERE entity_type = 'user'
+                          AND (display_name LIKE ? COLLATE NOCASE
+                               OR username LIKE ? COLLATE NOCASE)
+                        ORDER BY interaction_score DESC,
+                                 last_interaction_at DESC,
+                                 COALESCE(display_name, username, '') COLLATE NOCASE ASC
+                        LIMIT ?
+                        """,
+                    arguments: [pattern, pattern, limit]
+                )
+                return rows.compactMap { row in
+                    let node = Self.node(from: row)
+                    return node.isBot ? nil : node
+                }
+            }
+        } catch {
+            print("[RelationGraph] searchContacts failed: \(error)")
+            return []
+        }
+    }
+
     func recalculateScores() async {
         do {
             try await DatabaseManager.shared.write { db in
