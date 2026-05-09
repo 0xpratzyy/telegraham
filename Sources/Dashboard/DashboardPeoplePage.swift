@@ -172,17 +172,18 @@ struct DashboardPeoplePage: View {
     }
 
     private var personSearchField: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(PidgyDashboardTheme.captionMediumFont)
+                .font(PidgyDashboardTheme.metadataMediumFont)
                 .foregroundStyle(PidgyDashboardTheme.secondary)
             TextField("Search people", text: $personQuery)
                 .font(PidgyDashboardTheme.metadataFont)
                 .textFieldStyle(.plain)
         }
-        .frame(width: 160, height: 28)
-        .padding(.horizontal, 9)
-        .background(DashboardCapsuleBackground())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(minWidth: 220)
+        .background(DashboardSearchFieldBackground())
     }
 
     private var peopleRows: some View {

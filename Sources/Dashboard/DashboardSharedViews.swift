@@ -594,6 +594,24 @@ struct DashboardCapsuleBackground: View {
     }
 }
 
+/// Shared search-input chrome — rounded 14pt corners, sidebar-tinted fill,
+/// hairline border, faint lifted shadow. Matches the design system's
+/// "Claude-style" input used on Topic and People pages so search affordances
+/// look identical across the app.
+struct DashboardSearchFieldBackground: View {
+    var radius: CGFloat = 14
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.Pidgy.bg2)
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(PidgyDashboardTheme.rule)
+            )
+            .shadow(color: Color.black.opacity(0.18), radius: 6, y: 2)
+    }
+}
+
 struct DashboardFilterCapsule: View {
     let title: String
     let value: String

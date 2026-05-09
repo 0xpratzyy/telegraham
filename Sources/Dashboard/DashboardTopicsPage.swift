@@ -408,17 +408,10 @@ struct DashboardTopicsPage: View {
                 .font(PidgyDashboardTheme.rowTitleFont)
                 .textFieldStyle(.plain)
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 20)
         .frame(maxWidth: 620)
-        .frame(height: 48)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(PidgyDashboardTheme.raised.opacity(0.74))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(PidgyDashboardTheme.rule)
-        )
+        .background(DashboardSearchFieldBackground())
     }
 
     private var commandRow: some View {
