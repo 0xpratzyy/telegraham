@@ -1,6 +1,6 @@
 # Pidgy Task Tracker
 
-Last updated: 2026-04-29
+Last updated: 2026-05-09
 
 This tracker is the living status view for the current launch scope: fast launcher search plus a lightweight dashboard for attention, tasks, topics, people context, and dashboard-native preferences.
 
@@ -45,6 +45,10 @@ This tracker is the living status view for the current launch scope: fast launch
 - `done` reply-queue batching, progressive rendering, and compact deterministic digests
 - `done` shared chat eligibility filtering is centralized instead of duplicated across paths
 - `done` reconnect / foreground recent-sync recovery is in place
+- `done` durable major-chat coverage backfill: every major chat carries at least 30 days of local history, with per-chat cursor + retry backoff persisted in `chat_coverage_state` so progress survives sleep / restart / version migration
+- `done` `MajorChatCoverageCoordinator` sweeps the full major-chat pool each pass with priority for non-error chats so quick local-pass wins land before slow network deep-history fetches
+- `done` rate limiter splits `getChatHistoryLocal` (cache reads) from `getChatHistory` (network) so a stuck server fetch can't block the local fast-lane
+- `done` 5-minute network timeout per attempt + 6 batches per chat lets large-history chats with downtime gaps (verified end-to-end against Telegram exports for 22k-message DMs) actually complete
 
 ### Architecture Cleanup
 
@@ -87,6 +91,7 @@ This tracker is the living status view for the current launch scope: fast launch
 
 ### Data Coverage
 
+- `done` 30-day local message history is enforced across every major chat by `MajorChatCoverageCoordinator`
 - `in_progress` increase deep-index coverage now that two-worker indexing is live
 - `in_progress` verify local-first retrieval still behaves well on colder but recent chats
 

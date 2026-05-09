@@ -1,6 +1,6 @@
 # Pidgy Architecture
 
-Last updated: 2026-04-29
+Last updated: 2026-05-09
 
 Pidgy is a local-first macOS app for operating Telegram relationship context without turning Telegram into a full CRM. The launcher is still the fastest query surface; the dashboard is now a secondary operating surface for attention, extracted tasks, and relationship context.
 
@@ -65,10 +65,12 @@ Current rule: startup orchestration lives in `AppDelegate`; search and dashboard
 Core files:
 
 - [TelegramService.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/TelegramService.swift)
+- [RateLimiter.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/RateLimiter.swift)
 - [MessageCacheService.swift](/Users/pratyushrungta/telegraham/Sources/Telegram/MessageCacheService.swift)
 - [DatabaseManager.swift](/Users/pratyushrungta/telegraham/Sources/Storage/DatabaseManager.swift)
 - [Migrations.swift](/Users/pratyushrungta/telegraham/Sources/Storage/Migrations.swift)
 - [RecentSyncCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/RecentSyncCoordinator.swift)
+- [MajorChatCoverageCoordinator.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/MajorChatCoverageCoordinator.swift)
 - [IndexScheduler.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/IndexScheduler.swift)
 - [EmbeddingService.swift](/Users/pratyushrungta/telegraham/Sources/Indexing/EmbeddingService.swift)
 - [VectorStore.swift](/Users/pratyushrungta/telegraham/Sources/Storage/VectorStore.swift)
@@ -79,14 +81,17 @@ Storage rules:
 - `MessageCacheService` is the hot recent window, not the long-term source of truth.
 - `recent_sync_state` tracks launcher freshness.
 - `sync_state` tracks deep-index readiness.
+- `chat_coverage_state` tracks per-chat 30-day backfill progress, durable cursor, retry backoff, and last error so backfill resumes cleanly across restarts.
 - `dashboard_topics`, `dashboard_tasks`, `dashboard_task_sources`, and `dashboard_task_sync_state` persist dashboard operating state.
 - search-time networking is an anti-goal; the launcher should search local state.
 
 Freshness model:
 
 - `RecentSyncCoordinator` keeps active / visible chats fresh.
-- `IndexScheduler` handles deeper backfill and embeddings.
-- both publish progress used by Settings debug UI.
+- `MajorChatCoverageCoordinator` enforces the "every major chat has at least 30 days of local history" guarantee — sweeps every major chat each pass, runs a fast local-only TDLib pass first, falls back to a paginated network fetch when needed, and persists a durable cursor so progress survives sleep/restart.
+- `IndexScheduler` handles deeper backfill and embeddings on top of the coverage layer.
+- `RateLimiter` provides the only flood-safety boundary for TDLib calls (token bucket + capped concurrent in-flight slots; local-only `getChatHistory` is routed through a separate fast-lane bucket so cache reads aren't blocked by stuck network fetches).
+- All three coordinators publish progress used by Settings debug UI.
 
 ## 3. Query Planning And Search Execution
 

@@ -1,6 +1,6 @@
 # Pidgy Product PRD
 
-Last updated: 2026-04-29
+Last updated: 2026-05-09
 
 ## Product Thesis
 
@@ -205,7 +205,6 @@ The biggest product risks right now are:
 - dashboard task extraction output quality: titles, suggested actions, priority, topic labels, and false-positive ownership need dogfooding
 - stale dashboard tasks: closed-loop reconciliation exists for some reply-completed tasks, but broader stale/open-loop cleanup still needs hardening
 - dashboard AI cost/freshness expectations because background extraction can run without an explicit query
-- deep-index coverage across larger local histories
 - legacy settings/debug code still needs cleanup now that visible entry points route into dashboard-native Preferences
 - UI readability as launcher, settings, and dashboard model/storage files accumulate page-specific rendering
 
