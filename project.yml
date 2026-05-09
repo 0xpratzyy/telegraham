@@ -20,10 +20,6 @@ targets:
     platform: macOS
     sources:
       - path: Sources
-        excludes:
-          - Resources
-    resources:
-      - path: Sources/Resources
     dependencies:
       - package: TDLibKit
       - package: GRDB
