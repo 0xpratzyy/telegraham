@@ -27,7 +27,8 @@ struct DashboardHomePage: View {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("What to do now")
-                        .font(PidgyDashboardTheme.pageTitleFont)
+                        .font(PidgyDashboardTheme.heroTitleFont)
+                        .tracking(-0.7)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                     Text("\(feedItems.count) active item\(feedItems.count == 1 ? "" : "s")")
                         .font(PidgyDashboardTheme.pageSubtitleFont)
@@ -169,6 +170,7 @@ struct DashboardReplyQueuePage: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Reply queue")
                     .font(PidgyDashboardTheme.pageTitleFont)
+                    .tracking(-0.6)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                 if isLoading, totalCount > 0 {
                     Text("Analyzing \(processedCount)/\(totalCount) chats")
@@ -231,7 +233,8 @@ struct DashboardReplyDetail: View {
                 DashboardDetailCover {
                     DashboardTopicChip(text: item.category.rawValue, tint: categoryTint(item.category))
                     Text(item.chat.title)
-                        .font(PidgyDashboardTheme.titleFont)
+                        .font(PidgyDashboardTheme.sectionTitleFont)
+                        .tracking(-0.4)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 8) {

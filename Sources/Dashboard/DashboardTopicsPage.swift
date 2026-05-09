@@ -366,7 +366,8 @@ struct DashboardTopicsPage: View {
         // somewhere lives in the rationale chip below the title now.
         VStack(spacing: 8) {
             Text(topic.name)
-                .font(PidgyDashboardTheme.topicDisplayTitleFont)
+                .font(PidgyDashboardTheme.heroTitleFont)
+                .tracking(-0.7)
                 .foregroundStyle(PidgyDashboardTheme.primary)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)

@@ -128,6 +128,7 @@ struct DashboardPeoplePage: View {
             HStack(alignment: .lastTextBaseline, spacing: 10) {
                 Text("People")
                     .font(PidgyDashboardTheme.pageTitleFont)
+                    .tracking(-0.6)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                 Text(isBuildingSignals ? "loading relationships" : "\(visibleSignals.count) relationships")
                     .font(PidgyDashboardTheme.pageSubtitleFont)

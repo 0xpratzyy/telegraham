@@ -167,6 +167,7 @@ struct DashboardTasksPage: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Tasks")
                     .font(PidgyDashboardTheme.pageTitleFont)
+                    .tracking(-0.6)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                 Text(aiConfigured ? "\(filteredTasks.count) matching tasks" : "Connect AI to extract tasks")
                     .font(PidgyDashboardTheme.pageSubtitleFont)

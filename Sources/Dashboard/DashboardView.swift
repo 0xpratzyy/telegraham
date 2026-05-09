@@ -690,7 +690,8 @@ struct DashboardSidebar: View {
             PidgyMascotMark(size: 36)
             VStack(alignment: .leading, spacing: 2) {
                 Text(PidgyBranding.appName)
-                    .font(Font.Pidgy.displayH2.weight(.medium))
+                    .font(PidgyDashboardTheme.brandTitleFont)
+                    .tracking(-0.4)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                     .lineLimit(1)
                 Text(PidgyBranding.dashboardTagline)

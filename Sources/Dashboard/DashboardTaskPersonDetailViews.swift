@@ -15,7 +15,8 @@ struct DashboardTaskDetail: View {
                 DashboardDetailCover {
                     DashboardTopicChip(text: task.topicName ?? "Uncategorized", tint: topicTint(for: task))
                     Text(task.title)
-                        .font(PidgyDashboardTheme.titleFont)
+                        .font(PidgyDashboardTheme.taskDetailTitleFont)
+                        .tracking(-0.4)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .fixedSize(horizontal: false, vertical: true)
 

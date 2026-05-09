@@ -80,13 +80,42 @@ extension NSColor {
 
 extension Font {
     enum Pidgy {
-        // Page H1 - Newsreader serif, sentence case.
-        static let displayH1 = Font.custom("NewsreaderRoman-Medium", size: 36)
+        // ── Display (Newsreader) ──────────────────────────────────────────────
+        // Newsreader medium is reserved for serif headlines: hero pages, page
+        // titles, section heads, drawer titles, stat values, and brand wordmark.
+        // Sized variants below match the design system handoff exactly. Always
+        // pair with a -0.02em letterSpacing at the call-site (`.tracking(-0.4)`
+        // for 22pt and up, `.tracking(-0.2)` for smaller). Use the semantic
+        // aliases (heroTitle / pageTitle / brand / sectionTitle / statValue)
+        // unless you need a one-off size — those stay consistent across pages.
+        static let display19 = Font.custom("NewsreaderRoman-Medium", size: 19)
             .leading(.tight)
-        static let displayH2 = Font.custom("NewsreaderRoman-Medium", size: 28)
+        static let display22 = Font.custom("NewsreaderRoman-Medium", size: 22)
+            .leading(.tight)
+        static let display24 = Font.custom("NewsreaderRoman-Medium", size: 24)
+            .leading(.tight)
+        static let display26 = Font.custom("NewsreaderRoman-Medium", size: 26)
+            .leading(.tight)
+        static let display28 = Font.custom("NewsreaderRoman-Medium", size: 28)
+            .leading(.tight)
+        static let display32 = Font.custom("NewsreaderRoman-Medium", size: 32)
+            .leading(.tight)
+        static let display36 = Font.custom("NewsreaderRoman-Medium", size: 36)
             .leading(.tight)
 
-        // UI body.
+        // Semantic aliases — prefer these so call sites read intent-first.
+        static let brand = display19          // sidebar "Pidgy" wordmark
+        static let sectionTitle = display22   // SectionHead, drawer titles, hl in CatchMeUp
+        static let taskDetailTitle = display24
+        static let statValue = display26      // StatTile, Donut label
+        static let pageTitle = display32      // Reply queue / Tasks / People / About / Pricing big values
+        static let heroTitle = display36      // Dashboard "What to do now", Topic name
+
+        // Backwards compatibility for existing call sites.
+        static let displayH1 = display36
+        static let displayH2 = display28
+
+        // ── UI body (Inter) ───────────────────────────────────────────────────
         static let h2 = Font.custom("Inter-Regular_SemiBold", size: 20)
         static let h3 = Font.custom("Inter-Regular_SemiBold", size: 16)
         static let body = Font.custom("Inter-Regular", size: 14)
@@ -97,7 +126,8 @@ extension Font {
         // All-caps eyebrow. Apply tracking at the call site when needed.
         static let eyebrow = Font.custom("Inter-Regular_SemiBold", size: 10)
 
-        // Mono - URLs, IDs, and compact chrome.
+        // ── Mono (JetBrains Mono) ─────────────────────────────────────────────
+        // URLs, IDs, kbd hints, tabular numbers.
         static let mono = Font.custom("JetBrainsMono-Regular", size: 13)
         static let monoSm = Font.custom("JetBrainsMono-Regular", size: 11)
     }

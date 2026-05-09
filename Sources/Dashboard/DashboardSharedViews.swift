@@ -38,10 +38,25 @@ enum PidgyDashboardTheme {
     static let timestampColumnWidth: CGFloat = 52
     static let sidebarRowHeight: CGFloat = 34
 
-    static let displayTitleFont = Font.Pidgy.displayH1
-    static let topicDisplayTitleFont = Font.Pidgy.displayH1
+    /// Newsreader 36pt — only the hero pages (Dashboard "What to do now",
+    /// Topic workspace name).
+    static let heroTitleFont = Font.Pidgy.heroTitle
+    /// Newsreader 32pt — every other page-level title (Reply queue, Tasks,
+    /// People, About) and the big numeric values on Pricing.
+    static let pageTitleFont = Font.Pidgy.pageTitle
+    /// Newsreader 22pt — section heads, drawer titles, CatchMeUp headlines.
+    static let sectionTitleFont = Font.Pidgy.sectionTitle
+    /// Newsreader 26pt — StatTile big values + Donut label.
+    static let statValueFont = Font.Pidgy.statValue
+    /// Newsreader 24pt — task detail title.
+    static let taskDetailTitleFont = Font.Pidgy.taskDetailTitle
+    /// Newsreader 19pt — sidebar "Pidgy" wordmark.
+    static let brandTitleFont = Font.Pidgy.brand
+
+    // Legacy aliases kept until call sites migrate.
+    static let displayTitleFont = Font.Pidgy.heroTitle
+    static let topicDisplayTitleFont = Font.Pidgy.heroTitle
     static let titleFont = Font.Pidgy.h2
-    static let pageTitleFont = displayTitleFont
     static let pageSubtitleFont = Font.Pidgy.bodySm
     static let sectionLabelFont = Font.Pidgy.eyebrow
     static let rowTitleFont = Font.Pidgy.bodyMd

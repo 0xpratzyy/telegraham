@@ -571,7 +571,8 @@ struct DashboardPreferencesPage: View {
                 .textCase(.uppercase)
                 .foregroundStyle(Color.Pidgy.fg3)
             Text(value)
-                .font(.custom("NewsreaderRoman-Medium", size: 32))
+                .font(Font.Pidgy.pageTitle)
+                .tracking(-0.6)
                 .foregroundStyle(Color.Pidgy.fg1)
                 .lineLimit(1)
             Text(hint)
@@ -914,7 +915,8 @@ struct DashboardPreferencesPage: View {
                     PidgyMascotMark(size: 64)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(PidgyBranding.appName)
-                            .font(.custom("NewsreaderRoman-Medium", size: 32))
+                            .font(Font.Pidgy.pageTitle)
+                            .tracking(-0.6)
                             .foregroundStyle(Color.Pidgy.fg1)
                         Text("Local-first Telegram command center for replies, tasks, people, topics, and search.")
                             .font(.system(size: 13))
@@ -2255,7 +2257,8 @@ private struct PrefSectionHead<Action: View>: View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.custom("NewsreaderRoman-Medium", size: 22))
+                    .font(Font.Pidgy.sectionTitle)
+                    .tracking(-0.4)
                     .foregroundStyle(Color.Pidgy.fg1)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
@@ -2501,7 +2504,8 @@ private struct PrefStatTile: View {
                     .foregroundStyle(Color.Pidgy.fg3)
             }
             Text(value)
-                .font(.custom("NewsreaderRoman-Medium", size: 26))
+                .font(Font.Pidgy.statValue)
+                .tracking(-0.4)
                 .foregroundStyle(Color.Pidgy.fg1)
                 .lineLimit(1)
             if let hint, !hint.isEmpty {
@@ -2652,7 +2656,8 @@ private struct PrefDonut: View {
             .frame(width: size, height: size)
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.custom("NewsreaderRoman-Medium", size: 26))
+                    .font(Font.Pidgy.statValue)
+                    .tracking(-0.4)
                     .foregroundStyle(Color.Pidgy.fg1)
                 if let sub, !sub.isEmpty {
                     Text(sub)
