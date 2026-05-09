@@ -106,6 +106,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
+        NotificationCenter.default.addObserver(
+            forName: .requestLauncherToggle,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.panelManager?.toggle()
+            }
+        }
+
         menuBarManager = MenuBarManager(
             onTogglePanel: { [weak self] in self?.panelManager?.toggle() },
             onOpenDashboard: { [weak self] in self?.openDashboard() },

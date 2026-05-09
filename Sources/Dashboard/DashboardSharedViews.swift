@@ -68,6 +68,44 @@ enum PidgyDashboardTheme {
     }
 }
 
+/// Soft hand-drawn squiggle divider used under the dashboard / topic page
+/// titles. Pure SwiftUI so the line is crisp at any width.
+struct DashboardSquiggleDivider: View {
+    var amplitude: CGFloat = 4
+    var wavelength: CGFloat = 12
+    var lineWidth: CGFloat = 1
+    var opacity: Double = 0.22
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let mid = proxy.size.height / 2
+            Path { path in
+                path.move(to: CGPoint(x: 0, y: mid))
+                var x: CGFloat = 0
+                var up = true
+                while x < width {
+                    let nextX = min(x + wavelength, width)
+                    let controlX = (x + nextX) / 2
+                    let controlY = up ? mid - amplitude : mid + amplitude
+                    path.addQuadCurve(
+                        to: CGPoint(x: nextX, y: mid),
+                        control: CGPoint(x: controlX, y: controlY)
+                    )
+                    x = nextX
+                    up.toggle()
+                }
+            }
+            .stroke(
+                PidgyDashboardTheme.tertiary.opacity(opacity),
+                style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+            )
+        }
+        .frame(height: amplitude * 2 + lineWidth)
+        .accessibilityHidden(true)
+    }
+}
+
 struct PidgyMascotMark: View {
     let size: CGFloat
 

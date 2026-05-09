@@ -32,6 +32,8 @@ struct DashboardHomePage: View {
                     Text("\(feedItems.count) active item\(feedItems.count == 1 ? "" : "s")")
                         .font(PidgyDashboardTheme.pageSubtitleFont)
                         .foregroundStyle(PidgyDashboardTheme.secondary)
+                    DashboardSquiggleDivider()
+                        .padding(.top, 6)
                 }
                 .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
                 .padding(.bottom, PidgyDashboardTheme.headerBottomPadding)

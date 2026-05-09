@@ -7,6 +7,11 @@ extension Notification.Name {
     static let launcherArrowDown = Notification.Name("launcherArrowDown")
     static let launcherArrowUp = Notification.Name("launcherArrowUp")
     static let launcherEnter = Notification.Name("launcherEnter")
+    /// Posted by UI that wants to surface the launcher panel (e.g. the
+    /// dashboard sidebar's "Jump to anything…" search button). AppDelegate
+    /// listens for this and calls `PanelManager.toggle()` so we don't have
+    /// to thread the panel manager all the way down into SwiftUI views.
+    static let requestLauncherToggle = Notification.Name("requestLauncherToggle")
 }
 
 // MARK: - Floating Panel

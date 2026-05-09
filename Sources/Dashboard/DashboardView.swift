@@ -636,13 +636,22 @@ struct DashboardSidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            sidebarHeader
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 12)
+
+            sidebarLauncherShortcut
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+
             VStack(spacing: 2) {
                 ForEach(DashboardPage.allCases.filter { $0 != .topics && $0 != .preferences }) { page in
                     sidebarButton(page, count: count(for: page))
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.top, 16)
+            .padding(.top, 4)
 
             Spacer()
 
@@ -660,7 +669,7 @@ struct DashboardSidebar: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
         }
-        .frame(width: 232)
+        .frame(width: 240)
         .frame(maxHeight: .infinity)
         .background(PidgyDashboardTheme.sidebar)
         .overlay(alignment: .trailing) {
@@ -668,6 +677,64 @@ struct DashboardSidebar: View {
                 .fill(PidgyDashboardTheme.rule)
                 .frame(width: 1)
         }
+    }
+
+    private var sidebarHeader: some View {
+        HStack(alignment: .center, spacing: 10) {
+            PidgyMascotMark(size: 36)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(PidgyBranding.appName)
+                    .font(Font.Pidgy.displayH2.weight(.medium))
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    .lineLimit(1)
+                Text(PidgyBranding.dashboardTagline)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var sidebarLauncherShortcut: some View {
+        Button {
+            NotificationCenter.default.post(name: .requestLauncherToggle, object: nil)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                Text("Jump to anything…")
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("⌘K")
+                    .font(Font.Pidgy.monoSm)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(PidgyDashboardTheme.sidebar)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .stroke(PidgyDashboardTheme.rule, lineWidth: 1)
+                            )
+                    )
+            }
+            .foregroundStyle(PidgyDashboardTheme.tertiary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(PidgyDashboardTheme.raised)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.Pidgy.border1, lineWidth: 1)
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Jump to anything (⌘K)")
     }
 
     private func sidebarButton(_ page: DashboardPage, count: Int?) -> some View {
