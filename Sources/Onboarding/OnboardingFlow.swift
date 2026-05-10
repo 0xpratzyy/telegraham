@@ -768,17 +768,17 @@ private struct ConnectStep: View {
 
     private var providers: [Provider] {
         [
+            // Telegram glyph is a self-contained SVG (gradient circle +
+            // white paper-plane mark) so the tile background is fully
+            // taken over by the asset and we set the row chip to a
+            // transparent style.
             Provider(
                 id: "telegram",
                 name: "Telegram",
                 desc: "Personal account · TDLib",
-                bg: AnyShapeStyle(LinearGradient(
-                    colors: [Color(hex: 0x37BBFE), Color(hex: 0x007DBB)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )),
+                bg: AnyShapeStyle(Color.clear),
                 isComingSoon: false,
-                glyph: AnyView(TelegramGlyph())
+                glyph: AnyView(BrandSVGGlyph(name: "TelegramGlyph"))
             ),
             Provider(
                 id: "slack",
@@ -786,7 +786,7 @@ private struct ConnectStep: View {
                 desc: "Workspaces · DMs · Channels",
                 bg: AnyShapeStyle(Color.white),
                 isComingSoon: true,
-                glyph: AnyView(SlackGlyph())
+                glyph: AnyView(BrandSVGGlyph(name: "SlackGlyph", inset: 8))
             ),
             Provider(
                 id: "gmail",
@@ -794,7 +794,7 @@ private struct ConnectStep: View {
                 desc: "Threads · Senders · Labels",
                 bg: AnyShapeStyle(Color.white),
                 isComingSoon: true,
-                glyph: AnyView(GmailGlyph())
+                glyph: AnyView(BrandSVGGlyph(name: "GmailGlyph", inset: 8))
             )
         ]
     }
@@ -849,12 +849,12 @@ private struct ConnectStep: View {
 
         HStack(spacing: 14) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(p.bg)
-                    .frame(width: 40, height: 40)
-                    .shadow(color: .black.opacity(0.18), radius: 1.5, x: 0, y: 1)
+                Rectangle().fill(p.bg)
                 p.glyph
             }
+            .frame(width: 40, height: 40)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .shadow(color: .black.opacity(0.18), radius: 1.5, x: 0, y: 1)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
@@ -1253,45 +1253,23 @@ private struct DoneStep: View {
 
 // MARK: - Provider glyphs
 
-private struct TelegramGlyph: View {
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [Color(hex: 0x37BBFE), Color(hex: 0x007DBB)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: 40, height: 40)
-            Image(systemName: "paperplane.fill")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.white)
-                .rotationEffect(.degrees(45))
-                .offset(x: -1, y: 1)
-        }
-    }
-}
+/// Renders one of the brand SVG assets (Telegram / Slack / Gmail) inside
+/// the 40×40 chip the connect rows draw. Asset catalog SVGs preserve
+/// vector representation, so they stay crisp at any DPI. `inset` lets us
+/// pad the glyph against the white tile background (Slack and Gmail want
+/// a margin so they don't hug the corners).
+private struct BrandSVGGlyph: View {
+    let name: String
+    var inset: CGFloat = 0
 
-private struct SlackGlyph: View {
     var body: some View {
-        ZStack {
-            Image(systemName: "square.grid.2x2.fill")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(Color(hex: 0x36C5F0))
-                .opacity(0.85)
-        }
-    }
-}
-
-private struct GmailGlyph: View {
-    var body: some View {
-        ZStack {
-            Image(systemName: "envelope.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color(hex: 0xEA4335))
-        }
+        Image(name)
+            .resizable()
+            .renderingMode(.original)
+            .interpolation(.high)
+            .scaledToFit()
+            .padding(inset)
+            .frame(width: 40, height: 40)
     }
 }
 
