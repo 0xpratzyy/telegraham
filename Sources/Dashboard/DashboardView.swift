@@ -670,7 +670,11 @@ struct DashboardSidebar: View {
                     .fill(PidgyDashboardTheme.rule)
                     .frame(height: 1)
 
-                accountMenu
+                if accountUser == nil {
+                    sidebarSetupCTA
+                } else {
+                    accountMenu
+                }
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
@@ -809,6 +813,43 @@ struct DashboardSidebar: View {
                 }
             }
         }
+    }
+
+    private var sidebarSetupCTA: some View {
+        // Replaces the account menu when no Telegram user is connected. The
+        // chevron-down "YO / You" picker we used to render here implied the
+        // user could pick an account — but they can't until they finish
+        // onboarding. Surface a single Complete-setup button instead.
+        Button {
+            NotificationCenter.default.post(name: .pidgyShowOnboardingWindow, object: nil)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.Pidgy.bg1)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle().fill(Color.Pidgy.fg1)
+                    )
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Complete setup")
+                        .font(PidgyDashboardTheme.detailBodyFont.weight(.semibold))
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .lineLimit(1)
+                    Text("Connect Telegram to get started")
+                        .font(PidgyDashboardTheme.metadataFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var accountMenu: some View {
