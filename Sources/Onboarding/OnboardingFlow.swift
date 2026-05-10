@@ -254,6 +254,14 @@ struct OnboardingFlow: View {
         .onChange(of: telegramService.authState) { _, newValue in
             handleAuthStateChange(newValue)
         }
+        .onAppear {
+            // Sync from the current TDLib state on first appear too — if a
+            // tester opens the onboarding with TDLib already mid-auth (e.g.
+            // a cached 2FA session restored on launch), `onChange` won't
+            // fire because the value didn't change from the first reading,
+            // and we'd otherwise leave them stuck on Welcome / Connect.
+            handleAuthStateChange(telegramService.authState)
+        }
     }
 
     private var progressStrip: some View {
@@ -294,11 +302,21 @@ struct OnboardingFlow: View {
     private func beginTelegramAuth() async {
         errorMessage = nil
 
-        // If the user is already signed in (replaying onboarding mid-session),
-        // skip the QR rigmarole entirely and jump straight to Done.
-        if telegramService.authState == .ready {
-            advance(to: .done)
+        // If TDLib is already past phone-number entry, just route the UI
+        // to the matching step instead of forcing a QR. handleAuthStateChange
+        // owns this logic — the previous version blindly advanced to .qr,
+        // which left users with cached 2FA sessions stuck on a blank QR
+        // card waiting on a state change that would never come.
+        switch telegramService.authState {
+        case .ready, .waitingForCode, .waitingForPassword:
+            handleAuthStateChange(telegramService.authState)
             return
+        case .waitingForQrCode(let link):
+            qrLink = link
+            advance(to: .qr)
+            return
+        default:
+            break
         }
 
         isStartingQR = true
@@ -323,14 +341,22 @@ struct OnboardingFlow: View {
 
         advance(to: .qr)
 
-        // Wait until TDLib settles into a state where we can request the QR.
-        // It transitions uninitialized → waitingForParameters → waitingForPhoneNumber,
-        // and only then will requestQrCodeAuthentication produce a link.
+        // Wait until TDLib settles into a state we can act on. It normally
+        // transitions uninitialized → waitingForParameters → waitingForPhoneNumber,
+        // at which point we can call requestQrCodeAuthentication. If it
+        // jumps further on its own (e.g. resumed cached session), let
+        // handleAuthStateChange take over.
         let deadline = Date().addingTimeInterval(15)
-        while Date() < deadline {
-            if case .waitingForPhoneNumber = telegramService.authState { break }
-            if case .ready = telegramService.authState { break }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+        actionableLoop: while Date() < deadline {
+            switch telegramService.authState {
+            case .waitingForPhoneNumber:
+                break actionableLoop
+            case .ready, .waitingForQrCode, .waitingForCode, .waitingForPassword:
+                handleAuthStateChange(telegramService.authState)
+                return
+            default:
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
         }
 
         guard case .waitingForPhoneNumber = telegramService.authState else { return }
@@ -352,11 +378,22 @@ struct OnboardingFlow: View {
             // background.
             if step == .connect { advance(to: .qr) }
         case .waitingForCode:
+            // Can fire after the phone path submits a number, OR right after
+            // a QR scan if Telegram wants extra verification. Route to the
+            // code-entry step from anywhere except where we already are.
             errorMessage = nil
-            if step == .phone { advance(to: .code) }
+            if step != .done && step != .code && step != .password {
+                advance(to: .code)
+            }
         case .waitingForPassword:
+            // 2FA cloud password — surface the password step regardless of
+            // whether the user came in via QR or phone+code. The previous
+            // gate (only-from-.code) left QR-scan users stuck on the QR
+            // card with the "Linking your account…" overlay.
             errorMessage = nil
-            if step == .code { advance(to: .password) }
+            if step != .done && step != .password {
+                advance(to: .password)
+            }
         case .ready:
             advance(to: .done)
         default:
