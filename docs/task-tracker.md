@@ -121,6 +121,23 @@ This tracker is the living status view for the current launch scope: fast launch
 - `next` confirm app restart preserves task status and does not duplicate extracted tasks
 - `next` document known non-launch scope in UI/docs: no send automation, no proactive reminders, no graph-backed CRM execution
 
+## Beta Distribution — blocked on Apple Developer Program
+
+These items unblock once Deeksha's Apple Developer Program enrollment finishes
+(applied 2026-05-09, typically active within 24–48 hours). The Pidgy build is
+already shipping ad-hoc-signed via `scripts/make_dmg.sh`; the items below
+upgrade the chain to "no Gatekeeper warnings ever".
+
+- `blocked` add Pratyush as Developer/Admin in Deeksha's App Store Connect → Access → Users so his Mac's Xcode can pick the team
+- `blocked` swap `project.yml` from ad-hoc (`CODE_SIGN_IDENTITY: "-"`) to the Developer ID identity once it appears in `security find-identity`
+- `blocked` one-time `xcrun notarytool store-credentials pidgy-beta` on the build machine using an app-specific password from appleid.apple.com
+- `blocked` first notarized .dmg via `scripts/make_dmg.sh --sign "Developer ID Application: …" --notarize`; verify via `xcrun stapler validate` + `spctl -a -t open --context context:primary-signature -vvv`
+- `blocked` wire Sparkle for in-app auto-updates (signs each release with EdDSA, hosts appcast.xml from the repo, lets Sparkle download + install on next launch). Notarized signing pairs cleanly with Sparkle so testers never see Gatekeeper after the first install.
+- `blocked` extend `scripts/make_dmg.sh` (or a new `scripts/release.sh "v0.1.x" "notes"`) to: bump `MARKETING_VERSION`, sign the .dmg, regenerate appcast.xml entry, push to a GitHub release, commit the appcast update.
+- `next` build in-app **Send feedback** widget (menu item + ⌘? hotkey) that POSTs to a Discord/Slack webhook with build SHA, OS version, and the last 200 OSLog entries. Doesn't depend on the developer cert — can ship before notarization lands.
+- `next` document the tester install + bug-report flow in README once the notarized .dmg is the canonical artifact (currently README still describes the ad-hoc Privacy & Security override).
+- `later` decide if Sentry (or similar) crash capture is worth the privacy disclosure for the cohort, after first ~5 manual reports come in.
+
 ## Later
 
 - `later` full CRM pipeline management
