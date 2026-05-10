@@ -816,38 +816,25 @@ struct DashboardSidebar: View {
     }
 
     private var sidebarSetupCTA: some View {
-        // Replaces the account menu when no Telegram user is connected. The
-        // chevron-down "YO / You" picker we used to render here implied the
-        // user could pick an account — but they can't until they finish
-        // onboarding. Surface a single Complete-setup button instead.
+        // Single primary button — no avatar, no subtitle. Replaces the
+        // disabled-looking account menu when there's no signed-in user.
         Button {
             NotificationCenter.default.post(name: .pidgyShowOnboardingWindow, object: nil)
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "sparkles")
+            HStack(spacing: 6) {
+                Text("Complete setup")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.Pidgy.bg1)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        Circle().fill(Color.Pidgy.fg1)
-                    )
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Complete setup")
-                        .font(PidgyDashboardTheme.detailBodyFont.weight(.semibold))
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                        .lineLimit(1)
-                    Text("Connect Telegram to get started")
-                        .font(PidgyDashboardTheme.metadataFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 0)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 36)
-            .contentShape(Rectangle())
+            .foregroundStyle(Color.Pidgy.bg1)
+            .frame(maxWidth: .infinity)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: PidgyRadius.md, style: .continuous)
+                    .fill(Color.Pidgy.fg1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: PidgyRadius.md, style: .continuous))
         }
         .buttonStyle(.plain)
     }
