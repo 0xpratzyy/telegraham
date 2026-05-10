@@ -227,6 +227,21 @@ actor MajorChatCoverageCoordinator {
             if outcome.fetchedMessages > 0 {
                 backfilledChats += 1
                 fetchedMessages += outcome.fetchedMessages
+
+                // Same hook as RecentSyncCoordinator: tell downstream
+                // consumers (TaskIndex etc.) that fresh messages just hit
+                // the local store. Coverage typically writes 30+ messages
+                // per chat, which is exactly the kind of arrival that
+                // should drive a Tasks refresh without waiting 8 min.
+                NotificationCenter.default.post(
+                    name: .pidgyMessagesUpdatedLocally,
+                    object: nil,
+                    userInfo: [
+                        "chatIds": [outcome.chatId],
+                        "messageCount": outcome.fetchedMessages,
+                        "source": "majorChatCoverage"
+                    ]
+                )
             }
             if let historyCooldownSeconds = outcome.historyCooldownSeconds {
                 let cooldownUntil = now.addingTimeInterval(historyCooldownSeconds)

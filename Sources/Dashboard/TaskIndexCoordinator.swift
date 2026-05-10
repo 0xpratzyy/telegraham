@@ -1,9 +1,15 @@
 import Combine
 import Foundation
+import OSLog
 
 @MainActor
 final class TaskIndexCoordinator: ObservableObject {
     static let shared = TaskIndexCoordinator()
+
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
+        category: "TaskIndex"
+    )
 
     private struct PendingTaskScan: Sendable {
         let chat: TGChat
@@ -31,9 +37,30 @@ final class TaskIndexCoordinator: ObservableObject {
     private var lastTopicDiscoveryAt: Date?
     private var includeBotsInAISearch = false
     private weak var filteringTelegramService: TelegramService?
+    private weak var filteringAIService: AIService?
     private var queuedRefreshRequest: RefreshRequest?
 
+    /// Debounced trigger fired by `pidgyMessagesUpdatedLocally`. We collapse
+    /// a burst of message-arrival notifications into a single refresh after
+    /// the burst settles, so a busy chat doesn't drive 50 triages per minute.
+    private var debouncedRefreshTask: Task<Void, Never>?
+    private var messagesUpdatedObserver: NSObjectProtocol?
+    private var firstNotifyAtForCurrentBurst: Date?
+    private static let debouncedRefreshDelay: Duration = .seconds(20)
+    /// If notifications keep resetting the debounce, force a refresh anyway
+    /// after this much wall-clock time has elapsed since the burst's first
+    /// notification. Without this, sustained MajorChatCoverage backfills
+    /// (which keep posting notifications every few seconds for hours) would
+    /// starve the Tasks refresh forever.
+    private static let debouncedRefreshMaxWait: Duration = .seconds(60)
+
     private init() {}
+
+    deinit {
+        if let messagesUpdatedObserver {
+            NotificationCenter.default.removeObserver(messagesUpdatedObserver)
+        }
+    }
 
     func start(
         telegramService: TelegramService,
@@ -42,6 +69,23 @@ final class TaskIndexCoordinator: ObservableObject {
     ) {
         self.includeBotsInAISearch = includeBotsInAISearch
         filteringTelegramService = telegramService
+        filteringAIService = aiService
+
+        // Subscribe once to the new-message notification so we refresh
+        // right after a sync batch lands instead of waiting up to 8 min for
+        // the next periodic tick. Debounced so a burst of messages = one
+        // refresh after the burst settles.
+        if messagesUpdatedObserver == nil {
+            messagesUpdatedObserver = NotificationCenter.default.addObserver(
+                forName: .pidgyMessagesUpdatedLocally,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.scheduleDebouncedRefresh()
+                }
+            }
+        }
         if refreshLoopTask != nil {
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -58,35 +102,86 @@ final class TaskIndexCoordinator: ObservableObject {
             return
         }
 
+        logger.info("TaskIndex starting refresh loop (interval=\(Int(AppConstants.Dashboard.taskRefreshIntervalSeconds))s)")
         refreshLoopTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await loadFromStore(
+            self.logger.info("TaskIndex first-run loadFromStore")
+            await self.loadFromStore(
                 telegramService: telegramService,
                 includeBotsInAISearch: self.includeBotsInAISearch
             )
-            await refreshNow(
+            self.logger.info("TaskIndex first-run refreshNow")
+            await self.refreshNow(
                 telegramService: telegramService,
                 aiService: aiService,
                 includeBotsInAISearch: self.includeBotsInAISearch
             )
+            self.logger.info("TaskIndex first-run finished, entering periodic loop")
 
+            var cycle = 1
             while !Task.isCancelled {
+                self.logger.info("TaskIndex cycle \(cycle, privacy: .public): sleeping \(Int(AppConstants.Dashboard.taskRefreshIntervalSeconds))s")
                 try? await Task.sleep(
                     for: .seconds(AppConstants.Dashboard.taskRefreshIntervalSeconds)
                 )
                 guard !Task.isCancelled else { return }
-                await refreshNow(
+                self.logger.info("TaskIndex cycle \(cycle, privacy: .public): refreshNow firing")
+                await self.refreshNow(
                     telegramService: telegramService,
                     aiService: aiService,
                     includeBotsInAISearch: self.includeBotsInAISearch
                 )
+                self.logger.info("TaskIndex cycle \(cycle, privacy: .public): refreshNow returned (tasks=\(self.tasks.count, privacy: .public), lastError=\(self.lastError ?? "nil", privacy: .public))")
+                cycle += 1
             }
+            self.logger.warning("TaskIndex refresh loop exited (cancelled)")
         }
     }
 
     func stop() {
         refreshLoopTask?.cancel()
         refreshLoopTask = nil
+        debouncedRefreshTask?.cancel()
+        debouncedRefreshTask = nil
+    }
+
+    /// Called from the `pidgyMessagesUpdatedLocally` observer. Coalesces a
+    /// burst of message-arrival notifications into a single refreshNow that
+    /// fires once the burst settles, OR after `debouncedRefreshMaxWait`
+    /// elapsed since the burst's first notification — whichever comes first.
+    private func scheduleDebouncedRefresh() {
+        guard let telegramService = filteringTelegramService,
+              let aiService = filteringAIService
+        else { return }
+
+        let now = Date()
+        if firstNotifyAtForCurrentBurst == nil {
+            firstNotifyAtForCurrentBurst = now
+        }
+        let burstStart = firstNotifyAtForCurrentBurst ?? now
+
+        // Compute remaining time before the max-wait ceiling kicks in.
+        let elapsedSinceBurstStart = now.timeIntervalSince(burstStart)
+        let maxWaitSeconds = Double(Self.debouncedRefreshMaxWait.components.seconds)
+        let remainingMaxWait = max(0, maxWaitSeconds - elapsedSinceBurstStart)
+        // Sleep is the smaller of the trailing-edge debounce window and the
+        // remaining max-wait. So a quiet burst fires after 20 s; a busy
+        // ongoing burst fires after at most 60 s from its first notification.
+        let trailingDelaySeconds = Double(Self.debouncedRefreshDelay.components.seconds)
+        let sleepSeconds = min(trailingDelaySeconds, remainingMaxWait)
+
+        debouncedRefreshTask?.cancel()
+        debouncedRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(sleepSeconds))
+            guard let self, !Task.isCancelled else { return }
+            self.firstNotifyAtForCurrentBurst = nil
+            self.logger.info("TaskIndex debounced refresh firing (triggered by new messages)")
+            await self.refreshNow(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBotsInAISearch: self.includeBotsInAISearch
+            )
+        }
     }
 
     func setBotInclusion(
@@ -186,11 +281,13 @@ final class TaskIndexCoordinator: ObservableObject {
 
         guard aiService.isConfigured else {
             lastError = "Connect an AI provider to extract tasks from Telegram."
+            logger.warning("refreshNow: AI not configured")
             return
         }
 
         guard telegramService.authState == .ready else {
             lastError = "Telegram is not ready yet."
+            logger.warning("refreshNow: Telegram not ready (state=\(String(describing: telegramService.authState), privacy: .public))")
             return
         }
 
@@ -225,11 +322,13 @@ final class TaskIndexCoordinator: ObservableObject {
             forceRescan: forceRescan
         )
 
+        logger.info("refreshNow: candidates=\(candidateChats.count, privacy: .public) scanChats=\(scanChats.count, privacy: .public) pendingScans=\(pendingScans.count, privacy: .public)")
         guard !pendingScans.isEmpty else {
             lastRefreshAt = Date()
             if forceRescan {
                 Self.markTriageContextVersionScanned()
             }
+            logger.info("refreshNow: no pending scans, exiting cleanly")
             return
         }
 
@@ -240,8 +339,10 @@ final class TaskIndexCoordinator: ObservableObject {
                 aiService: aiService,
                 myUserId: myUserId
             )
+            logger.info("refreshNow: triage returned \(triageByChatId.count, privacy: .public) decisions")
         } catch {
             lastError = "Task triage failed: \(error.localizedDescription)"
+            logger.error("refreshNow: triage threw \(error.localizedDescription, privacy: .public)")
             return
         }
 
@@ -346,20 +447,41 @@ final class TaskIndexCoordinator: ObservableObject {
         return topics.first { $0.id == added.id } ?? added
     }
 
+    func removeTopic(id: Int64) async {
+        await DatabaseManager.shared.deleteDashboardTopic(id: id)
+        await loadFromStore()
+    }
+
     private func refreshTopicsIfNeeded(
         telegramService: TelegramService,
         aiService: AIService,
         includeBotsInAISearch: Bool
     ) async -> [DashboardTopic] {
+        // Topics are now exclusively user-curated. The previous behavior
+        // ran AI topic discovery whenever the stored set was empty (and
+        // periodically refreshed it), which silently pre-filled the
+        // sidebar with chat-derived names like "First Dollar" / "Inner
+        // Circle" — surprising for a tester who hadn't asked for any of
+        // those, and impossible to reproduce without burning AI credits.
+        //
+        // Tasks still extract correctly without topics; the chip strip
+        // on the Tasks page just doesn't auto-categorize by topic until
+        // the user adds one via the sidebar's "+" button.
         let stored = await DatabaseManager.shared.loadDashboardTopics()
-        let shouldDiscover = stored.isEmpty || lastTopicDiscoveryAt.map {
-            Date().timeIntervalSince($0) > AppConstants.Dashboard.taskRefreshIntervalSeconds * 6
-        } ?? true
+        topics = stored
+        return stored
+    }
 
-        guard shouldDiscover else {
-            topics = stored
-            return stored
-        }
+    /// Run AI-powered topic discovery on demand. Surfaced from the sidebar
+    /// "+" sheet's "Suggest from chats" affordance so the user can opt in
+    /// to a one-shot suggestion sweep instead of getting prefilled topics
+    /// they never asked for.
+    func discoverTopicsOnDemand(
+        telegramService: TelegramService,
+        aiService: AIService,
+        includeBotsInAISearch: Bool
+    ) async -> [DashboardTopic] {
+        let stored = await DatabaseManager.shared.loadDashboardTopics()
 
         let excludedChatIds = await Self.botChatIds(
             in: telegramService.visibleChats,

@@ -157,6 +157,24 @@ actor MessageCacheService {
             chatId: chatId,
             messages: [cachedMessage.toDatabaseRecord()]
         )
+
+        // This is the real-time TDLib push path — single message just
+        // arrived live (e.g. someone DM'd you). Tell downstream consumers
+        // (TaskIndex etc.) so the Tasks page can refresh within the
+        // debounce window instead of waiting up to 8 min for the
+        // periodic loop. Wrapped in DispatchQueue.main so we hop off the
+        // MessageCacheService actor before posting; observers are on .main.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .pidgyMessagesUpdatedLocally,
+                object: nil,
+                userInfo: [
+                    "chatIds": [chatId],
+                    "messageCount": 1,
+                    "source": "tdlibLiveAppend"
+                ]
+            )
+        }
     }
 
     /// Applies a TDLib content-edit event to an already cached message.

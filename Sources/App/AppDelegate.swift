@@ -70,6 +70,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var dashboardWindow: NSWindow?
     private var onboardingController: OnboardingWindowController?
     private var graphBuildTask: Task<Void, Never>?
+    private var backgroundActivityToken: NSObjectProtocol?
     private var preferencesOpenObserver: NSObjectProtocol?
     private var replayOnboardingObserver: NSObjectProtocol?
     private var showOnboardingObserver: NSObjectProtocol?
@@ -87,6 +88,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         PidgyFontRegistrar.registerBundledFonts()
+
+        // macOS App Nap aggressively throttles tasks that sleep for tens of
+        // seconds when the app's UI is idle. Our short-poll coordinators
+        // (RecentSync at 1.5 s, MajorChatCoverage at 8 s) tick through fine,
+        // but TaskIndex (8 min) and the GraphBuilder loop (2 min) get
+        // suspended indefinitely — both stop logging after the very first
+        // cycle. Asserting a `.userInitiated` activity tells the OS this
+        // process needs to stay scheduled for background work; it does NOT
+        // prevent display sleep or system sleep, just App Nap throttling.
+        backgroundActivityToken = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated],
+            reason: "Pidgy keeps Telegram messages, tasks, and the people graph in sync in the background."
+        )
 
         if launchPresentationMode.activatesAsRegularApp {
             NSApp.setActivationPolicy(.regular)
@@ -201,18 +215,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             logger.info("Startup pipeline waiting for Telegram readiness")
             await waitForGraphBuildReadiness()
             guard !Task.isCancelled else { return }
+
+            // The sync coordinators all return quickly from start() — they
+            // spawn their own loops. Keep them serialized so we don't spam
+            // TDLib in the same instant, but each only takes a few ms to
+            // arm itself.
             logger.info("Startup pipeline starting recent sync")
             await RecentSyncCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting major chat coverage")
             await MajorChatCoverageCoordinator.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
-            logger.info("Startup pipeline starting graph build")
-            await GraphBuilder.shared.buildIfNeeded(using: telegramService)
-            guard !Task.isCancelled else { return }
             logger.info("Startup pipeline starting index scheduler")
             await IndexScheduler.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
+
+            // Task extraction used to be the LAST thing in the chain — gated
+            // behind the full graph build, which on a fresh install can take
+            // many minutes. Move it here so the Tasks page populates roughly
+            // in step with reply queue. TaskIndexCoordinator.start() spawns
+            // its own loop and returns immediately.
+            logger.info("Startup pipeline starting task index")
             let includeBotsInAISearch = UserDefaults.standard.bool(
                 forKey: AppConstants.Preferences.includeBotsInAISearchKey
             )
@@ -221,6 +244,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 aiService: aiService,
                 includeBotsInAISearch: includeBotsInAISearch
             )
+
+            // GraphBuilder.buildIfNeeded actually awaits the full graph
+            // build to complete (writes nodes incrementally as it goes).
+            // Run it as a detached loop so it doesn't block any of the
+            // above — the People page picks up the new nodes as they land.
+            //
+            // The loop re-evaluates every couple of minutes because TDLib
+            // streams the chat list in over time. If we only ran the build
+            // once at startup, any chats that arrived after the first pass
+            // would never be added to the graph.
+            logger.info("Startup pipeline kicking off graph build (background)")
+            Task.detached { [telegramService] in
+                while !Task.isCancelled {
+                    await GraphBuilder.shared.buildIfNeeded(using: telegramService)
+                    if Task.isCancelled { return }
+                    try? await Task.sleep(for: .seconds(120))
+                }
+            }
         }
     }
 
@@ -301,6 +342,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func beginTerminationCleanup(onComplete: (() -> Void)? = nil) {
         terminationCleanupStarted = true
+        if let backgroundActivityToken {
+            ProcessInfo.processInfo.endActivity(backgroundActivityToken)
+            self.backgroundActivityToken = nil
+        }
         hotkeyManager?.unregister()
         graphBuildTask?.cancel()
         TaskIndexCoordinator.shared.stop()

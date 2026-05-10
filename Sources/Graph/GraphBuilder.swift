@@ -1,8 +1,14 @@
 import Foundation
 import GRDB
+import OSLog
 
 actor GraphBuilder {
     static let shared = GraphBuilder()
+
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
+        category: "GraphBuilder"
+    )
 
     struct DebugCountRow: Sendable, Identifiable, Equatable {
         let id: String
@@ -210,7 +216,10 @@ actor GraphBuilder {
                 .sorted { $0.id < $1.id }
         }
 
-        guard let currentUser else { return }
+        guard let currentUser else {
+            logger.warning("performBuild: no current user, bailing")
+            return
+        }
 
         await upsertSelfNode(currentUser)
 
@@ -219,27 +228,37 @@ actor GraphBuilder {
         let initialProcessed: Int
         let totalForProgress: Int
 
+        // Resolve which chats still need a node, regardless of any persisted
+        // dropFirst-style cursor. The previous cursor approach broke whenever
+        // the TDLib chat list shrank or hadn't loaded yet on cold start —
+        // dropFirst(processedCount) of the current visibleChats produced an
+        // empty slice, the build returned, and the People page sat frozen
+        // because no chats were ever evaluated.
+        let missingChats = await filterChatsMissingCoreNode(visibleChats)
+
         if forceFullScan {
             chatsToProcess = visibleChats
             initialProcessed = 0
             totalForProgress = visibleChats.count
-            print("[GraphBuilder] Refreshing graph across \(visibleChats.count) chats")
-        } else if let progress, progress.processedCount < progress.totalCount, progress.totalCount > 0 {
-            let safeProcessedCount = min(progress.processedCount, visibleChats.count)
-            chatsToProcess = Array(visibleChats.dropFirst(safeProcessedCount))
-            initialProcessed = safeProcessedCount
-            totalForProgress = visibleChats.count
-            print("[GraphBuilder] Resuming graph build at chat \(safeProcessedCount + 1) of \(visibleChats.count)")
+            logger.info("performBuild: forceFullScan over \(visibleChats.count, privacy: .public) chats")
+        } else if missingChats.isEmpty {
+            logger.info("performBuild: graph already covers all \(visibleChats.count, privacy: .public) visible chats; nothing to do")
+            // Keep progress aligned with reality so the diagnostics tile
+            // doesn't keep showing stale "X of Y" counts.
+            await saveProgressState(processedCount: visibleChats.count, totalCount: visibleChats.count)
+            return
         } else {
-            let missingChats = await filterChatsMissingCoreNode(visibleChats)
-            guard !missingChats.isEmpty else {
-                print("[GraphBuilder] Graph build already complete")
-                return
-            }
             chatsToProcess = missingChats
-            initialProcessed = 0
-            totalForProgress = missingChats.count
-            print("[GraphBuilder] Starting graph build for \(missingChats.count) chats")
+            // Anything covered counts as already processed for the UI.
+            initialProcessed = max(0, visibleChats.count - missingChats.count)
+            totalForProgress = visibleChats.count
+            if let progress {
+                logger.info(
+                    "performBuild: \(missingChats.count, privacy: .public) chats missing of \(visibleChats.count, privacy: .public) (prev cursor was \(progress.processedCount, privacy: .public)/\(progress.totalCount, privacy: .public))"
+                )
+            } else {
+                logger.info("performBuild: starting build for \(missingChats.count, privacy: .public) of \(visibleChats.count, privacy: .public) chats")
+            }
         }
 
         await saveProgressState(processedCount: initialProcessed, totalCount: totalForProgress)
@@ -250,7 +269,11 @@ actor GraphBuilder {
                 processedCount: initialProcessed + offset + 1,
                 totalCount: totalForProgress
             )
+            if (offset + 1) % 25 == 0 {
+                logger.info("performBuild: processed \(initialProcessed + offset + 1, privacy: .public) / \(totalForProgress, privacy: .public)")
+            }
         }
+        logger.info("performBuild: finished, processed \(chatsToProcess.count, privacy: .public) chats")
 
         await applyInitialScores(currentUser: currentUser, chats: visibleChats)
         await saveProgressState(processedCount: totalForProgress, totalCount: totalForProgress)

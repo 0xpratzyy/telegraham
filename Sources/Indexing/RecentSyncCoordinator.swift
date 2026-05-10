@@ -1,5 +1,14 @@
 import Foundation
 
+extension Foundation.Notification.Name {
+    /// Posted by RecentSyncCoordinator after a sync batch successfully
+    /// pulled NEW messages into the local SQLite store. Listeners
+    /// (TaskIndex, GraphBuilder, etc.) use this to schedule their own
+    /// refreshes without polling. `userInfo["chatIds"]` is `[Int64]`,
+    /// `userInfo["messageCount"]` is the count from this batch.
+    static let pidgyMessagesUpdatedLocally = Foundation.Notification.Name("pidgyMessagesUpdatedLocally")
+}
+
 actor RecentSyncCoordinator {
     static let shared = RecentSyncCoordinator()
 
@@ -315,6 +324,18 @@ actor RecentSyncCoordinator {
                 if let mostRecent = refreshedOutcomes.max(by: { $0.messageCount < $1.messageCount }) {
                     lastSyncedChat = mostRecent.chatTitle
                 }
+
+                // Tell downstream consumers (TaskIndex, etc.) that fresh
+                // messages just landed locally. They debounce on their end
+                // — we just fire-and-forget per batch.
+                NotificationCenter.default.post(
+                    name: .pidgyMessagesUpdatedLocally,
+                    object: nil,
+                    userInfo: [
+                        "chatIds": refreshedOutcomes.map(\.chatId),
+                        "messageCount": refreshedMessageCount
+                    ]
+                )
             }
 
             for outcome in batchOutcomes where outcome.refreshed {
