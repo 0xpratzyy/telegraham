@@ -215,10 +215,30 @@ enum AppConstants {
 
         enum Summary {
             static let localChatLimit = 12
-            static let supportingResultLimit = 8
+            /// How many candidate chats can ENTER the summary candidate
+            /// pool. Bumped from 8 — for broad "catch me up on X" queries
+            /// the answer often spans 6-10 chats and the previous cap meant
+            /// half of them were silently excluded before the multi-chat
+            /// fan-out even saw them.
+            static let supportingResultLimit = 14
             static let summaryMessageLimit = 18
             static let fallbackSnippetLimit = 3
-            static let multiChatCandidateLimit = 3
+            /// Cap on the number of chats that contribute to the AI digest.
+            /// Higher than supporting candidates so we can include a wider
+            /// sweep when scores are close together.
+            static let multiChatCandidateLimit = 6
+            /// How many ranked messages to pull from each chat in a multi-chat
+            /// digest. Per-chat budget instead of one flat top-6 — keeps every
+            /// participating chat represented in the AI input.
+            static let perChatDigestMessageLimit = 5
+            /// Score gap below the focus chat that still qualifies for inclusion
+            /// in the multi-chat digest. Tight default for sharp queries.
+            static let multiChatScoreDelta = 4.0
+            /// Looser threshold for "catch me up" / "key takeaways" / "what
+            /// happened" style queries — the user has explicitly asked for a
+            /// broad sweep, so we let more chats through even when their
+            /// scores are further from the focus.
+            static let multiChatScoreDeltaCatchUp = 7.5
             static let implicitRecentRecapLookbackDays = 7
             static let implicitRecentRecapBestHitBonus = 1.2
             static let implicitRecentRecapChatActivityBonus = 0.8

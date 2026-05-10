@@ -15,8 +15,37 @@ enum SummaryPrompt {
     """
 
     static func userMessage(snippets: [MessageSnippet]) -> String {
-        let formatted = snippets.map { "[\($0.relativeTimestamp)] \($0.senderFirstName): \($0.text)" }
-            .joined(separator: "\n")
-        return "Recent messages:\n\(formatted)"
+        // Preserve chat order — first appearance wins. Grouping per-chat is
+        // important once we send multi-chat digests: without it the AI
+        // sees a flat stream of "Akhil: ..." with no clue which message
+        // came from which conversation.
+        var chatOrder: [Int64] = []
+        var snippetsByChat: [Int64: [MessageSnippet]] = [:]
+        for snippet in snippets {
+            if snippetsByChat[snippet.chatId] == nil {
+                chatOrder.append(snippet.chatId)
+                snippetsByChat[snippet.chatId] = []
+            }
+            snippetsByChat[snippet.chatId]?.append(snippet)
+        }
+
+        if chatOrder.count <= 1 {
+            let formatted = snippets.map { "[\($0.relativeTimestamp)] \($0.senderFirstName): \($0.text)" }
+                .joined(separator: "\n")
+            return "Recent messages:\n\(formatted)"
+        }
+
+        var sections: [String] = []
+        for chatId in chatOrder {
+            guard let chatSnippets = snippetsByChat[chatId],
+                  let first = chatSnippets.first
+            else { continue }
+            var section = "=== Chat: \(first.chatName) ===\n"
+            section += chatSnippets
+                .map { "[\($0.relativeTimestamp)] \($0.senderFirstName): \($0.text)" }
+                .joined(separator: "\n")
+            sections.append(section)
+        }
+        return "Recent messages across \(chatOrder.count) chats:\n\n" + sections.joined(separator: "\n\n")
     }
 }

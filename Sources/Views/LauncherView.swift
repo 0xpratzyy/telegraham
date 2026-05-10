@@ -1371,10 +1371,18 @@ struct LauncherView: View {
                 .font(Font.Pidgy.bodyMd)
                 .foregroundStyle(Color.Pidgy.fg1)
 
-            Text(output.summaryText)
-                .font(Font.Pidgy.bodySm)
-                .foregroundStyle(Color.Pidgy.fg2)
-                .fixedSize(horizontal: false, vertical: true)
+            // The AI returns per-chat sections as `**Chat name** — recap.`
+            // separated by blank lines. Build one Text per paragraph so
+            // `**bold**` parses to actual bold and so the spacing between
+            // chats reads as visual breaks rather than wrapped prose.
+            ForEach(summaryParagraphs(in: output.summaryText), id: \.self) { paragraph in
+                Text(LocalizedStringKey(paragraph))
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.fg2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineSpacing(2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
@@ -1382,6 +1390,18 @@ struct LauncherView: View {
             RoundedRectangle(cornerRadius: 10)
                 .fill(Color.Pidgy.bg3)
         )
+    }
+
+    /// Splits the AI's summary into per-chat paragraphs so each renders as
+    /// its own block (with proper bold-name parsing). Falls back to the raw
+    /// string when there are no blank-line separators (older outputs or
+    /// short fallbacks).
+    private func summaryParagraphs(in text: String) -> [String] {
+        let parts = text
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? [text] : parts
     }
 
     private func summaryOnlyStateView(_ output: SummarySearchOutput) -> some View {

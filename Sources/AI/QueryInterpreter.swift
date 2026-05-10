@@ -180,10 +180,23 @@ final class QueryInterpreter: QueryInterpreting {
         }
 
         let summarySignals = [
+            // Explicit "summarize this" requests
             "summarize", "summary", "summarise", "recap",
+            // Decision / outcome questions
             "what did we decide", "what happened", "what did i discuss",
-            "what have we discussed", "latest context", "catch me up",
-            "key takeaways", "takeaways from", "recent context"
+            "what have we discussed", "decided about", "agreed on",
+            // Catch-up / context requests
+            "latest context", "catch me up", "key takeaways", "takeaways from",
+            "recent context", "give me context", "bring me up to speed",
+            // Status / progress questions — these used to fall through to
+            // topic search (semantic find) and silently miss the summary
+            // engine. "X status" / "any update on X" / "where are we on X"
+            // are exactly the queries a BD operator types — they want a
+            // synthesized recap across every chat where the topic landed,
+            // not just a list of matching messages.
+            "status", "any update", "any updates", "where are we",
+            "where do we stand", "where things stand", "where things are",
+            "any progress", "how is it going", "how's it going"
         ]
         let summaryPatterns = [
             #"\bwhat did we discuss(?: about)?\b"#,
@@ -191,7 +204,13 @@ final class QueryInterpreter: QueryInterpreting {
             #"\bwhat did i and .+ discuss\b"#,
             #"\bwhat(?:'s| is) the latest with\b"#,
             #"\bwhat(?:'s| is) the recent context from\b"#,
-            #"\bwhat (?:have|has) .+ been talking about lately\b"#
+            #"\bwhat (?:have|has) .+ been talking about lately\b"#,
+            // "X status" / "X update" / "X situation" — single-word noun
+            // phrasing that operators use casually. The pattern requires
+            // the keyword at the END so we don't catch random mid-sentence
+            // mentions ("share the status link" should NOT trigger summary).
+            #"\b(?:status|update|updates|situation|standing)\s*[?.!]?$"#,
+            #"\b(?:plan|plans|next steps?|next move)\s*[?.!]?$"#
         ]
         if containsAny(summarySignals, in: normalized) || regexMatchesAny(summaryPatterns, in: normalized) {
             return .summary

@@ -68,23 +68,29 @@ final class SummaryEngine {
         let retrievalQuery = queryContext.retrievalQuery.isEmpty ? querySpec.rawQuery : queryContext.retrievalQuery
         let effectiveTimeRange = focusTimeRange(explicitTimeRange: querySpec.timeRange, queryContext: queryContext)
 
-        let ftsHits = await telegramService.localScoredSearch(
+        // Parallelize the three independent local searches — they all run
+        // against SQLite and don't share any state, so the previous serial
+        // awaits were just leaving wall time on the floor.
+        async let ftsHitsTask = telegramService.localScoredSearch(
             query: retrievalQuery,
             chatIds: scopedChatIds,
             limit: constants.ftsTopMessages
         )
-        let vectorHits = await telegramService.localVectorSearch(
+        async let vectorHitsTask = telegramService.localVectorSearch(
             query: retrievalQuery,
             chatIds: scopedChatIds,
             limit: constants.vectorTopMessages
         )
-        let senderFallbackHits = await scopedSenderFallbackHits(
+        async let senderFallbackTask = scopedSenderFallbackHits(
             queryContext: queryContext,
             scopedChatIds: scopedChatIds,
             timeRange: effectiveTimeRange,
             fallbackLimit: constants.fallbackTopMessages,
             chatsById: chatById
         )
+        let ftsHits = await ftsHitsTask
+        let vectorHits = await vectorHitsTask
+        let senderFallbackHits = await senderFallbackTask
 
         let merged = applyTimeRange(
             merge(ftsHits: ftsHits, vectorHits: vectorHits, fallbackHits: senderFallbackHits),
@@ -102,23 +108,27 @@ final class SummaryEngine {
             }
 
           let supportingCandidates = Array(candidates.prefix(AppConstants.Search.Summary.supportingResultLimit))
-          let supportingResults = supportingCandidates.enumerated().map { index, candidate in
+          // Preliminary chips for the no-summary early-return paths below —
+          // these use each candidate's raw best-search-hit. Once we actually
+          // build a summary, the chips are rebuilt from the per-chat digest
+          // so each chip's snippet matches what the AI actually saw.
+          let preliminaryResults = supportingCandidates.enumerated().map { index, candidate in
               SemanticSearchResult(
                   chatId: candidate.chat.id,
                   chatTitle: candidate.chat.title,
-                reason: index == 0 ? "Best local summary context" : "Supporting local context",
-                relevance: index == 0 ? .high : .medium,
-                matchingMessages: [candidate.bestSnippet]
-            )
-        }
+                  reason: index == 0 ? "Best local summary context" : "Supporting local context",
+                  relevance: index == 0 ? .high : .medium,
+                  matchingMessages: [candidate.bestSnippet]
+              )
+          }
 
           guard let focus = supportingCandidates.first,
                 focus.score >= minimumFocusScore(for: queryContext) else {
-              return SearchExecution(output: nil, results: supportingResults)
+              return SearchExecution(output: nil, results: preliminaryResults)
           }
 
           if queryContext.requiresJointAnchor && focus.jointAnchorHits == 0 {
-              return SearchExecution(output: nil, results: supportingResults)
+              return SearchExecution(output: nil, results: preliminaryResults)
           }
 
         let summaryCandidates = summaryCandidates(
@@ -126,15 +136,20 @@ final class SummaryEngine {
             focus: focus,
             queryContext: queryContext
         )
-        let summaryMessages = await loadSummaryMessages(
+        // Per-chat digest — every participating chat gets its own slice of
+        // top-ranked messages instead of being squashed into one global top-6
+        // (which used to let a single noisy chat crowd everything else out).
+        let perChatDigest = await loadPerChatDigest(
             for: summaryCandidates,
-            timeRange: effectiveTimeRange
+            timeRange: effectiveTimeRange,
+            queryContext: queryContext,
+            anchorMessage: summaryCandidates.count == 1 ? focus.bestMessage : nil
         )
-        let boundedMessages = boundedSummaryMessages(
-            from: summaryMessages,
-            anchorMessage: summaryCandidates.count == 1 ? focus.bestMessage : nil,
-            queryContext: queryContext
-        )
+        // Flatten preserving chat grouping (chat A's messages, then chat B's,
+        // etc). SummaryPrompt.userMessage groups them under "=== Chat: name ==="
+        // headers so the AI knows which message came from where.
+        let boundedMessages = perChatDigest.flatMap { $0.messages }
+
         let summaryScopeDescription = summaryScopeDescription(
             from: summaryCandidates,
             queryContext: queryContext
@@ -153,6 +168,22 @@ final class SummaryEngine {
             queryContext: queryContext
         )
 
+        // Rebuild the chips from the per-chat digest so each chip's snippet
+        // matches the actual top message the AI saw for that chat — not the
+        // raw FTS best-hit (which can be a different line in the same chat
+        // and confuses users when the summary references something the chip
+        // doesn't show).
+        let supportingResults = perChatDigest.enumerated().map { index, digest in
+            SemanticSearchResult(
+                chatId: digest.candidate.chat.id,
+                chatTitle: digest.candidate.chat.title,
+                reason: index == 0 ? "Best local summary context" : "Supporting local context",
+                relevance: index == 0 ? .high : .medium,
+                matchingMessages: [snippet(from: (digest.topRankedMessage ?? digest.candidate.bestMessage)?.displayText
+                                          ?? digest.candidate.bestSnippet)]
+            )
+        }
+
         let output = SummarySearchOutput(
             summaryText: summaryText,
             title: summaryTitle(for: querySpec.rawQuery, scopeLabel: summaryScopeLabel),
@@ -161,6 +192,57 @@ final class SummaryEngine {
         )
 
         return SearchExecution(output: output, results: supportingResults)
+    }
+
+    private struct PerChatDigest {
+        let candidate: Candidate
+        /// Messages sent to the AI for this chat, in chronological order.
+        let messages: [TGMessage]
+        /// The single message with the highest support score for this chat.
+        /// Used as the supporting-chip preview so the chip text reflects
+        /// the same line that drove the AI's view of this chat (instead of
+        /// the raw FTS best-hit, which can be a totally different line).
+        let topRankedMessage: TGMessage?
+    }
+
+    /// For each candidate chat, load nearby messages and pick the top-ranked
+    /// `perChatDigestMessageLimit` of them in chronological order. Returns
+    /// chats in candidate-score order (focus first, then near-focus).
+    private func loadPerChatDigest(
+        for candidates: [Candidate],
+        timeRange: TimeRangeConstraint?,
+        queryContext: QueryContext,
+        anchorMessage: TGMessage?
+    ) async -> [PerChatDigest] {
+        let perChatLimit = AppConstants.Search.Summary.perChatDigestMessageLimit
+        var digests: [PerChatDigest] = []
+        for (index, candidate) in candidates.enumerated() {
+            // Only the focus chat (index 0) gets the anchor-window expansion;
+            // for the rest we just want a clean recent slice ranked against
+            // the query.
+            let messages = await loadSummaryMessages(
+                for: candidate.chat,
+                anchorMessage: index == 0 ? anchorMessage : nil,
+                timeRange: timeRange
+            )
+            let ranked = rankedSupportMessages(messages, queryContext: queryContext)
+            let preferredRanked: [TGMessage]
+            if queryContext.prefersImplicitRecentWindow {
+                let substantiveOnly = ranked.filter(hasSubstantiveBodyText)
+                preferredRanked = substantiveOnly.isEmpty ? ranked : substantiveOnly
+            } else {
+                preferredRanked = ranked
+            }
+            let pickedRanked = Array(preferredRanked.prefix(perChatLimit))
+            let chronological = pickedRanked.sorted { $0.date < $1.date }
+            guard !chronological.isEmpty else { continue }
+            digests.append(PerChatDigest(
+                candidate: candidate,
+                messages: chronological,
+                topRankedMessage: pickedRanked.first
+            ))
+        }
+        return digests
     }
 
     private func merge(
@@ -234,23 +316,39 @@ final class SummaryEngine {
 
         for hit in hits {
             guard let chat = chatsById[hit.message.chatId] else { continue }
-            let baseScore =
+            // Down-weight chats that are obviously automated (Telegram
+            // service notifications at chat 777000, bot account chats whose
+            // names end with "Bot", etc.). Otherwise a single login or
+            // verification message containing the keyword can become the
+            // focus chat and drown out the real human conversations.
+            let automatedPenalty: Double = isLikelyAutomatedChat(chat) ? 0.4 : 1.0
+            let baseScore = (
                 (hit.ftsScore * AppConstants.AI.SemanticSearch.ftsWeight) +
                 (hit.vectorScore * AppConstants.AI.SemanticSearch.vectorWeight) +
                 (chat.chatType.isPrivate ? 0.08 : 0)
+            ) * automatedPenalty
 
             let normalizedText = normalize(searchableText(for: hit.message))
             let normalizedSender = normalize(hit.message.senderName ?? "")
             let normalizedTitle = normalize(chat.title)
+            // Pidgy users often spell contact names playfully — "Deeeeeksha"
+            // for Deeksha, "Akhilll" for Akhil, etc. The strict substring
+            // check fails on those because "deeksha" isn't actually inside
+            // "deeeeksha". Collapse repeating letters so people-name anchors
+            // survive that kind of variation.
+            let collapsedSender = collapseRepeatedLetters(normalizedSender)
+            let collapsedTitle = collapseRepeatedLetters(normalizedTitle)
             let matchedQueryTerms = Set(queryContext.queryTerms.filter { normalizedText.contains($0) })
             let matchedScopedTerms = Set(queryContext.scopedTerms.filter {
                 normalizedText.contains($0) || normalizedTitle.contains($0)
             })
-            let matchedSenderAnchorTerms = Set(queryContext.senderFallbackTerms.filter {
-                normalizedSender.contains($0)
+            let matchedSenderAnchorTerms = Set(queryContext.senderFallbackTerms.filter { term in
+                let collapsedTerm = collapseRepeatedLetters(term)
+                return normalizedSender.contains(term) || collapsedSender.contains(collapsedTerm)
             })
-            let matchedTitleAnchorTerms = Set(queryContext.senderFallbackTerms.filter {
-                normalizedTitle.contains($0)
+            let matchedTitleAnchorTerms = Set(queryContext.senderFallbackTerms.filter { term in
+                let collapsedTerm = collapseRepeatedLetters(term)
+                return normalizedTitle.contains(term) || collapsedTitle.contains(collapsedTerm)
             })
             let matchedTopicTerms = Set(queryContext.topicTerms.filter {
                 normalizedText.contains($0) || normalizedTitle.contains($0)
@@ -513,6 +611,24 @@ final class SummaryEngine {
         return min(1, max(0, score / maxScore))
     }
 
+    /// Collapses runs of the same letter into one ("deeeeksha" -> "deksha",
+    /// "akhilll" -> "akhil"). Used as a cheap fuzzy-match for people-name
+    /// anchors so playful spellings still align with the canonical name
+    /// the user typed in their query.
+    private func collapseRepeatedLetters(_ text: String) -> String {
+        guard !text.isEmpty else { return text }
+        var result = ""
+        result.reserveCapacity(text.count)
+        var lastChar: Character? = nil
+        for char in text {
+            if char != lastChar {
+                result.append(char)
+                lastChar = char
+            }
+        }
+        return result
+    }
+
     private func normalize(_ text: String) -> String {
         text
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -669,25 +785,53 @@ final class SummaryEngine {
         focus: Candidate,
         queryContext: QueryContext
     ) -> [Candidate] {
-        guard !queryContext.senderFallbackTerms.isEmpty else {
-            return [focus]
-        }
+        // Always include the focus chat. Then walk the remaining candidates
+        // (already sorted by score) and include any whose score is within
+        // `multiChatScoreDelta` of the focus, up to `multiChatCandidateLimit`.
+        // This works for ANY query — the previous version only fanned out
+        // when the user mentioned a person by name, so topic queries like
+        // "what did we decide about Vietnam invoicing" silently got squashed
+        // to one chat even when 3+ chats had real signal.
+        let limit = AppConstants.Search.Summary.multiChatCandidateLimit
+        // "catch me up", "key takeaways", "what happened" — user explicitly
+        // asked for a sweep, so be more inclusive than the default delta.
+        let scoreDelta = queryContext.cluePhrases.isEmpty
+            ? AppConstants.Search.Summary.multiChatScoreDelta
+            : AppConstants.Search.Summary.multiChatScoreDeltaCatchUp
+        let threshold = focus.score - scoreDelta
 
-        let anchoredCandidates = candidates.filter { $0.personAnchorHits > 0 }
-        guard anchoredCandidates.count > 1 else {
-            return [focus]
-        }
+        // For catch-up queries ("catch me up", "key takeaways", etc.) the
+        // user has explicitly asked for a broad sweep — trust the score
+        // threshold and skip the strict person/topic anchor filters that
+        // would otherwise drop chats where the name only appears in body
+        // text or as a partial match.
+        let isCatchUpMode = !queryContext.cluePhrases.isEmpty
 
-        if queryContext.topicTerms.isEmpty {
-            return Array(anchoredCandidates.prefix(AppConstants.Search.Summary.multiChatCandidateLimit))
-        }
+        var selected: [Candidate] = [focus]
+        for candidate in candidates {
+            if candidate.chat.id == focus.chat.id { continue }
+            guard selected.count < limit else { break }
+            guard candidate.score >= threshold else { break }
 
-        let threshold = focus.score - 2.4
-        let selected = anchoredCandidates
-            .filter { $0.score >= threshold }
-            .prefix(AppConstants.Search.Summary.multiChatCandidateLimit)
-        let summaryCandidates = Array(selected)
-        return summaryCandidates.isEmpty ? [focus] : summaryCandidates
+            if !isCatchUpMode {
+                // Person-scoped queries keep their stricter rule: a near-focus
+                // candidate must actually contain the person's name. Otherwise
+                // a high-scoring chat about a different topic could sneak in.
+                if !queryContext.senderFallbackTerms.isEmpty,
+                   candidate.personAnchorHits == 0 {
+                    continue
+                }
+                // Topic-anchored queries (person AND topic both in the query)
+                // expect each near-focus chat to contain at least one matching
+                // topic term. Pure topic queries skip this check — score is
+                // enough.
+                if queryContext.requiresJointAnchor, candidate.jointAnchorHits == 0 {
+                    continue
+                }
+            }
+            selected.append(candidate)
+        }
+        return selected
     }
 
     private func summaryScopeDescription(
@@ -847,6 +991,27 @@ final class SummaryEngine {
         [message.senderName, message.displayText]
             .compactMap { $0 }
             .joined(separator: " ")
+    }
+
+    /// Best-effort detection of automated chats (bots, Telegram service
+    /// notifications, etc.) that shouldn't dominate summary scoring. Real
+    /// bot detection requires a TelegramService roundtrip to fetch user
+    /// metadata; here we use cheap title heuristics and a hardcoded id for
+    /// the well-known Telegram service chat.
+    private func isLikelyAutomatedChat(_ chat: TGChat) -> Bool {
+        // Telegram's own service-notifications chat (the "Telegram" entry
+        // that sends login codes, device alerts, etc.).
+        if chat.id == 777_000 { return true }
+
+        let normalizedTitle = chat.title.lowercased()
+        // Account names ending in "bot" — Telegram convention for bots.
+        if normalizedTitle.hasSuffix("bot") || normalizedTitle.hasSuffix(" bot") {
+            return true
+        }
+        // Chats explicitly named "Telegram" without further context — the
+        // app's own service chat surfaces that way for some accounts.
+        if normalizedTitle == "telegram" { return true }
+        return false
     }
 
     private func hasSubstantiveBodyText(_ message: TGMessage) -> Bool {
