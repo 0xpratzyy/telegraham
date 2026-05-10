@@ -124,10 +124,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                guard let self else { return }
                 UserDefaults.standard.removeObject(
                     forKey: AppConstants.Preferences.didCompleteOnboardingKey
                 )
-                self?.presentOnboardingIfNeeded(force: true)
+                // Drop the dashboard window so the user really lands on a
+                // "first run" surface — otherwise the empty dashboard sits
+                // behind the modal and looks broken.
+                self.dashboardWindow?.orderOut(nil)
+                self.presentOnboardingIfNeeded(force: true)
             }
         }
 

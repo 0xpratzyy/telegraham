@@ -29,6 +29,7 @@ struct DashboardPreferencesPage: View {
     @State private var routingSnapshots: [QueryRoutingDebugSnapshot] = []
     @State private var isLoadingRoutingDebug = false
     @State private var showDeleteConfirmation = false
+    @State private var isResetting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -98,13 +99,13 @@ struct DashboardPreferencesPage: View {
                 )
             }
         }
-        .alert("Delete all local data?", isPresented: $showDeleteConfirmation) {
+        .alert("Reset all local data?", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("Delete", role: .destructive) {
+            Button("Reset", role: .destructive) {
                 Task { await deleteAllData() }
             }
         } message: {
-            Text("This removes TDLib data, cached messages, AI usage, credentials, and your Telegram session. You will need to connect again.")
+            Text("This clears TDLib data, cached messages, AI usage, credentials, and your Telegram session. You'll be taken back to the welcome screen and can sign in again.")
         }
     }
 
@@ -844,13 +845,13 @@ struct DashboardPreferencesPage: View {
 
                 // Tinted warning panel — danger color at 4% bg + 18% border.
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("What gets deleted")
+                    Text("What gets reset")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(Color.Pidgy.fg1)
                     (
                         Text("TDLib data, SQLite cache, AI usage, saved providers, credentials, and all local dashboard state. ")
                             .foregroundColor(Color.Pidgy.fg3)
-                        + Text("Telegram cloud data is not deleted.")
+                        + Text("Telegram cloud data is not affected.")
                             .foregroundColor(Color.Pidgy.fg2)
                     )
                     .font(.system(size: 12))
@@ -886,16 +887,29 @@ struct DashboardPreferencesPage: View {
 
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Delete all local data")
+                        Text("Reset all local data")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(Color.Pidgy.fg1)
-                        Text("You will need to authenticate again")
+                        Text(isResetting
+                             ? "Stopping background work and clearing local files…"
+                             : "You'll go back to the welcome screen and sign in again")
                             .font(.system(size: 11.5))
                             .foregroundStyle(Color.Pidgy.fg3)
                     }
                     Spacer(minLength: 12)
-                    PrefGhostButton(title: "Delete", systemImage: "trash", tone: .danger) {
-                        showDeleteConfirmation = true
+                    if isResetting {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(Color.Pidgy.danger)
+                            Text("Resetting…")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.Pidgy.fg2)
+                        }
+                    } else {
+                        PrefGhostButton(title: "Reset", systemImage: "arrow.counterclockwise", tone: .danger) {
+                            showDeleteConfirmation = true
+                        }
                     }
                 }
                 .padding(.top, 16)
@@ -1165,6 +1179,10 @@ struct DashboardPreferencesPage: View {
 
     @MainActor
     private func deleteAllData() async {
+        guard !isResetting else { return }
+        isResetting = true
+        defer { isResetting = false }
+
         await PreferencesResetService().deleteAllLocalData(
             telegramService: telegramService,
             aiService: aiService
@@ -1179,7 +1197,12 @@ struct DashboardPreferencesPage: View {
         usageOverview = .empty
         graphDebugSummary = .empty
         routingSnapshots = []
-        setTelegramStatus(.success("Deleted"))
+        setTelegramStatus(.success("Reset complete"))
+
+        // Send the user back to the welcome screen — exactly like a fresh
+        // install. AppDelegate listens for this and (re)opens the onboarding
+        // window after closing the dashboard.
+        NotificationCenter.default.post(name: .pidgyReplayOnboarding, object: nil)
     }
 
     @MainActor

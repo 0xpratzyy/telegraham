@@ -174,6 +174,7 @@ struct PreferencesResetService {
         telegramService: TelegramService,
         aiService: AIService
     ) async {
+        // Synchronous, fast: keychain + UserDefaults clears.
         for key in PreferencesResetPlan.credentialKeysToDelete {
             try? KeychainManager.delete(for: key)
         }
@@ -183,17 +184,30 @@ struct PreferencesResetService {
 
         let pidgyDataDir = PreferencesResetPlan.defaultPidgyDataDirectory(fileManager: fileManager)
 
+        // Stop everything independently in parallel — each `stop()` waits on
+        // its own queue / TDLib roundtrip, and they don't depend on each
+        // other. Doing them serially used to add multiple seconds of
+        // perceived delay before the file removal could even start.
         TaskIndexCoordinator.shared.stop()
-        await RecentSyncCoordinator.shared.stop()
-        await MajorChatCoverageCoordinator.shared.stop()
-        await IndexScheduler.shared.stop()
+        async let recentStop: Void = RecentSyncCoordinator.shared.stop()
+        async let coverageStop: Void = MajorChatCoverageCoordinator.shared.stop()
+        async let scheduleStop: Void = IndexScheduler.shared.stop()
+        async let cacheInvalidate: Void = MessageCacheService.shared.invalidateAllLocalData()
+        async let usageInvalidate: Void = AIUsageStore.shared.invalidateAll()
+        _ = await (recentStop, coverageStop, scheduleStop, cacheInvalidate, usageInvalidate)
+
+        // Close TDLib + the SQLite handle BEFORE removing the data dir, so
+        // the OS isn't trying to delete files that are still open.
         telegramService.stop()
-        await MessageCacheService.shared.invalidateAllLocalData()
-        await AIUsageStore.shared.invalidateAll()
         await DatabaseManager.shared.close()
 
+        // The TDLib database can be hundreds of MB. Hop the recursive
+        // remove off the main actor so the SwiftUI alert can dismiss and
+        // the progress UI stays responsive while the disk does its thing.
         if let pidgyDataDir {
-            try? fileManager.removeItem(at: pidgyDataDir)
+            await Task.detached(priority: .userInitiated) {
+                try? FileManager.default.removeItem(at: pidgyDataDir)
+            }.value
         }
 
         telegramService.authState = .uninitialized
