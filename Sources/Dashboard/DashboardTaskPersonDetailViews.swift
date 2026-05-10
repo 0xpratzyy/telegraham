@@ -9,6 +9,15 @@ struct DashboardTaskDetail: View {
     let onOpenChat: (Int64) -> Void
     let onClose: () -> Void
 
+    @State private var conversationContext: [DatabaseManager.MessageRecord] = []
+    @State private var isLoadingContext = false
+
+    /// Hard cap on the merged Evidence list (source snippets + nearby
+    /// chat context). The trigger snippet alone is often opaque, but five
+    /// messages is enough to read the surrounding ask without turning the
+    /// section into a full chat transcript.
+    private static let maxEvidenceRows = 5
+
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
             if let task {
@@ -69,16 +78,22 @@ struct DashboardTaskDetail: View {
                         .lineSpacing(3)
                 }
 
-                DashboardDetailSection(title: "Evidence", trailing: "\(evidence.count) snippet\(evidence.count == 1 ? "" : "s")") {
-                    VStack(spacing: 8) {
-                        if evidence.isEmpty {
-                            Text("No source snippets were stored for this task.")
+                let merged = mergedEvidenceItems()
+                DashboardDetailSection(
+                    title: "Evidence",
+                    trailing: evidenceTrailing(for: merged)
+                ) {
+                    VStack(spacing: 6) {
+                        if merged.isEmpty {
+                            Text(isLoadingContext
+                                 ? "Loading nearby messages…"
+                                 : "No source snippets were stored for this task.")
                                 .font(PidgyDashboardTheme.detailBodyFont)
                                 .foregroundStyle(PidgyDashboardTheme.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
-                            ForEach(evidence, id: \.self) { source in
-                                DashboardEvidenceRow(source: source)
+                            ForEach(merged) { item in
+                                DashboardEvidenceContextRow(item: item)
                             }
                         }
                     }
@@ -117,12 +132,164 @@ struct DashboardTaskDetail: View {
             }
         }
         .foregroundStyle(PidgyDashboardTheme.primary)
+        .task(id: task?.id) {
+            await loadConversationContext()
+        }
     }
 
     private func displayPerson(for task: DashboardTask) -> String {
         task.personName.isEmpty ? task.ownerName : task.personName
     }
+
+    private func loadConversationContext() async {
+        guard let chatId = task?.chatId else {
+            conversationContext = []
+            return
+        }
+        isLoadingContext = true
+        defer { isLoadingContext = false }
+        // Pull a few extra so after deduping against source snippets we
+        // still have enough non-source rows to fill the merged list.
+        let recent = await DatabaseManager.shared.loadMessages(
+            chatId: chatId,
+            limit: Self.maxEvidenceRows + 4
+        )
+        conversationContext = recent.sorted { $0.date < $1.date }
+    }
+
+    /// Combines source snippets (always shown) with a few surrounding chat
+    /// messages, sorted chronologically and capped at `maxEvidenceRows`.
+    /// Source snippets get priority — if there are 5 of them, no extra
+    /// context is added; if there's 1, we fill the rest with the most
+    /// recent context messages.
+    private func mergedEvidenceItems() -> [EvidenceContextItem] {
+        let sourceItems = evidence.map { source in
+            EvidenceContextItem(
+                id: source.messageId,
+                date: source.date,
+                senderName: source.senderName,
+                isOutgoing: false,
+                text: source.text,
+                isSource: true
+            )
+        }
+
+        let evidenceIds = Set(evidence.map(\.messageId))
+        let contextItems = conversationContext
+            .filter { !evidenceIds.contains($0.id) }
+            .map { record in
+                EvidenceContextItem(
+                    id: record.id,
+                    date: record.date,
+                    senderName: record.isOutgoing
+                        ? "You"
+                        : (record.senderName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                           ? (record.senderName ?? "")
+                           : "Unknown"),
+                    isOutgoing: record.isOutgoing,
+                    text: nonEmptyDisplayText(for: record),
+                    isSource: false
+                )
+            }
+
+        let cap = Self.maxEvidenceRows
+        let sourceCapped = Array(sourceItems.prefix(cap))
+        let remaining = max(0, cap - sourceCapped.count)
+        // Take the most recent context messages so the user sees the
+        // freshest surrounding conversation.
+        let contextTrailing = Array(contextItems.suffix(remaining))
+
+        return (sourceCapped + contextTrailing).sorted { $0.date < $1.date }
+    }
+
+    private func nonEmptyDisplayText(for record: DatabaseManager.MessageRecord) -> String {
+        let trimmed = record.textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty { return trimmed }
+        if let media = record.mediaTypeRaw, !media.isEmpty {
+            return "[\(media)]"
+        }
+        return "[empty]"
+    }
+
+    private func evidenceTrailing(for merged: [EvidenceContextItem]) -> String {
+        let sourceCount = evidence.count
+        let contextCount = merged.count - merged.filter(\.isSource).count
+        if sourceCount == 0 && contextCount == 0 {
+            return isLoadingContext ? "loading…" : "no snippets"
+        }
+        if contextCount == 0 {
+            return "\(sourceCount) snippet\(sourceCount == 1 ? "" : "s")"
+        }
+        return "\(sourceCount) source · \(contextCount) context"
+    }
 }
+
+private struct EvidenceContextItem: Identifiable, Equatable {
+    let id: Int64
+    let date: Date
+    let senderName: String
+    let isOutgoing: Bool
+    let text: String
+    let isSource: Bool
+}
+
+private struct DashboardEvidenceContextRow: View {
+    let item: EvidenceContextItem
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            // Left gutter — bright on the source message that drove
+            // extraction, faint on surrounding context messages.
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(item.isSource ? PidgyDashboardTheme.brand : Color.Pidgy.border2)
+                .frame(width: 2)
+                .frame(maxHeight: .infinity)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(item.senderName)
+                        .font(PidgyDashboardTheme.metadataMediumFont)
+                        .foregroundStyle(item.isOutgoing
+                            ? PidgyDashboardTheme.brand
+                            : PidgyDashboardTheme.primary)
+                    Text(DateFormatting.compactRelativeTime(from: item.date))
+                        .font(PidgyDashboardTheme.monoCaptionFont)
+                        .foregroundStyle(PidgyDashboardTheme.tertiary)
+                    if item.isSource {
+                        Text("source")
+                            .font(.system(size: 9, weight: .semibold))
+                            .tracking(0.6)
+                            .textCase(.uppercase)
+                            .foregroundStyle(PidgyDashboardTheme.brand)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .stroke(PidgyDashboardTheme.brand.opacity(0.4), lineWidth: 1)
+                            )
+                    }
+                    Spacer()
+                }
+                Text(item.text)
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(item.isSource
+                        ? PidgyDashboardTheme.primary
+                        : PidgyDashboardTheme.secondary)
+                    .lineSpacing(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(item.isSource
+                      ? PidgyDashboardTheme.brand.opacity(0.06)
+                      : Color.clear)
+        )
+    }
+}
+
 
 struct DashboardPersonDetail: View {
     @EnvironmentObject private var telegramService: TelegramService

@@ -490,10 +490,22 @@ enum DashboardTaskListFilters {
             ownerFilter: .mine,
             currentUser: currentUser
         )
+        let anyoneCount = count(
+            tasks,
+            status: nil,
+            ownerFilter: .all,
+            currentUser: currentUser
+        )
 
         var seen: Set<String> = []
+        // "For me" → just user-owned tasks. "Anyone" → everyone Pidgy
+        // extracted, including tasks assigned to other named people in
+        // your chats (Akhil, Priyanshu, etc.). Surfacing both keeps the
+        // page calm by default while giving a single-tap escape hatch
+        // to see the full team-accountability view.
         var chips: [DashboardTaskOwnerOption] = [
-            DashboardTaskOwnerOption(filter: .mine, label: "For me", count: mineCount)
+            DashboardTaskOwnerOption(filter: .mine, label: "For me", count: mineCount),
+            DashboardTaskOwnerOption(filter: .all, label: "Anyone", count: anyoneCount)
         ]
 
         for rawName in pinnedNames {
