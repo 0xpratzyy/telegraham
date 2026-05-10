@@ -45,6 +45,12 @@ struct DashboardView: View {
                     accountName: telegramService.currentUser?.displayName ?? "You",
                     canLogOut: telegramService.currentUser != nil,
                     onAddTopic: { isAddingTopic = true },
+                    onRemoveTopic: { topicId in
+                        Task {
+                            await taskIndex.removeTopic(id: topicId)
+                            await rebuildSidebarTopicItems()
+                        }
+                    },
                     onOpenPreferences: { navigation.selectedPage = .preferences },
                     onRefresh: refreshDashboard,
                     onLogOut: {
@@ -101,6 +107,31 @@ struct DashboardView: View {
                 includeBotsInAISearch: includeBotsInAISearch
             )
             await peopleLoad
+        }
+        .task {
+            // Poll the relation graph while it's still being built so the
+            // People page (and the "+" picker on the Tasks chip strip)
+            // populates in step with the initial sync. Once the count
+            // settles for ~30 s, stop polling — anything later goes through
+            // the manual Refresh in Preferences or the next launch.
+            var lastCount = 0
+            var stableTicks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(4))
+                if Task.isCancelled { return }
+                let snapshotCountBefore = allContacts.count
+                await loadPeople()
+                let snapshotCountAfter = allContacts.count
+
+                if snapshotCountAfter == lastCount {
+                    stableTicks += 1
+                    if stableTicks >= 8 { return }   // ~32 s steady → stop
+                } else {
+                    stableTicks = 0
+                    lastCount = snapshotCountAfter
+                }
+                _ = snapshotCountBefore
+            }
         }
         .task(id: sidebarTopicRefreshKey) {
             await rebuildSidebarTopicItems()
@@ -636,6 +667,7 @@ struct DashboardSidebar: View {
     let accountName: String
     let canLogOut: Bool
     let onAddTopic: () -> Void
+    let onRemoveTopic: (Int64) -> Void
     let onOpenPreferences: () -> Void
     let onRefresh: () -> Void
     let onLogOut: () -> Void
@@ -807,6 +839,13 @@ struct DashboardSidebar: View {
                             )
                             .contentShape(Rectangle())
                             .animation(PidgyMotion.easeOutFast, value: isTopicSelected(item))
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    onRemoveTopic(item.id)
+                                } label: {
+                                    Label("Remove from sidebar", systemImage: "minus.circle")
+                                }
+                            }
                         }
                         .buttonStyle(.plain)
                     }

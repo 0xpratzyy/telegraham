@@ -1387,6 +1387,24 @@ actor DatabaseManager {
         }
     }
 
+    /// Hard-deletes a dashboard topic. The Tasks page's per-task topic
+    /// label survives because tasks store the topic name (not id), but
+    /// the sidebar entry disappears and won't be re-discovered until the
+    /// user explicitly runs topic discovery again.
+    func deleteDashboardTopic(id: Int64) async {
+        guard let pool = await ensureDatabase() else { return }
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: "DELETE FROM dashboard_topics WHERE id = ?",
+                    arguments: [id]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to delete dashboard topic \(id): \(error)")
+        }
+    }
+
     func upsertDashboardTasks(_ candidates: [DashboardTaskCandidate]) async -> [DashboardTask] {
         let normalized = candidates.filter {
             !$0.stableFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2017,35 +2035,25 @@ actor DatabaseManager {
         return rows.map(dashboardTopic(from:))
     }
 
+    /// Looks up the topic id for a name passed in by an extracted task.
+    /// Topics are now exclusively user-curated (via the sidebar "+" sheet)
+    /// — task extraction can still TAG a task with whatever topic name
+    /// the AI infers, but the row's `topic_id` foreign key only resolves
+    /// when the user has explicitly created that topic. Previously this
+    /// helper auto-inserted any name the AI mentioned, which is exactly
+    /// what was silently re-adding "Akhil B" / "First Dollar" / etc.
+    /// after the explicit topic-discovery pass was disabled.
     private static func ensureDashboardTopic(named rawName: String?, in db: Database) throws -> Int64? {
         guard let name = rawName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !name.isEmpty,
               name.lowercased() != "uncategorized" else {
             return nil
         }
-
-        if let existingId = try Int64.fetchOne(
+        return try Int64.fetchOne(
             db,
             sql: "SELECT id FROM dashboard_topics WHERE name = ? COLLATE NOCASE",
             arguments: [name]
-        ) {
-            return existingId
-        }
-
-        let now = Date().timeIntervalSince1970
-        try db.execute(
-            sql: """
-                INSERT INTO dashboard_topics (name, rationale, score, rank, created_at, updated_at)
-                VALUES (?, '', 0, ?, ?, ?)
-                """,
-            arguments: [
-                name,
-                AppConstants.Dashboard.maxTopicCount + 100,
-                now,
-                now
-            ]
         )
-        return db.lastInsertedRowID
     }
 
     private static func dashboardTopic(from row: Row) -> DashboardTopic {
