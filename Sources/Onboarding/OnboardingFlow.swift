@@ -21,9 +21,17 @@ import TDLibKit
 
 extension Foundation.Notification.Name {
     /// Posted when the user wants to replay the onboarding flow (Preferences →
-    /// About → Replay onboarding). The AppDelegate observes and reopens the
-    /// onboarding window.
+    /// About → Replay onboarding) or right after a Reset. The AppDelegate
+    /// observes, clears the completion flag, and reopens the onboarding
+    /// window from the welcome step.
     static let pidgyReplayOnboarding = Foundation.Notification.Name("pidgyReplayOnboarding")
+
+    /// Posted when something in the dashboard or launcher needs the
+    /// onboarding window brought forward without resetting its progress
+    /// (e.g. the launcher panel's "Open welcome window" button when the
+    /// user is mid-flow). AppDelegate observes and either reopens the
+    /// window if it was closed, or brings the existing one to focus.
+    static let pidgyShowOnboardingWindow = Foundation.Notification.Name("pidgyShowOnboardingWindow")
 }
 
 // MARK: - Onboarding window controller
@@ -52,7 +60,13 @@ final class OnboardingWindowController {
         let view = OnboardingFlow(
             telegramService: telegramService,
             aiService: aiService,
-            onClose: { [weak self] in self?.close() }
+            // markCompleted differentiates "user reached Done" (set the
+            // flag, never bother them again) from "user dismissed midway"
+            // (don't set the flag — the modal pops up again next launch
+            // until they actually finish setup).
+            onClose: { [weak self] markCompleted in
+                self?.close(markCompleted: markCompleted)
+            }
         )
         let hosting = NSHostingView(rootView: view)
         let newWindow = NSWindow(
@@ -83,10 +97,12 @@ final class OnboardingWindowController {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func close() {
+    func close(markCompleted: Bool) {
         window?.orderOut(nil)
         window = nil
-        UserDefaults.standard.set(true, forKey: AppConstants.Preferences.didCompleteOnboardingKey)
+        if markCompleted {
+            UserDefaults.standard.set(true, forKey: AppConstants.Preferences.didCompleteOnboardingKey)
+        }
         onComplete()
     }
 }
@@ -94,21 +110,40 @@ final class OnboardingWindowController {
 // MARK: - Root flow view
 
 private enum OnboardingStep: Int, CaseIterable {
-    case welcome, tour, connect, qr, done
+    case welcome, tour, connect, qr, phone, code, password, done
 
-    var index: Int { rawValue }
-    static var totalForProgress: Int { OnboardingStep.allCases.count - 1 }
+    /// Position used for the top progress strip. Phone / code / password
+    /// share the QR slot since they're alternative paths through the same
+    /// "auth in progress" milestone — no point making the bar bounce
+    /// backwards if a tester switches between QR and phone login.
+    var progressIndex: Int {
+        switch self {
+        case .welcome: return 0
+        case .tour: return 1
+        case .connect: return 2
+        case .qr, .phone, .code, .password: return 3
+        case .done: return 4
+        }
+    }
+
+    static var totalProgressSlots: Int { 4 }
 }
 
 struct OnboardingFlow: View {
     @ObservedObject var telegramService: TelegramService
     @ObservedObject var aiService: AIService
-    let onClose: () -> Void
+    /// Closes the onboarding window. Pass `true` only when the user has
+    /// actually finished setup (auth ready + tapped Open Pidgy on Done).
+    let onClose: (_ markCompleted: Bool) -> Void
 
     @State private var step: OnboardingStep = .welcome
     @State private var qrLink: String?
     @State private var isStartingQR = false
     @State private var errorMessage: String?
+    @State private var phoneNumber: String = ""
+    @State private var verificationCode: String = ""
+    @State private var twoFactorPassword: String = ""
+    @State private var isSubmitting = false
 
     var body: some View {
         ZStack {
@@ -156,7 +191,33 @@ struct OnboardingFlow: View {
                                 isStarting: isStartingQR,
                                 errorMessage: errorMessage,
                                 onBack: { advance(to: .connect) },
-                                onUsePhone: { Task { await switchToPhoneAuth() } }
+                                onUsePhone: { advance(to: .phone) }
+                            )
+                        case .phone:
+                            PhoneStep(
+                                phoneNumber: $phoneNumber,
+                                errorMessage: errorMessage,
+                                isSubmitting: isSubmitting,
+                                onBack: { advance(to: .qr) },
+                                onSubmit: { Task { await submitPhoneNumber() } }
+                            )
+                        case .code:
+                            CodeStep(
+                                phoneNumber: phoneNumber,
+                                code: $verificationCode,
+                                errorMessage: errorMessage,
+                                isSubmitting: isSubmitting,
+                                onBack: { advance(to: .phone) },
+                                onSubmit: { Task { await submitVerificationCode() } }
+                            )
+                        case .password:
+                            PasswordStep(
+                                password: $twoFactorPassword,
+                                hint: telegramService.authState.twoFactorPasswordHint,
+                                errorMessage: errorMessage,
+                                isSubmitting: isSubmitting,
+                                onBack: { advance(to: .code) },
+                                onSubmit: { Task { await submitPassword() } }
                             )
                         case .done:
                             DoneStep(onFinish: completeOnboarding)
@@ -207,7 +268,7 @@ struct OnboardingFlow: View {
     }
 
     private func progressFillWidth(total: CGFloat) -> CGFloat {
-        let pct = CGFloat(step.index) / CGFloat(OnboardingStep.totalForProgress)
+        let pct = CGFloat(step.progressIndex) / CGFloat(OnboardingStep.totalProgressSlots)
         return total * pct
     }
 
@@ -216,15 +277,18 @@ struct OnboardingFlow: View {
     }
 
     private func skipFlow() {
-        // Skip leaves onboarding without auth completion. The AppDelegate's
-        // existing AuthView path will pick up wherever the user is in the
-        // state machine.
-        UserDefaults.standard.set(true, forKey: AppConstants.Preferences.didCompleteOnboardingKey)
-        onClose()
+        // Closing without finishing setup leaves the completion flag unset
+        // so the modal reopens on the next launch — Telegram still isn't
+        // connected, the launcher panel can't do anything useful, the user
+        // would just be in the wrong place. Better to nudge them back.
+        onClose(false)
     }
 
     private func completeOnboarding() {
-        onClose()
+        // Reaching Done is the only path that marks the user as fully
+        // onboarded. Anything else (skip / system close / app crash) keeps
+        // the modal in rotation.
+        onClose(true)
     }
 
     private func beginTelegramAuth() async {
@@ -278,24 +342,105 @@ struct OnboardingFlow: View {
         }
     }
 
-    private func switchToPhoneAuth() async {
-        // Phone fallback isn't part of the design's onboarding flow but we
-        // keep the option for testers whose Telegram clients can't scan a QR.
-        // Skip onboarding wrapper and let AuthView take over — it has the
-        // full phone/code/password chain.
-        UserDefaults.standard.set(true, forKey: AppConstants.Preferences.didCompleteOnboardingKey)
-        onClose()
-    }
-
     private func handleAuthStateChange(_ newState: AuthState) {
         switch newState {
         case .waitingForQrCode(let link):
             qrLink = link
+            // Only auto-jump to QR if the user is on Connect / hasn't already
+            // chosen the phone path — otherwise switching to phone-login would
+            // get yanked back when TDLib re-issues a QR link in the
+            // background.
             if step == .connect { advance(to: .qr) }
+        case .waitingForCode:
+            errorMessage = nil
+            if step == .phone { advance(to: .code) }
+        case .waitingForPassword:
+            errorMessage = nil
+            if step == .code { advance(to: .password) }
         case .ready:
             advance(to: .done)
         default:
             break
+        }
+    }
+
+    // MARK: - Phone-login submit handlers
+
+    private func submitPhoneNumber() async {
+        let trimmed = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = "Phone number is required."
+            return
+        }
+        errorMessage = nil
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        // Connect step starts TDLib if needed; the phone path skips Connect,
+        // so make sure the service is running here too.
+        await ensureTelegramServiceRunning()
+
+        do {
+            try await telegramService.setPhoneNumber(trimmed)
+            // handleAuthStateChange will move us to .code when TDLib responds.
+        } catch {
+            errorMessage = Self.extractErrorMessage(error)
+        }
+    }
+
+    private func submitVerificationCode() async {
+        let trimmed = verificationCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = "Code is required."
+            return
+        }
+        errorMessage = nil
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        do {
+            try await telegramService.submitVerificationCode(trimmed)
+            // → handleAuthStateChange routes to .password (2FA) or .done.
+        } catch {
+            errorMessage = Self.extractErrorMessage(error)
+        }
+    }
+
+    private func submitPassword() async {
+        guard !twoFactorPassword.isEmpty else {
+            errorMessage = "Password is required."
+            return
+        }
+        errorMessage = nil
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        do {
+            try await telegramService.submitPassword(twoFactorPassword)
+            // → handleAuthStateChange routes to .done on .ready.
+        } catch {
+            errorMessage = Self.extractErrorMessage(error)
+        }
+    }
+
+    private func ensureTelegramServiceRunning() async {
+        guard telegramService.authState == .uninitialized || telegramService.authState == .closed else {
+            return
+        }
+        if let bundledId = BundledSecrets.telegramApiId,
+           let bundledHash = BundledSecrets.telegramApiHash {
+            telegramService.start(apiId: Int(bundledId), apiHash: bundledHash)
+        } else if let storedIdRaw = (try? KeychainManager.retrieve(for: .apiId)),
+                  let storedId = Int(storedIdRaw),
+                  let storedHash = (try? KeychainManager.retrieve(for: .apiHash)) {
+            telegramService.start(apiId: storedId, apiHash: storedHash)
+        }
+        // Wait briefly for TDLib to reach a state where it accepts auth
+        // input. setPhoneNumber on .uninitialized would fail.
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            if case .waitingForPhoneNumber = telegramService.authState { break }
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
     }
 
@@ -1278,6 +1423,7 @@ private struct BrandSVGGlyph: View {
 private struct OnboardingPrimaryButton: View {
     let title: String
     let trailingChevron: Bool
+    var isDisabled: Bool = false
     let action: () -> Void
 
     @State private var hovering = false
@@ -1292,15 +1438,288 @@ private struct OnboardingPrimaryButton: View {
                         .font(.system(size: 12, weight: .semibold))
                 }
             }
-            .foregroundStyle(Color.Pidgy.bg1)
+            .foregroundStyle(isDisabled ? Color.Pidgy.fg3 : Color.Pidgy.bg1)
             .padding(.horizontal, 22)
             .padding(.vertical, 12)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.Pidgy.fg1.opacity(hovering ? 0.9 : 1))
+                    .fill(isDisabled ? Color.Pidgy.bg3 : Color.Pidgy.fg1.opacity(hovering ? 0.9 : 1))
             )
         }
         .buttonStyle(.plain)
+        .disabled(isDisabled)
         .onHover { hovering = $0 }
+    }
+}
+
+// MARK: - Auth state convenience
+
+private extension AuthState {
+    /// Pulls the optional 2FA hint out of `.waitingForPassword(hint:)`.
+    /// Returns nil for any other state — the password step degrades to
+    /// just the input field if no hint is set on the account.
+    var twoFactorPasswordHint: String? {
+        if case .waitingForPassword(let hint) = self { return hint }
+        return nil
+    }
+}
+
+// MARK: - Phone-login step
+
+private struct PhoneStep: View {
+    @Binding var phoneNumber: String
+    let errorMessage: String?
+    let isSubmitting: Bool
+    let onBack: () -> Void
+    let onSubmit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Telegram")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(1.32)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.Pidgy.accentFg)
+
+            Text("Sign in with phone number")
+                .font(.custom("Newsreader", size: 30).weight(.medium))
+                .tracking(-0.6)
+                .foregroundStyle(Color.Pidgy.fg1)
+                .padding(.top, 8)
+
+            Text("Telegram will text you a 5-digit code. Use international format with the country code.")
+                .font(.system(size: 13.5))
+                .foregroundStyle(Color.Pidgy.fg3)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .padding(.top, 14)
+                .frame(maxWidth: 380)
+
+            OnboardingTextField(
+                title: "Phone number",
+                placeholder: "+1 555 123 4567",
+                text: $phoneNumber
+            )
+            .padding(.top, 26)
+            .frame(maxWidth: 320)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.Pidgy.danger)
+                    .padding(.top, 12)
+            }
+
+            HStack(spacing: 12) {
+                Button(action: onBack) {
+                    Text("← Back to QR")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                }
+                .buttonStyle(.plain)
+
+                OnboardingPrimaryButton(
+                    title: isSubmitting ? "Sending…" : "Send code",
+                    trailingChevron: !isSubmitting,
+                    isDisabled: isSubmitting,
+                    action: onSubmit
+                )
+            }
+            .padding(.top, 28)
+        }
+        .frame(maxWidth: 480)
+    }
+}
+
+// MARK: - Verification code step
+
+private struct CodeStep: View {
+    let phoneNumber: String
+    @Binding var code: String
+    let errorMessage: String?
+    let isSubmitting: Bool
+    let onBack: () -> Void
+    let onSubmit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Telegram")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(1.32)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.Pidgy.accentFg)
+
+            Text("Enter the code")
+                .font(.custom("Newsreader", size: 30).weight(.medium))
+                .tracking(-0.6)
+                .foregroundStyle(Color.Pidgy.fg1)
+                .padding(.top, 8)
+
+            (
+                Text("We sent a 5-digit code to ")
+                    .foregroundColor(Color.Pidgy.fg3)
+                + Text(phoneNumber.isEmpty ? "your phone" : phoneNumber)
+                    .foregroundColor(Color.Pidgy.fg1)
+                    .fontWeight(.medium)
+                + Text(". Open Telegram on the device that received it if it doesn't auto-fill.")
+                    .foregroundColor(Color.Pidgy.fg3)
+            )
+            .font(.system(size: 13.5))
+            .multilineTextAlignment(.center)
+            .lineSpacing(3)
+            .padding(.top, 14)
+            .frame(maxWidth: 400)
+
+            OnboardingTextField(
+                title: "Verification code",
+                placeholder: "12345",
+                text: $code
+            )
+            .padding(.top, 26)
+            .frame(maxWidth: 240)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.Pidgy.danger)
+                    .padding(.top, 12)
+            }
+
+            HStack(spacing: 12) {
+                Button(action: onBack) {
+                    Text("← Back")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                }
+                .buttonStyle(.plain)
+
+                OnboardingPrimaryButton(
+                    title: isSubmitting ? "Verifying…" : "Verify",
+                    trailingChevron: !isSubmitting,
+                    isDisabled: isSubmitting,
+                    action: onSubmit
+                )
+            }
+            .padding(.top, 28)
+        }
+        .frame(maxWidth: 480)
+    }
+}
+
+// MARK: - 2FA password step
+
+private struct PasswordStep: View {
+    @Binding var password: String
+    let hint: String?
+    let errorMessage: String?
+    let isSubmitting: Bool
+    let onBack: () -> Void
+    let onSubmit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Telegram")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(1.32)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.Pidgy.accentFg)
+
+            Text("Two-factor password")
+                .font(.custom("Newsreader", size: 30).weight(.medium))
+                .tracking(-0.6)
+                .foregroundStyle(Color.Pidgy.fg1)
+                .padding(.top, 8)
+
+            Text("Your account has 2FA on. Enter the cloud password you set in Telegram → Privacy → Two-Step Verification.")
+                .font(.system(size: 13.5))
+                .foregroundStyle(Color.Pidgy.fg3)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .padding(.top, 14)
+                .frame(maxWidth: 400)
+
+            if let hint, !hint.isEmpty {
+                Text("Hint: \(hint)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.Pidgy.fg2)
+                    .padding(.top, 8)
+            }
+
+            OnboardingTextField(
+                title: "Password",
+                placeholder: "Your 2FA password",
+                text: $password,
+                isSecure: true
+            )
+            .padding(.top, 24)
+            .frame(maxWidth: 320)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.Pidgy.danger)
+                    .padding(.top, 12)
+            }
+
+            HStack(spacing: 12) {
+                Button(action: onBack) {
+                    Text("← Back")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                }
+                .buttonStyle(.plain)
+
+                OnboardingPrimaryButton(
+                    title: isSubmitting ? "Verifying…" : "Sign in",
+                    trailingChevron: !isSubmitting,
+                    isDisabled: isSubmitting,
+                    action: onSubmit
+                )
+            }
+            .padding(.top, 28)
+        }
+        .frame(maxWidth: 480)
+    }
+}
+
+// MARK: - Shared text field for the auth steps
+
+private struct OnboardingTextField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    var isSecure: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: PidgySpace.s1) {
+            Text(title)
+                .font(Font.Pidgy.eyebrow)
+                .tracking(0.8)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.Pidgy.fg3)
+
+            Group {
+                if isSecure {
+                    SecureField(placeholder, text: $text)
+                } else {
+                    TextField(placeholder, text: $text)
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(Font.Pidgy.body)
+            .padding(PidgySpace.s3)
+            .background(Color.Pidgy.bg3)
+            .cornerRadius(PidgyRadius.sm)
+            .overlay(
+                RoundedRectangle(cornerRadius: PidgyRadius.sm, style: .continuous)
+                    .stroke(Color.Pidgy.border2, lineWidth: 1)
+            )
+        }
     }
 }

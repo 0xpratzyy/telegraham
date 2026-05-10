@@ -72,6 +72,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var graphBuildTask: Task<Void, Never>?
     private var preferencesOpenObserver: NSObjectProtocol?
     private var replayOnboardingObserver: NSObjectProtocol?
+    private var showOnboardingObserver: NSObjectProtocol?
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
@@ -133,6 +134,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 // behind the modal and looks broken.
                 self.dashboardWindow?.orderOut(nil)
                 self.presentOnboardingIfNeeded(force: true)
+            }
+        }
+
+        showOnboardingObserver = NotificationCenter.default.addObserver(
+            forName: .pidgyShowOnboardingWindow,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.presentOnboardingIfNeeded(force: true)
             }
         }
 
@@ -219,6 +230,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         if let replayOnboardingObserver {
             NotificationCenter.default.removeObserver(replayOnboardingObserver)
+        }
+        if let showOnboardingObserver {
+            NotificationCenter.default.removeObserver(showOnboardingObserver)
         }
     }
 

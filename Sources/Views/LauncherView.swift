@@ -230,7 +230,10 @@ struct LauncherView: View {
 
                 resultsList
             } else {
-                AuthView()
+                // Auth happens inside the dedicated OnboardingFlow window
+                // now — don't double up the QR / phone UI here. Send the
+                // user there so they see one consistent surface.
+                LauncherOnboardingHandoff()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1623,3 +1626,45 @@ enum LauncherChatPreviewResolver {
         return syntheticLabels.contains(normalized)
     }
 }
+
+// MARK: - Onboarding handoff
+
+/// Shown in the launcher panel when Telegram isn't authenticated yet.
+/// Onboarding is now done in a dedicated window (OnboardingWindowController),
+/// so the panel just nudges the user there instead of duplicating the QR /
+/// phone-login UI in two places.
+struct LauncherOnboardingHandoff: View {
+    var body: some View {
+        VStack(spacing: PidgySpace.s4) {
+            PidgyMascotMark(size: 56)
+            VStack(spacing: PidgySpace.s2) {
+                Text("Finish setting up Pidgy")
+                    .font(Font.Pidgy.h3)
+                    .foregroundStyle(Color.Pidgy.fg1)
+                Text("Connect Telegram in the welcome window to start using the launcher.")
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.fg3)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+            }
+            .padding(.horizontal, PidgySpace.s6)
+            Button {
+                NotificationCenter.default.post(name: .pidgyShowOnboardingWindow, object: nil)
+            } label: {
+                Text("Open welcome window")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(Color.Pidgy.bg1)
+                    .padding(.horizontal, PidgySpace.s5)
+                    .padding(.vertical, PidgySpace.s3)
+                    .background(
+                        RoundedRectangle(cornerRadius: PidgyRadius.md, style: .continuous)
+                            .fill(Color.Pidgy.fg1)
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(PidgySpace.s6)
+    }
+}
+
