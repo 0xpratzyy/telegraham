@@ -353,6 +353,59 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v13_strip_urls_in_fts") { db in
+            // Rebuild the FTS triggers to route every message body
+            // through `pidgy_strip_urls(...)` before indexing. The raw
+            // `text_content` column on `messages` is unchanged — only
+            // what FTS sees changes. Display, exports, and the embedding
+            // payload all continue to use the original text (the embed
+            // path strips URLs on its own).
+            //
+            // After the trigger swap, drop the existing FTS rows and
+            // re-insert them from messages with the stripper applied so
+            // historical data isn't stuck on the old noisy index.
+
+            try db.execute(sql: "DROP TRIGGER IF EXISTS messages_ai")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS messages_ad")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS messages_au")
+
+            try db.execute(sql: """
+                CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+                    INSERT INTO messages_fts(rowid, text_content)
+                    VALUES (new.rowid, pidgy_strip_urls(new.text_content));
+                END
+                """)
+
+            try db.execute(sql: """
+                CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts, rowid, text_content)
+                    VALUES ('delete', old.rowid, pidgy_strip_urls(old.text_content));
+                END
+                """)
+
+            try db.execute(sql: """
+                CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts, rowid, text_content)
+                    VALUES ('delete', old.rowid, pidgy_strip_urls(old.text_content));
+                    INSERT INTO messages_fts(rowid, text_content)
+                    VALUES (new.rowid, pidgy_strip_urls(new.text_content));
+                END
+                """)
+
+            // Reset and rebuild the index. `INSERT INTO messages_fts
+            // (messages_fts) VALUES ('delete-all')` clears all rows
+            // without touching the underlying messages table.
+            try db.execute(sql: """
+                INSERT INTO messages_fts(messages_fts) VALUES ('delete-all')
+                """)
+            try db.execute(sql: """
+                INSERT INTO messages_fts(rowid, text_content)
+                SELECT rowid, pidgy_strip_urls(text_content)
+                FROM messages
+                WHERE text_content IS NOT NULL
+                """)
+        }
+
         return migrator
     }
 }

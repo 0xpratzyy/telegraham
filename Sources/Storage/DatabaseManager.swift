@@ -9,6 +9,18 @@ actor DatabaseManager {
     static let shared = DatabaseManager()
     private static let manualDashboardTopicScore = 10_000.0
 
+    /// SQL bridge to `URLStripper.strip(_:)`. Registered on every DB
+    /// connection so FTS triggers can call it transparently from SQL —
+    /// see the `messages_fts` triggers updated in v13.
+    fileprivate static let stripURLsFunction = DatabaseFunction(
+        "pidgy_strip_urls",
+        argumentCount: 1,
+        pure: true
+    ) { dbValues in
+        guard let raw = String.fromDatabaseValue(dbValues[0]) else { return nil }
+        return URLStripper.strip(raw)
+    }
+
     struct MessageRecord: Sendable, Equatable {
         let id: Int64
         let chatId: Int64
@@ -174,6 +186,11 @@ actor DatabaseManager {
                 try db.execute(sql: "PRAGMA journal_mode = WAL")
                 try db.execute(sql: "PRAGMA synchronous = NORMAL")
                 try db.execute(sql: "PRAGMA foreign_keys = ON")
+                // Make Swift's URL stripper callable from SQL — the FTS
+                // sync triggers use it to skip URL substrings (which
+                // otherwise pollute multi-word search via `/status/`,
+                // `/update`, etc. paths inside shared tweets).
+                db.add(function: Self.stripURLsFunction)
             }
 
             let pool = try DatabasePool(path: databaseURL.path, configuration: configuration)

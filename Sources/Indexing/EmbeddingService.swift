@@ -26,7 +26,12 @@ actor EmbeddingService {
     }
 
     private func normalizedText(_ text: String) -> String {
-        text
+        // Strip URLs before embedding for the same reason FTS does:
+        // `https://x.com/.../status/123` ends up dominating the
+        // sentence embedding with vocabulary that has nothing to do
+        // with what the user actually wrote.
+        let stripped = URLStripper.strip(text)
+        return stripped
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
     }
