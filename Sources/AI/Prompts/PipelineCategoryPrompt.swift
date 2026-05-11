@@ -24,12 +24,25 @@ enum PipelineCategoryPrompt {
        - Else if any thread is on_them -> on_them
        - Else -> quiet
     4. Intended recipient rules:
-       - @mention or direct reply to [ME] -> directed at [ME]
-       - Direct reply to someone else -> not directed at [ME]
-       - DM open question -> directed at [ME]
-       - Small groups: untargeted operational questions may be on_me only if context strongly supports it.
+       - @mention or direct reply to [ME] -> directed at [ME].
+         An "@mention of [ME]" means the literal token @<my-username>
+         where <my-username> matches the username in "You are:". An
+         @mention of anyone else (including "cc @other_person") is NOT
+         directed at [ME] and is not on its own a reason to choose
+         on_me.
+       - Direct reply to someone else -> not directed at [ME].
+       - DM open question -> directed at [ME].
+       - Small groups: untargeted operational questions may be on_me
+         only if context strongly supports it.
        - Large groups: untargeted questions default quiet.
-    5. If ambiguous and more context would resolve it, request more context instead of guessing.
+    5. Observer chats: if the conversation window contains zero [ME]
+       messages AND the last open substantive message is not directly
+       addressed to [ME] (no @<my-username> mention, no reply to a
+       [ME] message), the user is an observer. Observer chats are
+       quiet with empty suggestedAction, even when the last message
+       is a substantive question to a third party.
+    6. If ambiguous and more context would resolve it, request more
+       context instead of guessing.
 
     Product boundary:
     - This pipeline powers Reply Queue only. on_me means the user owes a conversational reply, not outside-chat work.
