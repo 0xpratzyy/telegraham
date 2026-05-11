@@ -843,10 +843,11 @@ struct DashboardTopicsPage: View {
         }
         defer { isLoadingSemanticResults = false }
 
-        let ftsHits = await telegramService.localScoredSearch(
-            query: query,
+        let ftsHits = await runFTSVariantsFused(
+            rawQuery: query,
             chatIds: chatIds,
-            limit: 70
+            limit: 70,
+            telegramService: telegramService
         )
         guard !Task.isCancelled else { return }
 

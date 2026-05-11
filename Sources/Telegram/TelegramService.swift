@@ -330,11 +330,9 @@ class TelegramService: ObservableObject {
         return result.messages.compactMap { mapMessage($0) }
     }
 
-    func localSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [TGMessage] {
-        let records = await DatabaseManager.shared.localSearch(query: query, chatIds: chatIds, limit: limit)
-        return records.map { mapStoredMessage($0) }
-    }
-
+    /// Test-only seam — production callers now go through `runFTSVariants` /
+    /// `localFTSRawSearch`. Safe to delete once the `TestTelegramService`
+    /// mock in PidgyCoreTests is refactored to override the variant API.
     func localScoredSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
         let records = await DatabaseManager.shared.localSearchScored(query: query, chatIds: chatIds, limit: limit)
         return records.map { record in

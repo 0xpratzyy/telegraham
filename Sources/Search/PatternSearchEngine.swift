@@ -83,10 +83,11 @@ final class PatternSearchEngine {
         var candidateByKey: [String: CandidateScore] = [:]
 
         if !parsed.searchPhrase.isEmpty {
-            let ftsHits = await telegramService.localScoredSearch(
-                query: parsed.searchPhrase,
+            let ftsHits = await runFTSVariantsFused(
+                rawQuery: parsed.searchPhrase,
                 chatIds: scopedChatIds,
-                limit: AppConstants.Search.Pattern.ftsCandidateLimit
+                limit: AppConstants.Search.Pattern.ftsCandidateLimit,
+                telegramService: telegramService
             )
 
             for hit in applyTimeRange(ftsHits, timeRange: querySpec.timeRange) {

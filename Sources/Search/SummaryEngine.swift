@@ -139,10 +139,12 @@ final class SummaryEngine {
                 focus.score >= minimumFocusScore(for: queryContext) else {
               return SearchExecution(output: nil, results: preliminaryResults)
           }
-
-          if queryContext.requiresJointAnchor && focus.jointAnchorHits == 0 {
-              return SearchExecution(output: nil, results: preliminaryResults)
-          }
+          // (Joint-anchor matches used to be hard-required here — that
+          // dropped legitimate summaries whenever the person and topic
+          // tokens showed up in separate messages. Tier 1 graduated FTS
+          // makes that scenario common; the -2.2 score penalty in
+          // buildCandidates already discounts no-joint-anchor candidates,
+          // so passing the focus floor is sufficient.)
 
         let summaryCandidates = summaryCandidates(
             from: supportingCandidates,
@@ -770,7 +772,12 @@ final class SummaryEngine {
     }
 
     private func minimumFocusScore(for queryContext: QueryContext) -> Double {
-        queryContext.requiresJointAnchor ? 1.25 : 0.95
+        // Uniform floor — the joint-anchor bump (1.25) was load-bearing
+        // when AND-FTS was the only retriever and required both tokens
+        // to co-occur. With Tier 1 graduated FTS surfacing single-anchor
+        // matches, the bump shut summaries off entirely. The -2.2 penalty
+        // in buildCandidates is what now discounts those.
+        0.95
     }
 
     private func focusTimeRange(
@@ -832,13 +839,11 @@ final class SummaryEngine {
                    candidate.personAnchorHits == 0 {
                     continue
                 }
-                // Topic-anchored queries (person AND topic both in the query)
-                // expect each near-focus chat to contain at least one matching
-                // topic term. Pure topic queries skip this check — score is
-                // enough.
-                if queryContext.requiresJointAnchor, candidate.jointAnchorHits == 0 {
-                    continue
-                }
+                // (Joint-anchor was a hard drop here. Now soft — the
+                // -1.0 score penalty in buildCandidates already pushes
+                // candidates without a joint anchor below the focus
+                // unless they have strong independent FTS/vector signal,
+                // in which case they're worth including.)
             }
             selected.append(candidate)
         }

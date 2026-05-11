@@ -911,11 +911,6 @@ actor DatabaseManager {
         }
     }
 
-    func localSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [MessageRecord] {
-        let scored = await localSearchScored(query: query, chatIds: chatIds, limit: limit)
-        return scored.map(\.message)
-    }
-
     /// Run a pre-built FTS5 MATCH expression directly (no normalization).
     /// Use this when the caller wants to control query shape — e.g. to
     /// run graduated variants like `NEAR("a" "b", 5)` / `"a" OR "b"` /
@@ -985,6 +980,10 @@ actor DatabaseManager {
         }
     }
 
+    /// Single AND-of-quoted-tokens FTS query — superseded by `localSearchFTSRaw`
+    /// + `runFTSVariants`. Kept only because legacy tests mock through
+    /// `TelegramService.localScoredSearch`; safe to delete once those test
+    /// stubs are refactored to override the variant entry point instead.
     func localSearchScored(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [ScoredMessageRecord] {
         let ftsQuery = Self.normalizedFTSQuery(from: query)
         guard !ftsQuery.isEmpty else { return [] }

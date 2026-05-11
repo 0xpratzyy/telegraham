@@ -12,6 +12,9 @@ DerivedData/
 build/
 .build/
 
+# LLVM code-coverage artifacts (emitted at repo root on instrumented runs).
+*.profraw
+
 # SPM
 .swiftpm/
 Package.resolved
