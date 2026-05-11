@@ -13,6 +13,9 @@ packages:
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "7.0.0"
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa
+    from: "8.40.0"
 
 targets:
   Pidgy:
@@ -23,6 +26,8 @@ targets:
     dependencies:
       - package: TDLibKit
       - package: GRDB
+      - package: Sentry
+        product: Sentry
     configFiles:
       Debug: Config/BetaSecrets.xcconfig
       Release: Config/BetaSecrets.xcconfig
@@ -35,6 +40,7 @@ targets:
         PidgyBundledTelegramApiId: $(PIDGY_TG_API_ID)
         PidgyBundledTelegramApiHash: $(PIDGY_TG_API_HASH)
         PidgyBundledOpenAIApiKey: $(PIDGY_BUNDLED_OPENAI_API_KEY)
+        PidgyBundledSentryDsn: $(PIDGY_SENTRY_DSN)
         PidgyBuildCommitSHA: $(PIDGY_BUILD_COMMIT_SHA)
     postBuildScripts:
       - name: Stamp commit SHA into built Info.plist
@@ -49,6 +55,43 @@ targets:
           COMMIT_SHA=$(git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
           /usr/libexec/PlistBuddy -c "Set :PidgyBuildCommitSHA ${COMMIT_SHA}" "$BUILT_PLIST" 2>/dev/null \
             || /usr/libexec/PlistBuddy -c "Add :PidgyBuildCommitSHA string ${COMMIT_SHA}" "$BUILT_PLIST"
+      - name: Upload dSYMs to Sentry
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          # Skip silently when any Sentry value is empty. Source builds
+          # without telemetry credentials must still succeed end-to-end.
+          if [ -z "${PIDGY_SENTRY_AUTH_TOKEN:-}" ] \
+              || [ -z "${PIDGY_SENTRY_ORG:-}" ] \
+              || [ -z "${PIDGY_SENTRY_PROJECT:-}" ]; then
+            echo "note: Sentry dSYM upload skipped (auth_token/org/project unset)"
+            exit 0
+          fi
+          # Xcode build shells trim PATH aggressively, so probe common
+          # install locations (Homebrew + curl installer's default).
+          SENTRY_CLI=""
+          for candidate in /opt/homebrew/bin/sentry-cli /usr/local/bin/sentry-cli "$HOME/.local/bin/sentry-cli" "$(command -v sentry-cli 2>/dev/null || true)"; do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+              SENTRY_CLI="$candidate"
+              break
+            fi
+          done
+          if [ -z "$SENTRY_CLI" ]; then
+            echo "warning: sentry-cli not found — install via 'curl -sL https://sentry.io/get-cli/ | sh' or 'brew install getsentry/tools/sentry-cli'"
+            exit 0
+          fi
+          export SENTRY_AUTH_TOKEN="${PIDGY_SENTRY_AUTH_TOKEN}"
+          export SENTRY_ORG="${PIDGY_SENTRY_ORG}"
+          export SENTRY_PROJECT="${PIDGY_SENTRY_PROJECT}"
+          # Debug builds typically inline DWARF in the binary; release
+          # builds produce a separate .dSYM bundle. Point sentry-cli at
+          # the build dir and let it figure out which artifacts apply.
+          "$SENTRY_CLI" debug-files upload \
+            --include-sources \
+            "${DWARF_DSYM_FOLDER_PATH}" || \
+            "$SENTRY_CLI" debug-files upload \
+              --include-sources \
+              "${CONFIGURATION_BUILD_DIR}"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pidgy.app

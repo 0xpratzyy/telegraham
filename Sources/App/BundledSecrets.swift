@@ -27,6 +27,12 @@ enum BundledSecrets {
     /// include one — the AI Settings page falls back to BYO key.
     static let openAIApiKey: String? = stringValue(forKey: "PidgyBundledOpenAIApiKey")
 
+    /// Sentry DSN baked in for crash + error telemetry
+    /// (`PIDGY_SENTRY_DSN`). Returns nil when blank — `PidgyTelemetry.start`
+    /// then skips Sentry init entirely so source builds never make
+    /// outbound telemetry requests by accident.
+    static let sentryDsn: String? = stringValue(forKey: "PidgyBundledSentryDsn")
+
     /// Short git SHA of the build, stamped by a postBuildScript. Useful in
     /// the About page so a tester's bug report can be tied to a specific
     /// build.

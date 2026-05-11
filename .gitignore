@@ -28,6 +28,11 @@ Package.resolved
 .idea/
 .vscode/
 
+# Agent skill installs (per-contributor; install via `npx skills add ...`).
+.agents/
+.claude/skills/
+skills-lock.json
+
 # Beta credentials baked into the build via xcconfig — never check these in.
 Config/BetaSecrets.local.xcconfig
 

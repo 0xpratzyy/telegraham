@@ -87,6 +87,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Bring up telemetry first so any crash/error in subsequent
+        // startup (font registration, TDLib bring-up, panel manager,
+        // etc.) gets captured. Skipped automatically when no Sentry DSN
+        // is bundled — source builds make zero network calls.
+        PidgyTelemetry.start()
+
         PidgyFontRegistrar.registerBundledFonts()
 
         // macOS App Nap aggressively throttles tasks that sleep for tens of
