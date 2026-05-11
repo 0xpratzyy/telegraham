@@ -202,6 +202,24 @@ final class OpenAIProvider: AIProvider {
         return try DashboardTaskParser.parse(response)
     }
 
+    func extractPersonProfile(
+        personName: String,
+        messages: [MessageSnippet]
+    ) async throws -> String {
+        guard !messages.isEmpty else { return "" }
+        let response = try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: PersonProfilePrompt.systemPrompt,
+                userMessage: PersonProfilePrompt.userMessage(
+                    personName: personName,
+                    snippets: messages
+                ),
+                requestKind: .personProfile
+            )
+        }
+        return response.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func triageDashboardTaskCandidates(
         candidates: [DashboardTaskTriageCandidateDTO]
     ) async throws -> [DashboardTaskTriageResultDTO] {

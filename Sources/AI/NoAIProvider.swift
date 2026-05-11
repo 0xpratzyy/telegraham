@@ -68,6 +68,13 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
+    func extractPersonProfile(
+        personName: String,
+        messages: [MessageSnippet]
+    ) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
     func testConnection() async throws -> Bool {
         throw AIError.providerNotConfigured
     }

@@ -406,6 +406,29 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v14_person_profiles") { db in
+            // Compiled-truth profile per Telegram user. Filled lazily on
+            // first view in DashboardPersonDetail and refreshed when the
+            // observed message count has grown enough since the last
+            // extraction. `message_count_at_extraction` lets us decide
+            // when the cached profile is worth re-summarizing without
+            // firing an AI call on every message.
+            try db.execute(sql: """
+                CREATE TABLE person_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    summary TEXT NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    message_count_at_extraction INTEGER NOT NULL DEFAULT 0,
+                    last_extracted_at REAL NOT NULL
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_person_profiles_last_extracted
+                ON person_profiles(last_extracted_at DESC)
+                """)
+        }
+
         return migrator
     }
 }

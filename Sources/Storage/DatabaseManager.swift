@@ -1941,6 +1941,115 @@ actor DatabaseManager {
         return try await pool.write(updates)
     }
 
+    // MARK: - Person profiles
+
+    /// Cached compiled-truth profile for a Telegram user. Filled by
+    /// `PersonProfileService` on first view; refreshed when the
+    /// per-person message count has grown enough since the last extract.
+    struct PersonProfileRecord: Sendable, Equatable {
+        let userId: Int64
+        let summary: String
+        let version: Int
+        let messageCountAtExtraction: Int
+        let lastExtractedAt: Date
+    }
+
+    func loadPersonProfile(userId: Int64) async -> PersonProfileRecord? {
+        guard let pool = await ensureDatabase() else { return nil }
+        do {
+            return try await pool.read { db in
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT user_id, summary, version, message_count_at_extraction, last_extracted_at
+                        FROM person_profiles
+                        WHERE user_id = ?
+                        """,
+                    arguments: [userId]
+                ) else { return nil }
+                return Self.personProfileRecord(from: row)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load person profile for \(userId): \(error)")
+            return nil
+        }
+    }
+
+    func upsertPersonProfile(
+        userId: Int64,
+        summary: String,
+        messageCountAtExtraction: Int
+    ) async {
+        guard let pool = await ensureDatabase() else { return }
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO person_profiles
+                            (user_id, summary, version, message_count_at_extraction, last_extracted_at)
+                        VALUES (?, ?, 1, ?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            summary = excluded.summary,
+                            version = person_profiles.version + 1,
+                            message_count_at_extraction = excluded.message_count_at_extraction,
+                            last_extracted_at = excluded.last_extracted_at
+                        """,
+                    arguments: [
+                        userId,
+                        summary,
+                        messageCountAtExtraction,
+                        Date().timeIntervalSince1970
+                    ]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to upsert person profile for \(userId): \(error)")
+        }
+    }
+
+    /// Count of messages where this user is the sender (excludes outgoing
+    /// messages from the current user). Used to decide whether a cached
+    /// profile is stale enough to re-extract.
+    func messageCountForSender(userId: Int64) async -> Int {
+        guard let pool = await ensureDatabase() else { return 0 }
+        do {
+            return try await pool.read { db in
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM messages WHERE sender_user_id = ?",
+                    arguments: [userId]
+                ) ?? 0
+            }
+        } catch {
+            return 0
+        }
+    }
+
+    /// Recent messages where this user appears as the sender, across all
+    /// chats. Used as the source material for profile extraction.
+    func loadRecentMessages(fromSender userId: Int64, limit: Int = 50) async -> [MessageRecord] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        FROM messages
+                        WHERE sender_user_id = ?
+                        ORDER BY date DESC, id DESC
+                        LIMIT ?
+                        """,
+                    arguments: [userId, limit]
+                )
+                return rows.map { Self.messageRecord(from: $0) }
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load messages for sender \(userId): \(error)")
+            return []
+        }
+    }
+
     private func ensureDatabase() async -> DatabasePool? {
         if databasePool == nil {
             await initialize()
@@ -2509,5 +2618,16 @@ actor DatabaseManager {
         return tokens
             .map { "\"\($0)\"" }
             .joined(separator: " ")
+    }
+
+    private static func personProfileRecord(from row: Row) -> PersonProfileRecord {
+        let timestamp: Double = row["last_extracted_at"] ?? 0
+        return PersonProfileRecord(
+            userId: row["user_id"],
+            summary: row["summary"] ?? "",
+            version: row["version"] ?? 1,
+            messageCountAtExtraction: row["message_count_at_extraction"] ?? 0,
+            lastExtractedAt: Date(timeIntervalSince1970: timestamp)
+        )
     }
 }

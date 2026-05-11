@@ -10,6 +10,7 @@ enum AIRequestKind: String, Codable, CaseIterable {
     case dashboardTopicDiscovery
     case dashboardTaskTriage
     case dashboardTaskExtraction
+    case personProfile
     case summary
 
     var label: String {
@@ -32,6 +33,8 @@ enum AIRequestKind: String, Codable, CaseIterable {
             return "Dashboard Task Triage"
         case .dashboardTaskExtraction:
             return "Dashboard Tasks"
+        case .personProfile:
+            return "Person Profile"
         case .summary:
             return "Summary"
         }

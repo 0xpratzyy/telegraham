@@ -57,6 +57,15 @@ protocol AIProvider {
         candidates: [DashboardTaskTriageCandidateDTO]
     ) async throws -> [DashboardTaskTriageResultDTO]
 
+    /// Compiled-truth profile for a single contact: a short living
+    /// paragraph describing who they are, what's been discussed, what
+    /// loops are open, and the vibe. Source material is the supplied
+    /// message sample (chronological newest-first, [ME] marks the user).
+    func extractPersonProfile(
+        personName: String,
+        messages: [MessageSnippet]
+    ) async throws -> String
+
     /// Validates the API key by making a minimal request.
     func testConnection() async throws -> Bool
 }

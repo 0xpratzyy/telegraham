@@ -286,6 +286,45 @@ final class AIService: ObservableObject {
         return extracted.map { $0.resolvingSourceMetadata(from: messages, myUserId: myUserId) }
     }
 
+    /// Extract a compiled-truth profile for a single person. Messages
+    /// can span multiple chats — chat title is per-message rather than
+    /// per-call. Caller is responsible for caching; this just runs the
+    /// LLM round-trip.
+    func extractPersonProfile(
+        personName: String,
+        messages: [TGMessage],
+        myUserId: Int64,
+        chatTitleResolver: (Int64) -> String
+    ) async throws -> String {
+        let snippets: [MessageSnippet] = messages
+            .sorted { $0.date > $1.date }
+            .compactMap { msg in
+                guard let text = msg.textContent, !text.isEmpty else { return nil }
+                let isMe: Bool
+                if msg.isOutgoing {
+                    isMe = true
+                } else if case .user(let uid) = msg.senderId, myUserId > 0 {
+                    isMe = uid == myUserId
+                } else {
+                    isMe = false
+                }
+                let name = isMe ? "[ME]" : (msg.senderName?.split(separator: " ").first.map(String.init) ?? "Unknown")
+                return MessageSnippet(
+                    messageId: msg.id,
+                    senderFirstName: name,
+                    text: text,
+                    relativeTimestamp: msg.relativeDate,
+                    chatId: msg.chatId,
+                    chatName: chatTitleResolver(msg.chatId)
+                )
+            }
+        guard !snippets.isEmpty else { return "" }
+        return try await provider.extractPersonProfile(
+            personName: personName,
+            messages: snippets
+        )
+    }
+
     func triageDashboardTaskCandidates(
         _ candidates: [DashboardTaskTriageCandidate],
         myUserId: Int64

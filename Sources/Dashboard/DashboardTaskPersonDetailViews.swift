@@ -293,6 +293,8 @@ private struct DashboardEvidenceContextRow: View {
 
 struct DashboardPersonDetail: View {
     @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var aiService: AIService
+    @ObservedObject private var profileService = PersonProfileService.shared
 
     let contact: RelationGraph.Node?
     let signal: DashboardPersonSignal?
@@ -327,6 +329,20 @@ struct DashboardPersonDetail: View {
                                 .foregroundStyle(PidgyDashboardTheme.secondary)
                         }
                     }
+                }
+
+                if let profileSnapshot = profileService.profilesByUserId[contact.entityId],
+                   !profileSnapshot.summary.isEmpty {
+                    DashboardPersonAIProfileSection(snapshot: profileSnapshot)
+                } else if aiService.isConfigured {
+                    DashboardPersonAIProfileSection(
+                        snapshot: PersonProfileSnapshot(
+                            userId: contact.entityId,
+                            summary: "",
+                            isLoading: true,
+                            lastExtractedAt: nil
+                        )
+                    )
                 }
 
                 if let personSummary {
@@ -395,7 +411,27 @@ struct DashboardPersonDetail: View {
         .foregroundStyle(PidgyDashboardTheme.primary)
         .task(id: contact?.entityId) {
             await loadRecentMessages(for: contact)
+            await loadAIProfile(for: contact)
         }
+    }
+
+    private func loadAIProfile(for contact: RelationGraph.Node?) async {
+        guard let contact, aiService.isConfigured else { return }
+        let myUserId = telegramService.currentUser?.id ?? 0
+        let chatTitleResolver: (Int64) -> String = { [weak telegramService] chatId in
+            guard let telegramService else { return "" }
+            if let chat = (telegramService.visibleChats + telegramService.chats).first(where: { $0.id == chatId }) {
+                return chat.title
+            }
+            return ""
+        }
+        _ = await profileService.loadProfile(
+            userId: contact.entityId,
+            personName: contact.bestDisplayName,
+            aiService: aiService,
+            myUserId: myUserId,
+            chatTitleResolver: chatTitleResolver
+        )
     }
 
     private var personSummary: DashboardPersonContextSummary? {
@@ -499,6 +535,42 @@ struct DashboardPersonDetail: View {
         }
         var seen = Set<String>()
         return terms.filter { seen.insert($0.lowercased()).inserted }
+    }
+}
+
+struct DashboardPersonAIProfileSection: View {
+    let snapshot: PersonProfileSnapshot
+
+    var body: some View {
+        DashboardDetailSection(title: "Profile") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: snapshot.isLoading ? "arrow.clockwise" : "sparkles")
+                        .font(PidgyDashboardTheme.metadataMediumFont)
+                        .foregroundStyle(PidgyDashboardTheme.blue)
+                        .frame(width: 18, height: 18)
+                    if snapshot.summary.isEmpty && snapshot.isLoading {
+                        Text("Building profile from recent messages…")
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                    } else {
+                        // `Text(LocalizedStringKey:)` renders inline
+                        // `**bold**` markdown for the section labels
+                        // the prompt emits (`**Who:**`, `**Vibe:**`, etc.).
+                        Text(LocalizedStringKey(snapshot.summary))
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .lineSpacing(3)
+                    }
+                }
+                if let extractedAt = snapshot.lastExtractedAt {
+                    Text("Updated \(DateFormatting.compactRelativeTime(from: extractedAt)) ago")
+                        .font(PidgyDashboardTheme.captionFont)
+                        .foregroundStyle(PidgyDashboardTheme.tertiary)
+                }
+            }
+        }
     }
 }
 
