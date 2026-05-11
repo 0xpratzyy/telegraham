@@ -495,12 +495,19 @@ struct DashboardFeedItem: Identifiable {
     }
 
     static func reply(_ item: FollowUpItem) -> DashboardFeedItem {
-        let person = item.chat.chatType.isPrivate ? item.chat.title : item.lastMessage.senderName ?? item.chat.title
+        let isPrivate = item.chat.chatType.isPrivate
+        let person = isPrivate ? item.chat.title : item.lastMessage.senderName ?? item.chat.title
+        // For DMs the person column already names the contact, so the
+        // chat slot shows the type tag ("DM") for context. For groups /
+        // supergroups / channels, show the actual chat title — the
+        // generic "Group" / "Supergroup" word was uninformative when
+        // multiple group chats stacked in the feed.
+        let chatLabel = isPrivate ? item.chat.chatType.displayName : item.chat.title
         return DashboardFeedItem(
             id: "reply-\(item.chat.id)",
             title: item.suggestedAction ?? item.lastMessage.displayText,
             person: person,
-            chat: item.chat.chatType.displayName,
+            chat: chatLabel,
             topic: nil,
             avatarLabel: person,
             date: item.lastMessage.date,

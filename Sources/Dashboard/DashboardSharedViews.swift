@@ -349,7 +349,12 @@ struct DashboardTelegramAvatar: View {
             initials: chat?.initials ?? fallbackInitials,
             colorIndex: chat?.colorIndex ?? abs(fallbackTitle.hashValue % 8),
             size: size,
-            photo: chat.flatMap { photoManager.photos[$0.id] }
+            photo: chat.flatMap { photoManager.photos[$0.id] },
+            // Groups + channels render as rounded squares (Telegram
+            // convention) so the list scans faster — squircle = group,
+            // circle = person. Falls back to circle when the chat hasn't
+            // been resolved yet (unknown chats default to person-shape).
+            shape: (chat?.chatType.isOneOnOne ?? true) ? .circle : .squircle
         )
         .onAppear(perform: requestPhotoIfNeeded)
     }

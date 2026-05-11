@@ -44,6 +44,16 @@ struct TGChat: Identifiable, Equatable, Sendable {
             if case .privateChat = self { return true }
             return false
         }
+
+        /// True for 1:1 conversations (DM + secret chat). Drives the
+        /// circle vs squircle avatar choice — Telegram's convention is
+        /// circles for people, rounded squares for groups/channels.
+        var isOneOnOne: Bool {
+            switch self {
+            case .privateChat, .secretChat: return true
+            case .basicGroup, .supergroup: return false
+            }
+        }
     }
 
     var lastActivityDate: Date? {
