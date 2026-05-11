@@ -181,6 +181,7 @@ struct OnboardingFlow: View {
                         case .connect:
                             ConnectStep(
                                 isAuthReady: telegramService.authState == .ready,
+                                errorMessage: errorMessage,
                                 onPickTelegram: { Task { await beginTelegramAuth() } },
                                 onBack: { advance(to: .tour) }
                             )
@@ -334,7 +335,9 @@ struct OnboardingFlow: View {
                       let storedHash = (try? KeychainManager.retrieve(for: .apiHash)) {
                 telegramService.start(apiId: storedId, apiHash: storedHash)
             } else {
-                errorMessage = "Missing Telegram credentials. Reinstall the app or contact the developer."
+                // Source builds without baked-in credentials land here. Tell
+                // the user exactly what to do instead of a vague "reinstall".
+                errorMessage = "Missing Telegram API credentials. Building from source? Copy Config/BetaSecrets.local.xcconfig.template to Config/BetaSecrets.local.xcconfig, fill in PIDGY_TG_API_ID and PIDGY_TG_API_HASH from https://my.telegram.org/apps, then rerun xcodegen and rebuild."
                 return
             }
         }
@@ -934,6 +937,7 @@ private struct TourArtLocal: View {
 
 private struct ConnectStep: View {
     let isAuthReady: Bool
+    let errorMessage: String?
     let onPickTelegram: () -> Void
     let onBack: () -> Void
 
@@ -1000,6 +1004,16 @@ private struct ConnectStep: View {
                 ForEach(providers) { p in
                     providerRow(p)
                 }
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Color.Pidgy.danger)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .padding(.top, 16)
+                    .frame(maxWidth: .infinity)
             }
 
             HStack {
