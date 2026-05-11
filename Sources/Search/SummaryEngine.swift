@@ -68,32 +68,45 @@ final class SummaryEngine {
         let retrievalQuery = queryContext.retrievalQuery.isEmpty ? querySpec.rawQuery : queryContext.retrievalQuery
         let effectiveTimeRange = focusTimeRange(explicitTimeRange: querySpec.timeRange, queryContext: queryContext)
 
-        // Parallelize the three independent local searches — they all run
-        // against SQLite and don't share any state, so the previous serial
-        // awaits were just leaving wall time on the floor.
-        async let ftsHitsTask = telegramService.localScoredSearch(
-            query: retrievalQuery,
+        // Build graduated FTS variants and run them all in parallel
+        // alongside vector search and the sender-name fallback. Each
+        // returns its own ranked list — the previous flow ran a single
+        // FTS query (forced AND-of-quoted-tokens) which is exactly why
+        // "Bridge integration" returned zero on a corpus where
+        // "bridge" and "integration" never appeared in the same message.
+        async let variantHits = runFTSVariants(
+            rawQuery: retrievalQuery,
             chatIds: scopedChatIds,
-            limit: constants.ftsTopMessages
+            limit: constants.ftsTopMessages,
+            telegramService: telegramService
         )
+
         async let vectorHitsTask = telegramService.localVectorSearch(
             query: retrievalQuery,
             chatIds: scopedChatIds,
             limit: constants.vectorTopMessages
         )
-        async let senderFallbackTask = scopedSenderFallbackHits(
+        async let senderRankedTask = scopedSenderFallbackRanked(
             queryContext: queryContext,
             scopedChatIds: scopedChatIds,
             timeRange: effectiveTimeRange,
             fallbackLimit: constants.fallbackTopMessages,
             chatsById: chatById
         )
-        let ftsHits = await ftsHitsTask
+
+        let allFTSLists = await variantHits
         let vectorHits = await vectorHitsTask
-        let senderFallbackHits = await senderFallbackTask
+        let senderHits = await senderRankedTask
+
+        // RRF combine all sources — FTS variants + vector + sender — into
+        // a single deduped ranked list. Items appearing in multiple lists
+        // win because their per-list contributions sum.
+        var rankedSources: [[TelegramService.LocalMessageSearchHit]] = allFTSLists
+        rankedSources.append(vectorHits)
+        rankedSources.append(senderHits)
 
         let merged = applyTimeRange(
-            merge(ftsHits: ftsHits, vectorHits: vectorHits, fallbackHits: senderFallbackHits),
+            applyRRF(rankedLists: rankedSources),
             timeRange: effectiveTimeRange
         )
         let candidates = buildCandidates(
@@ -245,48 +258,46 @@ final class SummaryEngine {
         return digests
     }
 
-    private func merge(
-        ftsHits: [TelegramService.LocalMessageSearchHit],
-        vectorHits: [TelegramService.LocalMessageSearchHit],
-        fallbackHits: [LocalHit]
+    /// Reciprocal Rank Fusion (Cormack et al.). Combines many ranked
+    /// lists into one without trying to compare absolute scores across
+    /// retrievers. For each item, sum `1/(k + rank_i)` across every
+    /// list it appears in. k=60 is the constant the original paper used
+    /// and the default everywhere from Elasticsearch to Weaviate.
+    ///
+    /// We feed it: graduated FTS variants (phrase / AND / OR / prefix) +
+    /// vector hits + sender-name fallback hits. Each is its own ranked
+    /// list. Items that appear near the top of MULTIPLE lists win — so
+    /// a message that strict-phrase-matches AND vector-matches outranks
+    /// one that only OR-matches. Items appearing in just one list still
+    /// get scored, but lose to multi-list contenders.
+    ///
+    /// Output uses the engine's existing `LocalHit` shape: the RRF
+    /// score lands in `ftsScore` so downstream `buildCandidates` math
+    /// keeps working. `vectorScore` is set to 0 because RRF already
+    /// folded vector signal into the same field — the legacy weighted
+    /// blend in buildCandidates becomes a no-op multiplier on 0 for
+    /// the vector half.
+    private func applyRRF(
+        rankedLists: [[TelegramService.LocalMessageSearchHit]],
+        k: Double = 60
     ) -> [LocalHit] {
-        let maxFTS = ftsHits.map(\.score).max() ?? 0
-        let maxVector = vectorHits.map(\.score).max() ?? 0
-        var byKey: [String: LocalHit] = [:]
-
-        for hit in ftsHits {
-            let key = "\(hit.message.chatId):\(hit.message.id)"
-            let normalized = normalize(score: hit.score, maxScore: maxFTS)
-            if var existing = byKey[key] {
-                existing.ftsScore = max(existing.ftsScore, normalized)
-                byKey[key] = existing
-            } else {
-                byKey[key] = LocalHit(message: hit.message, ftsScore: normalized, vectorScore: 0)
+        var byKey: [MessageKey: LocalHit] = [:]
+        for list in rankedLists {
+            for (rank, hit) in list.enumerated() {
+                let key = MessageKey(hit.message)
+                let contribution = 1.0 / (k + Double(rank))
+                if var existing = byKey[key] {
+                    existing.ftsScore += contribution
+                    byKey[key] = existing
+                } else {
+                    byKey[key] = LocalHit(
+                        message: hit.message,
+                        ftsScore: contribution,
+                        vectorScore: 0
+                    )
+                }
             }
         }
-
-        for hit in vectorHits {
-            let key = "\(hit.message.chatId):\(hit.message.id)"
-            let normalized = normalize(score: hit.score, maxScore: maxVector)
-            if var existing = byKey[key] {
-                existing.vectorScore = max(existing.vectorScore, normalized)
-                byKey[key] = existing
-            } else {
-                byKey[key] = LocalHit(message: hit.message, ftsScore: 0, vectorScore: normalized)
-            }
-        }
-
-        for hit in fallbackHits {
-            let key = "\(hit.message.chatId):\(hit.message.id)"
-            if var existing = byKey[key] {
-                existing.ftsScore = max(existing.ftsScore, hit.ftsScore)
-                existing.vectorScore = max(existing.vectorScore, hit.vectorScore)
-                byKey[key] = existing
-            } else {
-                byKey[key] = hit
-            }
-        }
-
         return Array(byKey.values)
     }
 
@@ -1060,5 +1071,53 @@ final class SummaryEngine {
             )
             return LocalHit(message: message, ftsScore: 0.55, vectorScore: 0)
         }
+    }
+
+    /// Same data as `scopedSenderFallbackHits` but emitted as the public
+    /// `LocalMessageSearchHit` shape, ordered most-recent-first so RRF
+    /// gives the freshest sender match the highest rank contribution.
+    /// Used by the new graduated-FTS + RRF retrieval flow which fuses
+    /// multiple ranked lists uniformly — the legacy `LocalHit` flat-score
+    /// path is kept for callers that haven't moved to RRF yet.
+    private func scopedSenderFallbackRanked(
+        queryContext: QueryContext,
+        scopedChatIds: [Int64],
+        timeRange: TimeRangeConstraint?,
+        fallbackLimit: Int,
+        chatsById: [Int64: TGChat]
+    ) async -> [TelegramService.LocalMessageSearchHit] {
+        guard !queryContext.senderFallbackTerms.isEmpty else {
+            return []
+        }
+
+        let records = await DatabaseManager.shared.loadMessagesMatchingSenderTerms(
+            chatIds: scopedChatIds,
+            senderTerms: queryContext.senderFallbackTerms,
+            startDate: timeRange?.startDate,
+            endDate: timeRange?.endDate,
+            limit: fallbackLimit
+        )
+
+        return records
+            .sorted { $0.date > $1.date }
+            .map { record in
+                let senderId: TGMessage.MessageSenderId = if let senderUserId = record.senderUserId {
+                    .user(senderUserId)
+                } else {
+                    .chat(record.chatId)
+                }
+                let message = TGMessage(
+                    id: record.id,
+                    chatId: record.chatId,
+                    senderId: senderId,
+                    date: record.date,
+                    textContent: record.textContent,
+                    mediaType: record.mediaTypeRaw.flatMap(TGMessage.MediaType.init(rawValue:)),
+                    isOutgoing: record.isOutgoing,
+                    chatTitle: chatsById[record.chatId]?.title,
+                    senderName: record.senderName
+                )
+                return TelegramService.LocalMessageSearchHit(message: message, score: 1.0)
+            }
     }
 }

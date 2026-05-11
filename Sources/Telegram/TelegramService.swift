@@ -345,6 +345,24 @@ class TelegramService: ObservableObject {
         }
     }
 
+    /// Run a pre-built FTS5 MATCH expression directly. The caller is
+    /// responsible for shape — used by SummaryEngine's graduated FTS
+    /// variants (phrase / AND / OR / prefix) so each one yields its own
+    /// ranked list for RRF fusion.
+    func localFTSRawSearch(rawFTSQuery: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
+        let records = await DatabaseManager.shared.localSearchFTSRaw(
+            rawFTSQuery: rawFTSQuery,
+            chatIds: chatIds,
+            limit: limit
+        )
+        return records.map { record in
+            LocalMessageSearchHit(
+                message: mapStoredMessage(record.message),
+                score: record.score
+            )
+        }
+    }
+
     func localVectorSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
         guard let queryVector = await EmbeddingService.shared.embed(text: query) else { return [] }
 

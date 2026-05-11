@@ -382,20 +382,34 @@ final class SearchCoordinator: ObservableObject {
         let chatById = Dictionary(uniqueKeysWithValues: scopedChats.map { ($0.id, $0) })
         let topicContext = semanticTopicContext(for: query)
 
-        let ftsHits = await telegramService.localScoredSearch(
-            query: query,
+        // Tier 1 retrieval: run graduated FTS5 variants
+        // (NEAR / AND / OR / prefix) in parallel instead of a single
+        // AND-of-quoted-tokens query — that single-query path used to
+        // return zero whenever the user's terms never co-occurred in the
+        // same message ("Bridge integration" → 0 hits even when both
+        // words show up plenty of times separately). The variants are
+        // fused with the vector hits via RRF below.
+        async let variantListsTask = runFTSVariants(
+            rawQuery: query,
             chatIds: scopedChatIds,
-            limit: constants.ftsTopMessages
+            limit: constants.ftsTopMessages,
+            telegramService: telegramService
         )
-        let vectorHits = await telegramService.localVectorSearch(
+        async let vectorHitsTask = telegramService.localVectorSearch(
             query: query,
             chatIds: scopedChatIds,
             limit: constants.vectorTopMessages
         )
 
-        let rangedFTSHits = filterLocalSemanticHits(ftsHits, timeRange: timeRange)
+        let variantLists = await variantListsTask
+        let vectorHits = await vectorHitsTask
+
+        let rangedVariantLists = variantLists.map { filterLocalSemanticHits($0, timeRange: timeRange) }
         let rangedVectorHits = filterLocalSemanticHits(vectorHits, timeRange: timeRange)
-        let mergedHits = mergeLocalSemanticHits(ftsHits: rangedFTSHits, vectorHits: rangedVectorHits)
+        let mergedHits = mergeLocalSemanticHits(
+            ftsVariantLists: rangedVariantLists,
+            vectorHits: rangedVectorHits
+        )
         var candidatesByChatId = buildLocalSemanticCandidates(
             from: mergedHits,
             chatsById: chatById,
@@ -459,42 +473,59 @@ final class SearchCoordinator: ObservableObject {
     }
 
     private func mergeLocalSemanticHits(
-        ftsHits: [TelegramService.LocalMessageSearchHit],
+        ftsVariantLists: [[TelegramService.LocalMessageSearchHit]],
         vectorHits: [TelegramService.LocalMessageSearchHit]
     ) -> [LocalSemanticMessageScore] {
-        let maxFTSScore = ftsHits.map(\.score).max() ?? 0
-        let maxVectorScore = vectorHits.map { max(0, $0.score) }.max() ?? 0
+        // RRF fusion: every ranked input list contributes 1/(60 + rank)
+        // per item. Items appearing in multiple lists win because their
+        // contributions sum. FTS variants (NEAR / AND / OR / prefix) live
+        // in the ftsScore bucket so the downstream candidate scorer keeps
+        // working unchanged; vector hits land in vectorScore. Both halves
+        // are then min-maxed onto [0, 1] so the existing ftsWeight /
+        // vectorWeight blend in semanticMessageScore stays meaningful.
+        let k: Double = 60
+        var byKey: [String: LocalSemanticMessageScore] = [:]
 
-        var merged: [String: LocalSemanticMessageScore] = [:]
+        for list in ftsVariantLists {
+            for (rank, hit) in list.enumerated() {
+                let key = "\(hit.message.chatId):\(hit.message.id)"
+                let contribution = 1.0 / (k + Double(rank))
+                if var existing = byKey[key] {
+                    existing.ftsScore += contribution
+                    byKey[key] = existing
+                } else {
+                    byKey[key] = LocalSemanticMessageScore(
+                        message: hit.message,
+                        ftsScore: contribution,
+                        vectorScore: 0
+                    )
+                }
+            }
+        }
 
-        for hit in ftsHits {
+        for (rank, hit) in vectorHits.enumerated() {
             let key = "\(hit.message.chatId):\(hit.message.id)"
-            let normalizedScore = normalizeLocalSemanticScore(hit.score, maxScore: maxFTSScore)
-            if var existing = merged[key] {
-                existing.ftsScore = max(existing.ftsScore, normalizedScore)
-                merged[key] = existing
+            let contribution = 1.0 / (k + Double(rank))
+            if var existing = byKey[key] {
+                existing.vectorScore += contribution
+                byKey[key] = existing
             } else {
-                merged[key] = LocalSemanticMessageScore(
+                byKey[key] = LocalSemanticMessageScore(
                     message: hit.message,
-                    ftsScore: normalizedScore,
-                    vectorScore: 0
+                    ftsScore: 0,
+                    vectorScore: contribution
                 )
             }
         }
 
-        for hit in vectorHits {
-            let key = "\(hit.message.chatId):\(hit.message.id)"
-            let normalizedScore = normalizeLocalSemanticScore(max(0, hit.score), maxScore: maxVectorScore)
-            if var existing = merged[key] {
-                existing.vectorScore = max(existing.vectorScore, normalizedScore)
-                merged[key] = existing
-            } else {
-                merged[key] = LocalSemanticMessageScore(
-                    message: hit.message,
-                    ftsScore: 0,
-                    vectorScore: normalizedScore
-                )
-            }
+        let maxFTS = byKey.values.map(\.ftsScore).max() ?? 0
+        let maxVector = byKey.values.map(\.vectorScore).max() ?? 0
+        var merged = byKey
+        for (key, value) in merged {
+            var normalized = value
+            normalized.ftsScore = normalizeLocalSemanticScore(value.ftsScore, maxScore: maxFTS)
+            normalized.vectorScore = normalizeLocalSemanticScore(value.vectorScore, maxScore: maxVector)
+            merged[key] = normalized
         }
 
         return merged.values.sorted { lhs, rhs in
@@ -850,18 +881,17 @@ final class SearchCoordinator: ObservableObject {
         guard queryContext.requiresGuardedTopicRanking else { return true }
 
         let hasStrongHistorySignal = candidate.ftsScore > 0 || candidate.vectorScore >= 0.5
-        let minimumQueryCoverage = max(1, min(2, queryContext.queryTokens.count))
 
-        if candidate.queryCoverage < minimumQueryCoverage {
+        // Graduated FTS lands single-token matches via the OR/prefix
+        // variants — so a chat that only mentions one of the query
+        // tokens (e.g. "Bridge" but not "integration") is still a
+        // plausible candidate. We require at least one token match
+        // here; the strong-signal and best-match checks below catch
+        // the rest of the noise.
+        if candidate.queryCoverage < 1 {
             return false
         }
         if !queryContext.anchorTokens.isEmpty && candidate.anchorCoverage == 0 {
-            return false
-        }
-        if !queryContext.phraseCandidates.isEmpty
-            && candidate.phraseCoverage == 0
-            && candidate.bestPhraseMatches == 0
-            && candidate.bestQueryMatches < minimumQueryCoverage {
             return false
         }
         if !hasStrongHistorySignal && candidate.titleScore < 0.99 {
