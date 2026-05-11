@@ -18,7 +18,16 @@ struct DashboardHomePage: View {
                 if $0.section.rank != $1.section.rank {
                     return $0.section.rank < $1.section.rank
                 }
-                return $0.date > $1.date
+                if $0.date != $1.date {
+                    return $0.date > $1.date
+                }
+                // Stable tiebreaker — when two items share both section and
+                // date (common: tasks from the same minute), the previous
+                // comparator left ordering implementation-defined. That made
+                // the list visibly shuffle on every upstream republish
+                // (AttentionStore upserts, ChatPhotoManager photo loads,
+                // TaskIndex ticks) — Devesh saw it as flicker on his build.
+                return $0.id < $1.id
             }
     }
 
@@ -76,6 +85,14 @@ struct DashboardHomePage: View {
                                     .buttonStyle(.plain)
                                 }
                             }
+                            // Belt-and-suspenders against the upsert storm
+                            // during refresh: even with a stable sort, the
+                            // attention pipeline can replace ~20 follow-up
+                            // items in quick succession while AI categorizes
+                            // each chat. Suppressing implicit insert/remove
+                            // animations on the section keeps rows from
+                            // visibly fading in/out as content lands.
+                            .animation(nil, value: items.map(\.id))
                         }
                     }
                 }
