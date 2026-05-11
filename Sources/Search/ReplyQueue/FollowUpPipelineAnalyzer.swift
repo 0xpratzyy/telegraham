@@ -214,9 +214,35 @@ enum FollowUpPipelineAnalyzer {
                     continue
 
                 case .decision:
+                    // Guardrail against over-eager `onMe` from the AI.
+                    // The model sees a single message like
+                    //   "cc @davidtsocb since you started a blog"
+                    // in a group the user has never posted in, and
+                    // labels it `onMe` because there's an @-mention.
+                    // But if the user wasn't the mentioned party AND
+                    // hasn't ever participated in the window, the chat
+                    // isn't really "on them" — it's a passive observer
+                    // chat. Downgrade to `quiet` so it stops surfacing
+                    // as urgent.
+                    let resolvedCategory: FollowUpItem.Category = {
+                        guard triage.category == .onMe,
+                              effectiveChat.chatType.isGroup else {
+                            return triage.category
+                        }
+                        let userPostedInWindow = messagesToSend.contains { $0.isOutgoing }
+                        let userMentionedInLastMessage = mentionsCurrentUser(
+                            message: lastMessage,
+                            myUsername: currentUser?.username
+                        )
+                        if userPostedInWindow || userMentionedInLastMessage {
+                            return triage.category
+                        }
+                        return .quiet
+                    }()
+
                     let finalSuggestion = fallbackSuggestedAction(
-                        for: triage.category,
-                        existing: triage.suggestedAction,
+                        for: resolvedCategory,
+                        existing: resolvedCategory == triage.category ? triage.suggestedAction : nil,
                         age: age
                     )
 
@@ -231,14 +257,14 @@ enum FollowUpPipelineAnalyzer {
 
                     await cache.cachePipelineCategory(
                         chatId: effectiveChat.id,
-                        category: pipelineCategoryString(triage.category),
+                        category: pipelineCategoryString(resolvedCategory),
                         suggestedAction: finalSuggestion ?? "",
                         lastMessageId: lastMessage.id
                     )
 
                     return FollowUpItem(
                         chat: effectiveChat,
-                        category: triage.category,
+                        category: resolvedCategory,
                         lastMessage: lastMessage,
                         timeSinceLastActivity: age,
                         suggestedAction: finalSuggestion
@@ -389,5 +415,25 @@ enum FollowUpPipelineAnalyzer {
         case .onThem: return "on_them"
         case .quiet: return "quiet"
         }
+    }
+
+    /// Cheap @-mention check used as a guardrail on AI's `onMe` output.
+    /// Matches `@<username>` case-insensitively; a leading word boundary
+    /// keeps `@foo` from matching inside emails. We only care about the
+    /// user's own handle — other mentions (`cc @someoneElse`) are not a
+    /// reason to flag the chat as on-me.
+    private static func mentionsCurrentUser(message: TGMessage, myUsername: String?) -> Bool {
+        guard let myUsername, !myUsername.isEmpty,
+              let text = message.textContent?.lowercased() else {
+            return false
+        }
+        let needle = "@\(myUsername.lowercased())"
+        guard let range = text.range(of: needle) else { return false }
+        // Ensure the match is followed by a non-alphanumeric so
+        // `@pratzyyrandom` doesn't satisfy `@pratzyy`.
+        let after = range.upperBound
+        if after == text.endIndex { return true }
+        let next = text[after]
+        return !(next.isLetter || next.isNumber || next == "_")
     }
 }
