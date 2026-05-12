@@ -52,17 +52,6 @@ final class AttentionStore: ObservableObject {
             includeBots: includeBots
         )
 
-        guard aiService.isConfigured else {
-            followUpItems = FollowUpPipelineAnalyzer.buildRuleBasedFallbackItems(
-                from: candidates,
-                myUserId: telegramService.currentUser?.id
-            )
-            pipelineProcessedCount = followUpItems.count
-            pipelineTotalCount = followUpItems.count
-            postOnMeBadge()
-            return
-        }
-
         pipelineProcessedCount = 0
         pipelineTotalCount = 0
         isFollowUpsLoading = true
@@ -77,12 +66,22 @@ final class AttentionStore: ObservableObject {
             let myUserId = telegramService.currentUser?.id ?? 0
             let cache = MessageCacheService.shared
 
-            var cachedItems: [FollowUpItem] = []
+            // First pass: prefer cached AI categories for every candidate.
+            // The previous code had a synchronous `guard aiService.isConfigured
+            // else { followUpItems = ruleBased(...); return }` early-return
+            // that wholesale-replaced followUpItems with rule-based items.
+            // That fought with hydrateCachedFollowUps (which writes cached
+            // AI categories) every time .onChange(visibleChatIDs) fired
+            // during the AIService init window, ping-ponging rows between
+            // feed sections for ~20s after launch. Hoisting cache reads
+            // ahead of both branches makes cached values authoritative; rule-
+            // based only fills gaps.
+            var initialItems: [FollowUpItem] = []
             var staleChats: [TGChat] = []
 
             for chat in candidates {
                 if let cachedItem = await cachedPipelineItem(for: chat, cache: cache) {
-                    cachedItems.append(cachedItem)
+                    initialItems.append(cachedItem)
                     if force {
                         staleChats.append(chat)
                     }
@@ -91,15 +90,36 @@ final class AttentionStore: ObservableObject {
                 }
             }
 
-            followUpItems = cachedItems
-            sortPipelineItems()
+            if !aiService.isConfigured {
+                // Fill cache misses with rule-based heuristics so brand-new
+                // chats still appear. Existing cached categories are left
+                // intact — they're strictly higher-quality than the rules.
+                let cachedIds = Set(initialItems.map(\.chat.id))
+                let chatsWithoutCache = candidates.filter { !cachedIds.contains($0.id) }
+                if !chatsWithoutCache.isEmpty {
+                    let ruleBasedItems = FollowUpPipelineAnalyzer.buildRuleBasedFallbackItems(
+                        from: chatsWithoutCache,
+                        myUserId: telegramService.currentUser?.id
+                    )
+                    initialItems.append(contentsOf: ruleBasedItems)
+                }
+                self.followUpItems = initialItems
+                self.sortPipelineItems()
+                self.pipelineProcessedCount = initialItems.count
+                self.pipelineTotalCount = initialItems.count
+                self.postOnMeBadge()
+                return
+            }
+
+            self.followUpItems = initialItems
+            self.sortPipelineItems()
 
             guard !staleChats.isEmpty else {
                 return
             }
 
-            pipelineProcessedCount = 0
-            pipelineTotalCount = staleChats.count
+            self.pipelineProcessedCount = 0
+            self.pipelineTotalCount = staleChats.count
 
             let maxConcurrency = AppConstants.FollowUp.maxAIConcurrency
 
