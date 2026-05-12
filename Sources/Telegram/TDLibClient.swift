@@ -48,7 +48,7 @@ final class TDLibClientWrapper {
         let activeContinuation = updateContinuation
         manager = TDLibClientManager()
 
-        client = manager?.createClient(updateHandler: { [weak self] data, client in
+        let newClient = manager?.createClient(updateHandler: { [weak self] data, client in
             guard self != nil else { return }
             do {
                 let update = try client.decoder.decode(Update.self, from: data)
@@ -57,6 +57,22 @@ final class TDLibClientWrapper {
                 print("[TDLib] Failed to decode update: \(error)")
             }
         })
+
+        // Silence TDLib's internal C++ logger ASAP. Default verbosity is 5
+        // (VERBOSE) which dumps every request/response payload — when stderr
+        // is redirected to a file this historically grew /private/tmp/pidgy.log
+        // to 254 GB. `setLogVerbosityLevel` is one of TDLib's synchronous
+        // methods so it takes effect process-wide via td_execute. There's a
+        // tiny window between createClient and this call where verbose chatter
+        // still flows; that's bounded to a few KB at startup.
+        if let newClient {
+            do {
+                _ = try newClient.execute(query: DTO(SetLogVerbosityLevel(newVerbosityLevel: 1)))
+            } catch {
+                print("[TDLib] Failed to lower log verbosity: \(error)")
+            }
+        }
+        client = newClient
     }
 
     func close() {

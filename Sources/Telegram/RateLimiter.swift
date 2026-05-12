@@ -33,6 +33,14 @@ actor RateLimiter {
     private var historyCallsInFlight = 0
     private static let maxHistoryCallsInFlight = 2
 
+    /// Throttle log dedupe: only re-emit a given method's throttle line at most
+    /// once every `logCoalesceWindow`. Without this, a deep queue (e.g. 163
+    /// background `getUser` calls) emits hundreds of identical "throttled"
+    /// lines per second, which historically grew /private/tmp/pidgy.log to
+    /// 254 GB when stderr was redirected.
+    private var lastThrottleLogAt: [String: ContinuousClock.Instant] = [:]
+    private static let logCoalesceWindow: Duration = .seconds(2)
+
     /// - Parameters:
     ///   - maxTokens: Maximum burst capacity
     ///   - refillRate: Tokens added per second
@@ -234,6 +242,16 @@ actor RateLimiter {
     }
 
     private func logThrottle(priority: Priority, method: String, waitSeconds: Double?) {
+        // Coalesce repeat-spam: skip if we logged this method within the
+        // coalesce window. Different priorities for the same method are
+        // intentionally collapsed — the message content is near-identical.
+        let key = "\(method)|\(waitSeconds == nil ? "yield" : "throttle")"
+        let now = ContinuousClock.Instant.now
+        if let last = lastThrottleLogAt[key], now - last < Self.logCoalesceWindow {
+            return
+        }
+        lastThrottleLogAt[key] = now
+
         let queueDepth = queuedUserInitiated + queuedBackground
         if let waitSeconds {
             print(
