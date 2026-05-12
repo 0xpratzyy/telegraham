@@ -706,16 +706,32 @@ struct DashboardFilterCapsule: View {
 
 struct DashboardSegmentedReplyFilter: View {
     @Binding var selection: DashboardReplyFilter
-    let needsCount: Int
-    let allCount: Int
-    let mutedCount: Int
+    let onMeCount: Int
+    let onThemCount: Int
+    let quietCount: Int
 
     var body: some View {
         HStack(spacing: 2) {
-            segment(.needsYou, count: needsCount)
-            segment(.allOpen, count: allCount)
-            segment(.muted, count: mutedCount)
+            segment(.onMe, count: onMeCount)
+            segment(.onThem, count: onThemCount)
+            segment(.quiet, count: quietCount)
         }
+        // Outer rounded container — gives the filter a clear pill
+        // boundary so it reads as one control rather than three
+        // floating buttons. The fill is `sidebar` so it sits one
+        // step deeper than the `raised` active-segment fill — that
+        // contrast is what makes the selected segment pop above
+        // the container. Now mirrors the FollowUpItem.Category
+        // model (.onMe / .onThem / .quiet) end-to-end.
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(PidgyDashboardTheme.sidebar)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(PidgyDashboardTheme.rule.opacity(0.55), lineWidth: 1)
+                )
+        )
     }
 
     private func segment(_ filter: DashboardReplyFilter, count: Int) -> some View {
@@ -729,12 +745,18 @@ struct DashboardSegmentedReplyFilter: View {
             }
             .font(PidgyDashboardTheme.metadataMediumFont)
             .padding(.horizontal, 10)
-            .frame(height: 30)
+            .frame(height: 28)
             .foregroundStyle(selection == filter ? PidgyDashboardTheme.primary : PidgyDashboardTheme.secondary)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(selection == filter ? PidgyDashboardTheme.raised : Color.clear)
-                    .shadow(color: selection == filter ? Color.black.opacity(0.22) : Color.clear, radius: 6, x: 0, y: 3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(
+                                selection == filter ? PidgyDashboardTheme.rule.opacity(0.7) : Color.clear,
+                                lineWidth: 1
+                            )
+                    )
             )
         }
         .buttonStyle(.plain)

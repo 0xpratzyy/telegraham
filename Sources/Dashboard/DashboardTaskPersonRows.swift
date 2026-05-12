@@ -179,20 +179,20 @@ struct DashboardMiniReplyRow: View {
 }
 
 enum DashboardReplyFilter: String, CaseIterable, Identifiable {
-    case needsYou
-    case allOpen
-    case muted
+    case onMe
+    case onThem
+    case quiet
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .needsYou:
-            return "Needs you"
-        case .allOpen:
-            return "All open"
-        case .muted:
-            return "Muted"
+        case .onMe:
+            return "On me"
+        case .onThem:
+            return "On them"
+        case .quiet:
+            return "Quiet"
         }
     }
 }

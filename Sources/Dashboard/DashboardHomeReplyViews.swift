@@ -124,15 +124,15 @@ struct DashboardReplyQueuePage: View {
     let onRefresh: () -> Void
     let onOpenChat: (TGChat) -> Void
 
-    @State private var filter: DashboardReplyFilter = .needsYou
+    @State private var filter: DashboardReplyFilter = .onMe
 
     private var filteredItems: [FollowUpItem] {
         switch filter {
-        case .needsYou:
+        case .onMe:
             return items.filter { $0.category == .onMe }
-        case .allOpen:
-            return items
-        case .muted:
+        case .onThem:
+            return items.filter { $0.category == .onThem }
+        case .quiet:
             return items.filter { $0.category == .quiet }
         }
     }
@@ -208,9 +208,9 @@ struct DashboardReplyQueuePage: View {
 
             DashboardSegmentedReplyFilter(
                 selection: $filter,
-                needsCount: items.filter { $0.category == .onMe }.count,
-                allCount: items.count,
-                mutedCount: items.filter { $0.category == .quiet }.count
+                onMeCount: items.filter { $0.category == .onMe }.count,
+                onThemCount: items.filter { $0.category == .onThem }.count,
+                quietCount: items.filter { $0.category == .quiet }.count
             )
         }
         .padding(selectedItem == nil ? EdgeInsets(top: 0, leading: 8, bottom: 22, trailing: 8) : EdgeInsets())
