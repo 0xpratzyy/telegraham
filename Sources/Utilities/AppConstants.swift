@@ -142,7 +142,15 @@ enum AppConstants {
         static let pausedPollIntervalMilliseconds: UInt64 = 350
         static let maxPrioritizedChats = 32
         static let maxConcurrentChatWorkers = 2
-        static let maxIndexedGroupMembers = 20
+        // Raised from 20 → 50 so the indexing pipeline scope matches
+        // the reply-queue AI's `FollowUp.maxGroupMembers = 50`. Before
+        // this, supergroups in the 21–50 member range (real team /
+        // project chats) were filtered out at the indexing gate, which
+        // kept People + Tasks blind to ~60–80 active chats on a
+        // typical Telegram account. 50 stays well under the
+        // "community group" threshold (≥100 members) where messages
+        // mostly aren't addressed to you.
+        static let maxIndexedGroupMembers = 50
         static let minEmbeddingTextLength = 10
         static let embeddingPreviewCharacterLimit = 160
         static let embeddingBackfillBatchSize = 128
@@ -162,7 +170,14 @@ enum AppConstants {
     enum MajorChatCoverage {
         static let coverageStateVersion = 12
         static let coverageWindowDays: TimeInterval = 30
-        static let historyBatchSize = 100
+        // Pages of 50 instead of 100 — smaller per-call payload means
+        // each getChatHistory call finishes faster, which reduces the
+        // chance a single batch eats the entire 300s timeout window
+        // while TDLib's per-chat SequenceDispatcher is under
+        // backpressure. With 50/page we still hit the 3 req/s rate
+        // limit cap for active chats but no single call can stall the
+        // whole timeout budget.
+        static let historyBatchSize = 50
         // No artificial pass cap — every major chat is in scope every pass.
         // The rate limiter (2 concurrent in-flight + 3 tokens/sec for
         // getChatHistory + separate 20/sec bucket for getChatHistoryLocal)
@@ -186,6 +201,30 @@ enum AppConstants {
         // tolerable for users who left the app running overnight.
         static let networkHistoryFetchTimeoutSeconds: TimeInterval = 300
         static let networkBatchSpacingMilliseconds: UInt64 = 500
+
+        /// Adaptive page size — first attempt uses the full
+        /// `historyBatchSize`; each subsequent retry halves the page
+        /// until we hit a floor of 8. Smaller payloads per call mean a
+        /// single batch is less likely to stall the whole timeout
+        /// window when TDLib's per-chat SequenceDispatcher is backed up.
+        static func adaptiveBatchSize(failureCount: Int) -> Int {
+            let minBatch = 8
+            let attempts = max(0, failureCount)
+            let scaled = historyBatchSize >> attempts  // halves each step
+            return max(minBatch, scaled)
+        }
+
+        /// Adaptive network timeout — first attempt uses
+        /// `networkHistoryFetchTimeoutSeconds`; each retry doubles up
+        /// to a 30-min cap. Pairs with `adaptiveBatchSize` so retries
+        /// trade payload size for patience: smaller calls + longer
+        /// budget gives a stuck TDLib chat the best shot at completing.
+        static func adaptiveNetworkTimeoutSeconds(failureCount: Int) -> TimeInterval {
+            let cap: TimeInterval = 30 * 60
+            let attempts = max(0, failureCount)
+            let scaled = networkHistoryFetchTimeoutSeconds * pow(2.0, Double(attempts))
+            return min(cap, scaled)
+        }
         static let memberCountResolutionTimeoutSeconds: TimeInterval = 3
         static let localEmptyPageRetryCount = 1
         static let localEmptyPageRetryDelayMilliseconds: UInt64 = 250

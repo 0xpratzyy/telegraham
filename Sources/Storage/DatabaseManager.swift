@@ -2050,6 +2050,126 @@ actor DatabaseManager {
         }
     }
 
+    /// Clears the retry guard on chat_coverage_state rows so the
+    /// coordinator picks them up on its next sweep.
+    /// **Preserves `failure_count`** so the adaptive batch/timeout
+    /// scaling (smaller pages + longer wait per retry) actually kicks
+    /// in — that's the whole point of resetting.
+    ///
+    /// - `forceAllPending`: when true, clears every row with an error
+    ///   regardless of its backoff timer (intended for app launch so
+    ///   the user gets a fresh retry attempt against any chat that
+    ///   stalled previously). When false, only clears rows whose
+    ///   retry was scheduled longer than `cutoffAge` seconds ago,
+    ///   which preserves any legitimate in-flight backoff.
+    ///
+    /// Returns the count of rows reset so we can log it.
+    @discardableResult
+    func resetStuckCoverageRetries(
+        forceAllPending: Bool = false,
+        cutoffAge: TimeInterval = 30 * 60
+    ) async -> Int {
+        guard let pool = await ensureDatabase() else { return 0 }
+        let cutoff = Date().timeIntervalSince1970 - cutoffAge
+        do {
+            return try await pool.write { db -> Int in
+                if forceAllPending {
+                    try db.execute(sql: """
+                        UPDATE chat_coverage_state
+                        SET last_error = NULL,
+                            next_retry_at = NULL
+                        WHERE last_error IS NOT NULL
+                          AND last_error != ''
+                        """)
+                } else {
+                    try db.execute(
+                        sql: """
+                            UPDATE chat_coverage_state
+                            SET last_error = NULL,
+                                next_retry_at = NULL
+                            WHERE last_error IS NOT NULL
+                              AND last_error != ''
+                              AND (next_retry_at IS NULL OR next_retry_at < ?)
+                            """,
+                        arguments: [cutoff]
+                    )
+                }
+                let reset = db.changesCount
+                if reset > 0 {
+                    print("[DatabaseManager] Cleared retry guard on \(reset) stuck coverage rows (failure_count preserved so adaptive params apply).")
+                }
+                return reset
+            }
+        } catch {
+            print("[DatabaseManager] Reset coverage retry state failed: \(error)")
+            return 0
+        }
+    }
+
+    /// One-shot idempotent backfill that creates a `nodes` row for every
+    /// distinct non-outgoing sender already present in the `messages`
+    /// table. Closes the gap between MajorChatCoverageCoordinator
+    /// (which only fully covers recent + small + DM-style chats — ~80
+    /// out of ~1,600 in a typical Telegram account) and the People
+    /// page, which wants to surface every contact the user has ever
+    /// conversed with.
+    ///
+    /// Cheap because it runs entirely on the local DB — no TDLib calls,
+    /// no AI, no embeddings, no rate-limit risk. Uses INSERT OR IGNORE
+    /// so existing (richer) nodes written by GraphBuilder aren't
+    /// overwritten with thinner derived data.
+    ///
+    /// Returns the count of newly-inserted nodes so callers can log it.
+    @discardableResult
+    func backfillPersonNodesFromMessages() async -> Int {
+        guard let pool = await ensureDatabase() else { return 0 }
+        do {
+            return try await pool.write { db -> Int in
+                let before = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM nodes WHERE entity_type = 'user'"
+                ) ?? 0
+
+                try db.execute(sql: """
+                    INSERT OR IGNORE INTO nodes
+                        (entity_id, entity_type, display_name, username,
+                         category, category_source, interaction_score,
+                         last_interaction_at, first_seen_at, metadata)
+                    SELECT
+                        sender_user_id,
+                        'user',
+                        COALESCE(NULLIF(MAX(sender_name), ''), 'Contact'),
+                        NULL,
+                        '\(AppConstants.Graph.defaultCategory)',
+                        '\(AppConstants.Graph.automaticCategorySource)',
+                        CAST(COUNT(*) AS REAL),
+                        MAX(date),
+                        MIN(date),
+                        NULL
+                    FROM messages
+                    WHERE sender_user_id IS NOT NULL
+                      AND sender_user_id > 0
+                      AND is_outgoing = 0
+                    GROUP BY sender_user_id
+                    """)
+
+                let after = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM nodes WHERE entity_type = 'user'"
+                ) ?? 0
+
+                let inserted = after - before
+                if inserted > 0 {
+                    print("[DatabaseManager] Backfilled \(inserted) person nodes from message history (now \(after) total).")
+                }
+                return inserted
+            }
+        } catch {
+            print("[DatabaseManager] Person-node backfill failed: \(error)")
+            return 0
+        }
+    }
+
     private func ensureDatabase() async -> DatabasePool? {
         if databasePool == nil {
             await initialize()

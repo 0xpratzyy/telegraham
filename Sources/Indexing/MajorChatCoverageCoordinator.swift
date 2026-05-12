@@ -622,6 +622,20 @@ actor MajorChatCoverageCoordinator {
                 progress.oldestCoveredMessageId = cachedCursor.messageId
             }
 
+            // Adaptive scaling: every retry halves the batch and
+            // doubles the network timeout (capped at 30 min). For
+            // failure_count = 0 these are the regular constants; for
+            // 1 → 25/600s, 2 → 12/1200s, 3+ → 8/1800s. Smaller payloads
+            // give stuck TDLib chats a better shot at completing inside
+            // the timeout window.
+            let failureCount = state?.failureCount ?? 0
+            let adaptiveBatch = AppConstants.MajorChatCoverage.adaptiveBatchSize(
+                failureCount: failureCount
+            )
+            let adaptiveNetworkTimeout = AppConstants.MajorChatCoverage.adaptiveNetworkTimeoutSeconds(
+                failureCount: failureCount
+            )
+
             if !shouldPreferNetwork {
                 progress = try await fetchCoverageBatches(
                     for: coverageChat,
@@ -630,6 +644,7 @@ actor MajorChatCoverageCoordinator {
                     bridgeState: bridgeState,
                     onlyLocal: true,
                     historyFetchTimeoutSeconds: historyFetchTimeoutSeconds,
+                    batchSize: adaptiveBatch,
                     maxBatches: AppConstants.MajorChatCoverage.maxBatchesPerChat,
                     emptyPageRetryCount: AppConstants.MajorChatCoverage.localEmptyPageRetryCount,
                     interBatchDelayMilliseconds: 0,
@@ -645,7 +660,8 @@ actor MajorChatCoverageCoordinator {
                     cutoff: cutoff,
                     bridgeState: bridgeState,
                     onlyLocal: false,
-                    historyFetchTimeoutSeconds: AppConstants.MajorChatCoverage.networkHistoryFetchTimeoutSeconds,
+                    historyFetchTimeoutSeconds: adaptiveNetworkTimeout,
+                    batchSize: adaptiveBatch,
                     maxBatches: maxNetworkBatchesPerChatOverride
                         ?? AppConstants.MajorChatCoverage.maxNetworkBatchesPerChat,
                     emptyPageRetryCount: 0,
@@ -744,6 +760,7 @@ actor MajorChatCoverageCoordinator {
         bridgeState: DatabaseManager.ChatCoverageStateRecord?,
         onlyLocal: Bool,
         historyFetchTimeoutSeconds: TimeInterval,
+        batchSize: Int,
         maxBatches: Int,
         emptyPageRetryCount: Int,
         interBatchDelayMilliseconds: UInt64,
@@ -763,7 +780,7 @@ actor MajorChatCoverageCoordinator {
                     try await telegramService.getChatHistory(
                         chatId: chat.id,
                         fromMessageId: requestCursor,
-                        limit: AppConstants.MajorChatCoverage.historyBatchSize,
+                        limit: batchSize,
                         onlyLocal: onlyLocal,
                         priority: .background
                     )

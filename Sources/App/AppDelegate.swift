@@ -222,6 +222,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             await waitForGraphBuildReadiness()
             guard !Task.isCancelled else { return }
 
+            // One-shot person-node backfill from the local messages table.
+            // MajorChatCoverageCoordinator only fully indexes recent +
+            // small + DM-style chats (~80 out of ~1,600 in a typical
+            // account); without this pass the People page only ever
+            // shows the small fraction of contacts the graph builder
+            // walked. Fills nodes for every distinct sender already in
+            // the DB — pure local SQL, idempotent, ~1s on cold start.
+            logger.info("Startup pipeline running person-node backfill")
+            await DatabaseManager.shared.backfillPersonNodesFromMessages()
+            guard !Task.isCancelled else { return }
+
+            // Unstick chats whose coverage retry window already lapsed
+            // — e.g. the coordinator was busy timing out on neighbors
+            // and the queue cycled past them, or the app was force-quit
+            // mid-pass. Bounded to past-due rows so we don't undo a
+            // legitimate exponential backoff that's still in flight.
+            // MajorChatCoverageCoordinator picks them up on the next
+            // sweep with the (newly halved) 50-message batch size, so
+            // individual TDLib calls finish faster and have a better
+            // shot at completing inside the 300s ceiling.
+            logger.info("Startup pipeline resetting stuck coverage retries")
+            await DatabaseManager.shared.resetStuckCoverageRetries(forceAllPending: true)
+            guard !Task.isCancelled else { return }
+
             // The sync coordinators all return quickly from start() — they
             // spawn their own loops. Keep them serialized so we don't spam
             // TDLib in the same instant, but each only takes a few ms to
