@@ -89,6 +89,31 @@ enum DashboardTaskPrompt {
     - "can someone", "we need", "please send", or "need X" is not a task unless a clear owner is present.
     - "can we have" with no named owner is not a "Me" task. Return no task unless [ME] is directly addressed or later accepts the work.
     - If [ME] asks someone else to do something, ownerName is that person, not "Me".
+      Imperatives sent by [ME] in a DM are addressed to the other party
+      by default — short directives like "raise invoice for X",
+      "send the deck", "ping them again", "fix this" sent in a DM with
+      one other person are tasks owned by that other person, even
+      without an @-mention or "you" pronoun. The DM context is the
+      addressing.
+    - If [ME] makes a conditional commitment, the immediate next
+      action is on the other party — never on [ME].
+      Conditional commitment patterns to recognize (apply broadly,
+      not just these exact phrasings):
+        · "if you tell me X, I'll do Y"
+        · "let me know X and I'll do Y"
+        · "share details and I'll get it done"
+        · "what do you need? can possibly do Y for you"
+        · "what kind of X you need? can ask my <team/dev/legal> ..."
+        · any "Y" that hinges on the other party answering a question
+          [ME] just asked them in the same or adjacent message.
+      Even when [ME]'s message contains action verbs like "ask",
+      "send", "share", "build", "prepare" — if those verbs sit
+      AFTER a question [ME] just asked the other party in the same
+      thread, treat the question as the gating event. Until the
+      other party answers, there is no [ME] task. Return either no
+      task or a task owned by the OTHER party (e.g. "Share required
+      <X> with [ME]"). Do NOT pre-create a [ME] task for the
+      conditional half.
     - If [ME] already sent or shared the requested thing, do not create a new follow-up task from that sent/shared message unless someone later asks [ME] for a new deliverable.
     - Do not include ambient discussion, FYIs, greetings, or closed loops.
     - Use one of the provided topic names when it fits; otherwise use "Uncategorized".
@@ -102,6 +127,27 @@ enum DashboardTaskPrompt {
     - Non-[ME]: "yes let's find a time to merge both" -> no task for Me unless [ME] is directly asked to schedule or merge.
     - Non-[ME]: "can we have a comarketing announcement?" -> no task for Me when no owner is named.
     - [ME]: "sharing the First Dollar deck here" -> no task; [ME] already delivered the artifact.
+
+    Owner-disambiguation examples (apply these patterns, not surface phrasing):
+    - In DM with Ahaan, [ME]: "raise invoice for vietnam" -> task
+      "Raise invoice for vietnam", ownerName "Ahaan". [ME] is
+      directing Ahaan; the DM context substitutes for an @-mention.
+      ownerName is NEVER "Me" here.
+    - In DM with Sarah, [ME]: "send me the deck pls" -> task
+      "Send deck to [ME]", ownerName "Sarah". Same rule, with [ME]
+      as the recipient of the artifact.
+    - In DM with Himanshu, [ME]: "what kind of data you need? can
+      possibly ask my dev once you tell me" -> ownerName "Himanshu"
+      with task "Share required data fields", NOT a [ME] task. The
+      "ask my dev" half is conditional and only fires after Himanshu
+      answers. Pre-creating a [ME] task here puts the wrong ball in
+      the user's court.
+    - [ME]: "I'll send the wire details tomorrow" -> task "Send wire
+      details", ownerName "Me". Unconditional commitment, clear
+      deliverable.
+    - [ME]: "let me check with the team and revert" -> no task yet;
+      this is conversational, no concrete deliverable named. Reply
+      Queue territory if anything.
     """
 
     static func userMessage(
