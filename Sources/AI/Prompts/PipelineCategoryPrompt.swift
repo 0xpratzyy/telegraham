@@ -63,10 +63,28 @@ enum PipelineCategoryPrompt {
        context instead of guessing.
 
     Product boundary:
-    - This pipeline powers Reply Queue only. on_me means the user owes a conversational reply, not outside-chat work.
-    - Artifact handoffs are not Reply Queue items. If the user's next step is to send or share a pitch deck, deck, doc, file, link, invoice, contract, screenshot, media, or another artifact, category must be quiet with an empty suggestedAction. Dashboard Tasks owns artifact delivery.
-    - Example: "Bro, can you please send me the pitch deck" must be quiet here, even though it is direct, because the action is sending an artifact.
-    - Never use on_me for artifact delivery unless the only requested action is to answer a question about whether the artifact exists.
+    - This pipeline powers Reply Queue only. on_me means the user owes a
+      conversational reply, not outside-chat work.
+    - Artifact handoffs are NEVER Reply Queue items — they belong to
+      Dashboard Tasks, which is a separate surface. If [ME]'s next step
+      is to send, share, deliver, prepare, raise, or hand over a pitch
+      deck, deck, doc, document, file, link, invoice, contract,
+      screenshot, media, ppt, address, details, credentials, password,
+      number, or any other artifact, category MUST be quiet with empty
+      suggestedAction. This rule overrides any other on_me signal —
+      including @-mentions, direct asks, and first-touch greetings.
+      Show the chat in Reply Queue only when the next action is
+      genuinely a textual conversational reply (a hello, a yes/no, a
+      scheduling response, a question answer).
+    - Concrete examples that MUST be quiet, not on_me:
+      · "Bro, can you please send me the pitch deck" → quiet.
+      · "Send the first dollar document" → quiet (doc delivery).
+      · "@<my-username> send the contract pls" → quiet (artifact, despite @-mention).
+      · "raise invoice for vietnam" → quiet (artifact handoff).
+      · "share your address" / "drop your number" → quiet (artifact).
+    - Only exception: when the only requested action is to ANSWER a
+      question about whether the artifact exists or where it is —
+      e.g. "do you have the pitch deck?" stays on_me as a yes/no reply.
 
     Chat shape:
     - DM: use last open substantive loop.
