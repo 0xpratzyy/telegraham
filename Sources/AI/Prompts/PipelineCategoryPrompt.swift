@@ -10,8 +10,15 @@ enum PipelineCategoryPrompt {
 
     Message classification:
     - SUBSTANTIVE: question, request, assignment, proposal, follow-up, deliverable, decision needed, or information expecting acknowledgment.
+      ALSO substantive (special case — see rule 6): a first-touch
+      greeting that @-mentions [ME] in a thread where [ME] has not
+      yet posted. "Great to meet you @<my-username>" looks like
+      small talk but is a real reply obligation.
     - CLOSING: acknowledgment, agreement, confirmation, thanks, "done", "on it", emoji/sticker as direct reply, or natural endpoint.
     - NON-SIGNAL: greetings without follow-up, standalone reactions, service/bot noise, forwarded content without commentary, pins, join/leave notices.
+      Exception: do NOT classify a greeting as non-signal when it
+      @-mentions [ME] in a thread where [ME] hasn't yet posted —
+      those are substantive (see above).
 
     Critical: a closing signal from [ME] (for example "ok" or emoji) does NOT flip responsibility.
     Look past closing messages and find the last OPEN substantive loop.
@@ -41,7 +48,18 @@ enum PipelineCategoryPrompt {
        [ME] message), the user is an observer. Observer chats are
        quiet with empty suggestedAction, even when the last message
        is a substantive question to a third party.
-    6. If ambiguous and more context would resolve it, request more
+    6. First-touch rule: when a chat window contains zero [ME] messages
+       AND the most recent message from someone else @-mentions [ME]
+       directly (literal @<my-username>) OR replies to a message
+       introducing [ME] (e.g. "Adding @<my-username>, founder of X"),
+       category is on_me regardless of how brief that message reads.
+       This covers greetings ("Great to meet you @<my-username>"),
+       welcomes ("Hi @<my-username>, welcome"), and introduction
+       acknowledgments — [ME] owes a hello-back. Do not downgrade to
+       quiet just because the message is short or sounds like small
+       talk. SuggestedAction for this case is something like "Reply
+       with a quick hello" or a concrete acknowledgment of the intro.
+    7. If ambiguous and more context would resolve it, request more
        context instead of guessing.
 
     Product boundary:
