@@ -34,7 +34,19 @@ struct DashboardHomePage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 4) {
+                // Hero header — flush-left with the outer page padding.
+                // Removed the +12 inner wrapper that was making the
+                // title sit further right than the row avatars below
+                // (Dashboard.jsx puts hero text at body x=0 and the
+                // eyebrow + row content at body x=8, so the hero
+                // intentionally hugs the left more tightly).
+                //
+                // Inner spacings now match the design: 6pt between
+                // title and subtitle, 10pt subtitle-to-squiggle (4 from
+                // VStack + 6 from squiggle's padding-top), and the
+                // squiggle has 4pt below so the first group sits 4+28
+                // away from the squiggle baseline.
+                VStack(alignment: .leading, spacing: 6) {
                     Text("What to do now")
                         .font(PidgyDashboardTheme.heroTitleFont)
                         .tracking(-0.7)
@@ -43,10 +55,9 @@ struct DashboardHomePage: View {
                         .font(PidgyDashboardTheme.pageSubtitleFont)
                         .foregroundStyle(PidgyDashboardTheme.secondary)
                     DashboardSquiggleDivider()
-                        .padding(.top, 6)
+                        .padding(.top, 4)
                 }
-                .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
-                .padding(.bottom, PidgyDashboardTheme.headerBottomPadding)
+                .padding(.bottom, 4)
 
                 if feedItems.isEmpty && isLoading {
                     DashboardSkeletonRows(count: 7)
@@ -78,9 +89,14 @@ struct DashboardHomePage: View {
                         ForEach(DashboardFeedSection.allCases) { section in
                             let items = feedItems.filter { $0.section == section }
                             if !items.isEmpty {
+                                // Design's `group: { marginTop: 28 }`
+                                // gives every section a generous gap.
+                                // The label's own `.padding(.leading, 8)`
+                                // does the horizontal alignment with
+                                // the row avatars, so this only needs
+                                // to handle vertical rhythm.
                                 DashboardSectionLabel(section.title)
-                                    .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
-                                    .padding(.top, section == .onFire ? 0 : 2)
+                                    .padding(.top, 28)
                                     .padding(.bottom, 6)
 
                                 VStack(spacing: 0) {
@@ -334,44 +350,42 @@ struct DashboardFeedRow: View {
                 size: PidgyDashboardTheme.rowAvatarSize
             )
 
-            VStack(alignment: .leading, spacing: 3) {
+            // Title at regular weight (design spec: fontSize 14, no
+            // explicit weight → 400 regular). Metadata collapsed onto a
+            // single fg-3 line: "<person> · <chat-or-type> [· <topic>]".
+            // The old two-line treatment doubled the visual mass of every
+            // row; the design's compact context line is what gives the
+            // feed its calmer rhythm.
+            VStack(alignment: .leading, spacing: 2) {
                 Text(item.title)
-                    .font(PidgyDashboardTheme.rowTitleFont)
+                    .font(Font.Pidgy.body)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                     .lineLimit(1)
 
-                HStack(spacing: 6) {
-                    Text(item.person)
-                        .font(PidgyDashboardTheme.metadataMediumFont)
-                        .foregroundStyle(PidgyDashboardTheme.primary.opacity(0.78))
-                        .lineLimit(1)
-                    Text("·")
-                        .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    Text(item.chat)
-                        .font(PidgyDashboardTheme.metadataFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                    if let topic = item.topic {
-                        Text("·")
-                            .foregroundStyle(PidgyDashboardTheme.tertiary)
-                        Text(topic)
-                            .font(PidgyDashboardTheme.metadataFont)
-                            .foregroundStyle(PidgyDashboardTheme.secondary)
-                            .lineLimit(1)
-                    }
-                }
+                Text(contextLine)
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 14)
 
             Text(DateFormatting.compactRelativeTime(from: item.date))
                 .font(PidgyDashboardTheme.monoTimestampFont)
-                .foregroundStyle(item.section == .onFire ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
+                .foregroundStyle(item.section == .onFire ? PidgyDashboardTheme.brand : PidgyDashboardTheme.tertiary)
                 .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
         }
-        .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
+        .padding(.horizontal, 8)
         .frame(height: PidgyDashboardTheme.rowHeight)
         .contentShape(Rectangle())
+    }
+
+    private var contextLine: String {
+        var parts: [String] = [item.person, item.chat]
+        if let topic = item.topic, !topic.isEmpty {
+            parts.append(topic)
+        }
+        return parts.joined(separator: " · ")
     }
 
     private var chat: TGChat? {

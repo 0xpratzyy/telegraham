@@ -608,9 +608,19 @@ struct DashboardSectionLabel: View {
     }
 
     var body: some View {
+        // Design spec calls for a soft hint at 12pt fg-3 in sentence
+        // case — not the all-caps eyebrow style. Using bodySm (Inter
+        // 13, regular) is the closest stop on our ramp; tertiary (fg-3
+        // at 0.42 opacity) drops the visual weight so the section
+        // labels read as "rest your eyes here" hints rather than UI
+        // chrome. The 8pt leading pad puts the label flush with the
+        // row content (avatar) below — Dashboard.jsx's eyebrow uses
+        // `paddingLeft: 8` and rows use `padding: '10px 8px'`, so
+        // both land at the same x.
         Text(title)
-            .font(PidgyDashboardTheme.sectionLabelFont)
-            .foregroundStyle(PidgyDashboardTheme.secondary)
+            .font(PidgyDashboardTheme.metadataFont)
+            .foregroundStyle(PidgyDashboardTheme.tertiary)
+            .padding(.leading, 8)
     }
 }
 
