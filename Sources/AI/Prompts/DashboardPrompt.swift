@@ -77,6 +77,17 @@ enum DashboardTaskPrompt {
     - Extract only tasks still open at the end of the visible thread. If a later message says it was sent, done, handled, already added, marked used, or otherwise closed, do not return it as open.
     - ownerName must be the AI's best answer for who owns the next action: "Me" for [ME]/the user, otherwise the exact named assignee such as "Rajanshee" or "Deeeeeksha". Do not force "Me".
     - ownerName "Me" requires direct evidence: [ME] is named, tagged, directly asked, replying to the ask, or explicitly commits/promises to do the work. Being present in the chat, being part of "we", or being the app user is not enough.
+    - HARD RULE: if the supplied window contains ZERO messages marked
+      [ME] (i.e. the user has never spoken in this thread), ownerName
+      MUST NOT be "Me" under any circumstance. Either return the
+      named speaker as ownerName (e.g. "ipadeeWeb3" for a bug they
+      reported, "Damian" for a UI ask they made) or omit the task
+      entirely. Lurker presence in a project group is not ownership.
+      Example: in a team group "Banko" where members file feature
+      requests and bugs, every extracted task is owned by the named
+      reporter, never the lurking user. The fact that the chat is
+      about a product [ME] might care about is irrelevant — [ME]
+      hasn't accepted any of the work.
     - If a task is assigned to another named person, return it with that person's ownerName. The app will filter owner views later.
     - If ownership is truly unclear, return no task instead of ownerName "Me".
     - Requests to send or share a pitch deck, deck, doc, file, link, invoice, contract, screenshot, media, or another artifact are tasks when directed at a clear owner, even before that owner acknowledges.
