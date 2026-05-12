@@ -62,39 +62,47 @@ struct DashboardHomePage: View {
                     .frame(maxWidth: .infinity)
                     .padding(.top, 36)
                 } else {
-                    ForEach(DashboardFeedSection.allCases) { section in
-                        let items = feedItems.filter { $0.section == section }
-                        if !items.isEmpty {
-                            DashboardSectionLabel(section.title)
-                                .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
-                                .padding(.top, section == .onFire ? 0 : 2)
-                                .padding(.bottom, 6)
+                    // Hoisted from per-section to the whole feed: the prior
+                    // .animation(nil, value: items.map(\.id)) scope only
+                    // covered intra-section reorders. During the initial
+                    // pipeline burst the AttentionStore upserts ~20 chats as
+                    // their AI category lands, and many of those flip
+                    // sections (cached quiet → on_me, etc.). The cross-section
+                    // move — disappear from A's VStack + appear in B's VStack
+                    // — and the first-item-arrives section-header pop-in both
+                    // sit *outside* a per-section animation modifier, so they
+                    // leaked through as a visible flicker for the first few
+                    // seconds. Suppressing animations on the whole feed
+                    // covers both cases.
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(DashboardFeedSection.allCases) { section in
+                            let items = feedItems.filter { $0.section == section }
+                            if !items.isEmpty {
+                                DashboardSectionLabel(section.title)
+                                    .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
+                                    .padding(.top, section == .onFire ? 0 : 2)
+                                    .padding(.bottom, 6)
 
-                            VStack(spacing: 0) {
-                                ForEach(items.prefix(section == .onFire ? 5 : 10)) { item in
-                                    Button {
-                                        switch item.kind {
-                                        case .task(let task):
-                                            onOpenTask(task)
-                                        case .reply(let reply):
-                                            onOpenReply(reply)
+                                VStack(spacing: 0) {
+                                    ForEach(items.prefix(section == .onFire ? 5 : 10)) { item in
+                                        Button {
+                                            switch item.kind {
+                                            case .task(let task):
+                                                onOpenTask(task)
+                                            case .reply(let reply):
+                                                onOpenReply(reply)
+                                            }
+                                        } label: {
+                                            DashboardFeedRow(item: item)
                                         }
-                                    } label: {
-                                        DashboardFeedRow(item: item)
+                                        .buttonStyle(.plain)
                                     }
-                                    .buttonStyle(.plain)
                                 }
                             }
-                            // Belt-and-suspenders against the upsert storm
-                            // during refresh: even with a stable sort, the
-                            // attention pipeline can replace ~20 follow-up
-                            // items in quick succession while AI categorizes
-                            // each chat. Suppressing implicit insert/remove
-                            // animations on the section keeps rows from
-                            // visibly fading in/out as content lands.
-                            .animation(nil, value: items.map(\.id))
                         }
                     }
+                    .animation(nil, value: feedItems.map(\.id))
+                    .transaction { $0.disablesAnimations = true }
                 }
             }
             .frame(maxWidth: PidgyDashboardTheme.pageMaxWidth, alignment: .leading)
