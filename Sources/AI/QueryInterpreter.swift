@@ -196,7 +196,17 @@ final class QueryInterpreter: QueryInterpreting {
             // not just a list of matching messages.
             "status", "any update", "any updates", "where are we",
             "where do we stand", "where things stand", "where things are",
-            "any progress", "how is it going", "how's it going"
+            "any progress", "how is it going", "how's it going",
+            // Open-loop / blocker shorthand — what's pending / blocked /
+            // outstanding / still open with X. Same shape as status
+            // queries (operator wants a recap of the open work), but
+            // these specific words weren't in the list and were
+            // silently falling through to topic search. Real query
+            // that motivated this: "what's pending with Rahul on First
+            // Dollar" — returned a list of 24 keyword-matched chats
+            // instead of a synthesized "here's what's still open" answer.
+            "pending", "outstanding", "blocked on", "open loops",
+            "open with", "still open", "what's left", "what is left"
         ]
         let summaryPatterns = [
             #"\bwhat did we discuss(?: about)?\b"#,
@@ -210,7 +220,13 @@ final class QueryInterpreter: QueryInterpreting {
             // the keyword at the END so we don't catch random mid-sentence
             // mentions ("share the status link" should NOT trigger summary).
             #"\b(?:status|update|updates|situation|standing)\s*[?.!]?$"#,
-            #"\b(?:plan|plans|next steps?|next move)\s*[?.!]?$"#
+            #"\b(?:plan|plans|next steps?|next move)\s*[?.!]?$"#,
+            // "what's pending with X" / "what's up with X" — open-loop
+            // recap shape that matches the conversational way operators
+            // ask about a person's open threads.
+            #"\bwhat(?:'s| is) pending\b"#,
+            #"\bwhat(?:'s| is) up with\b"#,
+            #"\bwhat(?:'s| is) going on with\b"#
         ]
         if containsAny(summarySignals, in: normalized) || regexMatchesAny(summaryPatterns, in: normalized) {
             return .summary
