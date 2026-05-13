@@ -473,6 +473,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func openDashboard(page: DashboardPage = .dashboard) {
+        // Hard gate: never reveal the dashboard when Telegram credentials
+        // aren't available, regardless of which path called us. The
+        // launch-time gate above only covers `applicationDidFinishLaunching`;
+        // menu bar items, the dock-icon reopen handler, the search panel's
+        // "Open dashboard" action, and the Settings opener all funnel
+        // through here, and without this guard a single dismiss of the
+        // onboarding modal lets every one of those reveal the cached
+        // dashboard ("Investigate DMG installer issue" over an empty
+        // Telegram session etc.). Funnel everyone to onboarding instead
+        // — credentials get entered there, and once entered, every path
+        // works normally again.
+        guard telegramCredentialsAvailable() else {
+            presentOnboardingIfNeeded(force: true)
+            return
+        }
+
         if page == PreferencesRouting.authoritativePage {
             PreferencesRouting.showAuthoritativePreferences()
         } else {
