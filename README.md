@@ -81,15 +81,19 @@ You should have received a `Pidgy-<sha>.dmg` file. To install:
 
 ### What hits the network
 
-Pidgy talks to three places. Everything else stays on your Mac.
+| Endpoint | When | What gets sent |
+|---|---|---|
+| `api.telegram.org` (via TDLib) | Always, while signed in | Your Telegram session — sync chats and download message history |
+| `api.openai.com/v1/chat/completions` | When AI features run (reply suggestions, task extraction, semantic search) and an OpenAI key is configured | Recent message snippets from the chat being analyzed + the prompt that drives that feature |
+| `api.anthropic.com/v1/messages` | Same as above, if a Claude key is configured instead | Same |
+| `*.ingest.us.sentry.io` (Sentry SDK) | If a Sentry DSN was bundled into the build — crashes only, plus the explicit `PidgyTelemetry.capture(error:)` non-fatal sites | Stack trace + device/OS metadata. Event bodies pass through `scrubEvent` (`Sources/App/PidgyTelemetry.swift`) before send, which strips raw Telegram message text, sender names, phone numbers, and API tokens. You can disable by building from source without `PIDGY_SENTRY_DSN` set |
 
-| Endpoint | Why |
-|---|---|
-| `api.telegram.org` (via TDLib) | Sync your chats and download message history |
-| `api.openai.com/v1/chat/completions` | Reply suggestions, task extraction, semantic search (only when those features run) |
-| `api.anthropic.com/v1/messages` | Same, if you've configured a Claude key instead |
+**Telemetry honesty:**
+- **No analytics SDK** (no Mixpanel / Amplitude / PostHog / Google Analytics) — no usage events, no session tracking, no funnels.
+- **One crash-reporting SDK**: Sentry, opt-in via the bundled DSN above. PII-scrubbed, no message bodies.
+- **No LangSmith / LangChain traces in Release builds.** A LangSmith tracer exists for the developer loop and is wired through `LangSmithTracer.swift`, but `BundledSecrets.langSmithApiKey` returns `nil` outside `#if DEBUG`, and the xcconfig blanks the bundled key under `[config=Release]`, so the tracer is a no-op in any distributed build.
 
-No analytics, no telemetry, no third-party SDKs. Open the **About** preferences page to see the exact commit you're running.
+Open the **About** preferences page to see the exact commit you're running.
 
 ### Filing a bug
 
