@@ -70,6 +70,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var dashboardWindow: NSWindow?
     private var onboardingController: OnboardingWindowController?
     private var graphBuildTask: Task<Void, Never>?
+    /// Retains the inner detached graph-build loop separately from the
+    /// outer `graphBuildTask` orchestrator. Without this handle,
+    /// `graphBuildTask?.cancel()` only cancelled the outer Task — the
+    /// inner `Task.detached` kept running its `while !Task.isCancelled`
+    /// loop forever because nothing was setting its cancellation flag.
+    /// On reset, that meant GraphBuilder could continue writing to the
+    /// `nodes` table after `PreferencesResetService.deleteAllLocalData`
+    /// had wiped the DB, recreating ghost rows the user expected gone.
+    private var graphBuildLoopTask: Task<Void, Never>?
     private var backgroundActivityToken: NSObjectProtocol?
     private var preferencesOpenObserver: NSObjectProtocol?
     private var replayOnboardingObserver: NSObjectProtocol?
@@ -298,7 +307,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             // once at startup, any chats that arrived after the first pass
             // would never be added to the graph.
             logger.info("Startup pipeline kicking off graph build (background)")
-            Task.detached { [telegramService] in
+            // Retain the detached loop on `graphBuildLoopTask` so reset /
+            // termination can actually stop it. Previously this was a
+            // fire-and-forget Task.detached that survived
+            // `graphBuildTask?.cancel()` and kept rebuilding the relation
+            // graph indefinitely.
+            self.graphBuildLoopTask = Task.detached { [telegramService] in
                 while !Task.isCancelled {
                     await GraphBuilder.shared.buildIfNeeded(using: telegramService)
                     if Task.isCancelled { return }
@@ -318,6 +332,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if let showOnboardingObserver {
             NotificationCenter.default.removeObserver(showOnboardingObserver)
         }
+    }
+
+    /// Cancel the background graph-build loop. Called by
+    /// `PreferencesResetService.deleteAllLocalData` before the DB file is
+    /// removed — otherwise the loop's next iteration would `await
+    /// GraphBuilder.shared.buildIfNeeded` and start writing fresh `nodes`
+    /// rows to the just-recreated DB, recreating the "ghost contacts after
+    /// reset" the audit flagged.
+    func cancelGraphBuildLoop() {
+        graphBuildLoopTask?.cancel()
+        graphBuildLoopTask = nil
+        graphBuildTask?.cancel()
+        graphBuildTask = nil
     }
 
     private func presentOnboardingIfNeeded(force: Bool) {
@@ -397,6 +424,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         hotkeyManager?.unregister()
         graphBuildTask?.cancel()
+        graphBuildLoopTask?.cancel()
         TaskIndexCoordinator.shared.stop()
         telegramService.stop()
         Task { @MainActor in

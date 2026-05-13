@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
@@ -189,6 +190,14 @@ struct PreferencesResetService {
         // other. Doing them serially used to add multiple seconds of
         // perceived delay before the file removal could even start.
         TaskIndexCoordinator.shared.stop()
+        // Cancel the GraphBuilder background loop owned by AppDelegate.
+        // It's a Task.detached `while !Task.isCancelled` cycle —
+        // without this explicit cancel, the next 2-minute tick would
+        // rebuild relation-graph nodes onto the freshly-reset DB.
+        // Audit P1 finding; verified in code review.
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.cancelGraphBuildLoop()
+        }
         async let recentStop: Void = RecentSyncCoordinator.shared.stop()
         async let coverageStop: Void = MajorChatCoverageCoordinator.shared.stop()
         async let scheduleStop: Void = IndexScheduler.shared.stop()
