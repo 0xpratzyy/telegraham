@@ -429,6 +429,31 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v15_repair_dashboard_task_sources_orphans") { db in
+            // One-time cleanup for orphaned dashboard_task_sources rows.
+            //
+            // The FK is `task_id REFERENCES dashboard_tasks(id) ON DELETE
+            // CASCADE` (see v8 schema) and `PRAGMA foreign_keys = ON` is
+            // set at connection setup, but a PRAGMA foreign_key_check on
+            // existing user DBs reports orphans. They predate the FK
+            // enforcement OR were written through a code path / migration
+            // that bypassed CASCADE — either way the rows are real
+            // garbage. Left in place they:
+            //   - bloat the `loadDashboardTaskEvidence` UNION queries
+            //   - confuse future migrations that try to verify FK health
+            //   - make a future PRAGMA foreign_key_check on startup fail
+            //     to find a clean baseline
+            //
+            // Idempotent: zero-orphan DBs delete zero rows.
+            try db.execute(sql: """
+                DELETE FROM dashboard_task_sources
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM dashboard_tasks t
+                    WHERE t.id = dashboard_task_sources.task_id
+                )
+                """)
+        }
+
         return migrator
     }
 }
