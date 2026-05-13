@@ -32,7 +32,7 @@ enum AppConstants {
         static let openAIBaseURL = URL(string: "https://api.openai.com/v1/chat/completions")!
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
-        static let defaultOpenAIModel = "gpt-5.4-mini"
+        static let defaultOpenAIModel = "gpt-5"
         static let replyQueueOpenAIModel = "gpt-5.4-mini"
         static let followUpClaudeModel = "claude-3-5-haiku-20241022"
         static let followUpOpenAIModel = "gpt-5.4-mini"
@@ -306,7 +306,7 @@ enum AppConstants {
 
     enum Dashboard {
         static let maxTopicCount = 6
-        static let taskTriageContextVersion = 7
+        static let taskTriageContextVersion = 9
         static let taskTriageChatLimit = 48
         static let taskTriageBatchSize = 12
         static let taskExtractionMessagesPerChat = 16

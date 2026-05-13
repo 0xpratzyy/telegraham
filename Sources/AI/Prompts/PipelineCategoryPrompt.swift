@@ -38,6 +38,16 @@ enum PipelineCategoryPrompt {
          directed at [ME] and is not on its own a reason to choose
          on_me.
        - Direct reply to someone else -> not directed at [ME].
+       - Addressee inheritance: second-person pronouns ("you", "your",
+         "yours", "you're") inside a message that opens with "Hi @other"
+         / "Hey @other" / "@other," or replies directly to @other's
+         message refer to @other, NOT to [ME]. Example:
+         "Hi @nextwarrior, would love to hear what your fundraising
+         plans are" puts the ball on @nextwarrior; [ME] is observing
+         even if [ME] cares about the topic. Do not generalize "your"
+         to mean "every group member's" — Telegram threads are dyadic
+         by default unless the message is an explicit broadcast
+         ("everyone:", "team:", "@here", "@all").
        - DM open question -> directed at [ME].
        - Small groups: untargeted operational questions may be on_me
          only if context strongly supports it.
@@ -85,6 +95,33 @@ enum PipelineCategoryPrompt {
     - Only exception: when the only requested action is to ANSWER a
       question about whether the artifact exists or where it is —
       e.g. "do you have the pitch deck?" stays on_me as a yes/no reply.
+
+    Dyadic thread examples (someone else owes the next reply, NOT [ME]):
+    These are common false-positive shapes. When the latest substantive
+    message names a specific OTHER user and asks them a question, the
+    ball is on @other — do not flip it onto [ME], even if [ME] is on
+    the same team as the sender or active in the chat:
+      · Rajanshee → "Hey @crypticghostz did you get a chance to create
+        the campaign?" → on_them (waiting on @crypticghostz). The
+        suggestedAction must NOT say "Reply to Rajanshee" — Rajanshee
+        is the one asking, not the one being asked.
+      · Rajanshee → "@akamft bumping this up" → on_them (Rajanshee
+        nudging @akamft for the earlier ask). Quiet/observer if [ME]
+        has never posted in the chat.
+      · Evan → "Hi @nextwarrior, would love to know what your plans
+        are" → on_them (addressed at @nextwarrior); [ME] is observing
+        even if [ME] is a peer in the same group.
+      · Teammate → external_user: any "Hi @external_user / Hey
+        @external_user / @external_user," followed by a question is
+        on_them. [ME] inheriting team responsibility is not a
+        Reply-Queue obligation — Reply Queue is only [ME]'s direct
+        conversational replies.
+
+    Action-direction sanity check:
+    Before emitting suggestedAction, verify it makes literal sense.
+    "Reply to <name> about X" is only valid when <name> directly asked
+    [ME] about X. If <name> asked someone else about X, never write
+    "Reply to <name>" — that's a hallucinated reversal.
 
     Chat shape:
     - DM: use last open substantive loop.

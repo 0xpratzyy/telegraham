@@ -151,6 +151,12 @@ enum AIUsagePricingCatalog {
                 inputUSDPerMillionTokens: 0.25,
                 outputUSDPerMillionTokens: 2.00
             )
+        case (.openAI, "gpt-5"):
+            return AIModelPricing(
+                family: family,
+                inputUSDPerMillionTokens: 1.25,
+                outputUSDPerMillionTokens: 10.00
+            )
         case (.claude, "claude-sonnet-4"):
             return AIModelPricing(
                 family: family,
@@ -182,6 +188,11 @@ enum AIUsagePricingCatalog {
             }
             if normalized.hasPrefix("gpt-5-mini") {
                 return "gpt-5-mini"
+            }
+            // gpt-5 full (not mini/nano). Matched last so the more specific
+            // mini/nano branches take precedence on their longer names.
+            if normalized == "gpt-5" {
+                return "gpt-5"
             }
         case .claude:
             if normalized.contains("claude-sonnet-4") || normalized.contains("sonnet-4") {

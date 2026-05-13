@@ -268,6 +268,13 @@ struct DashboardReplyDetail: View {
     let onOpenChat: (TGChat) -> Void
     let onClose: () -> Void
 
+    @State private var conversationContext: [DatabaseManager.MessageRecord] = []
+    @State private var isLoadingContext = false
+
+    /// Same cap as the Task Evidence section — enough to read the back-and-
+    /// forth that triggered the suggestion without becoming a full transcript.
+    private static let maxEvidenceRows = 5
+
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
             if let item {
@@ -302,12 +309,25 @@ struct DashboardReplyDetail: View {
                         )
                 }
 
-                DashboardDetailSection(title: "Latest message") {
-                    Text(item.lastMessage.displayText)
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(8)
-                        .lineSpacing(3)
+                let evidenceItems = mergedEvidenceItems(for: item)
+                DashboardDetailSection(
+                    title: "Evidence",
+                    trailing: evidenceTrailing(for: evidenceItems)
+                ) {
+                    VStack(spacing: 6) {
+                        if evidenceItems.isEmpty {
+                            Text(isLoadingContext
+                                 ? "Loading nearby messages…"
+                                 : "No recent messages found for this chat.")
+                                .font(PidgyDashboardTheme.detailBodyFont)
+                                .foregroundStyle(PidgyDashboardTheme.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            ForEach(evidenceItems) { row in
+                                DashboardEvidenceContextRow(item: row)
+                            }
+                        }
+                    }
                 }
             } else {
                 DashboardEmptyState(
@@ -334,6 +354,77 @@ struct DashboardReplyDetail: View {
             .frame(height: 36)
             .background(DashboardCapsuleBackground())
         }
+        .task(id: item?.chat.id) {
+            await loadConversationContext()
+        }
+    }
+
+    private func loadConversationContext() async {
+        guard let chatId = item?.chat.id else {
+            conversationContext = []
+            return
+        }
+        isLoadingContext = true
+        defer { isLoadingContext = false }
+        let recent = await DatabaseManager.shared.loadMessages(
+            chatId: chatId,
+            limit: Self.maxEvidenceRows + 2
+        )
+        conversationContext = recent.sorted { $0.date < $1.date }
+    }
+
+    /// Treats the FollowUpItem's `lastMessage` as the "source" — it's the
+    /// message that drove the categorization. Surrounding chat history is
+    /// loaded from the DB and rendered as context. Falls back to a one-row
+    /// list with just the last message if the DB hasn't cached the chat yet.
+    private func mergedEvidenceItems(for item: FollowUpItem) -> [EvidenceContextItem] {
+        let sourceId = item.lastMessage.id
+        let context = conversationContext
+            .filter { $0.id != sourceId }
+            .suffix(Self.maxEvidenceRows - 1)
+            .map { record in
+                EvidenceContextItem(
+                    id: record.id,
+                    date: record.date,
+                    senderName: senderLabel(for: record),
+                    isOutgoing: record.isOutgoing,
+                    text: nonEmptyDisplayText(for: record),
+                    isSource: false
+                )
+            }
+
+        let source = EvidenceContextItem(
+            id: sourceId,
+            date: item.lastMessage.date,
+            senderName: item.lastMessage.senderName ?? "Unknown",
+            isOutgoing: item.lastMessage.isOutgoing,
+            text: item.lastMessage.displayText,
+            isSource: true
+        )
+
+        return (context + [source]).sorted { $0.date < $1.date }
+    }
+
+    private func senderLabel(for record: DatabaseManager.MessageRecord) -> String {
+        if record.isOutgoing { return "You" }
+        let trimmed = record.senderName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Unknown" : trimmed
+    }
+
+    private func nonEmptyDisplayText(for record: DatabaseManager.MessageRecord) -> String {
+        let trimmed = record.textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty { return trimmed }
+        if let media = record.mediaTypeRaw, !media.isEmpty {
+            return "[\(media)]"
+        }
+        return "[empty]"
+    }
+
+    private func evidenceTrailing(for items: [EvidenceContextItem]) -> String {
+        if items.isEmpty { return isLoadingContext ? "loading…" : "no context" }
+        let contextCount = items.count - items.filter(\.isSource).count
+        if contextCount == 0 { return "1 source" }
+        return "1 source · \(contextCount) context"
     }
 }
 

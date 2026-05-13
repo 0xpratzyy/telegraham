@@ -169,26 +169,39 @@ enum FollowUpPipelineAnalyzer {
                 myUserId: myUserId,
                 myUsername: currentUser?.username
             )
-            let localSuggestion = fallbackSuggestedAction(
-                for: localCategory,
-                existing: nil,
-                age: age
-            )
 
-            await cache.cachePipelineCategory(
-                chatId: effectiveChat.id,
-                category: pipelineCategoryString(localCategory),
-                suggestedAction: localSuggestion ?? "",
-                lastMessageId: lastMessage.id
-            )
+            // For large groups (>50 members or unknown count) we used to
+            // short-circuit the AI entirely and trust the local heuristic.
+            // That mis-classified broadcast-style group posts as on_me — a
+            // "please share" or any text ≥28 chars trips the heuristic, even
+            // when the message is clearly a community announcement nobody
+            // is waiting on [ME] for. Compromise: trust the local heuristic
+            // for the "quiet" verdict (cheap, accurate enough), but when it
+            // says on_me, defer to AI as a tiebreaker — these are the
+            // expensive false positives we want to catch.
+            if localCategory != .onMe {
+                let localSuggestion = fallbackSuggestedAction(
+                    for: localCategory,
+                    existing: nil,
+                    age: age
+                )
 
-            return FollowUpItem(
-                chat: effectiveChat,
-                category: localCategory,
-                lastMessage: lastMessage,
-                timeSinceLastActivity: age,
-                suggestedAction: localSuggestion
-            )
+                await cache.cachePipelineCategory(
+                    chatId: effectiveChat.id,
+                    category: pipelineCategoryString(localCategory),
+                    suggestedAction: localSuggestion ?? "",
+                    lastMessageId: lastMessage.id
+                )
+
+                return FollowUpItem(
+                    chat: effectiveChat,
+                    category: localCategory,
+                    lastMessage: lastMessage,
+                    timeSinceLastActivity: age,
+                    suggestedAction: localSuggestion
+                )
+            }
+            // Fall through to the AI loop below for the on_me-leaning cases.
         }
 
         var attempt = 0
@@ -210,7 +223,14 @@ enum FollowUpPipelineAnalyzer {
                     let requested = triage.additionalMessages ?? defaultNeedMoreMessages
                     let boundedAdditional = max(10, min(defaultNeedMoreMessages, requested))
                     let targetWindowSize = min(maxMessages, currentWindowSize + boundedAdditional)
-                    guard await expandWindow(toAtLeast: targetWindowSize) else { break }
+                    // Try to expand, but ALWAYS continue to attempt 2 even if
+                    // expansion failed (no more history available, TDLib error,
+                    // or already at maxMessages). The system prompt instructs
+                    // the AI to return a decision on the second pass — short-
+                    // circuiting to the rule-based heuristic here was flipping
+                    // 1-message lurker chats to on_me with a generic "Reply
+                    // with a concrete next step." action.
+                    _ = await expandWindow(toAtLeast: targetWindowSize)
                     continue
 
                 case .decision:

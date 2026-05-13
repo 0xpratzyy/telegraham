@@ -97,6 +97,29 @@ enum DashboardTaskPrompt {
       The decision hinges on direct address, not message count.
     - If a task is assigned to another named person, return it with that person's ownerName. The app will filter owner views later.
     - If ownership is truly unclear, return no task instead of ownerName "Me".
+    - Addressee inheritance for "Hi @other" / "Hey @other" / "@other,"
+      patterns: when the latest substantive ask opens with a vocative
+      @-mention or name of a non-[ME] person and contains a request or
+      question, that person owns the next action. Past participation by
+      [ME] in earlier turns of the same chat does NOT make [ME] a
+      co-owner of this new ask. The latest addressee controls ownership.
+      Examples (apply the pattern, not the surface):
+        · "Hey @crypticghostz did you get a chance to create the
+          campaign?" → ownerName "crypticghostz", NOT "Me", even if
+          [ME] helped set up the campaign earlier in the same chat.
+        · "Hi @nextwarrior, what are your fundraising plans?" →
+          ownerName "nextwarrior", NOT "Me", even when [ME] is part
+          of the same group.
+        · "@akamft bumping this up" (a follow-up nudge to @akamft) →
+          ownerName "akamft", NOT "Me". The earlier substantive ask
+          that this is bumping carries through to @akamft.
+    - Closure detection: a brief acknowledgement from the asker after
+      [ME] supplies the requested thing closes the loop. Treat short
+      replies like "thk h", "thanks", "thx", "got it", "noted", "ok",
+      "great", "sure", "perfect", "done", and emoji-only reactions as
+      closing signals when they come from the original asker after
+      [ME] has answered. Do NOT return a still-open task in that case
+      — return ignore (or skip extraction) instead.
     - Requests to send or share a pitch deck, deck, doc, file, link, invoice, contract, screenshot, media, or another artifact are tasks when directed at a clear owner, even before that owner acknowledges.
     - Do not extract reply-only items. A quick confirmation, acknowledgement, answer, or scheduling reply belongs in Reply Queue, not Tasks.
       Difference: "can you send the deck?" is a task because the next move is delivering an artifact. "can you confirm?" is reply-only because the next move is only text.
@@ -240,6 +263,32 @@ enum DashboardTaskTriagePrompt {
     - If a listed open task was created from unclear group coordination rather than direct user ownership, return "ignore" and include the source message IDs for that stale task so it can leave the open list.
     - Existing open task source evidence is the evidence that created the current task row. Use it to clean up stale false positives, especially when the source evidence shows another non-[ME] person accepting or owning the work.
     - For listed open tasks, check the current stored ownerName against the evidence. If ownerName is "Me" but the visible evidence assigns the work to someone else or no direct user ownership exists, return "ignore" or the correct non-user effort_task instead of keeping it as a user task.
+    - Addressee inheritance: when the latest substantive message opens
+      with a vocative @-mention or name of a non-[ME] person — "Hi
+      @other", "Hey @other", "@other,", "@other did you ..." — that
+      person owns the next action. Past participation by [ME] in
+      earlier turns of the SAME chat does NOT make [ME] a co-owner of
+      the new ask. Concrete cases that must NOT route as Me-owned
+      effort_task:
+        · "Hey @crypticghostz did you get a chance to create the
+          campaign?" in a chat where [ME] helped set up the campaign
+          earlier → effort_task with owner "crypticghostz" (NOT Me).
+        · "Hi @nextwarrior, what are your plans?" → effort_task with
+          owner "nextwarrior" (NOT Me), even when [ME] is in the
+          group.
+        · "@akamft bumping this up" → effort_task with owner "akamft"
+          (or ignore if there is no existing open task that is for
+          @akamft).
+    - Closure via brief acknowledgement: when the original asker sends
+      a short ack after [ME] has supplied the requested thing, route
+      as "completed_task" with that existing task's id (or "ignore" if
+      no matching open task). Treat as closure: "thk h", "theek hai",
+      "thanks", "thx", "got it", "noted", "ok", "great", "sure",
+      "perfect", "done", "kk", emoji-only reactions. Example:
+        · DM with Deeeeeksha. Deeeeeksha asked for business overview
+          text. [ME] supplied it. Deeeeeksha responded "thk h" →
+          "completed_task" for any open business-overview task in
+          this chat. Do NOT keep it open with owner Me.
     - If a listed open task is complete, prefer "completed_task" over "ignore" so the task can leave the open list.
     - For completed_task, supportingMessageIds should point at the completion evidence and, when visible, the original ask.
     - Do not create tasks for bots, channels, announcements, or generic chatter.

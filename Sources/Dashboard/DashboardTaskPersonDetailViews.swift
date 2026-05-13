@@ -224,7 +224,7 @@ struct DashboardTaskDetail: View {
     }
 }
 
-private struct EvidenceContextItem: Identifiable, Equatable {
+struct EvidenceContextItem: Identifiable, Equatable {
     let id: Int64
     let date: Date
     let senderName: String
@@ -233,7 +233,7 @@ private struct EvidenceContextItem: Identifiable, Equatable {
     let isSource: Bool
 }
 
-private struct DashboardEvidenceContextRow: View {
+struct DashboardEvidenceContextRow: View {
     let item: EvidenceContextItem
 
     var body: some View {

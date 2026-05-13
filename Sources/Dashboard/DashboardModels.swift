@@ -255,7 +255,12 @@ enum DashboardTaskOwnership {
         case .mine:
             return isMine(ownerName: task.ownerName, currentUser: currentUser)
         case .owner(let name):
-            return namesOverlap(task.ownerName, name) || namesOverlap(task.personName, name)
+            // Owner chips filter strictly by ownerName. Previously we also
+            // matched personName, which leaked tasks whose subject (but not
+            // owner) was the selected person — e.g. "Create the campaign"
+            // (owner=Me, person=Rajanshee) showed up under the "Rajanshee"
+            // chip because Rajanshee was the conversational person.
+            return namesOverlap(task.ownerName, name)
         case .all:
             return true
         }
@@ -328,12 +333,21 @@ enum DashboardTaskOwnership {
             aliases.insert(full)
         }
 
-        let parts = trimmed
+        // Only include the FIRST token (first name) as a secondary alias.
+        // Previously we added every token, which caused last names like
+        // "Singh" to make unrelated people collide — "Rahul Singh
+        // Bhadoriya" and "Rajanshee Singh" share `singh`, so the
+        // "Rajanshee Singh" chip was matching all of Rahul's tasks too.
+        // First-name matches still catch the common "Rajanshee" vs
+        // "Rajanshee Singh" merge that the chip strip relies on.
+        let tokens = trimmed
             .lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .map(normalizedOwnerName)
             .filter { $0.count >= 2 }
-        aliases.formUnion(parts)
+        if let firstToken = tokens.first, !firstToken.isEmpty {
+            aliases.insert(firstToken)
+        }
 
         return aliases
     }
