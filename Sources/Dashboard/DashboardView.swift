@@ -482,11 +482,27 @@ struct DashboardView: View {
                 preview: $0.lastMessage?.displayText
             )
         }
+
+        // If we have no topics yet (initial load) or no chats (TDLib hasn't
+        // populated visibleChats), don't overwrite the sidebar with []. Empty
+        // inputs always produce empty output via sidebarItems, which made the
+        // "Main Topics" section briefly disappear during any concurrent
+        // taskIndex.loadFromStore pass (it momentarily re-publishes `topics`
+        // even when the new array equals the old, and rapid republishes can
+        // overlap with the sidebar rebuild). Keep the last-good list visible
+        // until we have inputs that can produce a real answer.
+        guard !topics.isEmpty, !snapshots.isEmpty else { return }
+
         let items = await Task.detached(priority: .utility) {
             DashboardTopicMatcher.sidebarItems(topics: topics, chats: snapshots)
         }.value
 
         guard !Task.isCancelled else { return }
+        // Same defense: if the rebuild produced nothing (e.g. no topic
+        // matched), keep prior items rather than flashing an empty sidebar.
+        // Pinned topics with score >= 9000 should always satisfy the
+        // sidebarItems filter, so empty output is suspicious.
+        guard !items.isEmpty else { return }
         sidebarTopicItems = items
     }
 

@@ -188,6 +188,19 @@ final class TaskIndexCoordinator: ObservableObject {
         _ includeBotsInAISearch: Bool,
         telegramService: TelegramService
     ) async {
+        // Early-return when nothing actually changed. This is called from
+        // DashboardView's .onChange(of: visibleChatIDs) on every TDLib chat
+        // update, and every botMetadataRefreshVersion bump. The toggle
+        // genuinely changes ~0 times per session, but each no-op call
+        // otherwise fires 3 SQLite reads (topics + tasks + evidence) plus a
+        // bot-filter pass over all tasks. Skip when the value matches what
+        // we already hold AND we already have a service reference.
+        let serviceUnchanged = filteringTelegramService === telegramService
+        let inclusionUnchanged = self.includeBotsInAISearch == includeBotsInAISearch
+        if serviceUnchanged && inclusionUnchanged && !tasks.isEmpty {
+            return
+        }
+
         self.includeBotsInAISearch = includeBotsInAISearch
         filteringTelegramService = telegramService
         await loadFromStore(
