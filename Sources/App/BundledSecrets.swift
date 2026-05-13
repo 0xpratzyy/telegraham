@@ -38,6 +38,16 @@ enum BundledSecrets {
     /// build.
     static let buildCommitSHA: String = stringValue(forKey: "PidgyBuildCommitSHA") ?? "unknown"
 
+    /// LangSmith API key for LLM call tracing (`PIDGY_BUNDLED_LANGSMITH_API_KEY`).
+    /// When nil/empty, `LangSmithTracer.record` is a no-op so no traces leave
+    /// the device. Intended as temporary observability scaffolding — remove
+    /// once we've extracted the eval fixtures we need.
+    static let langSmithApiKey: String? = stringValue(forKey: "PidgyBundledLangSmithApiKey")
+
+    /// Optional override for the LangSmith project name traces land in
+    /// (`PIDGY_BUNDLED_LANGSMITH_PROJECT`). Defaults to "pidgy-dev" when blank.
+    static let langSmithProjectName: String? = stringValue(forKey: "PidgyBundledLangSmithProject")
+
     /// True when both Telegram credentials are present — the auth flow can
     /// then skip its credential entry step and go straight to QR / phone.
     static var hasBundledTelegramCredentials: Bool {

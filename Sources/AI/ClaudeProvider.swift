@@ -238,6 +238,11 @@ final class ClaudeProvider: AIProvider {
         userMessage: String,
         requestKind: AIRequestKind? = nil
     ) async throws -> String {
+        // LangSmith tracing scaffolding — see OpenAIProvider.makeRequest for
+        // rationale. No-op when PIDGY_BUNDLED_LANGSMITH_API_KEY is empty.
+        let startedAt = Date()
+        let runName = requestKind?.rawValue ?? "claude_chat"
+
         var request = URLRequest(url: AppConstants.AI.claudeBaseURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -252,14 +257,44 @@ final class ClaudeProvider: AIProvider {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            // Skip tracing cancellations — see OpenAIProvider for rationale.
+            if !(error is CancellationError) && (error as NSError).code != NSURLErrorCancelled {
+                LangSmithTracer.shared.record(
+                    provider: "claude", model: model, runName: runName,
+                    systemPrompt: systemPrompt, userMessage: userMessage,
+                    startedAt: startedAt, completedAt: Date(),
+                    response: nil, error: "transport: \(error.localizedDescription)",
+                    inputTokens: nil, outputTokens: nil, costUSD: nil
+                )
+            }
+            throw error
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
+            LangSmithTracer.shared.record(
+                provider: "claude", model: model, runName: runName,
+                systemPrompt: systemPrompt, userMessage: userMessage,
+                startedAt: startedAt, completedAt: Date(),
+                response: nil, error: "invalidResponse: non-HTTP",
+                inputTokens: nil, outputTokens: nil, costUSD: nil
+            )
             throw AIError.invalidResponse
         }
 
         guard httpResponse.statusCode == 200 else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            LangSmithTracer.shared.record(
+                provider: "claude", model: model, runName: runName,
+                systemPrompt: systemPrompt, userMessage: userMessage,
+                startedAt: startedAt, completedAt: Date(),
+                response: errorBody, error: "http_\(httpResponse.statusCode)",
+                inputTokens: nil, outputTokens: nil, costUSD: nil
+            )
             throw AIError.httpError(httpResponse.statusCode, errorBody)
         }
 
@@ -267,11 +302,20 @@ final class ClaudeProvider: AIProvider {
               let content = json["content"] as? [[String: Any]],
               let firstBlock = content.first,
               let text = firstBlock["text"] as? String else {
+            LangSmithTracer.shared.record(
+                provider: "claude", model: model, runName: runName,
+                systemPrompt: systemPrompt, userMessage: userMessage,
+                startedAt: startedAt, completedAt: Date(),
+                response: String(data: data, encoding: .utf8),
+                error: "invalidResponse: parse",
+                inputTokens: nil, outputTokens: nil, costUSD: nil
+            )
             throw AIError.invalidResponse
         }
 
+        let usage = parseUsage(from: json["usage"])
+
         if let requestKind {
-            let usage = parseUsage(from: json["usage"])
             await AIUsageStore.shared.record(
                 provider: .claude,
                 model: model,
@@ -279,6 +323,28 @@ final class ClaudeProvider: AIProvider {
                 usage: usage
             )
         }
+
+        LangSmithTracer.shared.record(
+            provider: "claude",
+            model: model,
+            runName: runName,
+            systemPrompt: systemPrompt,
+            userMessage: userMessage,
+            startedAt: startedAt,
+            completedAt: Date(),
+            response: text,
+            error: nil,
+            inputTokens: usage?.inputTokens,
+            outputTokens: usage?.outputTokens,
+            costUSD: AIUsagePricingCatalog
+                .pricing(for: .claude, model: model)
+                .flatMap { p in
+                    guard let usage else { return nil }
+                    let inCost = Double(usage.inputTokens) / 1_000_000 * p.inputUSDPerMillionTokens
+                    let outCost = Double(usage.outputTokens) / 1_000_000 * p.outputUSDPerMillionTokens
+                    return inCost + outCost
+                }
+        )
 
         return text
     }

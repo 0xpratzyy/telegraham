@@ -41,6 +41,8 @@ targets:
         PidgyBundledTelegramApiHash: $(PIDGY_TG_API_HASH)
         PidgyBundledOpenAIApiKey: $(PIDGY_BUNDLED_OPENAI_API_KEY)
         PidgyBundledSentryDsn: $(PIDGY_SENTRY_DSN)
+        PidgyBundledLangSmithApiKey: $(PIDGY_BUNDLED_LANGSMITH_API_KEY)
+        PidgyBundledLangSmithProject: $(PIDGY_BUNDLED_LANGSMITH_PROJECT)
         PidgyBuildCommitSHA: $(PIDGY_BUILD_COMMIT_SHA)
     postBuildScripts:
       - name: Stamp commit SHA into built Info.plist

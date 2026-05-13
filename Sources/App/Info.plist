@@ -22,6 +22,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>PidgyBuildCommitSHA</key>
 	<string>$(PIDGY_BUILD_COMMIT_SHA)</string>
+	<key>PidgyBundledLangSmithApiKey</key>
+	<string>$(PIDGY_BUNDLED_LANGSMITH_API_KEY)</string>
+	<key>PidgyBundledLangSmithProject</key>
+	<string>$(PIDGY_BUNDLED_LANGSMITH_PROJECT)</string>
 	<key>PidgyBundledOpenAIApiKey</key>
 	<string>$(PIDGY_BUNDLED_OPENAI_API_KEY)</string>
 	<key>PidgyBundledSentryDsn</key>

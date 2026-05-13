@@ -257,6 +257,11 @@ final class OpenAIProvider: AIProvider {
         requestKind: AIRequestKind? = nil,
         responseFormat: [String: Any]? = nil
     ) async throws -> String {
+        // LangSmith tracing scaffolding — captures start/end so we can replay
+        // and compare prompt versions while iterating on accuracy. No-op when
+        // PIDGY_BUNDLED_LANGSMITH_API_KEY is empty.
+        let startedAt = Date()
+
         var request = URLRequest(url: AppConstants.AI.openAIBaseURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -272,16 +277,67 @@ final class OpenAIProvider: AIProvider {
         if let responseFormat {
             body["response_format"] = responseFormat
         }
+        // gpt-5 reasoning models default to medium effort, which produces
+        // 1,000-2,500 reasoning tokens per call (billed at output rate)
+        // before the final JSON. Our prompts ask for structured triage
+        // decisions ~80 tokens long; we don't need long internal reasoning.
+        // "low" cuts the reasoning tokens 3-5× and keeps quality on
+        // structured outputs. Only emit for gpt-5* models — older
+        // chat-completions models 400 on this param.
+        if model.hasPrefix("gpt-5") {
+            body["reasoning_effort"] = "low"
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            // Skip tracing cancellations — they're benign Swift Task aborts
+            // (a newer refresh superseded this one). Tracing them clutters
+            // LangSmith with red errors that aren't real failures.
+            if !(error is CancellationError) && (error as NSError).code != NSURLErrorCancelled {
+                LangSmithTracer.shared.record(
+                    provider: "openai",
+                    model: model,
+                    runName: requestKind?.rawValue ?? "openai_chat",
+                    systemPrompt: systemPrompt,
+                    userMessage: userMessage,
+                    startedAt: startedAt,
+                    completedAt: Date(),
+                    response: nil,
+                    error: "transport: \(error.localizedDescription)",
+                    inputTokens: nil,
+                    outputTokens: nil,
+                    costUSD: nil
+                )
+            }
+            throw error
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
+            LangSmithTracer.shared.record(
+                provider: "openai", model: model,
+                runName: requestKind?.rawValue ?? "openai_chat",
+                systemPrompt: systemPrompt, userMessage: userMessage,
+                startedAt: startedAt, completedAt: Date(),
+                response: nil, error: "invalidResponse: non-HTTP",
+                inputTokens: nil, outputTokens: nil, costUSD: nil
+            )
             throw AIError.invalidResponse
         }
 
         guard httpResponse.statusCode == 200 else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            LangSmithTracer.shared.record(
+                provider: "openai", model: model,
+                runName: requestKind?.rawValue ?? "openai_chat",
+                systemPrompt: systemPrompt, userMessage: userMessage,
+                startedAt: startedAt, completedAt: Date(),
+                response: errorBody, error: "http_\(httpResponse.statusCode)",
+                inputTokens: nil, outputTokens: nil, costUSD: nil
+            )
             throw AIError.httpError(httpResponse.statusCode, errorBody)
         }
 
@@ -290,11 +346,21 @@ final class OpenAIProvider: AIProvider {
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any],
               let content = extractMessageContent(from: message["content"]) else {
+            LangSmithTracer.shared.record(
+                provider: "openai", model: model,
+                runName: requestKind?.rawValue ?? "openai_chat",
+                systemPrompt: systemPrompt, userMessage: userMessage,
+                startedAt: startedAt, completedAt: Date(),
+                response: String(data: data, encoding: .utf8),
+                error: "invalidResponse: parse",
+                inputTokens: nil, outputTokens: nil, costUSD: nil
+            )
             throw AIError.invalidResponse
         }
 
+        let usage = parseUsage(from: json["usage"])
+
         if let requestKind {
-            let usage = parseUsage(from: json["usage"])
             await AIUsageStore.shared.record(
                 provider: .openAI,
                 model: model,
@@ -302,6 +368,28 @@ final class OpenAIProvider: AIProvider {
                 usage: usage
             )
         }
+
+        LangSmithTracer.shared.record(
+            provider: "openai",
+            model: model,
+            runName: requestKind?.rawValue ?? "openai_chat",
+            systemPrompt: systemPrompt,
+            userMessage: userMessage,
+            startedAt: startedAt,
+            completedAt: Date(),
+            response: content,
+            error: nil,
+            inputTokens: usage?.inputTokens,
+            outputTokens: usage?.outputTokens,
+            costUSD: AIUsagePricingCatalog
+                .pricing(for: .openAI, model: model)
+                .flatMap { p in
+                    guard let usage else { return nil }
+                    let inCost = Double(usage.inputTokens) / 1_000_000 * p.inputUSDPerMillionTokens
+                    let outCost = Double(usage.outputTokens) / 1_000_000 * p.outputUSDPerMillionTokens
+                    return inCost + outCost
+                }
+        )
 
         return content
     }
