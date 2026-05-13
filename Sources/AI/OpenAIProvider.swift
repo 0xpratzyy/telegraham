@@ -163,7 +163,8 @@ final class OpenAIProvider: AIProvider {
             try await self.makeRequest(
                 systemPrompt: PipelineCategoryPrompt.systemPrompt,
                 userMessage: PipelineCategoryPrompt.userMessage(context: context, snippets: snippets),
-                requestKind: .pipelineTriage
+                requestKind: .pipelineTriage,
+                chatId: context.chatId
             )
         }
         return try JSONExtractor.parseJSON(response)
@@ -196,7 +197,8 @@ final class OpenAIProvider: AIProvider {
                     snippets: messages
                 ),
                 requestKind: .dashboardTaskExtraction,
-                responseFormat: self.dashboardTaskExtractionResponseFormat()
+                responseFormat: self.dashboardTaskExtractionResponseFormat(),
+                chatId: chat.id
             )
         }
         return try DashboardTaskParser.parse(response)
@@ -255,7 +257,13 @@ final class OpenAIProvider: AIProvider {
         systemPrompt: String,
         userMessage: String,
         requestKind: AIRequestKind? = nil,
-        responseFormat: [String: Any]? = nil
+        responseFormat: [String: Any]? = nil,
+        // Optional Telegram chat_id passed through to LangSmith trace
+        // metadata so per-chat decisions can be filtered + replayed.
+        // Only the per-chat methods (categorizePipelineChat,
+        // extractDashboardTasks) populate this; batch/cross-chat calls
+        // leave it nil.
+        chatId: Int64? = nil
     ) async throws -> String {
         // LangSmith tracing scaffolding — captures start/end so we can replay
         // and compare prompt versions while iterating on accuracy. No-op when
@@ -310,7 +318,8 @@ final class OpenAIProvider: AIProvider {
                     error: "transport: \(error.localizedDescription)",
                     inputTokens: nil,
                     outputTokens: nil,
-                    costUSD: nil
+                    costUSD: nil,
+                    chatId: chatId
                 )
             }
             throw error
@@ -323,7 +332,8 @@ final class OpenAIProvider: AIProvider {
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
                 response: nil, error: "invalidResponse: non-HTTP",
-                inputTokens: nil, outputTokens: nil, costUSD: nil
+                inputTokens: nil, outputTokens: nil, costUSD: nil,
+                chatId: chatId
             )
             throw AIError.invalidResponse
         }
@@ -336,7 +346,8 @@ final class OpenAIProvider: AIProvider {
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
                 response: errorBody, error: "http_\(httpResponse.statusCode)",
-                inputTokens: nil, outputTokens: nil, costUSD: nil
+                inputTokens: nil, outputTokens: nil, costUSD: nil,
+                chatId: chatId
             )
             throw AIError.httpError(httpResponse.statusCode, errorBody)
         }
@@ -353,7 +364,8 @@ final class OpenAIProvider: AIProvider {
                 startedAt: startedAt, completedAt: Date(),
                 response: String(data: data, encoding: .utf8),
                 error: "invalidResponse: parse",
-                inputTokens: nil, outputTokens: nil, costUSD: nil
+                inputTokens: nil, outputTokens: nil, costUSD: nil,
+                chatId: chatId
             )
             throw AIError.invalidResponse
         }
@@ -367,6 +379,22 @@ final class OpenAIProvider: AIProvider {
                 requestKind: requestKind,
                 usage: usage
             )
+        }
+
+        // OpenAI's gpt-5 family automatically caches prompt prefixes
+        // ≥1024 tokens at a 50% discount, but the LangSmith trace
+        // metadata.usage.prompt_token_details.cached_tokens that LangSmith
+        // displays comes from this `usage.prompt_tokens_details.cached_tokens`
+        // field. Surface it via extraTags so we can confirm caching is
+        // active for the hot pipelineTriage prompt (7.6KB system, ~80%
+        // of our LLM volume).
+        let cachedTokens: Int? = (json["usage"] as? [String: Any])
+            .flatMap { $0["prompt_tokens_details"] as? [String: Any] }
+            .flatMap { $0["cached_tokens"] as? Int }
+
+        var extraTags: [String: String] = [:]
+        if let cachedTokens {
+            extraTags["cached_tokens"] = String(cachedTokens)
         }
 
         LangSmithTracer.shared.record(
@@ -385,10 +413,17 @@ final class OpenAIProvider: AIProvider {
                 .pricing(for: .openAI, model: model)
                 .flatMap { p in
                     guard let usage else { return nil }
-                    let inCost = Double(usage.inputTokens) / 1_000_000 * p.inputUSDPerMillionTokens
+                    // Discount cached input tokens at 50% (gpt-5 family
+                    // pricing) so the trace cost number reflects what we
+                    // actually pay, not the catalog list price.
+                    let cached = cachedTokens ?? 0
+                    let uncachedIn = max(0, usage.inputTokens - cached)
+                    let inCost = (Double(uncachedIn) + Double(cached) * 0.5) / 1_000_000 * p.inputUSDPerMillionTokens
                     let outCost = Double(usage.outputTokens) / 1_000_000 * p.outputUSDPerMillionTokens
                     return inCost + outCost
-                }
+                },
+            chatId: chatId,
+            extraTags: extraTags
         )
 
         return content

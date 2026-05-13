@@ -429,6 +429,11 @@ enum ReplyQueueTriageResultParser {
 
 /// Context passed to AI for pipeline categorization.
 struct PipelineChatContext {
+    /// Telegram chat id. Plumbed through to LangSmith trace metadata so
+    /// individual pipeline-triage decisions can be filtered + replayed
+    /// per-chat during prompt iteration. Not surfaced to the AI prompt
+    /// itself (just used as a trace tag).
+    let chatId: Int64
     let chatTitle: String
     let chatType: String      // "DM", "Group", "Supergroup", "Channel"
     let unreadCount: Int

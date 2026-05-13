@@ -149,7 +149,8 @@ final class ClaudeProvider: AIProvider {
             try await self.makeRequest(
                 systemPrompt: PipelineCategoryPrompt.systemPrompt,
                 userMessage: PipelineCategoryPrompt.userMessage(context: context, snippets: snippets),
-                requestKind: .pipelineTriage
+                requestKind: .pipelineTriage,
+                chatId: context.chatId
             )
         }
         return try JSONExtractor.parseJSON(response)
@@ -181,7 +182,8 @@ final class ClaudeProvider: AIProvider {
                     topics: topics,
                     snippets: messages
                 ),
-                requestKind: .dashboardTaskExtraction
+                requestKind: .dashboardTaskExtraction,
+                chatId: chat.id
             )
         }
         return try DashboardTaskParser.parse(response)
@@ -236,7 +238,10 @@ final class ClaudeProvider: AIProvider {
     private func makeRequest(
         systemPrompt: String,
         userMessage: String,
-        requestKind: AIRequestKind? = nil
+        requestKind: AIRequestKind? = nil,
+        // See OpenAIProvider.makeRequest for rationale — Telegram chat_id
+        // for LangSmith trace metadata, only set by per-chat call sites.
+        chatId: Int64? = nil
     ) async throws -> String {
         // LangSmith tracing scaffolding — see OpenAIProvider.makeRequest for
         // rationale. No-op when PIDGY_BUNDLED_LANGSMITH_API_KEY is empty.
@@ -269,7 +274,8 @@ final class ClaudeProvider: AIProvider {
                     systemPrompt: systemPrompt, userMessage: userMessage,
                     startedAt: startedAt, completedAt: Date(),
                     response: nil, error: "transport: \(error.localizedDescription)",
-                    inputTokens: nil, outputTokens: nil, costUSD: nil
+                    inputTokens: nil, outputTokens: nil, costUSD: nil,
+                    chatId: chatId
                 )
             }
             throw error
@@ -281,7 +287,8 @@ final class ClaudeProvider: AIProvider {
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
                 response: nil, error: "invalidResponse: non-HTTP",
-                inputTokens: nil, outputTokens: nil, costUSD: nil
+                inputTokens: nil, outputTokens: nil, costUSD: nil,
+                chatId: chatId
             )
             throw AIError.invalidResponse
         }
@@ -293,7 +300,8 @@ final class ClaudeProvider: AIProvider {
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
                 response: errorBody, error: "http_\(httpResponse.statusCode)",
-                inputTokens: nil, outputTokens: nil, costUSD: nil
+                inputTokens: nil, outputTokens: nil, costUSD: nil,
+                chatId: chatId
             )
             throw AIError.httpError(httpResponse.statusCode, errorBody)
         }
@@ -308,7 +316,8 @@ final class ClaudeProvider: AIProvider {
                 startedAt: startedAt, completedAt: Date(),
                 response: String(data: data, encoding: .utf8),
                 error: "invalidResponse: parse",
-                inputTokens: nil, outputTokens: nil, costUSD: nil
+                inputTokens: nil, outputTokens: nil, costUSD: nil,
+                chatId: chatId
             )
             throw AIError.invalidResponse
         }
@@ -343,7 +352,8 @@ final class ClaudeProvider: AIProvider {
                     let inCost = Double(usage.inputTokens) / 1_000_000 * p.inputUSDPerMillionTokens
                     let outCost = Double(usage.outputTokens) / 1_000_000 * p.outputUSDPerMillionTokens
                     return inCost + outCost
-                }
+                },
+            chatId: chatId
         )
 
         return text

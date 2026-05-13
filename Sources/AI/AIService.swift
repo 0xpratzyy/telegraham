@@ -220,6 +220,7 @@ final class AIService: ObservableObject {
         }
 
         let context = PipelineChatContext(
+            chatId: chat.id,
             chatTitle: chat.title,
             chatType: chat.chatType.displayName,
             unreadCount: chat.unreadCount,
