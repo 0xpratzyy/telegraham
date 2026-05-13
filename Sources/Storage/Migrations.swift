@@ -454,6 +454,29 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v16_messages_sender_date_index_drop_dead_ai_usage") { db in
+            // Two pieces of storage hygiene in one migration:
+            //
+            // 1. Composite (sender_user_id, date DESC) index on messages.
+            //    `loadRecentMessages(fromSender:)` filters by
+            //    `sender_user_id` and orders by `date DESC, id DESC`. The
+            //    existing `idx_messages_sender(sender_user_id)` covers the
+            //    filter but not the sort, so once `messages` grows past
+            //    ~100k rows SQLite would fall back to a tempfile sort. We
+            //    have 11k today; adding the index pre-empts the cliff.
+            //
+            // 2. Drop the `ai_usage` table. It was declared in v1 but
+            //    never received an INSERT or SELECT anywhere in the Swift
+            //    sources — usage tracking has lived in `AIUsageStore`
+            //    (JSON file on disk) since launch. The dead table just
+            //    confuses future maintainers reading the migration log.
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_messages_sender_date
+                ON messages(sender_user_id, date DESC)
+                """)
+            try db.execute(sql: "DROP TABLE IF EXISTS ai_usage")
+        }
+
         return migrator
     }
 }
