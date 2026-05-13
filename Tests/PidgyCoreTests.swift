@@ -9133,6 +9133,13 @@ private struct DashboardTaskTriageAIProvider: AIProvider {
         return tasksByChatId[chat.id].map { [$0] } ?? []
     }
 
+    func extractPersonProfile(
+        personName: String,
+        messages: [MessageSnippet]
+    ) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
     func planQuery(
         query: String,
         activeFilter: QueryScope,
@@ -9205,6 +9212,13 @@ private struct CountingPipelineAIProvider: AIProvider {
         topics: [DashboardTopic],
         messages: [MessageSnippet]
     ) async throws -> [DashboardTaskCandidate] {
+        throw AIError.providerNotConfigured
+    }
+
+    func extractPersonProfile(
+        personName: String,
+        messages: [MessageSnippet]
+    ) async throws -> String {
         throw AIError.providerNotConfigured
     }
 
@@ -9289,6 +9303,13 @@ private struct StubAIProvider: AIProvider {
         topics: [DashboardTopic],
         messages: [MessageSnippet]
     ) async throws -> [DashboardTaskCandidate] {
+        throw AIError.providerNotConfigured
+    }
+
+    func extractPersonProfile(
+        personName: String,
+        messages: [MessageSnippet]
+    ) async throws -> String {
         throw AIError.providerNotConfigured
     }
 
