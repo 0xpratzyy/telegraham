@@ -29,7 +29,18 @@ final class TaskIndexCoordinator: ObservableObject {
     @Published private(set) var topics: [DashboardTopic] = []
     @Published private(set) var tasks: [DashboardTask] = []
     @Published private(set) var evidenceByTaskId: [Int64: [DashboardTaskSourceMessage]] = [:]
+    /// True while the refresh machinery is busy. Set by every refresh,
+    /// including background ticks and the debounced refresh that fires
+    /// after message bursts. Other code (e.g. the background pipeline)
+    /// uses this to know if work is in flight. The Tasks page UI should
+    /// NOT bind to this directly — it makes the button perpetually spin
+    /// on active accounts. Use `isUserInitiatedRefreshing` instead.
     @Published private(set) var isRefreshing = false
+    /// True only while a user-initiated refresh is running — the button
+    /// the user actually clicked. Reset as soon as that specific request
+    /// (plus its queued continuations) drains. Background / periodic /
+    /// debounced refreshes leave this `false`.
+    @Published private(set) var isUserInitiatedRefreshing = false
     @Published private(set) var lastRefreshAt: Date?
     @Published private(set) var lastError: String?
 
@@ -235,7 +246,8 @@ final class TaskIndexCoordinator: ObservableObject {
         telegramService: TelegramService,
         aiService: AIService,
         includeBotsInAISearch: Bool? = nil,
-        forceRescan: Bool = false
+        forceRescan: Bool = false,
+        userInitiated: Bool = false
     ) async {
         let includeBotsInAISearch = includeBotsInAISearch ?? self.includeBotsInAISearch
         let request = RefreshRequest(
@@ -245,8 +257,25 @@ final class TaskIndexCoordinator: ObservableObject {
             forceRescan: forceRescan
         )
 
+        // Flip the user-facing flag eagerly so the button shows feedback
+        // even if the request gets queued behind a background tick. We
+        // clear it in the deferred block below — but only this caller is
+        // responsible for clearing it (using shouldClearUserFlag) so two
+        // overlapping user-initiated clicks don't fight.
+        let shouldClearUserFlag = userInitiated && !isUserInitiatedRefreshing
+        if userInitiated {
+            isUserInitiatedRefreshing = true
+        }
+
         guard !isRefreshing else {
             queueRefresh(request)
+            // If we set the flag but are queuing, the queued runner won't
+            // know it was user-initiated and won't clear our flag. Clear
+            // it here — the active refresh will sweep the queued work in
+            // a moment and the UI will update to the fresh state.
+            if shouldClearUserFlag {
+                isUserInitiatedRefreshing = false
+            }
             return
         }
 
@@ -254,6 +283,9 @@ final class TaskIndexCoordinator: ObservableObject {
 
         defer {
             isRefreshing = false
+            if shouldClearUserFlag {
+                isUserInitiatedRefreshing = false
+            }
         }
 
         var nextRequest: RefreshRequest? = request

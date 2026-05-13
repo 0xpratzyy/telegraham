@@ -137,6 +137,9 @@ struct DashboardReplyQueuePage: View {
     let processedCount: Int
     let totalCount: Int
     @Binding var selectedChatId: Int64?
+    /// Incremental refresh — only entry point for re-analysis. Top-bar
+    /// button only; detail panes have no Refresh of their own. Only
+    /// analyzes chats with new messages since their cached decision.
     let onRefresh: () -> Void
     let onOpenChat: (TGChat) -> Void
 
@@ -165,7 +168,6 @@ struct DashboardReplyQueuePage: View {
 
                 DashboardReplyDetail(
                     item: selectedItem,
-                    onRefresh: onRefresh,
                     onOpenChat: onOpenChat,
                     onClose: { selectedChatId = nil }
                 )
@@ -264,7 +266,6 @@ struct DashboardReplyQueuePage: View {
 
 struct DashboardReplyDetail: View {
     let item: FollowUpItem?
-    let onRefresh: () -> Void
     let onOpenChat: (TGChat) -> Void
     let onClose: () -> Void
 
@@ -337,12 +338,9 @@ struct DashboardReplyDetail: View {
                 )
             }
         } actions: {
-            Button(action: onRefresh) {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(PidgyDashboardTheme.primary)
-
+            // Single primary action — the top-bar Refresh covers re-analysis.
+            // Per-detail Refresh buttons were removed because the global
+            // top-bar refresh is the one source of truth for the user.
             Button {
                 if let item { onOpenChat(item.chat) }
             } label: {

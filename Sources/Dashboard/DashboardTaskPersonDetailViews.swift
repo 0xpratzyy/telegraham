@@ -4,7 +4,6 @@ struct DashboardTaskDetail: View {
     let task: DashboardTask?
     let evidence: [DashboardTaskSourceMessage]
     let isRefreshing: Bool
-    let onRefresh: () -> Void
     let onUpdateStatus: (DashboardTask, DashboardTaskStatus, Date?) -> Void
     let onOpenChat: (Int64) -> Void
     let onClose: () -> Void
@@ -113,6 +112,9 @@ struct DashboardTaskDetail: View {
                 )
             }
         } actions: {
+            // Single primary action only — Mark Done when a task is
+            // selected, nothing when the empty state is shown. The global
+            // top-bar Refresh covers re-evaluation; no per-detail Refresh.
             if let task {
                 Button {
                     onUpdateStatus(task, .done, nil)
@@ -125,10 +127,6 @@ struct DashboardTaskDetail: View {
                 .buttonStyle(.plain)
                 .background(DashboardCapsuleBackground())
                 .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            } else {
-                Button(action: onRefresh) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
             }
         }
         .foregroundStyle(PidgyDashboardTheme.primary)

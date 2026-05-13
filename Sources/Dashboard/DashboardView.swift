@@ -61,12 +61,13 @@ struct DashboardView: View {
 
             VStack(spacing: 0) {
                 if chromePolicy.showsDashboardTopBar {
-                    // The Reply Queue refresh finishes in ~30 s while the
-                    // Tasks refresh can run 10+ minutes; sharing one
-                    // isRefreshing/lastRefreshAt across pages left the
-                    // Reply Queue's button stuck on "Refreshing" until
-                    // the (unrelated) Tasks coordinator finally settled.
-                    // Route the right coordinator's state to each page.
+                    // Route per-page state. The Tasks coordinator does
+                    // background ticks every ~8 min PLUS debounced
+                    // refreshes on every message-arrival burst, so its
+                    // generic `isRefreshing` is true most of the time on
+                    // an active account. Bind the UI to the
+                    // user-initiated subset so the button only spins for
+                    // refreshes the user actually asked for.
                     DashboardTopBar(
                         page: currentPage,
                         lastRefreshAt: currentPage == .replyQueue
@@ -74,7 +75,7 @@ struct DashboardView: View {
                             : taskIndex.lastRefreshAt,
                         isRefreshing: currentPage == .replyQueue
                             ? attentionStore.isFollowUpsLoading
-                            : taskIndex.isRefreshing,
+                            : taskIndex.isUserInitiatedRefreshing,
                         onRefresh: refreshDashboard
                     )
                 }
@@ -342,12 +343,15 @@ struct DashboardView: View {
                 processedCount: attentionStore.pipelineProcessedCount,
                 totalCount: attentionStore.pipelineTotalCount,
                 selectedChatId: $selectedReplyChatId,
+                // Single Refresh entry point — top bar only. Incremental:
+                // cached decisions with matching lastMessageId stay; only
+                // chats with new messages or no cache go through AI.
                 onRefresh: {
                     attentionStore.loadFollowUps(
                         telegramService: telegramService,
                         aiService: aiService,
                         includeBots: includeBotsInAISearch,
-                        force: true
+                        force: false
                     )
                 },
                 onOpenChat: { chat in openChat(chat) }
@@ -359,19 +363,10 @@ struct DashboardView: View {
                 evidenceByTaskId: taskIndex.evidenceByTaskId,
                 ownerPeople: allContacts,
                 currentUser: telegramService.currentUser,
-                isRefreshing: taskIndex.isRefreshing,
+                // User-initiated only — see top-bar binding above.
+                isRefreshing: taskIndex.isUserInitiatedRefreshing,
                 aiConfigured: aiService.isConfigured,
                 selectedTaskId: $selectedTaskId,
-                onRefresh: {
-                    Task {
-                        await taskIndex.refreshNow(
-                            telegramService: telegramService,
-                            aiService: aiService,
-                            includeBotsInAISearch: includeBotsInAISearch,
-                            forceRescan: true
-                        )
-                    }
-                },
                 onUpdateStatus: { task, status, snoozedUntil in
                     Task {
                         await taskIndex.updateStatus(
@@ -507,11 +502,18 @@ struct DashboardView: View {
     }
 
     private func refreshDashboard() {
+        // The ONE refresh entry point. Bound to the top-bar button and the
+        // burger menu's "Refresh dashboard". Incremental: only chats with
+        // new messages get re-evaluated. Marked user-initiated so the
+        // top-bar button correctly shows the "Refreshing" spinner; the
+        // separate isUserInitiatedRefreshing flag keeps the silent
+        // background ticks (8-min loop + message-burst debounce) from
+        // perpetually animating the button.
         attentionStore.loadFollowUps(
             telegramService: telegramService,
             aiService: aiService,
             includeBots: includeBotsInAISearch,
-            force: true
+            force: false
         )
 
         Task {
@@ -520,7 +522,8 @@ struct DashboardView: View {
                 telegramService: telegramService,
                 aiService: aiService,
                 includeBotsInAISearch: includeBotsInAISearch,
-                forceRescan: true
+                forceRescan: false,
+                userInitiated: true
             )
             await peopleRefresh
         }

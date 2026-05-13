@@ -1925,6 +1925,7 @@ actor DatabaseManager {
         }
     }
 
+
     func read<T: Sendable>(_ operation: @escaping @Sendable (Database) throws -> T) async throws -> T {
         guard let pool = await ensureDatabase() else {
             throw DatabaseManagerError.unavailable

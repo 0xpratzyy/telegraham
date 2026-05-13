@@ -8,7 +8,6 @@ struct DashboardTasksPage: View {
     let isRefreshing: Bool
     let aiConfigured: Bool
     @Binding var selectedTaskId: Int64?
-    let onRefresh: () -> Void
     let onUpdateStatus: (DashboardTask, DashboardTaskStatus, Date?) -> Void
     let onOpenChat: (Int64) -> Void
 
@@ -158,7 +157,6 @@ struct DashboardTasksPage: View {
                         task: selectedTask,
                         evidence: evidenceByTaskId[selectedTask.id] ?? [],
                         isRefreshing: isRefreshing,
-                        onRefresh: onRefresh,
                         onUpdateStatus: onUpdateStatus,
                         onOpenChat: onOpenChat,
                         onClose: { selectedTaskId = nil }
@@ -229,6 +227,9 @@ struct DashboardTasksPage: View {
     }
 
     private var header: some View {
+        // Page-internal Refresh button removed — the global top-bar
+        // Refresh (with the "Updated Xm ago" stamp) is the only entry
+        // point now. Single-button refresh model per UX spec.
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Tasks")
@@ -240,15 +241,6 @@ struct DashboardTasksPage: View {
                     .foregroundStyle(PidgyDashboardTheme.secondary)
             }
             Spacer()
-            Button(action: onRefresh) {
-                Label(isRefreshing ? "Refreshing" : "Refresh", systemImage: "arrow.clockwise")
-                    .font(PidgyDashboardTheme.metadataMediumFont)
-                    .frame(height: 30)
-                    .padding(.horizontal, 12)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(PidgyDashboardTheme.primary)
-            .background(DashboardCapsuleBackground())
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 14)
