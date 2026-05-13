@@ -206,7 +206,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if launchPresentationMode.showsLauncherOnLaunch {
             panelManager?.showForDebugTesting()
         }
-        if opensDashboardOnLaunch {
+
+        // Only open the dashboard at launch when the user has completed
+        // onboarding before. A fresh / wiped install would otherwise
+        // render the dashboard with stale local cache (followups, tasks,
+        // people from a prior session) while the onboarding modal floats
+        // on top — exactly the "Complete setup" + cached-data overlay the
+        // audit flagged. After onboarding completes, the
+        // `onComplete` callback on OnboardingWindowController opens the
+        // dashboard, so first-time users still land there immediately
+        // after finishing the flow.
+        let didCompleteOnboarding = UserDefaults.standard.bool(
+            forKey: AppConstants.Preferences.didCompleteOnboardingKey
+        )
+        if opensDashboardOnLaunch && didCompleteOnboarding {
             openDashboard()
         }
 
@@ -317,9 +330,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         // If TDLib is already authenticated (existing user reopening the app),
         // there's nothing to onboard — just mark the flag so we never bother
-        // them again.
+        // them again. Also open the dashboard if it isn't already up; the
+        // launch path gates `openDashboard()` on this key, so without this
+        // we'd silently render no UI for the rare returning-user-with-
+        // cleared-key edge case.
         if !force && telegramService.authState == .ready {
             defaults.set(true, forKey: AppConstants.Preferences.didCompleteOnboardingKey)
+            if dashboardWindow == nil && opensDashboardOnLaunch {
+                openDashboard()
+            }
             return
         }
 
