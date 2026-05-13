@@ -43,6 +43,13 @@ final class SummaryEngine {
         let jointAnchorHits: Int
         let personAnchorHits: Int
         let topMessages: [TGMessage]
+        /// True when this candidate was added because the user's query
+        /// named a person and this chat matches that person, regardless
+        /// of whether FTS/vector hit anything inside the chat. Per-chat
+        /// digest treats these specially — recent-window slice instead
+        /// of relevance-ranked picks — because the user usually wants
+        /// "what's happening with X recently" not "messages about X".
+        let isPersonAnchored: Bool
     }
 
     struct SearchExecution {
@@ -109,7 +116,7 @@ final class SummaryEngine {
             applyRRF(rankedLists: rankedSources),
             timeRange: effectiveTimeRange
         )
-        let candidates = buildCandidates(
+        let fts_candidates = buildCandidates(
             from: merged,
             chatsById: chatById,
             queryContext: queryContext,
@@ -119,6 +126,24 @@ final class SummaryEngine {
                 if lhs.score != rhs.score { return lhs.score > rhs.score }
                 return lhs.chat.order > rhs.chat.order
             }
+
+        // Person-anchored injection. When the planner extracts a person
+        // name from the query ("with Akhil"), surface that person's
+        // chat as a guaranteed candidate — even when FTS/vector found
+        // no hits on the topic terms inside that chat. Before this,
+        // "what did we decide with Akhil on email" only included Akhil
+        // B if its messages also FTS-matched "email", and most often
+        // they didn't, so the most relevant chat was silently dropped
+        // before reaching the AI.
+        let plannerPeople = querySpec.plannerHints?.people ?? []
+        let personAnchoredChats_ = personAnchoredChats(
+            people: plannerPeople,
+            visibleChats: scopedChats
+        )
+        let candidates = mergePersonAnchoredCandidates(
+            existing: fts_candidates,
+            personAnchoredChats: personAnchoredChats_
+        )
 
           let supportingCandidates = Array(candidates.prefix(AppConstants.Search.Summary.supportingResultLimit))
           // Preliminary chips for the no-summary early-return paths below —
@@ -135,16 +160,22 @@ final class SummaryEngine {
               )
           }
 
-          guard let focus = supportingCandidates.first,
-                focus.score >= minimumFocusScore(for: queryContext) else {
+          guard let focus = supportingCandidates.first else {
               return SearchExecution(output: nil, results: preliminaryResults)
           }
-          // (Joint-anchor matches used to be hard-required here — that
-          // dropped legitimate summaries whenever the person and topic
-          // tokens showed up in separate messages. Tier 1 graduated FTS
-          // makes that scenario common; the -2.2 score penalty in
-          // buildCandidates already discounts no-joint-anchor candidates,
-          // so passing the focus floor is sufficient.)
+          // No score floor: if the retrievers found any candidates, send
+          // them to the AI. Real example that motivated dropping the
+          // floor — "what did we decide with Akhil on email" surfaced
+          // 6 candidate chats (Akhil B included, MEDIUM relevance), but
+          // the focus-score gate (0.95) silently swallowed the summary
+          // and the UI rendered "No clear local summary context found"
+          // sitting on top of 6 visible search results. Worse, the gate
+          // also caused empty hits on time-windowed queries that had
+          // perfect FTS matches inside the window. The AI is a better
+          // judge of "is this enough context to answer" than a static
+          // numeric threshold — per the codebase rule, fix AI mistakes
+          // in the prompt rather than pre-gating AI access with
+          // heuristics.
 
         let summaryCandidates = summaryCandidates(
             from: supportingCandidates,
@@ -174,35 +205,57 @@ final class SummaryEngine {
             queryContext: queryContext
         )
 
-        let summaryText = await summarize(
+        let summary = await summarize(
             query: querySpec.rawQuery,
             scopeDescription: summaryScopeDescription,
-            messages: boundedMessages,
+            perChatDigest: perChatDigest,
             aiService: aiService,
             fallbackSnippet: focus.bestSnippet,
             queryContext: queryContext
         )
+        let summaryText = summary.text
 
-        // Rebuild the chips from the per-chat digest so each chip's snippet
-        // matches the actual top message the AI saw for that chat — not the
-        // raw FTS best-hit (which can be a different line in the same chat
-        // and confuses users when the summary references something the chip
-        // doesn't show).
-        let supportingResults = perChatDigest.enumerated().map { index, digest in
-            SemanticSearchResult(
-                chatId: digest.candidate.chat.id,
-                chatTitle: digest.candidate.chat.title,
-                reason: index == 0 ? "Best local summary context" : "Supporting local context",
-                relevance: index == 0 ? .high : .medium,
-                matchingMessages: [snippet(from: (digest.topRankedMessage ?? digest.candidate.bestMessage)?.displayText
-                                          ?? digest.candidate.bestSnippet)]
-            )
+        // Build the supporting-chat chips. When the AI returned real
+        // extracts for some chats, show ONLY those — and use each
+        // chat's extract as the chip snippet, so users see WHY the
+        // chat is included (not a random "Hehe" last message). When
+        // there are no extracts (AI off / all NOT_RELEVANT) we fall
+        // back to the perChatDigest list with the original top-hit
+        // snippet, so the user can still see what was looked at.
+        let supportingResults: [SemanticSearchResult]
+        if !summary.extracts.isEmpty {
+            supportingResults = summary.extracts.enumerated().map { index, extract in
+                SemanticSearchResult(
+                    chatId: extract.chat.id,
+                    chatTitle: extract.chat.title,
+                    reason: index == 0 ? "Most relevant context" : "Supporting context",
+                    relevance: index == 0 ? .high : .medium,
+                    matchingMessages: [snippet(from: extract.text)]
+                )
+            }
+        } else {
+            supportingResults = perChatDigest.enumerated().map { index, digest in
+                SemanticSearchResult(
+                    chatId: digest.candidate.chat.id,
+                    chatTitle: digest.candidate.chat.title,
+                    reason: index == 0 ? "Best local summary context" : "Supporting local context",
+                    relevance: index == 0 ? .high : .medium,
+                    matchingMessages: [snippet(from: (digest.topRankedMessage ?? digest.candidate.bestMessage)?.displayText
+                                              ?? digest.candidate.bestSnippet)]
+                )
+            }
         }
 
+        // Prefer the AI-confirmed most-relevant chat as the click-
+        // through target, so "open this chat" jumps to where the
+        // answer actually lives — not the highest-FTS-scoring
+        // candidate, which is often a noisy near-miss when the
+        // retriever surfaced unrelated keyword hits.
+        let supportingChatId = summary.extracts.first?.chat.id ?? focus.chat.id
         let output = SummarySearchOutput(
             summaryText: summaryText,
             title: summaryTitle(for: querySpec.rawQuery, scopeLabel: summaryScopeLabel),
-            supportingChatId: focus.chat.id,
+            supportingChatId: supportingChatId,
             supportingMessageIds: boundedMessages.map(\.id)
         )
 
@@ -220,9 +273,29 @@ final class SummaryEngine {
         let topRankedMessage: TGMessage?
     }
 
-    /// For each candidate chat, load nearby messages and pick the top-ranked
-    /// `perChatDigestMessageLimit` of them in chronological order. Returns
-    /// chats in candidate-score order (focus first, then near-focus).
+    /// Build the per-chat context that goes to the AI. Each candidate
+    /// contributes a CHRONOLOGICAL window of messages — not the old
+    /// top-K-by-query-relevance slice. The win:
+    ///
+    /// - Per the research consensus (Glean, Slack AI, multi-doc
+    ///   summarization papers), chat meaning is positional. Sending the
+    ///   AI 5 relevance-shuffled messages scattered across a year of
+    ///   chat history starves it of conversational flow. ±10 around the
+    ///   anchor (or the 20 most-recent for person-anchored chats) lets
+    ///   the model see the lead-up and the resolution.
+    /// - The AI is a better filter than `rankedSupportMessages`. Giving
+    ///   it more raw context and letting it pick relevance in-prompt
+    ///   produces better summaries than pre-filtering with a static
+    ///   scorer.
+    ///
+    /// Anchor selection per candidate:
+    /// - Person-anchored chats (planner extracted a person name and
+    ///   this chat matches) → no anchor, take the 20 most-recent
+    ///   messages. The user wants "what's been happening lately with
+    ///   X", not "X mentions of the topic terms".
+    /// - Focus chat (first in list) → caller-supplied anchor if any,
+    ///   else this chat's own bestMessage.
+    /// - Other candidates → their own bestMessage as the anchor.
     private func loadPerChatDigest(
         for candidates: [Candidate],
         timeRange: TimeRangeConstraint?,
@@ -232,29 +305,41 @@ final class SummaryEngine {
         let perChatLimit = AppConstants.Search.Summary.perChatDigestMessageLimit
         var digests: [PerChatDigest] = []
         for (index, candidate) in candidates.enumerated() {
-            // Only the focus chat (index 0) gets the anchor-window expansion;
-            // for the rest we just want a clean recent slice ranked against
-            // the query.
+            let effectiveAnchor: TGMessage?
+            if candidate.isPersonAnchored {
+                effectiveAnchor = nil
+            } else if index == 0 {
+                effectiveAnchor = anchorMessage ?? candidate.bestMessage
+            } else {
+                effectiveAnchor = candidate.bestMessage
+            }
             let messages = await loadSummaryMessages(
                 for: candidate.chat,
-                anchorMessage: index == 0 ? anchorMessage : nil,
+                anchorMessage: effectiveAnchor,
                 timeRange: timeRange
             )
-            let ranked = rankedSupportMessages(messages, queryContext: queryContext)
-            let preferredRanked: [TGMessage]
-            if queryContext.prefersImplicitRecentWindow {
-                let substantiveOnly = ranked.filter(hasSubstantiveBodyText)
-                preferredRanked = substantiveOnly.isEmpty ? ranked : substantiveOnly
+            // `loadSummaryMessages` returns either an ascending-date
+            // anchor window (±10 around the anchor) or an ascending-
+            // date recent slice (when anchor is nil). For person-
+            // anchored chats we want the most-recent end of the slice
+            // — `suffix(N)` does the right thing for both shapes.
+            let trimmed = Array(messages.suffix(perChatLimit))
+            guard !trimmed.isEmpty else { continue }
+            // Chip preview: prefer the originally surfaced
+            // best-message (so the chip snippet matches what
+            // triggered this chat to be a candidate), else the most
+            // recent message in the window.
+            let preview: TGMessage?
+            if let bestMessage = candidate.bestMessage,
+               trimmed.contains(where: { $0.id == bestMessage.id }) {
+                preview = bestMessage
             } else {
-                preferredRanked = ranked
+                preview = trimmed.last
             }
-            let pickedRanked = Array(preferredRanked.prefix(perChatLimit))
-            let chronological = pickedRanked.sorted { $0.date < $1.date }
-            guard !chronological.isEmpty else { continue }
             digests.append(PerChatDigest(
                 candidate: candidate,
-                messages: chronological,
-                topRankedMessage: pickedRanked.first
+                messages: trimmed,
+                topRankedMessage: preview
             ))
         }
         return digests
@@ -503,35 +588,298 @@ final class SummaryEngine {
                 queryCoverage: matchedQueryTerms.count,
                 jointAnchorHits: jointAnchors,
                 personAnchorHits: senderAnchorHits + titleAnchorHits,
-                topMessages: Array(sortedHits.prefix(8).map(\.hit.message))
+                topMessages: Array(sortedHits.prefix(8).map(\.hit.message)),
+                isPersonAnchored: false
             )
         }
     }
 
+    /// Find visible chats whose title matches any of the named people
+    /// extracted by the query planner. Used to inject "with Akhil"
+    /// queries' chats as guaranteed candidates even when FTS/vector
+    /// found nothing about the topic terms inside those chats.
+    ///
+    /// Match shape: a chat is included if any of its title tokens
+    /// exactly equals the person name (case-insensitive), OR if the
+    /// title token's collapsed-letters form equals the person name
+    /// (so "Akhillll" → "akhil" matches a planner person "akhil").
+    /// Token-equality (not prefix) avoids false positives like
+    /// "Akhilesh" matching "akhil".
+    private func personAnchoredChats(
+        people: [String],
+        visibleChats: [TGChat]
+    ) -> [TGChat] {
+        guard !people.isEmpty else { return [] }
+        let normalizedPeople = Set(people.map { $0.lowercased() })
+        var matched: [Int64: TGChat] = [:]
+        for chat in visibleChats {
+            let titleTokens = chat.title
+                .lowercased()
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+            let isMatch = titleTokens.contains { token in
+                if normalizedPeople.contains(token) { return true }
+                let collapsed = collapseRepeatedLetters(token)
+                return normalizedPeople.contains(collapsed)
+            }
+            if isMatch {
+                matched[chat.id] = chat
+            }
+        }
+        return Array(matched.values).sorted { lhs, rhs in
+            (lhs.lastMessage?.date ?? .distantPast)
+                > (rhs.lastMessage?.date ?? .distantPast)
+        }
+    }
+
+    /// Merge person-anchored chats into the existing candidates list.
+    /// Chats already in `candidates` get their `isPersonAnchored` flag
+    /// flipped (so the digest stage uses recent-window). Chats not
+    /// already present become new candidates anchored on their last
+    /// message and inserted at the front of the list.
+    private func mergePersonAnchoredCandidates(
+        existing candidates: [Candidate],
+        personAnchoredChats chats: [TGChat]
+    ) -> [Candidate] {
+        guard !chats.isEmpty else { return candidates }
+        var byId: [Int64: Candidate] = Dictionary(
+            uniqueKeysWithValues: candidates.map { ($0.chat.id, $0) }
+        )
+        var prependOrder: [Int64] = []
+        for chat in chats {
+            if let existing = byId[chat.id] {
+                byId[chat.id] = Candidate(
+                    chat: existing.chat,
+                    bestMessage: existing.bestMessage,
+                    bestSnippet: existing.bestSnippet,
+                    score: existing.score,
+                    queryCoverage: existing.queryCoverage,
+                    jointAnchorHits: existing.jointAnchorHits,
+                    personAnchorHits: existing.personAnchorHits,
+                    topMessages: existing.topMessages,
+                    isPersonAnchored: true
+                )
+            } else {
+                let synthetic = Candidate(
+                    chat: chat,
+                    bestMessage: chat.lastMessage,
+                    bestSnippet: snippet(
+                        from: chat.lastMessage?.displayText ?? ""
+                    ),
+                    // Moderate score — sorts above empty-keyword chats
+                    // but doesn't beat strong FTS hits. The
+                    // person-anchored flag is what guarantees inclusion;
+                    // score only matters for ordering within the list.
+                    score: 1.0,
+                    queryCoverage: 0,
+                    jointAnchorHits: 0,
+                    personAnchorHits: 1,
+                    topMessages: chat.lastMessage.map { [$0] } ?? [],
+                    isPersonAnchored: true
+                )
+                byId[chat.id] = synthetic
+                prependOrder.append(chat.id)
+            }
+        }
+        // Order: synthetic person-anchored chats first (most recently
+        // active first, per `chats` ordering), then everything else by
+        // its existing rank.
+        var merged: [Candidate] = []
+        for chatId in prependOrder {
+            if let c = byId[chatId] { merged.append(c) }
+        }
+        for candidate in candidates {
+            if let c = byId[candidate.chat.id],
+               !prependOrder.contains(candidate.chat.id) {
+                merged.append(c)
+            }
+        }
+        return merged
+    }
+
+    /// Result of map-reduce summarization. Caller needs both the final
+    /// synthesized text AND the list of per-chat extracts so it can
+    /// render chips for *only* the chats the AI found relevant —
+    /// instead of showing every retrieval candidate with a random
+    /// last-message snippet next to it.
+    private struct SummarizeResult {
+        let text: String
+        /// Chats that returned non-null extracts in the map step,
+        /// ordered by perChatDigest order. Empty when AI is off,
+        /// every chat returned NOT_RELEVANT, or the digest was empty.
+        let extracts: [(chat: TGChat, text: String)]
+    }
+
+    /// Map-reduce summarization over the per-chat digests.
+    ///
+    /// MAP — for each digest, run a small AI call in parallel that
+    /// either pulls out anything query-relevant from that one chat or
+    /// declares it NOT_RELEVANT. Cheap, parallelizable, citations are
+    /// implicit (each extract belongs to exactly one chat).
+    ///
+    /// REDUCE — feed the non-null extracts into a single synthesis
+    /// call using `QuerySummaryPrompt`. The model now does only
+    /// cross-chat compression (much easier than reading 100+ raw
+    /// messages and deciding what's relevant in one shot).
+    ///
+    /// When no chat extract returns relevant content, we surface that
+    /// honestly to the user (with a list of what was looked at) rather
+    /// than the old "No clear local summary context found" refusal.
     private func summarize(
         query: String,
         scopeDescription: String,
-        messages: [TGMessage],
+        perChatDigest: [PerChatDigest],
         aiService: AIService,
         fallbackSnippet: String,
         queryContext: QueryContext
-    ) async -> String {
-        guard !messages.isEmpty else {
-            return "Little recent context found in \(scopeDescription)."
+    ) async -> SummarizeResult {
+        guard !perChatDigest.isEmpty else {
+            return SummarizeResult(
+                text: "Little recent context found in \(scopeDescription).",
+                extracts: []
+            )
         }
 
-        let snippets = MessageSnippet.fromMessages(messages)
-        let systemPrompt = QuerySummaryPrompt.systemPrompt(query: query, scopeDescription: scopeDescription)
+        // AI not configured → mechanical fallback so the UI still
+        // shows useful text (e.g. tests with type:.none, offline use).
+        guard aiService.isConfigured else {
+            return SummarizeResult(
+                text: localFallbackSummary(
+                    perChatDigest: perChatDigest,
+                    queryContext: queryContext,
+                    fallbackSnippet: fallbackSnippet
+                ),
+                extracts: []
+            )
+        }
 
-        if aiService.isConfigured {
+        // MAP — parallel per-chat extraction.
+        let extracts = await runPerChatExtraction(
+            query: query,
+            perChatDigest: perChatDigest,
+            aiService: aiService
+        )
+
+        // REDUCE — synthesize across the non-null extracts.
+        if !extracts.isEmpty {
+            let synthesisInput = extracts.map { extract -> MessageSnippet in
+                MessageSnippet(
+                    messageId: 0,
+                    senderFirstName: "extract",
+                    text: extract.text,
+                    relativeTimestamp: "summary",
+                    chatId: extract.chat.id,
+                    chatName: extract.chat.title
+                )
+            }
+            let synthesisPrompt = QuerySummaryPrompt.systemPrompt(
+                query: query,
+                scopeDescription: scopeDescription
+            )
             do {
-                return try await aiService.provider.summarize(messages: snippets, prompt: systemPrompt)
+                let synthesized = try await aiService.provider.summarize(
+                    messages: synthesisInput,
+                    prompt: synthesisPrompt
+                )
+                return SummarizeResult(text: synthesized, extracts: extracts)
             } catch {
-                // Fall through to local fallback summary.
+                // Synthesis failed — return per-chat extracts inline so
+                // the user gets something instead of nothing. Matches
+                // the per-chat-grouped shape the synthesis prompt
+                // would have produced.
+                let inlined = extracts
+                    .map { "**\($0.chat.title)** — \($0.text)" }
+                    .joined(separator: "\n\n")
+                return SummarizeResult(text: inlined, extracts: extracts)
             }
         }
 
-        let topFallbackSnippets = rankedSupportMessages(messages, queryContext: queryContext)
+        // Every chat returned NOT_RELEVANT. Surface what we looked at
+        // so the user can broaden the query, rather than the old
+        // "no context found" dead end.
+        let chatList = perChatDigest
+            .map { "- " + $0.candidate.chat.title }
+            .joined(separator: "\n")
+        let emptyText = """
+            **Direct answer** — Nothing in the messages I checked answers that question directly.
+
+            **What I looked at:**
+            \(chatList)
+
+            **Suggestion:** Try a broader phrasing or drop a specific term (e.g. keep just the person's name or just the topic).
+            """
+        return SummarizeResult(text: emptyText, extracts: [])
+    }
+
+    /// Run per-chat extraction prompts in parallel. Each returns
+    /// either a non-empty extract string or nil (NOT_RELEVANT / AI
+    /// error / empty digest). Results are returned in the order of the
+    /// input `perChatDigest` array (so the focus chat leads when its
+    /// extract is non-null).
+    private func runPerChatExtraction(
+        query: String,
+        perChatDigest: [PerChatDigest],
+        aiService: AIService
+    ) async -> [(chat: TGChat, text: String)] {
+        let provider = aiService.provider
+        let indexedResults: [(Int, TGChat, String?)] =
+            await withTaskGroup(of: (Int, TGChat, String?).self) { group in
+                for (index, digest) in perChatDigest.enumerated() {
+                    let chat = digest.candidate.chat
+                    let snippets = MessageSnippet.fromMessages(
+                        digest.messages,
+                        chatTitle: chat.title
+                    )
+                    guard !snippets.isEmpty else {
+                        group.addTask { (index, chat, nil) }
+                        continue
+                    }
+                    let prompt = PerChatExtractionPrompt.systemPrompt(
+                        query: query,
+                        chatName: chat.title
+                    )
+                    group.addTask {
+                        do {
+                            let raw = try await provider.summarize(
+                                messages: snippets,
+                                prompt: prompt
+                            )
+                            let trimmed = raw
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            if trimmed.isEmpty
+                                || trimmed.uppercased().contains("NOT_RELEVANT") {
+                                return (index, chat, nil)
+                            }
+                            return (index, chat, trimmed)
+                        } catch {
+                            return (index, chat, nil)
+                        }
+                    }
+                }
+                var collected: [(Int, TGChat, String?)] = []
+                for await result in group {
+                    collected.append(result)
+                }
+                return collected
+            }
+        return indexedResults
+            .sorted { $0.0 < $1.0 }
+            .compactMap { entry in
+                guard let text = entry.2 else { return nil }
+                return (entry.1, text)
+            }
+    }
+
+    /// Old single-pass fallback used when AI isn't configured. Pulls
+    /// top-ranked snippets from across all per-chat digests and
+    /// joins them. Mechanical but better than empty.
+    private func localFallbackSummary(
+        perChatDigest: [PerChatDigest],
+        queryContext: QueryContext,
+        fallbackSnippet: String
+    ) -> String {
+        let allMessages = perChatDigest.flatMap { $0.messages }
+        let topFallbackSnippets = rankedSupportMessages(allMessages, queryContext: queryContext)
             .prefix(AppConstants.Search.Summary.fallbackSnippetLimit + 2)
             .map { snippet(from: $0.displayText) }
 
@@ -771,15 +1119,6 @@ final class SummaryEngine {
         return []
     }
 
-    private func minimumFocusScore(for queryContext: QueryContext) -> Double {
-        // Uniform floor — the joint-anchor bump (1.25) was load-bearing
-        // when AND-FTS was the only retriever and required both tokens
-        // to co-occur. With Tier 1 graduated FTS surfacing single-anchor
-        // matches, the bump shut summaries off entirely. The -2.2 penalty
-        // in buildCandidates is what now discounts those.
-        0.95
-    }
-
     private func focusTimeRange(
         explicitTimeRange: TimeRangeConstraint?,
         queryContext: QueryContext
@@ -897,8 +1236,15 @@ final class SummaryEngine {
               let anchorIndex = sorted.firstIndex(where: { $0.id == anchorMessage.id }) else {
             return sorted
         }
-        let lowerBound = max(0, anchorIndex - 6)
-        let upperBound = min(sorted.count - 1, anchorIndex + 6)
+        // ±10 around the anchor = 21-message window. Wider than the old
+        // ±6 because the digest no longer re-ranks within the chat
+        // (research consensus is chronological context beats top-K
+        // relevance for chat summarization), so the AI's coherence
+        // comes from seeing the surrounding conversation, not from
+        // higher per-message density.
+        let radius = 10
+        let lowerBound = max(0, anchorIndex - radius)
+        let upperBound = min(sorted.count - 1, anchorIndex + radius)
         return Array(sorted[lowerBound...upperBound])
     }
 

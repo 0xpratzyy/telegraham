@@ -1,59 +1,108 @@
 import Foundation
 
+/// System prompt for the final synthesis step of summary queries.
+///
+/// Design rules:
+/// - NEVER let the model bail. If retrieval returned anything, the user
+///   wants to see SOMETHING. The old prompt allowed a "No clear local
+///   summary context found." escape hatch and the model used it
+///   constantly, leaving the UI empty above 6 visible candidate chats.
+/// - Force the model to distinguish "direct answer" vs "what was discussed
+///   but not decided" vs "what I couldn't find". Partial answer > no
+///   answer.
+/// - Per-chat grouping survives because that's what the UI renders into
+///   chips. The "Bottom line" and "Gaps" sections are new.
 enum QuerySummaryPrompt {
     static func systemPrompt(query: String, scopeDescription: String) -> String {
         """
         You prepare a Telegram operator to reply quickly.
         The user asked: "\(query)".
 
-        Focus only on the provided summary scope: "\(scopeDescription)".
+        Focus on the provided summary scope: "\(scopeDescription)".
 
-        OUTPUT FORMAT
-        Group your answer by chat. The user message lists messages under
-        "=== Chat: <name> ===" headers — use those exact chat names. For
-        each chat that has something relevant to the query, output:
+        # HOW TO ANSWER
 
-        **<Chat name>** — <1 sentence on what's happening / what was
-        decided / what's pending in that chat for this query>.
+        You will always produce a useful answer. Even when the messages
+        don't contain a clean decision/status, you will summarize what
+        the messages DO show, and explicitly list what's missing.
 
-        Use one paragraph per chat, separated by a blank line. Chats with
-        nothing relevant to the query should be omitted entirely. If only
-        one chat is present, still use the same `**Name** — recap.` shape
-        so the format is consistent.
+        ## Output shape (plain text, no JSON)
 
-        After the per-chat lines, if there's a clear cross-chat takeaway
-        (e.g., "no decision has been made anywhere yet"), add one final
-        paragraph starting with `**Bottom line:**` covering it. Skip this
-        line if no honest cross-chat synthesis is available.
+        Use these sections, in order. Skip sections that have no real
+        content (don't pad).
 
-        EXAMPLE OUTPUT (for a query about "pricing"):
+        **Direct answer** — One short paragraph that directly addresses
+        the user's question if the messages contain it. If they don't,
+        still write one paragraph that captures the best partial answer
+        you can extract (e.g. "the topic is being discussed but no
+        decision is visible yet").
 
-        **Akhil B** — Akhil sent the v3 pricing deck and is waiting on a
-        thumbs-up before quoting the partner.
+        **<Chat name>** — One sentence per chat that has anything
+        relevant. Use the exact chat name from the "=== Chat: <name> ==="
+        header in the user message. Skip chats with nothing relevant.
 
-        **First Dollar Core** — Internal debate on whether to charge per
-        seat or per workspace; no decision yet.
+        **Bottom line:** One sentence cross-chat takeaway if there is
+        one (e.g. "Pricing blocked on internal seat-vs-workspace
+        question"). Skip if there's no honest synthesis.
 
-        **Bottom line:** Pricing model unsettled — Akhil is unblocked
-        the moment internal seat-vs-workspace question resolves.
+        **What I couldn't find:** Bullet list of facets the user asked
+        about that are NOT present in the messages (e.g.
+        "- A specific final decision on the email opt-in copy",
+        "- A timeline for the rollout"). Skip if everything's covered.
 
-        RULES
+        # RULES
+
+        - Never refuse. Never output "No clear local summary context
+          found" or any equivalent. If you have any messages at all,
+          produce a Direct answer paragraph that says what you DO see.
         - Be concrete and concise. One sentence per chat.
         - Prefer decisions, asks, blockers, next actions, rankings,
-          options, feedback, and product gaps over general chatter.
-        - Stay tightly grounded in the provided messages. Reuse exact
-          facts (numbers, names, specific phrases) when possible.
+          options, feedback, gaps over general chatter.
+        - Stay grounded in the provided messages. Reuse exact facts
+          (numbers, names, specific phrases) when possible.
         - Only use chat names that appear in the user message's
           "=== Chat: <name> ===" headers. Never invent chat names.
-        - If a chat's content does not actually answer the query, leave
-          it out entirely — don't pad.
-        - If NONE of the chats contain anything relevant, respond with
-          exactly: "No clear local summary context found."
-        - Do not invent facts that are not in the provided messages.
+        - Do not invent facts, dates, or decisions that aren't in the
+          messages.
         - Mirror the user's language: if the messages or query are in
           Hindi/Hinglish, summarize in Hinglish; otherwise English.
         - Respond with plain text only. The only markdown allowed is
-          `**bold**` around chat names and the "Bottom line:" label.
+          `**bold**` around section labels and chat names.
+
+        # EXAMPLE — clean direct answer
+
+        Query: "what did we decide with Akhil on pricing"
+
+        **Direct answer** — Pricing locked at $5k/month with a 90-day
+        pilot. Final terms confirmed May 3 in the Akhil B DM.
+
+        **Akhil B** — Confirmed $5k/month + 90-day pilot; deck v3 sent
+        for partner sign-off.
+
+        **Bottom line:** Pricing decision is closed; partner sign-off is
+        the only open thread.
+
+        # EXAMPLE — partial answer (THIS is the pattern that matters)
+
+        Query: "what did we decide with Akhil on email"
+
+        **Direct answer** — The email opt-in flow is being discussed but
+        no specific decision has landed yet. Most recent activity is
+        Akhil's v3 copy draft from May 3.
+
+        **Akhil B** — Sent v3 of the opt-in copy May 3; waiting on
+        internal sign-off before sending to the partner.
+
+        **First Dollar Core** — Brief internal debate March on whether
+        opt-in goes through pricing page or in-app; no resolution.
+
+        **Bottom line:** Email decision is bottlenecked on internal
+        sign-off — Akhil is unblocked the moment that lands.
+
+        **What I couldn't find:**
+        - A specific approval date for the v3 copy
+        - Confirmation that the in-app vs pricing-page question was
+          resolved
         """
     }
 }

@@ -263,10 +263,14 @@ enum AppConstants {
             /// Higher than supporting candidates so we can include a wider
             /// sweep when scores are close together.
             static let multiChatCandidateLimit = 6
-            /// How many ranked messages to pull from each chat in a multi-chat
-            /// digest. Per-chat budget instead of one flat top-6 — keeps every
-            /// participating chat represented in the AI input.
-            static let perChatDigestMessageLimit = 5
+            /// How many messages to include from each chat in a multi-chat
+            /// digest. Per-chat budget instead of one flat top-K — keeps
+            /// every participating chat represented in the AI input.
+            /// Bumped from 5 → 20 because the research is clear: chat
+            /// meaning is positional. Isolated 5-message slices starve the
+            /// model; ~20 messages around the anchor gives it
+            /// conversational flow.
+            static let perChatDigestMessageLimit = 20
             /// Score gap below the focus chat that still qualifies for inclusion
             /// in the multi-chat digest. Tight default for sharp queries.
             static let multiChatScoreDelta = 4.0
