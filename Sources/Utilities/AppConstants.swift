@@ -33,9 +33,6 @@ enum AppConstants {
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
         static let defaultOpenAIModel = "gpt-5"
-        static let replyQueueOpenAIModel = "gpt-5.4-mini"
-        static let followUpClaudeModel = "claude-3-5-haiku-20241022"
-        static let followUpOpenAIModel = "gpt-5.4-mini"
         static let maxResponseTokens = 4096
         static let maxTokenBudgetChars = 16000
         static let requestTimeoutSeconds: TimeInterval = 90

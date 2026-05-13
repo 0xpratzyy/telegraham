@@ -63,6 +63,20 @@ final class ReplyQueueEngine {
         let source: MessageCacheService.MessageLoadSource
     }
 
+    /// Sendable snapshot of the AIService config captured at search-start.
+    /// Lets the `nonisolated` parallel-batch path construct a provider
+    /// without re-awaiting the @MainActor service for every batch.
+    /// Previously a struct of the same shape lived on AIService named
+    /// `ReplyQueueExecutionConfig` and falsely advertised a cheaper "reply
+    /// queue" model — that model was never actually used at request time;
+    /// every batch ended up going through OpenAIProvider with the user's
+    /// real model. Now we just carry the real config.
+    private struct AIInvocation: Sendable {
+        let providerType: AIProviderConfig.ProviderType
+        let apiKey: String
+        let model: String
+    }
+
     func search(
         query: String,
         querySpec: QuerySpec,
@@ -76,7 +90,18 @@ final class ReplyQueueEngine {
         let totalStartedAt = Date()
         let myUserId = telegramService.currentUser?.id ?? 0
         let myUsername = telegramService.currentUser?.username
-        let replyQueueConfig = aiService.replyQueueExecutionConfig()
+
+        let aiInvocation: AIInvocation? = {
+            guard aiService.isConfigured,
+                  aiService.providerType != .none,
+                  !aiService.configuredAPIKey.isEmpty
+            else { return nil }
+            return AIInvocation(
+                providerType: aiService.providerType,
+                apiKey: aiService.configuredAPIKey,
+                model: aiService.providerModel
+            )
+        }()
 
         let collectStartedAt = Date()
         let candidateCollection = collectEligibleChats(
@@ -91,8 +116,8 @@ final class ReplyQueueEngine {
         var debug = AgenticDebugInfo(
             scopedChats: candidateCollection.included.count,
             maxScanChats: candidateCollection.included.count,
-            providerName: replyQueueConfig?.providerType.rawValue ?? aiService.providerType.rawValue,
-            providerModel: replyQueueConfig?.model ?? aiService.providerModel
+            providerName: aiService.providerType.rawValue,
+            providerModel: aiService.providerModel
         )
         debug.candidateCollectionMs = collectDurationMs
         debug.eligiblePrivateChats = candidateCollection.included.filter { $0.chatType.isPrivate }.count
@@ -225,7 +250,7 @@ final class ReplyQueueEngine {
                 query: query,
                 scope: querySpec.scope,
                 batches: wavePending.chunked(into: AppConstants.Search.ReplyQueue.aiBatchSize),
-                providerConfig: replyQueueConfig,
+                providerConfig: aiInvocation,
                 myUserId: myUserId
             )
             let waveAIDurationMs = elapsedMs(since: waveAIStartedAt)
@@ -363,7 +388,7 @@ final class ReplyQueueEngine {
                 query: query,
                 scope: querySpec.scope,
                 batches: expanded.chunked(into: AppConstants.Search.ReplyQueue.aiBatchSize),
-                providerConfig: replyQueueConfig,
+                providerConfig: aiInvocation,
                 myUserId: myUserId
             )
             debug.aiMs += elapsedMs(since: needMoreAIStartedAt)
@@ -452,8 +477,8 @@ final class ReplyQueueEngine {
         persistCandidateSnapshot(
             query: query,
             scope: querySpec.scope,
-            providerName: replyQueueConfig?.providerType.rawValue ?? aiService.providerType.rawValue,
-            providerModel: replyQueueConfig?.model ?? aiService.providerModel,
+            providerName: aiInvocation?.providerType.rawValue ?? aiService.providerType.rawValue,
+            providerModel: aiInvocation?.model ?? aiService.providerModel,
             pending: processedPending,
             myUserId: myUserId
         )
@@ -678,7 +703,7 @@ final class ReplyQueueEngine {
         query: String,
         scope: QueryScope,
         batches: [[PendingChat]],
-        providerConfig: AIService.ReplyQueueExecutionConfig?,
+        providerConfig: AIInvocation?,
         myUserId: Int64
     ) async -> [ParallelAIBatchOutcome] {
         await withTaskGroup(of: ParallelAIBatchOutcome.self) { group in
@@ -717,7 +742,7 @@ final class ReplyQueueEngine {
         query: String,
         scope: QueryScope,
         candidates: [ReplyQueueCandidateDTO],
-        providerConfig: AIService.ReplyQueueExecutionConfig?
+        providerConfig: AIInvocation?
     ) async -> TriageBatchOutcome {
         guard let providerConfig else {
             return TriageBatchOutcome(

@@ -127,18 +127,6 @@ enum AIUsagePricingCatalog {
         guard let family = canonicalFamily(for: provider, model: model) else { return nil }
 
         switch (provider, family) {
-        case (.openAI, "gpt-5.4-mini"):
-            return AIModelPricing(
-                family: family,
-                inputUSDPerMillionTokens: 0.75,
-                outputUSDPerMillionTokens: 4.50
-            )
-        case (.openAI, "gpt-5.4-nano"):
-            return AIModelPricing(
-                family: family,
-                inputUSDPerMillionTokens: 0.20,
-                outputUSDPerMillionTokens: 1.25
-            )
         case (.openAI, "gpt-4o-mini"):
             return AIModelPricing(
                 family: family,
@@ -177,12 +165,6 @@ enum AIUsagePricingCatalog {
 
         switch provider {
         case .openAI:
-            if normalized == "gpt-5.4-mini" {
-                return "gpt-5.4-mini"
-            }
-            if normalized == "gpt-5.4-nano" {
-                return "gpt-5.4-nano"
-            }
             if normalized == "gpt-4o-mini" {
                 return "gpt-4o-mini"
             }
@@ -190,7 +172,7 @@ enum AIUsagePricingCatalog {
                 return "gpt-5-mini"
             }
             // gpt-5 full (not mini/nano). Matched last so the more specific
-            // mini/nano branches take precedence on their longer names.
+            // mini branch takes precedence on its longer name.
             if normalized == "gpt-5" {
                 return "gpt-5"
             }

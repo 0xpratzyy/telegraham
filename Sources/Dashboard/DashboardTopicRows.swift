@@ -498,21 +498,3 @@ struct DashboardTopicMiniBadge: View {
     }
 }
 
-struct DashboardMetricPill: View {
-    let value: String
-    let label: String
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            Text(value)
-                .font(PidgyDashboardTheme.monoTimestampFont)
-                .foregroundStyle(PidgyDashboardTheme.primary)
-            Text(label)
-                .font(PidgyDashboardTheme.captionMediumFont)
-                .foregroundStyle(PidgyDashboardTheme.secondary)
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 38)
-        .background(DashboardCapsuleBackground())
-    }
-}

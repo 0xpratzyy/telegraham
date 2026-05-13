@@ -5,12 +5,6 @@ import SwiftUI
 /// and exposes high-level AI operations that combine TelegramService data with AI.
 @MainActor
 final class AIService: ObservableObject {
-    struct ReplyQueueExecutionConfig: Sendable {
-        let providerType: AIProviderConfig.ProviderType
-        let apiKey: String
-        let model: String
-    }
-
     struct PipelineTriageResult {
         enum Status: Equatable {
             case decision
@@ -36,7 +30,11 @@ final class AIService: ObservableObject {
     @Published private(set) var providerModel: String = ""
     private(set) var provider: AIProvider = NoAIProvider()
     let queryRouter: QueryRouter
-    private var configuredAPIKey: String = ""
+    /// Internal-readable so module peers like ReplyQueueEngine can capture
+    /// the live key into a Sendable snapshot for parallel-batch work
+    /// without having to re-await the @MainActor service mid-loop. Setter
+    /// stays private — the only writer is the configuration path.
+    private(set) var configuredAPIKey: String = ""
 
     init() {
         self.queryRouter = QueryRouter(aiProvider: NoAIProvider())
@@ -435,28 +433,6 @@ final class AIService: ObservableObject {
 
     func loadUsageOverview() async -> AIUsageOverview {
         await AIUsageStore.shared.loadOverview()
-    }
-
-    func replyQueueExecutionConfig() -> ReplyQueueExecutionConfig? {
-        guard isConfigured, providerType != .none, !configuredAPIKey.isEmpty else {
-            return nil
-        }
-
-        let resolvedModel: String
-        switch providerType {
-        case .openai:
-            resolvedModel = AppConstants.AI.replyQueueOpenAIModel
-        case .claude:
-            resolvedModel = providerModel
-        case .none:
-            return nil
-        }
-
-        return ReplyQueueExecutionConfig(
-            providerType: providerType,
-            apiKey: configuredAPIKey,
-            model: resolvedModel
-        )
     }
 
     func persistedConfiguration(for type: AIProviderConfig.ProviderType) -> AIProviderConfig? {

@@ -420,40 +420,6 @@ struct DashboardTelegramUserAvatar: View {
     }
 }
 
-struct DashboardEvidenceRow: View {
-    let source: DashboardTaskSourceMessage
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Text(source.senderName)
-                    .font(PidgyDashboardTheme.metadataMediumFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                Text(DateFormatting.compactRelativeTime(from: source.date))
-                    .font(PidgyDashboardTheme.monoCaptionFont)
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-                Spacer()
-                Text("#\(source.messageId)")
-                    .font(PidgyDashboardTheme.monoCaptionFont)
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-            }
-            Text(source.text)
-                .font(PidgyDashboardTheme.detailBodyFont)
-                .italic()
-                .foregroundStyle(PidgyDashboardTheme.primary)
-                .lineLimit(4)
-                .lineSpacing(2)
-        }
-        .padding(10)
-        .background(PidgyDashboardTheme.paper)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(PidgyDashboardTheme.rule)
-        )
-    }
-}
-
 struct DashboardDetailPane<Content: View, Actions: View>: View {
     let onClose: () -> Void
     @ViewBuilder let content: Content
@@ -688,29 +654,6 @@ struct DashboardSearchFieldBackground: View {
                     .stroke(PidgyDashboardTheme.rule)
             )
             .shadow(color: Color.black.opacity(0.18), radius: 6, y: 2)
-    }
-}
-
-struct DashboardFilterCapsule: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "line.3.horizontal.decrease.circle")
-                .font(PidgyDashboardTheme.metadataFont)
-            Text("\(title):")
-                .font(PidgyDashboardTheme.metadataMediumFont)
-            Text(value)
-                .font(PidgyDashboardTheme.metadataMediumFont)
-                .lineLimit(1)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-        }
-        .foregroundStyle(PidgyDashboardTheme.secondary)
-        .frame(height: 28)
-        .padding(.horizontal, 10)
-        .background(DashboardCapsuleBackground())
     }
 }
 

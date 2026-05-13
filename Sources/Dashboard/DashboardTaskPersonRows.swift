@@ -237,13 +237,6 @@ enum DashboardStatusFilter: String, CaseIterable, Identifiable {
     }
 }
 
-struct DashboardChatOption: Identifiable {
-    let chatId: Int64
-    let title: String
-
-    var id: Int64 { chatId }
-}
-
 func topicTint(for task: DashboardTask) -> Color {
     if let topicId = task.topicId {
         return PidgyDashboardTheme.topicTint(topicId)
