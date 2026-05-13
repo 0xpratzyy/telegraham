@@ -391,23 +391,54 @@ struct DashboardTasksPage: View {
         .background(PidgyDashboardTheme.paper)
     }
 
+    // Pick the most specific reason the filtered list is empty. If the
+    // user has actively chosen an owner/profile chip, that's the answer
+    // — even when AI is off — otherwise selecting "Rajanshee Singh 0"
+    // silently shows "AI task extraction is off" while other owners
+    // have plenty of tasks, which looks like the whole feature is
+    // broken.
+    private func emptyStateContent() -> (image: String, title: String, subtitle: String) {
+        if let profileName = selectedProfileName {
+            return (
+                "tray",
+                "No tasks for \(profileName)",
+                aiConfigured
+                    ? "Try Open, Done, or another profile."
+                    : "Connect an AI provider in Settings to surface more."
+            )
+        }
+        if aiConfigured {
+            return (
+                "tray",
+                "No tasks match",
+                "Change a filter or refresh after recent sync catches up."
+            )
+        }
+        return (
+            "sparkles",
+            "AI task extraction is off",
+            "Connect an AI provider in Settings to populate this page."
+        )
+    }
+
+    private var emptyStateView: some View {
+        let content = emptyStateContent()
+        return DashboardEmptyState(
+            systemImage: content.image,
+            title: content.title,
+            subtitle: content.subtitle
+        )
+        .frame(maxWidth: .infinity)
+        .padding(.top, 36)
+    }
+
     private var taskRows: some View {
         VStack(spacing: 0) {
             if shouldShowTaskSkeleton {
                 DashboardSkeletonRows(count: selectedTask == nil ? 9 : 7)
                     .padding(.top, 6)
             } else if filteredTasks.isEmpty {
-                DashboardEmptyState(
-                    systemImage: aiConfigured ? "tray" : "sparkles",
-                    title: aiConfigured
-                        ? selectedProfileName.map { "No tasks for \($0)" } ?? "No tasks match"
-                        : "AI task extraction is off",
-                    subtitle: aiConfigured
-                        ? (selectedProfileName == nil ? "Change a filter or refresh after recent sync catches up." : "Try Open, Done, or another profile.")
-                        : "Connect an AI provider in Settings to populate this page."
-                )
-                .frame(maxWidth: .infinity)
-                .padding(.top, 36)
+                emptyStateView
             } else {
                 ForEach(filteredTasks) { task in
                     Button {
