@@ -811,7 +811,7 @@ struct DashboardSidebar: View {
                     .font(PidgyDashboardTheme.metadataMediumFont)
                     .frame(width: 18)
                 Text(page.rawValue)
-                    .font(PidgyDashboardTheme.detailBodyFont.weight(.semibold))
+                    .font(PidgyDashboardTheme.detailBodyFont.weight(.regular))
                     .lineLimit(1)
                 Spacer()
                 if let count, count > 0 {
@@ -878,7 +878,7 @@ struct DashboardSidebar: View {
                                     .fill(isTopicSelected(item) ? PidgyDashboardTheme.brand : item.tint.opacity(0.75))
                                     .frame(width: 8, height: 8)
                                 Text(item.name)
-                                    .font(PidgyDashboardTheme.metadataMediumFont)
+                                    .font(PidgyDashboardTheme.metadataMediumFont.weight(.regular))
                                     .foregroundStyle(isTopicSelected(item) ? Color.white : PidgyDashboardTheme.primary)
                                     .lineLimit(1)
                                 Spacer()
@@ -959,7 +959,7 @@ struct DashboardSidebar: View {
 
                 HStack(spacing: 4) {
                     Text(accountTitle)
-                        .font(PidgyDashboardTheme.detailBodyFont.weight(.semibold))
+                        .font(PidgyDashboardTheme.detailBodyFont.weight(.regular))
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .lineLimit(1)
 
