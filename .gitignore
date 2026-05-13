@@ -38,3 +38,14 @@ Config/BetaSecrets.local.xcconfig
 
 # Packaged distribution artifacts (Pidgy-<sha>.dmg etc.)
 dist/
+
+# Coding-agent / LLM session transcripts. Belt-and-suspenders for a real
+# incident: one such file (yc-coding-agent-session-pidgy-evals.md) landed
+# in the repo root with raw Telegram api_id / api_hash bytes in it. It
+# wasn't tracked, but a single `git add .` would have committed it. These
+# patterns make sure no future transcript drop ever ends up staged.
+yc-coding-agent-session-*.md
+*-coding-agent-session-*.md
+*-session-transcript-*.md
+*-eval-session-*.md
+.claude/worktrees/*/yc-coding-agent-session-*.md
