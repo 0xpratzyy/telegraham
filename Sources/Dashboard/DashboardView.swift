@@ -61,10 +61,20 @@ struct DashboardView: View {
 
             VStack(spacing: 0) {
                 if chromePolicy.showsDashboardTopBar {
+                    // The Reply Queue refresh finishes in ~30 s while the
+                    // Tasks refresh can run 10+ minutes; sharing one
+                    // isRefreshing/lastRefreshAt across pages left the
+                    // Reply Queue's button stuck on "Refreshing" until
+                    // the (unrelated) Tasks coordinator finally settled.
+                    // Route the right coordinator's state to each page.
                     DashboardTopBar(
                         page: currentPage,
-                        lastRefreshAt: taskIndex.lastRefreshAt,
-                        isRefreshing: taskIndex.isRefreshing,
+                        lastRefreshAt: currentPage == .replyQueue
+                            ? attentionStore.lastFollowUpsRefreshAt
+                            : taskIndex.lastRefreshAt,
+                        isRefreshing: currentPage == .replyQueue
+                            ? attentionStore.isFollowUpsLoading
+                            : taskIndex.isRefreshing,
                         onRefresh: refreshDashboard
                     )
                 }
@@ -204,8 +214,16 @@ struct DashboardView: View {
         let topicKey = taskIndex.topics
             .map { "\($0.id):\($0.name):\($0.rank):\($0.score):\($0.updatedAt.timeIntervalSince1970)" }
             .joined(separator: "|")
+        // Use only structurally-stable chat fields (id + title) — NOT
+        // `lastMessage.id`. Including the last message id made every
+        // Telegram message arrival in any chat invalidate the key, which
+        // re-fired DashboardTopicMatcher.sidebarItems and regex-normalized
+        // ~1000 chat titles + previews. Sidebar topic counts only need to
+        // update when chats are added/removed or renamed; the preview-text
+        // contribution to topic matching is a minor signal not worth the
+        // CPU cost of recomputing on every inbound message.
         let chatKey = telegramService.visibleChats
-            .map { "\($0.id):\($0.title):\($0.lastMessage?.id ?? 0)" }
+            .map { "\($0.id):\($0.title)" }
             .joined(separator: "|")
         return "\(topicKey)#\(chatKey)"
     }
@@ -615,7 +633,7 @@ struct DashboardTopBar: View {
             Spacer()
 
             if let lastRefreshAt {
-                Text("Updated \(DateFormatting.compactRelativeTime(from: lastRefreshAt)) ago")
+                Text(refreshTimestampLabel(for: lastRefreshAt))
                     .font(PidgyDashboardTheme.metadataFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
                     .lineLimit(1)
@@ -623,17 +641,27 @@ struct DashboardTopBar: View {
 
             Button(action: onRefresh) {
                 HStack(spacing: 7) {
-                    Image(systemName: isRefreshing ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
-                        .font(PidgyDashboardTheme.metadataMediumFont)
+                    if isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.65)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(PidgyDashboardTheme.metadataMediumFont)
+                            .frame(width: 14, height: 14)
+                    }
                     Text(isRefreshing ? "Refreshing" : "Refresh")
                         .font(PidgyDashboardTheme.metadataMediumFont)
                 }
                 .frame(height: 30)
                 .padding(.horizontal, 12)
                 .background(DashboardCapsuleBackground())
+                .opacity(isRefreshing ? 0.6 : 1)
             }
             .buttonStyle(.plain)
             .foregroundStyle(PidgyDashboardTheme.primary)
+            .disabled(isRefreshing)
             .help(refreshHelp)
         }
         .padding(.horizontal, PidgyDashboardTheme.pageHorizontalPadding)
@@ -648,9 +676,19 @@ struct DashboardTopBar: View {
 
     private var refreshHelp: String {
         if let lastRefreshAt {
-            return "Last refreshed \(DateFormatting.compactRelativeTime(from: lastRefreshAt)) ago"
+            return "Last refreshed \(refreshTimestampLabel(for: lastRefreshAt).replacingOccurrences(of: "Updated ", with: ""))"
         }
         return "Refresh dashboard"
+    }
+
+    private func refreshTimestampLabel(for date: Date) -> String {
+        let compact = DateFormatting.compactRelativeTime(from: date)
+        // "now" → "Updated just now" (avoids the grammatical "now ago").
+        // Everything else gets the "Updated <Xm/Xh/Xd> ago" form.
+        if compact == "now" {
+            return "Updated just now"
+        }
+        return "Updated \(compact) ago"
     }
 }
 

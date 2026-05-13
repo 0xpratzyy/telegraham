@@ -9,10 +9,21 @@ final class AttentionStore: ObservableObject {
     @Published private(set) var isFollowUpsLoading = false
     @Published private(set) var pipelineProcessedCount = 0
     @Published private(set) var pipelineTotalCount = 0
+    /// Stamp set when the most recent reply-queue refresh finishes. Used by
+    /// DashboardTopBar to render the "Updated Nm ago" label on the Reply
+    /// Queue page. Tasks-page refreshes use TaskIndexCoordinator.lastRefreshAt
+    /// instead — these two refreshes have wildly different durations and
+    /// can't share one timestamp without confusing the UI.
+    @Published private(set) var lastFollowUpsRefreshAt: Date?
 
     private var backgroundRefreshTask: Task<Void, Never>?
     private var cachedHydrationTask: Task<Void, Never>?
     private var queuedRefreshRequest: RefreshRequest?
+    /// Non-published lock so `loadFollowUps` calls overlap-coalesce
+    /// correctly even when no AI work needs to run. `isFollowUpsLoading`
+    /// stays decoupled — it only flips when AI is genuinely active, so
+    /// the Refresh button doesn't flicker on every cache-hit refresh.
+    private var isExecuting = false
 
     private init() {}
 
@@ -37,7 +48,7 @@ final class AttentionStore: ObservableObject {
         includeBots: Bool,
         force: Bool = false
     ) {
-        guard !isFollowUpsLoading else {
+        guard !isExecuting else {
             queueRefresh(
                 telegramService: telegramService,
                 aiService: aiService,
@@ -46,6 +57,7 @@ final class AttentionStore: ObservableObject {
             )
             return
         }
+        isExecuting = true
 
         let candidates = collectPipelineCandidates(
             telegramService: telegramService,
@@ -54,12 +66,26 @@ final class AttentionStore: ObservableObject {
 
         pipelineProcessedCount = 0
         pipelineTotalCount = 0
-        isFollowUpsLoading = true
+        // NOTE: Don't set isFollowUpsLoading = true here. The auto-refresh
+        // on visibleChatIDs changes fires constantly (every TDLib chat
+        // update), and most of those firings find every candidate already
+        // cached → no AI work needed. Flipping the loading bit before
+        // knowing if there's work caused the "Refreshing" button to flicker
+        // on/off every time TDLib pushed an update. Defer to the Task below
+        // where we know whether staleChats is non-empty.
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // We only mark as "Refreshing" when AI work is actually queued.
+            // The completion arm below mirrors the entry — it only clears
+            // the loading bit if we set it.
+            var didFlipLoadingFlag = false
             defer {
-                self.isFollowUpsLoading = false
+                if didFlipLoadingFlag {
+                    self.isFollowUpsLoading = false
+                }
+                self.lastFollowUpsRefreshAt = Date()
+                self.isExecuting = false
                 self.runQueuedRefreshIfNeeded()
             }
 
@@ -117,6 +143,12 @@ final class AttentionStore: ObservableObject {
             guard !staleChats.isEmpty else {
                 return
             }
+
+            // Flip the loading bit now that we know there's real AI work
+            // queued. Anything reaching this point will run `categorizeChat`
+            // for each entry in staleChats, which takes seconds-to-minutes.
+            self.isFollowUpsLoading = true
+            didFlipLoadingFlag = true
 
             self.pipelineProcessedCount = 0
             self.pipelineTotalCount = staleChats.count
@@ -214,7 +246,7 @@ final class AttentionStore: ObservableObject {
         aiService: AIService,
         includeBots: Bool
     ) {
-        guard !followUpItems.isEmpty, aiService.isConfigured, !isFollowUpsLoading else { return }
+        guard !followUpItems.isEmpty, aiService.isConfigured, !isExecuting else { return }
 
         backgroundRefreshTask?.cancel()
         backgroundRefreshTask = Task { @MainActor [weak self] in

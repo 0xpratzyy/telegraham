@@ -51,15 +51,17 @@ actor RateLimiter {
     }
 
     /// Acquires a token, waiting if necessary.
-    func acquire() async {
-        await acquire(priority: .userInitiated, method: AppConstants.RateLimit.defaultMethod)
+    /// Throws `CancellationError` if the calling Task is cancelled while waiting.
+    func acquire() async throws {
+        try await acquire(priority: .userInitiated, method: AppConstants.RateLimit.defaultMethod)
     }
 
+    /// Throws `CancellationError` if the calling Task is cancelled while waiting.
     func acquire(
         priority: Priority,
         method: String,
         floodWaitSeconds: Int? = nil
-    ) async {
+    ) async throws {
         let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? AppConstants.RateLimit.defaultMethod
             : method
@@ -72,15 +74,24 @@ actor RateLimiter {
         defer { decrementQueue(for: priority) }
 
         while true {
+            // Bail out if the calling Task has been cancelled. Without this
+            // check, cancelled work (e.g. scheduleBotMetadataWarm tasks
+            // superseded by a newer visibleChatIDs change) keeps looping
+            // inside this actor — every `try? await Task.sleep(...)` below
+            // swallows the cancellation throw, so the loop never naturally
+            // exits. Stale tasks accumulated for hours, holding actor work
+            // and burning CPU on the polling cycle.
+            if Task.isCancelled { throw CancellationError() }
+
             if let waitSeconds = cooldownWaitSeconds(for: normalizedMethod), waitSeconds > 0 {
                 logThrottle(priority: priority, method: normalizedMethod, waitSeconds: waitSeconds)
-                try? await Task.sleep(for: .milliseconds(Int(waitSeconds * 1000)))
+                try await Task.sleep(for: .milliseconds(Int(waitSeconds * 1000)))
                 continue
             }
 
             if priority == .background && queuedUserInitiated > 0 {
                 logThrottle(priority: priority, method: normalizedMethod, waitSeconds: nil)
-                try? await Task.sleep(
+                try await Task.sleep(
                     for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
                 )
                 continue
@@ -108,19 +119,20 @@ actor RateLimiter {
                 ? AppConstants.RateLimit.userPriorityPollIntervalMilliseconds
                 : AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds
             let sleepMilliseconds = max(Int(waitSeconds * 1000), Int(pollMilliseconds))
-            try? await Task.sleep(for: .milliseconds(sleepMilliseconds))
+            try await Task.sleep(for: .milliseconds(sleepMilliseconds))
         }
     }
 
+    /// Throws `CancellationError` if the calling Task is cancelled while waiting.
     func acquireCall(
         priority: Priority,
         method: String,
         floodWaitSeconds: Int? = nil
-    ) async {
+    ) async throws {
         let normalizedMethod = normalized(method)
-        await acquire(priority: priority, method: normalizedMethod, floodWaitSeconds: floodWaitSeconds)
+        try await acquire(priority: priority, method: normalizedMethod, floodWaitSeconds: floodWaitSeconds)
         if shouldSerializeInFlight(method: normalizedMethod) {
-            await acquireSerializedHistorySlot(priority: priority, method: normalizedMethod)
+            try await acquireSerializedHistorySlot(priority: priority, method: normalizedMethod)
         }
     }
 
@@ -140,7 +152,7 @@ actor RateLimiter {
         print("[RateLimiter] FLOOD_WAIT backoff \(String(format: "%.1f", backoffSeconds))s for \(normalizedMethod)")
     }
 
-    private func acquireSerializedHistorySlot(priority: Priority, method: String) async {
+    private func acquireSerializedHistorySlot(priority: Priority, method: String) async throws {
         // We allow up to `maxHistoryCallsInFlight` concurrent in-flight history
         // calls. The coordinator already serializes per-chat work in its for
         // loop, but TDLibKit history calls cannot be cancelled — when the
@@ -150,8 +162,9 @@ actor RateLimiter {
         // second concurrent slot leaves headroom for the next fresh chat to
         // proceed while the abandoned one drains.
         while historyCallsInFlight >= Self.maxHistoryCallsInFlight {
+            if Task.isCancelled { throw CancellationError() }
             logThrottle(priority: priority, method: method, waitSeconds: nil)
-            try? await Task.sleep(
+            try await Task.sleep(
                 for: .milliseconds(Int(AppConstants.RateLimit.backgroundPriorityPollIntervalMilliseconds))
             )
         }

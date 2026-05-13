@@ -1163,7 +1163,12 @@ class TelegramService: ObservableObject {
         var attempt = 0
         while true {
             attempt += 1
-            await rateLimiter.acquireCall(
+            // The rate limiter now propagates `CancellationError` when the
+            // calling Task is cancelled mid-wait. Previously it swallowed
+            // cancellation via `try?`, so superseded warm/refresh tasks
+            // kept looping inside the actor for hours, burning CPU on
+            // throttle/sleep cycles.
+            try await rateLimiter.acquireCall(
                 priority: priority,
                 method: method,
                 floodWaitSeconds: nil

@@ -155,10 +155,10 @@ final class PidgyCoreTests: XCTestCase {
         let limiter = RateLimiter(maxTokens: 10, refillRate: 10)
         let thirdCall = AsyncCompletionFlag()
 
-        await limiter.acquireCall(priority: .background, method: "getChatHistory")
-        await limiter.acquireCall(priority: .background, method: "getChatHistory")
+        try await limiter.acquireCall(priority: .background, method: "getChatHistory")
+        try await limiter.acquireCall(priority: .background, method: "getChatHistory")
         let pending = Task {
-            await limiter.acquireCall(priority: .background, method: "getChatHistory")
+            try? await limiter.acquireCall(priority: .background, method: "getChatHistory")
             await thirdCall.markCompleted()
             await limiter.releaseCall(method: "getChatHistory")
         }
