@@ -217,18 +217,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
 
         // Only open the dashboard at launch when the user has completed
-        // onboarding before. A fresh / wiped install would otherwise
-        // render the dashboard with stale local cache (followups, tasks,
-        // people from a prior session) while the onboarding modal floats
-        // on top — exactly the "Complete setup" + cached-data overlay the
-        // audit flagged. After onboarding completes, the
-        // `onComplete` callback on OnboardingWindowController opens the
-        // dashboard, so first-time users still land there immediately
-        // after finishing the flow.
+        // onboarding before AND usable Telegram credentials still exist.
+        // Without the credential check, a leftover `didCompleteOnboarding`
+        // flag from a prior session silently opens the dashboard with
+        // stale local cache (followups, tasks, people) while
+        // Settings → Account reads "Not initialized / Visible chats = 0"
+        // — the user has no signal that the keychain entries vanished
+        // (dev rebuild, manual wipe) or that bundled creds were dropped
+        // from this build. After onboarding completes, the `onComplete`
+        // callback on OnboardingWindowController opens the dashboard, so
+        // first-time users still land there immediately after finishing
+        // the flow.
         let didCompleteOnboarding = UserDefaults.standard.bool(
             forKey: AppConstants.Preferences.didCompleteOnboardingKey
         )
-        if opensDashboardOnLaunch && didCompleteOnboarding {
+        let hasTelegramCredentials = telegramCredentialsAvailable()
+        if opensDashboardOnLaunch && didCompleteOnboarding && hasTelegramCredentials {
             openDashboard()
         }
 
@@ -236,7 +240,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // completed the flow yet AND Telegram isn't already authenticated. If
         // they're already signed in (e.g. dev rebuilds, Keychain still holds
         // the session) we just mark onboarding done so the modal never pops.
-        presentOnboardingIfNeeded(force: false)
+        //
+        // Special case: flag is set but credentials are gone — force the
+        // onboarding window so the user can re-enter them. Otherwise
+        // `presentOnboardingIfNeeded(force: false)` would early-return on
+        // the stale flag and leave the user staring at nothing.
+        let stalled = didCompleteOnboarding && !hasTelegramCredentials
+        presentOnboardingIfNeeded(force: stalled)
 
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
@@ -345,6 +355,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildLoopTask = nil
         graphBuildTask?.cancel()
         graphBuildTask = nil
+    }
+
+    /// True iff the app can actually start TDLib right now — either the
+    /// user has their own credentials in the Keychain, or this build was
+    /// stamped with usable bundled beta credentials. Used to gate the
+    /// launch-time `openDashboard()` so we never render stale cached data
+    /// on top of a Telegram session that can't actually authenticate.
+    /// Mirrors the keychain-vs-bundled fallback in the launch Task above
+    /// so the two paths can't drift.
+    private func telegramCredentialsAvailable() -> Bool {
+        if let apiIdStr = try? KeychainManager.retrieve(for: .apiId),
+           (try? KeychainManager.retrieve(for: .apiHash)) != nil,
+           Int(apiIdStr) != nil {
+            return true
+        }
+        if BundledSecrets.telegramApiId != nil,
+           let bundledHash = BundledSecrets.telegramApiHash,
+           !bundledHash.isEmpty {
+            return true
+        }
+        return false
     }
 
     private func presentOnboardingIfNeeded(force: Bool) {
