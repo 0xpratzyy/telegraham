@@ -17,92 +17,41 @@ struct LoadingStateView: View {
     }
 }
 
-/// Rich loading state for AI search mode.
-/// Shows rotating intent keywords and skeleton rows instead of a blank spinner.
+/// Lightweight loading state for AI search. Originally rendered a
+/// styled "Preparing summary…" block with rotating intent chips on top
+/// of the skeleton rows — but that duplicated the status message in
+/// the top banner (with its own ticking duration). Two "Preparing
+/// summary…" headers stacked on top of each other looked broken. Now
+/// this view is just the skeleton rows; the banner is the single
+/// source of truth for status copy.
+///
+/// `message`, `keywords`, `progressText` are kept on the signature so
+/// the call sites don't change, but only `keywords` is still
+/// consulted — its presence drives the pulse timer.
 struct AISearchLoadingView: View {
     let message: String
     let keywords: [String]
     var progressText: String?
 
-    @State private var activeKeywordIndex = 0
     @State private var pulse = false
 
     private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
 
-    private var visibleKeywords: [String] {
-        guard !keywords.isEmpty else { return [] }
-        if keywords.count <= 4 { return keywords }
-        let start = activeKeywordIndex % keywords.count
-        return (0..<4).map { keywords[(start + $0) % keywords.count] }
-    }
-
     var body: some View {
-        VStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
-                        .font(Font.Pidgy.meta)
-                        .foregroundStyle(Color.Pidgy.accent)
-
-                    Text(message)
-                        .font(Font.Pidgy.bodyMd)
-                        .foregroundStyle(Color.Pidgy.fg1)
-
-                    Spacer()
-                }
-
-                if let progressText, !progressText.isEmpty {
-                    Text(progressText)
-                        .font(Font.Pidgy.monoSm)
-                        .foregroundStyle(Color.Pidgy.fg2)
-                }
-
-                if !visibleKeywords.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(Array(visibleKeywords.enumerated()), id: \.offset) { idx, word in
-                            let isActive = idx == 0
-                            Text(word)
-                                .font(Font.Pidgy.monoSm)
-                                .foregroundStyle(isActive ? Color.Pidgy.accentFg : Color.Pidgy.fg2)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(
-                                    Capsule()
-                                        .fill(isActive ? Color.Pidgy.accentSoft : Color.Pidgy.bg4.opacity(0.55))
-                                )
-                        }
-                    }
-                    .transition(.opacity)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.Pidgy.bg3)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.Pidgy.border2, lineWidth: 1)
-            )
-
-            VStack(spacing: 6) {
-                ForEach(0..<6, id: \.self) { index in
-                    AISearchSkeletonRow(
-                        pulse: pulse,
-                        titleWidth: index % 3 == 0 ? 220 : (index % 3 == 1 ? 180 : 250),
-                        subtitleWidth: index % 2 == 0 ? 260 : 190
-                    )
-                }
+        VStack(spacing: 6) {
+            ForEach(0..<6, id: \.self) { index in
+                AISearchSkeletonRow(
+                    pulse: pulse,
+                    titleWidth: index % 3 == 0 ? 220 : (index % 3 == 1 ? 180 : 250),
+                    subtitleWidth: index % 2 == 0 ? 260 : 190
+                )
             }
         }
         .padding(.horizontal, 8)
         .padding(.top, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onReceive(timer) { _ in
-            guard !keywords.isEmpty else { return }
             withAnimation(.easeInOut(duration: 0.28)) {
-                activeKeywordIndex = (activeKeywordIndex + 1) % keywords.count
                 pulse.toggle()
             }
         }

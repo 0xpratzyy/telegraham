@@ -43,6 +43,12 @@ struct LauncherView: View {
 
     @State private var activeFilter: Filter = .all
 
+    // Opacity that pulses between 1.0 and ~0.55 while an AI search is
+    // in flight. Lights up the search input so the user has a visible
+    // "engine is thinking" cue right where they're looking. Driven by
+    // an .onChange(isAISearching) below; idle stays at 1.0.
+    @State private var inputPulseOpacity: Double = 1.0
+
     // Keyboard navigation
     @State private var selectedIndex: Int = 0
 
@@ -374,6 +380,10 @@ struct LauncherView: View {
                 .textFieldStyle(.plain)
                 .font(Font.Pidgy.body)
                 .focused($isSearchFocused)
+                // Pulsating "I'm thinking" cue. Only dims the visible
+                // text — typing is uninterrupted because the field
+                // itself stays active.
+                .opacity(isAISearching ? inputPulseOpacity : 1.0)
 
             if !searchText.isEmpty {
                 Button {
@@ -413,6 +423,25 @@ struct LauncherView: View {
         .padding(.horizontal, PidgySpace.s3)
         .padding(.vertical, PidgySpace.s2)
         .background(Color.clear)
+        .onChange(of: isAISearching) { _, isSearching in
+            // Kick off / cancel the pulsing-input animation when the
+            // engine starts or finishes searching. Use a smooth
+            // ease-in-out that auto-reverses forever; resetting back
+            // to 1.0 when idle uses a short fade so the field doesn't
+            // pop awkwardly to full opacity mid-pulse.
+            if isSearching {
+                inputPulseOpacity = 1.0
+                withAnimation(
+                    .easeInOut(duration: 0.95).repeatForever(autoreverses: true)
+                ) {
+                    inputPulseOpacity = 0.55
+                }
+            } else {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    inputPulseOpacity = 1.0
+                }
+            }
+        }
     }
 
     private func performChromeAction(_ action: LauncherChromeAction) {
@@ -447,6 +476,79 @@ struct LauncherView: View {
 
     // MARK: - AI Mode Banner
 
+    /// Witty status messages that rotate while a search is in flight.
+    /// Tone leans into Claude's playbook — short quirky verbs (mostly
+    /// single-word, slightly archaic, never robot-speak) with a sprinkle
+    /// of chat-context riffs so it's still on-brand for a Telegram
+    /// CRM. Each list has 8-12 entries so a 30s search doesn't loop
+    /// back to the same word awkwardly.
+    private static let summaryWittyMessages: [String] = [
+        "cogitating…",
+        "marinating…",
+        "rummaging through receipts…",
+        "eavesdropping on past you…",
+        "pondering…",
+        "sleuthing…",
+        "noodling…",
+        "triangulating…",
+        "spelunking the archive…",
+        "putting on the detective hat…",
+        "percolating…",
+        "almost there…"
+    ]
+    private static let semanticWittyMessages: [String] = [
+        "scanning the corpus…",
+        "matching vibes…",
+        "ranking the contenders…",
+        "putting on the glasses…",
+        "polishing matches…",
+        "consulting the vectors…",
+        "skimming…"
+    ]
+    private static let agenticWittyMessages: [String] = [
+        "spotting open loops…",
+        "stalking your inbox (politely)…",
+        "ranking warm leads…",
+        "untangling threads…",
+        "checking who's on you…",
+        "drafting next actions…",
+        "doing the math…"
+    ]
+    private static let messageWittyMessages: [String] = [
+        "hunting the exact phrase…",
+        "scrolling back…",
+        "checking the wording…",
+        "double-tapping the receipts…"
+    ]
+
+    /// Rotating banner label. Pulls from the witty pool while searching,
+    /// then snaps to the static "ready/done" label once results land.
+    /// `now` is supplied by the TimelineView ticker so this re-renders
+    /// every 0.1s — pick a new message every ~2.4s based on elapsed
+    /// search time so the user sees the engine "thinking out loud".
+    private func bannerStatusText(intent: QueryIntent, now: Foundation.Date) -> String {
+        guard isAISearching, let startedAt = searchStartedAt else {
+            return aiModeLabel(intent: intent)
+        }
+        let elapsed = max(0, now.timeIntervalSince(startedAt))
+        let pool: [String]
+        switch intent {
+        case .summarySearch:
+            pool = Self.summaryWittyMessages
+        case .semanticSearch:
+            pool = Self.semanticWittyMessages
+        case .agenticSearch:
+            pool = Self.agenticWittyMessages
+        case .messageSearch:
+            pool = Self.messageWittyMessages
+        case .unsupported:
+            return aiModeLabel(intent: intent)
+        }
+        let rotationSeconds: Double = 2.4
+        let index = Int(elapsed / rotationSeconds) % pool.count
+        return pool[index]
+    }
+
     private func aiModeBanner(intent: QueryIntent) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             TimelineView(.periodic(from: .now, by: 0.1)) { context in
@@ -455,9 +557,10 @@ struct LauncherView: View {
                         .font(Font.Pidgy.meta)
                         .foregroundStyle(Color.Pidgy.accent)
 
-                    Text(aiModeLabel(intent: intent))
+                    Text(bannerStatusText(intent: intent, now: context.date))
                         .font(Font.Pidgy.meta)
                         .foregroundStyle(Color.Pidgy.fg2)
+                        .animation(.easeInOut(duration: 0.25), value: bannerStatusText(intent: intent, now: context.date))
 
                     Spacer()
 
