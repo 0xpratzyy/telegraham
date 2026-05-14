@@ -4,6 +4,7 @@ import Foundation
 enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
     case account = "Account"
     case ai = "AI"
+    case preferences = "Preferences"
     case pricing = "Pricing"
     case indexing = "Indexing"
     case diagnostics = "Diagnostics"
@@ -18,6 +19,8 @@ enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
             return "person.crop.circle"
         case .ai:
             return "sparkles"
+        case .preferences:
+            return "slider.horizontal.3"
         case .pricing:
             return "chart.bar.xaxis"
         case .indexing:
@@ -37,6 +40,8 @@ enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
             return "Telegram connection and credentials"
         case .ai:
             return "Provider, model, and privacy"
+        case .preferences:
+            return "Toggles for the small stuff"
         case .pricing:
             return "AI usage, tokens, and cost"
         case .indexing:
@@ -152,7 +157,8 @@ enum PreferencesResetPlan {
         AppConstants.Preferences.includeBotsInAISearchKey,
         AppConstants.Preferences.dashboardTaskTriageContextVersionKey,
         AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
-        AppConstants.Preferences.didCompleteOnboardingKey
+        AppConstants.Preferences.didCompleteOnboardingKey,
+        AppConstants.Preferences.showPigeonFlockKey
     ]
 
     static func pidgyDataDirectory(in applicationSupportDirectory: URL?) -> URL? {

@@ -326,5 +326,9 @@ enum AppConstants {
         static let dashboardTaskTriageContextVersionKey = "dashboardTaskTriageContextVersion"
         static let dashboardTaskPinnedOwnersKey = "dashboardTaskPinnedOwners"
         static let didCompleteOnboardingKey = "pidgyDidCompleteOnboarding"
+        /// Toggle for the decorative pigeon flock on the home
+        /// dashboard's "What to do now" squiggle. Default: on. When
+        /// off, the squiggle falls back to a plain divider line.
+        static let showPigeonFlockKey = "showPigeonFlock"
     }
 }

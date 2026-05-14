@@ -8,6 +8,12 @@ struct DashboardHomePage: View {
     let onOpenTask: (DashboardTask) -> Void
     let onOpenReply: (FollowUpItem) -> Void
 
+    // Pigeon flock is an opt-out via Settings → Display. When off we
+    // fall back to the plain DashboardSquiggleDivider that used to
+    // live here, so the layout stays identical and birds simply
+    // disappear.
+    @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
+
     private var feedItems: [DashboardFeedItem] {
         let taskItems = tasks
             .filter(\.isActionableNow)
@@ -54,8 +60,14 @@ struct DashboardHomePage: View {
                     Text("\(feedItems.count) active item\(feedItems.count == 1 ? "" : "s")")
                         .font(PidgyDashboardTheme.pageSubtitleFont)
                         .foregroundStyle(PidgyDashboardTheme.secondary)
-                    DashboardPigeonFlock()
-                        .padding(.top, 4)
+                    Group {
+                        if showPigeonFlock {
+                            DashboardPigeonFlock()
+                        } else {
+                            DashboardSquiggleDivider()
+                        }
+                    }
+                    .padding(.top, 4)
                 }
                 .padding(.bottom, 4)
 

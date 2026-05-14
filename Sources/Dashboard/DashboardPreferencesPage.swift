@@ -6,6 +6,7 @@ struct DashboardPreferencesPage: View {
     @StateObject private var indexingProgress = IndexScheduler.shared.progress
     @StateObject private var recentSyncProgress = RecentSyncCoordinator.shared.progress
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
+    @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
 
     let onBackToDashboard: () -> Void
     let onRefreshDashboard: () -> Void
@@ -158,7 +159,7 @@ struct DashboardPreferencesPage: View {
         switch selectedPage {
         case .pricing, .indexing, .diagnostics:
             return true
-        case .account, .ai, .reset, .about:
+        case .account, .ai, .preferences, .reset, .about:
             return false
         }
     }
@@ -202,6 +203,14 @@ struct DashboardPreferencesPage: View {
             return preferenceStatusItems[0]
         case .ai:
             return preferenceStatusItems[1]
+        case .preferences:
+            return DashboardPreferenceStatusItem(
+                title: "Pigeon flock",
+                value: showPigeonFlock ? "On" : "Off",
+                caption: showPigeonFlock ? "5 birds, drag the line to bounce" : "Plain divider under the title",
+                systemImage: "slider.horizontal.3",
+                tint: PidgyDashboardTheme.blue
+            )
         case .pricing:
             return preferenceStatusItems[2]
         case .indexing:
@@ -273,6 +282,8 @@ struct DashboardPreferencesPage: View {
             accountPage
         case .ai:
             aiPage
+        case .preferences:
+            preferencesPage
         case .pricing:
             pricingPage
         case .indexing:
@@ -418,6 +429,39 @@ struct DashboardPreferencesPage: View {
                             }
                             .disabled(isTestingConnection || selectedAIProvider == .none)
                         }
+                    }
+                )
+            }
+
+        }
+    }
+
+    /// "Preferences" page — collects the small toggleable bits of
+    /// Pidgy that don't fit cleanly under Account / AI / etc:
+    ///
+    /// 1. **Pigeons** — the decorative animated flock on the home
+    ///    dashboard's "What to do now" squiggle.
+    /// 2. **Include bot chats** — moved here from the AI page's
+    ///    Privacy section. Bot chats are mostly a noise-suppression
+    ///    surface choice, so it groups well with the pigeon toggle
+    ///    under "tweaks the user opts into."
+    ///
+    /// The "What AI sees" disclosure travels with the bot-chats
+    /// toggle since the two are related (toggling bots changes what
+    /// goes to AI, the disclosure explains what AI receives in
+    /// general).
+    private var preferencesPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection {
+                PrefSectionHead(
+                    title: "Quirks",
+                    subtitle: "Little bits of Pidgy you can turn on or off"
+                )
+                PrefField(
+                    label: "Pigeons on the squiggle",
+                    hint: "Show the animated flock under the page title. Drag the line to bounce them; click any to shoo.",
+                    right: {
+                        PrefToggle(isOn: $showPigeonFlock)
                     }
                 )
             }
@@ -1194,6 +1238,7 @@ struct DashboardPreferencesPage: View {
         aiModel = ""
         selectedAIProvider = .none
         includeBotsInAISearch = false
+        showPigeonFlock = true
         usageOverview = .empty
         graphDebugSummary = .empty
         routingSnapshots = []
@@ -1213,6 +1258,9 @@ struct DashboardPreferencesPage: View {
             onRefreshDashboard()
         case .ai:
             loadAIConfig()
+        case .preferences:
+            // Toggles are pure @AppStorage — nothing to fetch.
+            break
         case .pricing:
             Task { await refreshUsageOverview() }
         case .indexing:
