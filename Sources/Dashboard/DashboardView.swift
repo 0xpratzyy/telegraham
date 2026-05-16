@@ -21,6 +21,7 @@ struct DashboardView: View {
     @State private var selectedPersonId: Int64?
     @State private var selectedTopicId: Int64?
     @State private var isAddingTopic = false
+    @State private var isShowingFeedbackSheet = false
     @State private var topContacts: [RelationGraph.Node] = []
     @State private var staleContacts: [RelationGraph.Node] = []
     @State private var allContacts: [RelationGraph.Node] = []
@@ -55,7 +56,8 @@ struct DashboardView: View {
                     onRefresh: refreshDashboard,
                     onLogOut: {
                         Task { try? await telegramService.logOut() }
-                    }
+                    },
+                    onSendFeedback: { isShowingFeedbackSheet = true }
                 )
             }
 
@@ -101,6 +103,31 @@ struct DashboardView: View {
             )
             .preferredColorScheme(.dark)
             .presentationBackground(PidgyDashboardTheme.paper)
+        }
+        .sheet(isPresented: $isShowingFeedbackSheet) {
+            PidgyFeedbackSheet(
+                currentViewLabel: currentPage.feedbackLabel,
+                userFirstName: telegramService.currentUser?.firstName,
+                onClose: { isShowingFeedbackSheet = false }
+            )
+            .preferredColorScheme(.dark)
+            .presentationBackground(Color.Pidgy.bg2)
+        }
+        // ⌘⇧F anywhere in the dashboard opens Send Feedback. The
+        // shortcut lives on a hidden Button rendered as a background
+        // so SwiftUI registers the keyboard shortcut for the window
+        // without leaving any visible chrome.
+        .background {
+            Button {
+                isShowingFeedbackSheet = true
+            } label: {
+                EmptyView()
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("f", modifiers: [.command, .shift])
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
         .task {
             attentionStore.loadFollowUps(
@@ -728,6 +755,7 @@ struct DashboardSidebar: View {
     let onOpenPreferences: () -> Void
     let onRefresh: () -> Void
     let onLogOut: () -> Void
+    let onSendFeedback: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -943,6 +971,11 @@ struct DashboardSidebar: View {
             Button(action: onRefresh) {
                 Label("Refresh dashboard", systemImage: "arrow.clockwise")
             }
+            Divider()
+            Button(action: onSendFeedback) {
+                Label("Send feedback…", systemImage: "paperplane")
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
             if canLogOut {
                 Divider()
                 Button(role: .destructive, action: onLogOut) {

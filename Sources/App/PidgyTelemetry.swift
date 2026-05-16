@@ -112,6 +112,51 @@ enum PidgyTelemetry {
         SentrySDK.addBreadcrumb(crumb)
     }
 
+    /// Submit user feedback typed into the in-app "Send Feedback…"
+    /// sheet. Goes through Sentry's first-class feedback API so it
+    /// shows up in the Sentry feedback inbox (separate from the error
+    /// stream) — easier to triage product-y reports without them
+    /// drowning in crash reports.
+    ///
+    /// `kind` is a free-form tag we set on the scope (bug / idea /
+    /// other) so the feedback inbox is filterable. `extras` is the
+    /// auto-attached metadata (current view, app version, commit
+    /// SHA, OS version).
+    ///
+    /// User-typed content is intentionally NOT scrubbed — the
+    /// `scrubEvent` filter strips message bodies on auto-captured
+    /// events, but this user explicitly typed and pressed Send.
+    static func submitFeedback(
+        message: String,
+        kind: String,
+        email: String?,
+        name: String?,
+        extras: [String: String]
+    ) {
+        guard SentrySDK.isEnabled else {
+            // Source builds / beta without DSN — silently log so the UX
+            // flow still works (the user gets the success toast either
+            // way; ack is the point on those builds).
+            logger.info("Suppressed feedback submit (Sentry not enabled). kind=\(kind, privacy: .public)")
+            return
+        }
+        SentrySDK.configureScope { scope in
+            scope.setTag(value: kind, key: "feedback.kind")
+            scope.setContext(value: extras, key: "feedback")
+        }
+        let feedback = SentryFeedback(
+            message: message,
+            name: name,
+            email: email
+        )
+        SentrySDK.capture(feedback: feedback)
+        // Log so we can confirm via the system log that the SDK
+        // accepted the submission — the Sentry network roundtrip is
+        // async + silent on success, so otherwise it's invisible
+        // from the client side.
+        logger.info("Feedback submitted to Sentry. kind=\(kind, privacy: .public) chars=\(message.count) view=\(extras["view"] ?? "?", privacy: .public)")
+    }
+
     // MARK: - Scrubbing
 
     /// Strip well-known PII shapes from event payloads before send. This
