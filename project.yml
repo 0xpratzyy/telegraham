@@ -45,18 +45,75 @@ targets:
         PidgyBundledLangSmithProject: $(PIDGY_BUNDLED_LANGSMITH_PROJECT)
         PidgyBuildCommitSHA: $(PIDGY_BUILD_COMMIT_SHA)
     postBuildScripts:
-      - name: Stamp commit SHA into built Info.plist
+      - name: Stamp commit SHA into .app sidecar file
         basedOnDependencyAnalysis: false
+        # Writes the current commit SHA to a sidecar file inside the
+        # built .app:  Contents/Resources/PidgyBuildSHA.txt
+        # Read at runtime via Bundle.main.url(forResource:).
+        #
+        # Why not stamp the Info.plist directly: Xcode's modern
+        # XCBuild reorders post-build scripts to run *before*
+        # `ProcessInfoPlistFile` on incremental builds, so any write
+        # we do to the Info.plist gets clobbered by Xcode re-emitting
+        # the plist from source. The sidecar approach sidesteps that
+        # entirely — Xcode doesn't manage that file, so nothing
+        # overwrites it.
+        #
+        # Falls back to a direct `.git/HEAD` read if `git` isn't
+        # available in the build shell (rare, but cheap to do).
         script: |
           set -eu
-          BUILT_PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
-          if [ ! -f "$BUILT_PLIST" ]; then
-            echo "warning: built Info.plist not found at $BUILT_PLIST"
-            exit 0
+          SIDECAR_DIR="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Resources"
+          SIDECAR_FILE="${SIDECAR_DIR}/PidgyBuildSHA.txt"
+
+          resolve_sha_via_git() {
+            /usr/bin/git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || true
+          }
+
+          # Handles both branch refs ("ref: refs/heads/main") and
+          # detached HEAD (raw SHA in the file). Also resolves the
+          # worktree case where .git is a file pointing at the
+          # worktree's gitdir.
+          resolve_sha_via_dotgit() {
+            local head_file="${SRCROOT}/.git/HEAD"
+            local git_dir="${SRCROOT}/.git"
+            if [ -f "$git_dir" ]; then
+              local pointer
+              pointer=$(sed -n 's/^gitdir: //p' "$git_dir" 2>/dev/null || true)
+              if [ -n "$pointer" ]; then
+                git_dir="$pointer"
+                head_file="$git_dir/HEAD"
+              fi
+            fi
+            if [ ! -f "$head_file" ]; then
+              return 0
+            fi
+            local content
+            content=$(cat "$head_file" 2>/dev/null || true)
+            case "$content" in
+              ref:*)
+                local ref_path="${git_dir}/${content#ref: }"
+                if [ -f "$ref_path" ]; then
+                  cut -c1-7 "$ref_path" 2>/dev/null || true
+                fi
+                ;;
+              *)
+                echo "$content" | cut -c1-7
+                ;;
+            esac
+          }
+
+          COMMIT_SHA=$(resolve_sha_via_git)
+          if [ -z "$COMMIT_SHA" ]; then
+            COMMIT_SHA=$(resolve_sha_via_dotgit)
           fi
-          COMMIT_SHA=$(git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-          /usr/libexec/PlistBuddy -c "Set :PidgyBuildCommitSHA ${COMMIT_SHA}" "$BUILT_PLIST" 2>/dev/null \
-            || /usr/libexec/PlistBuddy -c "Add :PidgyBuildCommitSHA string ${COMMIT_SHA}" "$BUILT_PLIST"
+          if [ -z "$COMMIT_SHA" ]; then
+            COMMIT_SHA="unknown"
+          fi
+
+          mkdir -p "$SIDECAR_DIR"
+          printf '%s' "$COMMIT_SHA" > "$SIDECAR_FILE"
+          echo "Stamped commit SHA $COMMIT_SHA into $SIDECAR_FILE"
       - name: Upload dSYMs to Sentry
         basedOnDependencyAnalysis: false
         script: |
@@ -107,6 +164,14 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: false
         GENERATE_INFOPLIST_FILE: false
+        # The "Stamp commit SHA" post-build script needs to write to
+        # the freshly-built Info.plist and read .git/HEAD inside the
+        # source tree. Xcode 14+ ships with script sandboxing on by
+        # default, which blocks both of those — the SHA stamp ended
+        # up silently writing "unknown" to every build and feedback
+        # in Sentry couldn't be traced to a commit. Off-target so
+        # the post-build phase actually runs to completion.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
 
   PidgyTests:
     type: bundle.unit-test

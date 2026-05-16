@@ -33,10 +33,30 @@ enum BundledSecrets {
     /// outbound telemetry requests by accident.
     static let sentryDsn: String? = stringValue(forKey: "PidgyBundledSentryDsn")
 
-    /// Short git SHA of the build, stamped by a postBuildScript. Useful in
-    /// the About page so a tester's bug report can be tied to a specific
-    /// build.
-    static let buildCommitSHA: String = stringValue(forKey: "PidgyBuildCommitSHA") ?? "unknown"
+    /// Short git SHA of the build. Useful in the About page + the
+    /// feedback sheet so a tester's bug report can be tied to a
+    /// specific build.
+    ///
+    /// Read from a sidecar file at `Contents/Resources/PidgyBuildSHA.txt`
+    /// that the post-build script writes. We stopped stamping the
+    /// Info.plist directly because Xcode's `ProcessInfoPlistFile`
+    /// re-emits the plist from source on incremental builds and
+    /// silently clobbers any in-place edit, leaving every dev build
+    /// stuck at "unknown".
+    ///
+    /// Falls back to the legacy Info.plist key (still wired in
+    /// project.yml as a no-op placeholder) and then to "unknown" so
+    /// the field never crashes a caller.
+    static let buildCommitSHA: String = {
+        if let url = Bundle.main.url(forResource: "PidgyBuildSHA", withExtension: "txt"),
+           let raw = try? String(contentsOf: url, encoding: .utf8) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return stringValue(forKey: "PidgyBuildCommitSHA") ?? "unknown"
+    }()
 
     /// LangSmith API key for LLM call tracing (`PIDGY_BUNDLED_LANGSMITH_API_KEY`).
     /// When nil/empty, `LangSmithTracer.record` is a no-op so no traces leave
