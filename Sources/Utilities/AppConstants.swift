@@ -326,16 +326,6 @@ enum AppConstants {
         static let dashboardTaskTriageContextVersionKey = "dashboardTaskTriageContextVersion"
         static let dashboardTaskPinnedOwnersKey = "dashboardTaskPinnedOwners"
         static let didCompleteOnboardingKey = "pidgyDidCompleteOnboarding"
-        /// First-run "Install Pidgy" welcome window — the 720×480 brand
-        /// moment that reproduces the .dmg drag-to-Applications flow as
-        /// a live SwiftUI scene. Distinct from `didCompleteOnboardingKey`
-        /// because that one is set after the Telegram QR/code is in;
-        /// the welcome window must show even when the user has *no*
-        /// auth yet (it's the very first thing they see). On upgrade
-        /// from a pre-welcome build, AppDelegate auto-sets this to
-        /// `true` if `didCompleteOnboardingKey` is already set so
-        /// existing users don't see the install moment after the fact.
-        static let welcomeShownKey = "pidgyWelcomeShown"
         /// Toggle for the decorative pigeon flock on the home
         /// dashboard's "What to do now" squiggle. Default: on. When
         /// off, the squiggle falls back to a plain divider line.

@@ -8,7 +8,6 @@
 //
 //  - Reads:
 //      Sources/Resources/Assets.xcassets/InstallWallpaper.imageset/install-wallpaper.png
-//      Sources/Resources/Assets.xcassets/PidgyMascotPhoto.imageset/pidgy-mascot.png
 //  - Writes:
 //      dist/install-bg.png   (default — override via --output PATH)
 //
@@ -74,7 +73,6 @@ func parseArgs() -> Options {
 @available(macOS 13.0, *)
 struct StaticInstallBackground: View {
     let wallpaper: NSImage
-    let mascot: NSImage
 
     var body: some View {
         ZStack {
@@ -245,15 +243,8 @@ func renderInstallBackground() throws {
     let wallpaperURL = projectRoot.appendingPathComponent(
         "Sources/Resources/Assets.xcassets/InstallWallpaper.imageset/install-wallpaper.png"
     )
-    let mascotURL = projectRoot.appendingPathComponent(
-        "Sources/Resources/Assets.xcassets/PidgyMascotPhoto.imageset/pidgy-mascot.png"
-    )
     guard let wallpaper = NSImage(contentsOf: wallpaperURL) else {
         FileHandle.standardError.write(Data("error: cannot read wallpaper at \(wallpaperURL.path)\n".utf8))
-        exit(1)
-    }
-    guard let mascot = NSImage(contentsOf: mascotURL) else {
-        FileHandle.standardError.write(Data("error: cannot read mascot at \(mascotURL.path)\n".utf8))
         exit(1)
     }
 
@@ -269,7 +260,7 @@ func renderInstallBackground() throws {
         withIntermediateDirectories: true
     )
 
-    let view = StaticInstallBackground(wallpaper: wallpaper, mascot: mascot)
+    let view = StaticInstallBackground(wallpaper: wallpaper)
     let renderer = ImageRenderer(content: view)
     renderer.scale = opts.scale
     // Force a known size — ImageRenderer otherwise derives it from
