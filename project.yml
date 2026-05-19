@@ -161,9 +161,12 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         INFOPLIST_FILE: Sources/App/Info.plist
         ENABLE_APP_SANDBOX: false
-        CODE_SIGN_IDENTITY: "-"
-        CODE_SIGNING_REQUIRED: false
         GENERATE_INFOPLIST_FILE: false
+        # Apple Developer team for the Pidgy Developer ID Application
+        # certificate. Used by Release signing below. Team IDs are
+        # public (visible in any signed binary) so this is safe to
+        # commit.
+        DEVELOPMENT_TEAM: ZCJL3LC558
         # The "Stamp commit SHA" post-build script needs to write to
         # the freshly-built Info.plist and read .git/HEAD inside the
         # source tree. Xcode 14+ ships with script sandboxing on by
@@ -172,6 +175,47 @@ targets:
         # in Sentry couldn't be traced to a commit. Off-target so
         # the post-build phase actually runs to completion.
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+      configs:
+        Debug:
+          # Local iteration — ad-hoc signing is fine, no notarization,
+          # no hardened runtime needed. Keeps the dev loop fast.
+          CODE_SIGN_IDENTITY: "-"
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGNING_ALLOWED: YES
+          ENABLE_HARDENED_RUNTIME: NO
+        Release:
+          # Distribution build — signed with the Developer ID
+          # Application certificate (Apple-issued, lives in the
+          # macOS Keychain), hardened runtime ON, secure timestamp
+          # baked into the signature. These are the prerequisites
+          # for Apple's notarization service to accept the binary.
+          #
+          # "Developer ID Application" is the certificate *name*;
+          # Xcode resolves it to the actual cert by matching
+          # DEVELOPMENT_TEAM (above). No need to paste the cert SHA
+          # — Xcode picks the right one if there's only one DID
+          # cert for this team in the keychain.
+          CODE_SIGN_IDENTITY: Developer ID Application
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGNING_REQUIRED: YES
+          CODE_SIGNING_ALLOWED: YES
+          ENABLE_HARDENED_RUNTIME: YES
+          # --timestamp asks the codesign tool to embed an Apple
+          # secure timestamp into the signature. Notarization
+          # *requires* a timestamped signature; without this the
+          # `notarytool submit` rejects the package immediately.
+          OTHER_CODE_SIGN_FLAGS: --timestamp
+          # Don't inject the `com.apple.security.get-task-allow`
+          # base entitlement — Apple's notarization scanner rejects
+          # any binary that requests it, since it allows debuggers
+          # to attach (fine for local dev, never for distribution).
+          # Xcode auto-injects it unless explicitly turned off
+          # here. Symptom was: `notarytool` returned status:Invalid
+          # with two issues — one per architecture — saying
+          # "The executable requests the com.apple.security.get-task-allow
+          # entitlement."
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
   PidgyTests:
     type: bundle.unit-test

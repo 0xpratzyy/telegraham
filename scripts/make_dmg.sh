@@ -9,19 +9,29 @@
 #   - Credentials filled into Config/BetaSecrets.local.xcconfig
 #   - xcodegen on PATH (brew install xcodegen)
 #   - Xcode command line tools
+#   - For signed distribution: a "Developer ID Application" certificate
+#     installed in the macOS Keychain matching DEVELOPMENT_TEAM in
+#     project.yml (ZCJL3LC558). project.yml's Release config picks
+#     it up automatically.
+#   - For notarization: `xcrun notarytool store-credentials pidgy-beta`
+#     done once locally so this script can submit without arguments.
 #
 # Usage:
-#   scripts/make_dmg.sh                # ad-hoc signed (testers see Gatekeeper warning)
-#   scripts/make_dmg.sh --sign "Developer ID Application: Your Name (TEAMID)"
-#                                      # signed for distribution
-#   scripts/make_dmg.sh --notarize     # also notarize via notarytool;
-#                                      # requires `xcrun notarytool store-credentials pidgy-beta` first
+#   scripts/make_dmg.sh                 # signed (Developer ID, per project.yml) — no notarization
+#   scripts/make_dmg.sh --notarize      # signed + notarized + stapled (the path for tester distribution)
+#   scripts/make_dmg.sh --ad-hoc        # ad-hoc signed (Gatekeeper-rejected) for local sanity-check builds
+#   scripts/make_dmg.sh --sign "Developer ID Application: Different Identity (OTHERTEAMID)"
+#                                       # override the certificate (rare — normally project.yml is enough)
+#   scripts/make_dmg.sh --notary-profile other-profile-name
+#                                       # use a different keychain notarytool profile than `pidgy-beta`
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SIGN_IDENTITY="-"
+# Empty = let project.yml's Release config (Developer ID Application)
+# do its thing. Override only when --sign or --ad-hoc is passed.
+SIGN_IDENTITY=""
 NOTARIZE=0
 NOTARY_PROFILE="pidgy-beta"
 
@@ -30,6 +40,10 @@ while [ $# -gt 0 ]; do
     --sign)
       SIGN_IDENTITY="$2"
       shift 2
+      ;;
+    --ad-hoc)
+      SIGN_IDENTITY="-"
+      shift
       ;;
     --notarize)
       NOTARIZE=1
@@ -64,6 +78,20 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   SHORT_SHA="${SHORT_SHA}-dirty"
 fi
 
+# Refuse to notarize a dirty / ad-hoc build — both produce DMGs that
+# Apple's notarytool can't ratify, and the resulting feedback loop
+# ("notarytool rejected the package") is annoying. Bail early.
+if [ "$NOTARIZE" -eq 1 ]; then
+  if [ "$SIGN_IDENTITY" = "-" ]; then
+    echo "error: --notarize requires a real Developer ID signature; --ad-hoc is incompatible." >&2
+    exit 2
+  fi
+  if [[ "$SHORT_SHA" == *-dirty ]]; then
+    echo "error: --notarize refuses to ship a dirty tree. Commit your changes (or stash) first." >&2
+    exit 2
+  fi
+fi
+
 echo "==> Generating Xcode project"
 xcodegen generate
 
@@ -71,16 +99,24 @@ echo "==> Building Release"
 DERIVED="$(mktemp -d -t pidgy-release-XXXXXXXX)"
 trap 'rm -rf "$DERIVED"' EXIT
 
+# When SIGN_IDENTITY is empty, omit the override entirely so the
+# Release config in project.yml picks it up. Pass it as an extra
+# argument otherwise.
+EXTRA_ARGS=()
+if [ -n "$SIGN_IDENTITY" ]; then
+  EXTRA_ARGS+=("CODE_SIGN_IDENTITY=$SIGN_IDENTITY")
+  EXTRA_ARGS+=("CODE_SIGN_STYLE=Manual")
+  EXTRA_ARGS+=("CODE_SIGNING_REQUIRED=YES")
+  EXTRA_ARGS+=("CODE_SIGNING_ALLOWED=YES")
+fi
+
 xcodebuild \
   -project Pidgy.xcodeproj \
   -scheme Pidgy \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED" \
-  CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
-  CODE_SIGN_STYLE=Manual \
-  CODE_SIGNING_REQUIRED=YES \
-  CODE_SIGNING_ALLOWED=YES \
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
   build \
   | xcbeautify --quiet 2>/dev/null \
   || xcodebuild \
@@ -89,10 +125,7 @@ xcodebuild \
        -configuration Release \
        -destination 'generic/platform=macOS' \
        -derivedDataPath "$DERIVED" \
-       CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
-       CODE_SIGN_STYLE=Manual \
-       CODE_SIGNING_REQUIRED=YES \
-       CODE_SIGNING_ALLOWED=YES \
+       ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
        build
 
 APP_PATH="$DERIVED/Build/Products/Release/Pidgy.app"
@@ -101,7 +134,7 @@ if [ ! -d "$APP_PATH" ]; then
   exit 1
 fi
 
-echo "==> Verifying signature"
+echo "==> Verifying .app signature"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 codesign -dvv "$APP_PATH" 2>&1 | head -10 || true
 
@@ -126,8 +159,21 @@ hdiutil create \
   -imagekey zlib-level=9 \
   "$DMG_OUT" >/dev/null
 
-echo "==> Signing the .dmg"
-codesign --sign "$SIGN_IDENTITY" --timestamp "$DMG_OUT" 2>/dev/null || true
+# Sign the DMG itself. Pick the right identity:
+#   - explicit override via --sign / --ad-hoc → use that
+#   - otherwise read it back from the .app we just signed (so the
+#     DMG and the app share an identity)
+DMG_SIGN_IDENTITY="$SIGN_IDENTITY"
+if [ -z "$DMG_SIGN_IDENTITY" ]; then
+  DMG_SIGN_IDENTITY=$(codesign -dvv "$APP_PATH" 2>&1 \
+    | sed -n 's/^Authority=//p' | head -1)
+  if [ -z "$DMG_SIGN_IDENTITY" ]; then
+    DMG_SIGN_IDENTITY="-"
+  fi
+fi
+
+echo "==> Signing the .dmg with: $DMG_SIGN_IDENTITY"
+codesign --sign "$DMG_SIGN_IDENTITY" --timestamp "$DMG_OUT"
 
 if [ "$NOTARIZE" -eq 1 ]; then
   echo "==> Submitting $DMG_OUT to notarytool (profile: $NOTARY_PROFILE)"
@@ -137,6 +183,8 @@ if [ "$NOTARIZE" -eq 1 ]; then
   echo "==> Stapling notarization ticket"
   xcrun stapler staple "$DMG_OUT"
   xcrun stapler validate "$DMG_OUT"
+  echo "==> Verifying Gatekeeper acceptance"
+  spctl -a -t open --context context:primary-signature -vv "$DMG_OUT" || true
 fi
 
 echo
