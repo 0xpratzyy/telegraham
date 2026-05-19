@@ -16,6 +16,15 @@ packages:
   Sentry:
     url: https://github.com/getsentry/sentry-cocoa
     from: "8.40.0"
+  # Sparkle auto-updater. Pidgy ships outside the App Store, so it
+  # needs its own update mechanism — Sparkle is the de-facto choice
+  # for distributing macOS app updates via DMG. App polls the
+  # appcast feed (SUFeedURL), shows an in-app "Pidgy 1.0.1
+  # available" dialog, downloads + EdDSA-verifies the new DMG, and
+  # atomically replaces itself.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.6.0"
 
 targets:
   Pidgy:
@@ -28,6 +37,8 @@ targets:
       - package: GRDB
       - package: Sentry
         product: Sentry
+      - package: Sparkle
+        product: Sparkle
     configFiles:
       Debug: Config/BetaSecrets.xcconfig
       Release: Config/BetaSecrets.xcconfig
@@ -44,6 +55,29 @@ targets:
         PidgyBundledLangSmithApiKey: $(PIDGY_BUNDLED_LANGSMITH_API_KEY)
         PidgyBundledLangSmithProject: $(PIDGY_BUNDLED_LANGSMITH_PROJECT)
         PidgyBuildCommitSHA: $(PIDGY_BUILD_COMMIT_SHA)
+        # Sparkle auto-updater wiring.
+        #
+        # SUPublicEDKey is the base64-encoded EdDSA public key used
+        # to verify the signature on every downloaded update. Its
+        # matching private key lives in the developer's Keychain
+        # under the service `https://sparkle-project.org` (added by
+        # Sparkle's `generate_keys` tool, never committed). Once
+        # chosen the public key is effectively project-level — every
+        # tester's installed Pidgy has this exact bytes embedded,
+        # and only payloads signed by the matching private key
+        # validate.
+        #
+        # SUFeedURL is the publicly-fetchable appcast. Points at
+        # the raw appcast.xml hosted in the public `pidgy-releases`
+        # repo — separate from the private `telegraham` source so
+        # we can serve the file without leaking code.
+        SUPublicEDKey: ZvPujxTMtOfaewSOF2uoCycxcjO/X5/BeqdEPVRMTn4=
+        SUFeedURL: https://raw.githubusercontent.com/0xpratzyy/pidgy-releases/main/appcast.xml
+        # Auto-check every 6 hours after launch; user can also
+        # trigger manually via the menu. Default is 1 day, which
+        # is too slow for a beta where we ship frequent fixes.
+        SUScheduledCheckInterval: 21600
+        SUEnableAutomaticChecks: true
     postBuildScripts:
       - name: Stamp commit SHA into .app sidecar file
         basedOnDependencyAnalysis: false

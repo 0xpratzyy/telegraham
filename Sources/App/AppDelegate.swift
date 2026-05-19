@@ -1,5 +1,6 @@
 import AppKit
 import OSLog
+import Sparkle
 import SwiftUI
 
 enum AppLaunchPresentationMode: Equatable {
@@ -67,6 +68,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var menuBarManager: MenuBarManager?
     private var panelManager: PanelManager?
     private var hotkeyManager: HotkeyManager?
+    /// Sparkle's standard updater controller. Starts checking the
+    /// appcast (SUFeedURL in Info.plist) on launch and on the
+    /// `SUScheduledCheckInterval` cadence after that. Held as a
+    /// property so the "Check for Updates…" menu item can call into
+    /// it, and so its target/action wiring isn't garbage collected.
+    private var updaterController: SPUStandardUpdaterController?
     private var dashboardWindow: NSWindow?
     private var onboardingController: OnboardingWindowController?
     private var graphBuildTask: Task<Void, Never>?
@@ -101,6 +108,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // etc.) gets captured. Skipped automatically when no Sentry DSN
         // is bundled — source builds make zero network calls.
         PidgyTelemetry.start()
+
+        // Sparkle auto-updater. `startingUpdater: true` kicks off an
+        // immediate background appcast check; the periodic cadence
+        // then follows `SUScheduledCheckInterval` from Info.plist.
+        // Held on `self` so the "Check for Updates…" menu item below
+        // can call `checkForUpdates(_:)` on it.
+        //
+        // Skipped under XCTest so the test runner isn't fighting
+        // the updater for network or UI focus.
+        if !isRunningTests {
+            updaterController = SPUStandardUpdaterController(
+                startingUpdater: true,
+                updaterDelegate: nil,
+                userDriverDelegate: nil
+            )
+            installCheckForUpdatesMenuItem()
+        }
 
         PidgyFontRegistrar.registerBundledFonts()
 
@@ -342,6 +366,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if let showOnboardingObserver {
             NotificationCenter.default.removeObserver(showOnboardingObserver)
         }
+    }
+
+    /// Inserts a "Check for Updates…" item into Pidgy's app menu
+    /// (the bold "Pidgy" menu next to the Apple logo). Targets
+    /// `SPUStandardUpdaterController.checkForUpdates(_:)`, which
+    /// shows the Sparkle "you're up to date" or "1.0.1 available"
+    /// dialog. macOS's default app menu layout puts "About Pidgy"
+    /// at index 0; we slot the new item right after it, matching
+    /// the convention every other AppKit app uses.
+    private func installCheckForUpdatesMenuItem() {
+        guard let mainMenu = NSApp.mainMenu,
+              let appMenu = mainMenu.item(at: 0)?.submenu,
+              let updater = updaterController else { return }
+        let item = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        item.target = updater
+        appMenu.insertItem(item, at: 1)
+        // Keep the visual separation clean — the system inserts a
+        // separator after the About item by default; our new entry
+        // jumps before that separator so the menu reads:
+        //   About Pidgy
+        //   Check for Updates…
+        //   ────
+        //   (rest of the standard items)
     }
 
     /// Cancel the background graph-build loop. Called by

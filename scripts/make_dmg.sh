@@ -33,7 +33,13 @@ cd "$(dirname "$0")/.."
 # do its thing. Override only when --sign or --ad-hoc is passed.
 SIGN_IDENTITY=""
 NOTARIZE=0
+PUBLISH=0
 NOTARY_PROFILE="pidgy-beta"
+# Where the public appcast lives — Sparkle on each tester's Mac
+# polls this URL. The DMG itself gets attached to a matching
+# GitHub Release in the same repo, so the URL pattern below
+# (`download/v{version}/...`) is deterministic.
+APPCAST_REPO="0xpratzyy/pidgy-releases"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,6 +52,15 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --notarize)
+      NOTARIZE=1
+      shift
+      ;;
+    --publish)
+      # Sign the DMG with Sparkle's EdDSA key (using the private
+      # key from the Keychain) and print the appcast <item> entry
+      # to paste into pidgy-releases/appcast.xml. Forces
+      # --notarize so we never publish an un-notarized build.
+      PUBLISH=1
       NOTARIZE=1
       shift
       ;;
@@ -185,6 +200,83 @@ if [ "$NOTARIZE" -eq 1 ]; then
   xcrun stapler validate "$DMG_OUT"
   echo "==> Verifying Gatekeeper acceptance"
   spctl -a -t open --context context:primary-signature -vv "$DMG_OUT" || true
+fi
+
+if [ "$PUBLISH" -eq 1 ]; then
+  # Sparkle's sign_update tool lives inside the resolved SPM
+  # checkout. We find it dynamically because the path includes
+  # a hash that changes per Xcode version. Prefer the local
+  # /tmp build artifact (recent) and fall back to user DerivedData.
+  SIGN_UPDATE=$(find /private/tmp/pidgy-bug3-test-20260514 \
+                     -name "sign_update" -type f \
+                     -not -path "*old_dsa*" 2>/dev/null | head -1)
+  if [ -z "$SIGN_UPDATE" ]; then
+    SIGN_UPDATE=$(find "$HOME/Library/Developer/Xcode/DerivedData" \
+                       -name "sign_update" -type f \
+                       -not -path "*old_dsa*" 2>/dev/null | head -1)
+  fi
+  if [ -z "$SIGN_UPDATE" ] || [ ! -x "$SIGN_UPDATE" ]; then
+    echo "error: couldn't find Sparkle's sign_update binary." >&2
+    echo "       Run an Xcode build first so SPM unpacks Sparkle." >&2
+    exit 1
+  fi
+
+  echo "==> Signing the .dmg with Sparkle's EdDSA key"
+  # sign_update prints attributes you can paste straight into the
+  # enclosure element of an appcast item, e.g.:
+  #   sparkle:edSignature="abc..." length="74448219"
+  SPARKLE_ATTRS=$("$SIGN_UPDATE" "$DMG_OUT")
+
+  # Pull the version out of the built Info.plist so the appcast
+  # entry matches what the .app actually advertises.
+  APP_VERSION=$(/usr/libexec/PlistBuddy \
+    -c "Print :CFBundleShortVersionString" \
+    "$APP_PATH/Contents/Info.plist")
+  APP_BUILD=$(/usr/libexec/PlistBuddy \
+    -c "Print :CFBundleVersion" \
+    "$APP_PATH/Contents/Info.plist")
+  PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
+
+  # The DMG needs a publicly-fetchable URL. We assume each release
+  # is uploaded as an asset to a GitHub Release tagged v<version>
+  # in the appcast repo — so the URL is fully determined by the
+  # version. Adjust APPCAST_REPO at the top of the script if you
+  # host elsewhere.
+  RELEASE_URL="https://github.com/${APPCAST_REPO}/releases/download/v${APP_VERSION}/$(basename "$DMG_OUT")"
+
+  echo
+  echo "============================================================"
+  echo "Appcast entry — paste into ${APPCAST_REPO}/appcast.xml:"
+  echo "============================================================"
+  cat <<EOF
+    <item>
+      <title>Version ${APP_VERSION}</title>
+      <pubDate>${PUB_DATE}</pubDate>
+      <sparkle:version>${APP_BUILD}</sparkle:version>
+      <sparkle:shortVersionString>${APP_VERSION}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <!-- TODO: release notes for ${APP_VERSION} go here -->
+      ]]></description>
+      <enclosure url="${RELEASE_URL}"
+                 type="application/octet-stream"
+                 ${SPARKLE_ATTRS} />
+    </item>
+EOF
+  echo "============================================================"
+  echo
+  echo "Next steps to actually ship the update:"
+  echo "  1. Create the GitHub release + upload the DMG:"
+  echo "       gh release create v${APP_VERSION} \\"
+  echo "         --repo ${APPCAST_REPO} \\"
+  echo "         --title 'Pidgy ${APP_VERSION}' \\"
+  echo "         --notes 'release notes here' \\"
+  echo "         ${DMG_OUT}"
+  echo "  2. Paste the <item> block above into appcast.xml at"
+  echo "     the top of <channel> (newest entries go first)."
+  echo "  3. Commit + push that repo. Within ~5 min of GitHub CDN"
+  echo "     refresh, every installed Pidgy will see the update on"
+  echo "     its next scheduled check."
 fi
 
 echo

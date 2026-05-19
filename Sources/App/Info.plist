@@ -34,5 +34,13 @@
 	<string>$(PIDGY_TG_API_HASH)</string>
 	<key>PidgyBundledTelegramApiId</key>
 	<string>$(PIDGY_TG_API_ID)</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/0xpratzyy/pidgy-releases/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>ZvPujxTMtOfaewSOF2uoCycxcjO/X5/BeqdEPVRMTn4=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
 </dict>
 </plist>
