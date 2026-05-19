@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# pre-push hook for the Pidgy repo.
+#
+# Tracked in git at scripts/git-hooks/pre-push; activated per-clone
+# by running scripts/install-hooks.sh once (which symlinks
+# .git/hooks/pre-push to this file).
+#
+# Runs ONLY when the target ref is `main`. Pushes to feature
+# branches / worktree branches are unaffected — push as often as
+# you like, only the merge to main has guardrails.
+#
+# Checks (fast-fail order):
+#   1. Sweep the commits being pushed for credential-looking
+#      strings — Sentry auth tokens, OpenAI keys (sk-…),
+#      Anthropic keys (sk-ant-…), 32-hex strings near
+#      `api_hash`/`apiHash`. Cheaper to catch here than to
+#      rotate a leaked key.
+#   2. Run a Debug build against a cached DerivedData
+#      (~/Library/Caches/pidgy-preflight). First run is slow
+#      (~60s); steady-state is ~10-30s incremental.
+#
+# Bypass for an emergency hotfix:  git push --no-verify
+# (use sparingly — that's also how leaks reach origin)
+
+set -euo pipefail
+
+protected_branch="refs/heads/main"
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Per-hook DerivedData so we don't clobber the user's normal
+# `xcodebuild` cache. Persistent across runs → incremental builds.
+preflight_dd="$HOME/Library/Caches/pidgy-preflight"
+mkdir -p "$preflight_dd"
+
+build_log=$(mktemp -t pidgy-preflight-XXXXXX)
+trap 'rm -f "$build_log"' EXIT
+
+# git push pipes refs to stdin, one per line:
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+# We only act on the line(s) targeting `main`.
+while read local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "$protected_branch" ] || continue
+
+  # Special-case branch deletion (local_sha all zeroes) and brand-
+  # new branch (remote_sha all zeroes — fall back to merge-base
+  # with origin/main if available, else skip checks entirely).
+  zero="0000000000000000000000000000000000000000"
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+  if [ "$remote_sha" = "$zero" ]; then
+    remote_sha=$(git merge-base "$local_sha" origin/main 2>/dev/null || echo "")
+  fi
+
+  echo ""
+  echo "==> Pre-push checks for main"
+  echo "    pushing: ${remote_sha:0:7}..${local_sha:0:7}"
+
+  # ── 1. Secret pattern scan ────────────────────────────────
+  if [ -n "$remote_sha" ]; then
+    diff_range="${remote_sha}..${local_sha}"
+  else
+    # No common ancestor — scan everything in this push.
+    diff_range="$local_sha"
+  fi
+
+  echo "==> Scanning $(git rev-list --count "$diff_range" 2>/dev/null || echo "?") commit(s) for credential patterns…"
+
+  # Patterns kept narrow on purpose — false positives are
+  # annoying enough to make people --no-verify everything,
+  # which defeats the point.
+  #   sntrys_…   → Sentry auth tokens
+  #   sk-…       → OpenAI keys (≥20 chars after prefix)
+  #   sk-ant-…   → Anthropic keys
+  #   api_hash = "<32 hex chars>"  → Telegram api_hash literal
+  patterns=(
+    'sntrys_[A-Za-z0-9+/=_-]{20,}'
+    'sk-[A-Za-z0-9_-]{40,}'
+    'sk-ant-[A-Za-z0-9_-]{40,}'
+    '[Aa][Pp][Ii]_?[Hh]ash[[:space:]]*[=:][[:space:]]*"?[a-f0-9]{32}"?'
+  )
+
+  hits_file=$(mktemp -t pidgy-secrets-XXXXXX)
+  trap 'rm -f "$build_log" "$hits_file"' EXIT
+  for pattern in "${patterns[@]}"; do
+    git log -p "$diff_range" -- \
+      ":(exclude)Config/BetaSecrets.local.xcconfig" \
+      ":(exclude)Config/BetaSecrets.local.xcconfig.template" \
+      2>/dev/null \
+      | grep -nE "$pattern" >> "$hits_file" || true
+  done
+
+  if [ -s "$hits_file" ]; then
+    echo ""
+    echo "ERROR: credential-looking strings in commits being pushed:" >&2
+    head -10 "$hits_file" >&2
+    echo "" >&2
+    echo "If these are false positives, override with:  git push --no-verify" >&2
+    echo "If they're real, rotate the key first, then rewrite history." >&2
+    exit 1
+  fi
+  echo "    no credential patterns found ✓"
+
+  # ── 2. Debug build ────────────────────────────────────────
+  echo "==> Generating Xcode project + building Debug…"
+  cd "$repo_root"
+  if ! xcodegen generate > "$build_log" 2>&1; then
+    echo "" >&2
+    echo "ERROR: xcodegen generate failed:" >&2
+    tail -30 "$build_log" >&2
+    exit 1
+  fi
+
+  if ! xcodebuild \
+      -project Pidgy.xcodeproj \
+      -scheme Pidgy \
+      -configuration Debug \
+      -destination 'platform=macOS' \
+      -derivedDataPath "$preflight_dd" \
+      build >> "$build_log" 2>&1; then
+    echo "" >&2
+    echo "ERROR: Debug build failed:" >&2
+    grep -A1 -E "error:" "$build_log" | head -40 >&2
+    echo "" >&2
+    echo "Full log: $build_log" >&2
+    # Don't clean up the log on error — user wants to inspect.
+    trap - EXIT
+    exit 1
+  fi
+  echo "    Debug build green ✓"
+
+  # ── 3. Working-tree advisory (warn, don't block) ──────────
+  if [ -n "$(git status --porcelain)" ]; then
+    echo ""
+    echo "warning: working tree has uncommitted changes."
+    echo "         (not blocking the push — but the next DMG you build"
+    echo "          will get a -dirty suffix from the SHA stamper.)"
+    git status --short
+  fi
+
+  echo ""
+  echo "==> Pre-push checks passed. Pushing…"
+done
+
+exit 0
