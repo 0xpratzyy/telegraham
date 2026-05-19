@@ -148,6 +148,86 @@ targets:
           mkdir -p "$SIDECAR_DIR"
           printf '%s' "$COMMIT_SHA" > "$SIDECAR_FILE"
           echo "Stamped commit SHA $COMMIT_SHA into $SIDECAR_FILE"
+      - name: Sign Sparkle Helpers
+        basedOnDependencyAnalysis: false
+        # Sparkle.framework ships with nested helpers — Updater.app,
+        # Autoupdate, Downloader.xpc, Installer.xpc — pre-signed by
+        # the Sparkle project's release engineer, not by us. Apple's
+        # notarization service rejects DMGs containing ANY nested
+        # executable not signed with the submitting team's Developer
+        # ID, so we re-sign each helper here with the build's
+        # CODE_SIGN_IDENTITY (which is "Developer ID Application:
+        # Pratyush Rungta" for Release).
+        #
+        # Skipped automatically for ad-hoc Debug builds (identity =
+        # "-") since hardened runtime can't be applied to an
+        # ad-hoc signature anyway.
+        #
+        # Without this script, notarytool rejects with:
+        #   "The binary is not signed with a valid Developer ID
+        #    certificate. ...Sparkle.framework/Versions/B/Updater.app
+        #    /Contents/MacOS/Updater" (and three siblings).
+        script: |
+          set -eu
+          # Only run for Release builds — Debug uses ad-hoc signing
+          # and never goes to notarization, so re-signing Sparkle's
+          # helpers is wasted work (and would fail anyway because
+          # Xcode sets EXPANDED_CODE_SIGN_IDENTITY_NAME to the
+          # placeholder string "Sign to Run Locally: no identity
+          # found" for Debug, which codesign correctly rejects).
+          if [ "${CONFIGURATION:-Debug}" != "Release" ]; then
+            echo "note: Skipping Sparkle helper re-sign (Configuration=${CONFIGURATION:-Debug})"
+            exit 0
+          fi
+          IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY_NAME:-}"
+          if [ -z "$IDENTITY" ] || [ "$IDENTITY" = "-" ]; then
+            echo "note: Skipping Sparkle helper re-sign (identity=$IDENTITY)"
+            exit 0
+          fi
+          SPARKLE_PATH="${TARGET_BUILD_DIR}/${PRODUCT_NAME}.app/Contents/Frameworks/Sparkle.framework"
+          if [ ! -d "$SPARKLE_PATH" ]; then
+            echo "note: Sparkle.framework not embedded; nothing to sign"
+            exit 0
+          fi
+          # Resolve `Versions/Current` (a symlink) to the actual
+          # version directory — currently `B` for Sparkle 2.x, but
+          # we don't hardcode in case it changes.
+          CURRENT=$(readlink "$SPARKLE_PATH/Versions/Current" 2>/dev/null || echo "")
+          if [ -n "$CURRENT" ]; then
+            VERSION_DIR="$SPARKLE_PATH/Versions/$CURRENT"
+          else
+            for v in "$SPARKLE_PATH/Versions/"*/; do
+              name=$(basename "$v")
+              if [ "$name" != "Current" ]; then
+                VERSION_DIR="${v%/}"
+                break
+              fi
+            done
+          fi
+          if [ -z "${VERSION_DIR:-}" ] || [ ! -d "$VERSION_DIR" ]; then
+            echo "warning: couldn't find Sparkle version dir under $SPARKLE_PATH/Versions"
+            exit 0
+          fi
+          echo "==> Re-signing Sparkle helpers under $VERSION_DIR"
+          # Sign innermost first, then outwards. --options runtime
+          # opts into hardened runtime; --timestamp embeds Apple's
+          # secure timestamp (required for notarization).
+          for helper in \
+              "$VERSION_DIR/XPCServices/Installer.xpc" \
+              "$VERSION_DIR/XPCServices/Downloader.xpc" \
+              "$VERSION_DIR/Autoupdate" \
+              "$VERSION_DIR/Updater.app"; do
+            if [ -e "$helper" ]; then
+              codesign --force --options runtime --timestamp \
+                --sign "$IDENTITY" "$helper"
+              echo "    signed: $(basename "$helper")"
+            fi
+          done
+          # Re-sign the framework itself last so its CodeResources
+          # hash reflects the new inner signatures.
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY" "$SPARKLE_PATH"
+          echo "    signed: Sparkle.framework"
       - name: Upload dSYMs to Sentry
         basedOnDependencyAnalysis: false
         script: |
