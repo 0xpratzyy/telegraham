@@ -180,10 +180,40 @@ targets:
             exit 0
           fi
           IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY_NAME:-}"
-          if [ -z "$IDENTITY" ] || [ "$IDENTITY" = "-" ]; then
-            echo "note: Skipping Sparkle helper re-sign (identity=$IDENTITY)"
-            exit 0
-          fi
+          # Resolve the codesign flags from the configured identity:
+          #
+          #   - Empty / "Sign to Run Locally" → skip entirely. There's
+          #     no usable identity at all (this is the Debug-ish path
+          #     with no signing cert provisioned). Resigning anything
+          #     would fail.
+          #
+          #   - "-" → ad-hoc. We MUST still re-sign Sparkle here, even
+          #     though notarization is irrelevant for ad-hoc builds.
+          #     If we don't, the main app ships with team-id "" (the
+          #     ad-hoc default) while Sparkle.framework retains the
+          #     Sparkle Project's team-id from the SPM artifact, and
+          #     dyld refuses to load the framework at launch with
+          #     "mapping process and mapped file have different Team
+          #     IDs". The crash is immediate and unrecoverable.
+          #     Hardened runtime + timestamp aren't available for
+          #     ad-hoc signatures, so we strip those flags.
+          #
+          #   - Anything else (Developer ID Application: …) → real
+          #     Distribution build. Sign with hardened runtime +
+          #     secure timestamp so notarytool accepts the result.
+          case "$IDENTITY" in
+            ""|"Sign to Run Locally"*)
+              echo "note: Skipping Sparkle helper re-sign (identity=$IDENTITY)"
+              exit 0
+              ;;
+            "-")
+              SIGN_FLAGS=""
+              echo "note: Ad-hoc identity — re-signing Sparkle helpers without hardened runtime"
+              ;;
+            *)
+              SIGN_FLAGS="--options runtime --timestamp"
+              ;;
+          esac
           SPARKLE_PATH="${TARGET_BUILD_DIR}/${PRODUCT_NAME}.app/Contents/Frameworks/Sparkle.framework"
           if [ ! -d "$SPARKLE_PATH" ]; then
             echo "note: Sparkle.framework not embedded; nothing to sign"
@@ -209,24 +239,38 @@ targets:
             exit 0
           fi
           echo "==> Re-signing Sparkle helpers under $VERSION_DIR"
-          # Sign innermost first, then outwards. --options runtime
-          # opts into hardened runtime; --timestamp embeds Apple's
-          # secure timestamp (required for notarization).
+          # Sign innermost first, then outwards. The SIGN_FLAGS string
+          # is intentionally word-split (no quotes) so empty = no
+          # extra flags, "--options runtime --timestamp" = two flags.
+          #
+          # For ad-hoc we MUST strip the existing signature first.
+          # The SPM Sparkle artifact comes pre-signed with hardened
+          # runtime by the Sparkle project; `codesign --force` would
+          # preserve the runtime flag, and dyld then refuses to load
+          # the framework into an ad-hoc-signed host process (library
+          # validation insists Team IDs match, two empty Team IDs
+          # don't qualify). For real Developer ID builds we keep the
+          # `--force` overwrite path — the new signature carries
+          # --options runtime --timestamp as needed.
           for helper in \
               "$VERSION_DIR/XPCServices/Installer.xpc" \
               "$VERSION_DIR/XPCServices/Downloader.xpc" \
               "$VERSION_DIR/Autoupdate" \
               "$VERSION_DIR/Updater.app"; do
             if [ -e "$helper" ]; then
-              codesign --force --options runtime --timestamp \
-                --sign "$IDENTITY" "$helper"
+              if [ "$IDENTITY" = "-" ]; then
+                codesign --remove-signature "$helper" 2>/dev/null || true
+              fi
+              codesign --force $SIGN_FLAGS --sign "$IDENTITY" "$helper"
               echo "    signed: $(basename "$helper")"
             fi
           done
           # Re-sign the framework itself last so its CodeResources
           # hash reflects the new inner signatures.
-          codesign --force --options runtime --timestamp \
-            --sign "$IDENTITY" "$SPARKLE_PATH"
+          if [ "$IDENTITY" = "-" ]; then
+            codesign --remove-signature "$SPARKLE_PATH" 2>/dev/null || true
+          fi
+          codesign --force $SIGN_FLAGS --sign "$IDENTITY" "$SPARKLE_PATH"
           echo "    signed: Sparkle.framework"
       - name: Upload dSYMs to Sentry
         basedOnDependencyAnalysis: false

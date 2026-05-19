@@ -14,11 +14,11 @@ import SwiftUI
 extension Color {
     enum Pidgy {
         // Surfaces: 5-step neutral gray ladder, no blue tint.
-        static let bg0 = Color(hex: 0x2B2B2B)
-        static let bg1 = Color(hex: 0x333333)
-        static let bg2 = Color(hex: 0x3A3A3A)
-        static let bg3 = Color(hex: 0x424242)
-        static let bg4 = Color(hex: 0x4D4D4D)
+        static let bg0 = Color(hex: 0x242424)
+        static let bg1 = Color(hex: 0x2B2B2B)
+        static let bg2 = Color(hex: 0x323232)
+        static let bg3 = Color(hex: 0x393939)
+        static let bg4 = Color(hex: 0x444444)
 
         // Foreground / text.
         static let fg1 = Color.white.opacity(0.92)
@@ -33,29 +33,29 @@ extension Color {
         static let divider = Color.white.opacity(0.05)
 
         // Accent: cool blue, used sparingly.
-        static let accent = Color(hex: 0x5B8DEF)
-        static let accentHover = Color(hex: 0x7AA4F4)
-        static let accentPress = Color(hex: 0x4276DC)
-        static let accentSoft = Color(hex: 0x5B8DEF, alpha: 0.14)
-        static let accentSoftHi = Color(hex: 0x5B8DEF, alpha: 0.22)
-        static let accentRing = Color(hex: 0x5B8DEF, alpha: 0.45)
-        static let accentFg = Color(hex: 0xA8C2F5)
+        static let accent = Color(hex: 0x4F7FDC)
+        static let accentHover = Color(hex: 0x6E96E8)
+        static let accentPress = Color(hex: 0x3869CA)
+        static let accentSoft = Color(hex: 0x4F7FDC, alpha: 0.14)
+        static let accentSoftHi = Color(hex: 0x4F7FDC, alpha: 0.22)
+        static let accentRing = Color(hex: 0x4F7FDC, alpha: 0.45)
+        static let accentFg = Color(hex: 0x91ACE8)
 
         // Semantic status.
-        static let success = Color(hex: 0x5BD18B)
-        static let warning = Color(hex: 0xF4B740)
-        static let danger = Color(hex: 0xE5484D)
+        static let success = Color(hex: 0x4EBE7A)
+        static let warning = Color(hex: 0xD99B2D)
+        static let danger = Color(hex: 0xD63D43)
         static let info = accent
 
         // Avatar palette.
-        static let avRed = Color(hex: 0xE04E48)
-        static let avOrange = Color(hex: 0xE07B3A)
-        static let avYellow = Color(hex: 0xC8A23A)
-        static let avGreen = Color(hex: 0x4F9D5F)
-        static let avBlue = Color(hex: 0x4A82D6)
-        static let avPurple = Color(hex: 0x8E55C9)
-        static let avPink = Color(hex: 0xC95590)
-        static let avGraphite = Color(hex: 0x2A2B30)
+        static let avRed = Color(hex: 0xC94540)
+        static let avOrange = Color(hex: 0xC86A31)
+        static let avYellow = Color(hex: 0xB28D2F)
+        static let avGreen = Color(hex: 0x438A52)
+        static let avBlue = Color(hex: 0x3F73BF)
+        static let avPurple = Color(hex: 0x7B48B4)
+        static let avPink = Color(hex: 0xB3457D)
+        static let avGraphite = Color(hex: 0x22242A)
     }
 }
 
@@ -63,16 +63,16 @@ extension Color {
 
 extension NSColor {
     enum Pidgy {
-        static let bg0 = NSColor(pidgyHex: 0x2B2B2B)
-        static let bg1 = NSColor(pidgyHex: 0x333333)
-        static let bg2 = NSColor(pidgyHex: 0x3A3A3A)
-        static let bg3 = NSColor(pidgyHex: 0x424242)
-        static let bg4 = NSColor(pidgyHex: 0x4D4D4D)
+        static let bg0 = NSColor(pidgyHex: 0x242424)
+        static let bg1 = NSColor(pidgyHex: 0x2B2B2B)
+        static let bg2 = NSColor(pidgyHex: 0x323232)
+        static let bg3 = NSColor(pidgyHex: 0x393939)
+        static let bg4 = NSColor(pidgyHex: 0x444444)
 
-        static let accent = NSColor(pidgyHex: 0x5B8DEF)
-        static let success = NSColor(pidgyHex: 0x5BD18B)
-        static let warning = NSColor(pidgyHex: 0xF4B740)
-        static let danger = NSColor(pidgyHex: 0xE5484D)
+        static let accent = NSColor(pidgyHex: 0x4F7FDC)
+        static let success = NSColor(pidgyHex: 0x4EBE7A)
+        static let warning = NSColor(pidgyHex: 0xD99B2D)
+        static let danger = NSColor(pidgyHex: 0xD63D43)
     }
 }
 

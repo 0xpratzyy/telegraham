@@ -76,6 +76,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var updaterController: SPUStandardUpdaterController?
     private var dashboardWindow: NSWindow?
     private var onboardingController: OnboardingWindowController?
+    /// The 720×480 first-run "Install Pidgy" welcome window. Lives
+    /// here so its lifetime spans the asynchronous onComplete callback
+    /// that chains into `OnboardingWindowController`. Retained for the
+    /// life of the app — re-showing it during a replay just calls
+    /// `show()` again.
+    private var installWelcomeController: InstallWelcomeWindowController?
     private var graphBuildTask: Task<Void, Never>?
     /// Retains the inner detached graph-build loop separately from the
     /// outer `graphBuildTask` orchestrator. Without this handle,
@@ -90,6 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var preferencesOpenObserver: NSObjectProtocol?
     private var replayOnboardingObserver: NSObjectProtocol?
     private var showOnboardingObserver: NSObjectProtocol?
+    private var replayInstallWelcomeObserver: NSObjectProtocol?
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
@@ -200,6 +207,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
+        // Replay the install-welcome window — wired into Preferences →
+        // About so a tester can re-watch the brand moment without
+        // wiping the data dir. Clears the welcomeShown flag so the
+        // window appears fresh; we don't reset onboarding here because
+        // the two are independent gates.
+        replayInstallWelcomeObserver = NotificationCenter.default.addObserver(
+            forName: .pidgyReplayInstallWelcome,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                UserDefaults.standard.removeObject(
+                    forKey: AppConstants.Preferences.welcomeShownKey
+                )
+                self.dashboardWindow?.orderOut(nil)
+                self.presentInstallWelcomeIfNeeded(force: true) {
+                    // After the replay finishes we just close the
+                    // welcome window — no need to re-pop onboarding,
+                    // since the user already finished it.
+                }
+            }
+        }
+
         menuBarManager = MenuBarManager(
             onTogglePanel: { [weak self] in self?.panelManager?.toggle() },
             onOpenDashboard: { [weak self] in self?.openDashboard() },
@@ -240,37 +271,73 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             panelManager?.showForDebugTesting()
         }
 
-        // Only open the dashboard at launch when the user has completed
-        // onboarding before AND usable Telegram credentials still exist.
-        // Without the credential check, a leftover `didCompleteOnboarding`
-        // flag from a prior session silently opens the dashboard with
-        // stale local cache (followups, tasks, people) while
-        // Settings → Account reads "Not initialized / Visible chats = 0"
-        // — the user has no signal that the keychain entries vanished
-        // (dev rebuild, manual wipe) or that bundled creds were dropped
-        // from this build. After onboarding completes, the `onComplete`
-        // callback on OnboardingWindowController opens the dashboard, so
-        // first-time users still land there immediately after finishing
-        // the flow.
-        let didCompleteOnboarding = UserDefaults.standard.bool(
+        // First-run install-welcome window. This is the 720×480 brand
+        // moment that mirrors the .dmg drag-to-Applications design, run
+        // *before* the existing Telegram onboarding modal (which is
+        // 680×620 and looks completely different). Per the design
+        // handoff, this must show before any auth — don't gate on
+        // Telegram credentials.
+        //
+        // Upgrade path: if `didCompleteOnboardingKey` is already set
+        // but the new `welcomeShownKey` isn't, we silently flip the
+        // welcome flag so existing users don't see the install moment
+        // after the fact. Only true first-time users see it.
+        let defaults = UserDefaults.standard
+        let didCompleteOnboarding = defaults.bool(
             forKey: AppConstants.Preferences.didCompleteOnboardingKey
         )
-        let hasTelegramCredentials = telegramCredentialsAvailable()
-        if opensDashboardOnLaunch && didCompleteOnboarding && hasTelegramCredentials {
-            openDashboard()
+        if didCompleteOnboarding && !defaults.bool(
+            forKey: AppConstants.Preferences.welcomeShownKey
+        ) {
+            defaults.set(true, forKey: AppConstants.Preferences.welcomeShownKey)
         }
 
-        // First-launch onboarding modal. We show it whenever the user hasn't
-        // completed the flow yet AND Telegram isn't already authenticated. If
-        // they're already signed in (e.g. dev rebuilds, Keychain still holds
-        // the session) we just mark onboarding done so the modal never pops.
-        //
-        // Special case: flag is set but credentials are gone — force the
-        // onboarding window so the user can re-enter them. Otherwise
-        // `presentOnboardingIfNeeded(force: false)` would early-return on
-        // the stale flag and leave the user staring at nothing.
-        let stalled = didCompleteOnboarding && !hasTelegramCredentials
-        presentOnboardingIfNeeded(force: stalled)
+        // The decision tree past the welcome window — dashboard vs.
+        // onboarding modal — is exactly what the previous build did.
+        // Wrapped into a closure so we can defer it until after the
+        // welcome window finishes, when one is shown.
+        let runOnboardingDecision: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            // Only open the dashboard at launch when the user has
+            // completed onboarding before AND usable Telegram
+            // credentials still exist. Without the credential check,
+            // a leftover `didCompleteOnboarding` flag from a prior
+            // session silently opens the dashboard with stale local
+            // cache (followups, tasks, people) while Settings →
+            // Account reads "Not initialized / Visible chats = 0" —
+            // the user has no signal that the keychain entries
+            // vanished (dev rebuild, manual wipe) or that bundled
+            // creds were dropped from this build.
+            let hasTelegramCredentials = self.telegramCredentialsAvailable()
+            if self.opensDashboardOnLaunch && didCompleteOnboarding && hasTelegramCredentials {
+                self.openDashboard()
+            }
+
+            // First-launch onboarding modal. We show it whenever the
+            // user hasn't completed the flow yet AND Telegram isn't
+            // already authenticated. If they're already signed in
+            // (e.g. dev rebuilds, Keychain still holds the session)
+            // we just mark onboarding done so the modal never pops.
+            //
+            // Special case: flag is set but credentials are gone —
+            // force the onboarding window so the user can re-enter
+            // them. Otherwise `presentOnboardingIfNeeded(force: false)`
+            // would early-return on the stale flag and leave the user
+            // staring at nothing.
+            let stalled = didCompleteOnboarding && !hasTelegramCredentials
+            self.presentOnboardingIfNeeded(force: stalled)
+        }
+
+        let welcomeShown = defaults.bool(
+            forKey: AppConstants.Preferences.welcomeShownKey
+        )
+        if !welcomeShown {
+            presentInstallWelcomeIfNeeded(force: false) {
+                runOnboardingDecision()
+            }
+        } else {
+            runOnboardingDecision()
+        }
 
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
@@ -366,6 +433,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if let showOnboardingObserver {
             NotificationCenter.default.removeObserver(showOnboardingObserver)
         }
+        if let replayInstallWelcomeObserver {
+            NotificationCenter.default.removeObserver(replayInstallWelcomeObserver)
+        }
     }
 
     /// Inserts a "Check for Updates…" item into Pidgy's app menu
@@ -427,6 +497,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return true
         }
         return false
+    }
+
+    /// Present the 720×480 first-run "Install Pidgy" welcome window if
+    /// the user hasn't seen it before. `onFinish` runs after the user
+    /// drops the icon on the folder OR clicks the × skip button. The
+    /// caller is responsible for chaining into any further onboarding
+    /// — this method is intentionally narrow.
+    ///
+    /// `force: true` reopens the window even when `welcomeShownKey` is
+    /// already set (the "Replay install welcome" path).
+    private func presentInstallWelcomeIfNeeded(force: Bool, onFinish: @escaping @MainActor () -> Void) {
+        let defaults = UserDefaults.standard
+        let alreadyShown = defaults.bool(
+            forKey: AppConstants.Preferences.welcomeShownKey
+        )
+        if !force && alreadyShown {
+            onFinish()
+            return
+        }
+
+        let controller = InstallWelcomeWindowController(onFinish: { [weak self] in
+            guard let self else { return }
+            // Flip the flag on first close (whether drop-on-folder or
+            // skip). Replays don't need to set it again, but the
+            // duplicate write is a no-op.
+            UserDefaults.standard.set(
+                true,
+                forKey: AppConstants.Preferences.welcomeShownKey
+            )
+            self.installWelcomeController = nil
+            onFinish()
+        })
+        installWelcomeController = controller
+        controller.show()
     }
 
     private func presentOnboardingIfNeeded(force: Bool) {
