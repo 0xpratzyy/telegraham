@@ -10,6 +10,17 @@ struct PidgyApp: App {
         Settings {
             DashboardPreferencesRedirectView()
         }
+        .commands {
+            // "Check for Updates…" right after "About Pidgy" in the
+            // app menu. Declared here (not spliced into NSApp.mainMenu
+            // by hand) so it survives SwiftUI's menu rebuilds.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    appDelegate.triggerCheckForUpdates()
+                }
+                .disabled(!appDelegate.canCheckForUpdates)
+            }
+        }
     }
 }
 

@@ -123,7 +123,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 updaterDelegate: nil,
                 userDriverDelegate: nil
             )
-            installCheckForUpdatesMenuItem()
+            // The manual NSMenu insertion (installCheckForUpdatesMenuItem)
+            // was unreliable: SwiftUI owns the main menu under the App
+            // lifecycle and rebuilds it after launch, dropping any item
+            // we splice in by hand — so "Check for Updates…" never
+            // appeared. The menu item is now declared in PidgyApp via
+            // `.commands`, which routes to `triggerCheckForUpdates()`
+            // below and survives SwiftUI's menu management.
         }
 
         PidgyFontRegistrar.registerBundledFonts()
@@ -375,24 +381,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// dialog. macOS's default app menu layout puts "About Pidgy"
     /// at index 0; we slot the new item right after it, matching
     /// the convention every other AppKit app uses.
-    private func installCheckForUpdatesMenuItem() {
-        guard let mainMenu = NSApp.mainMenu,
-              let appMenu = mainMenu.item(at: 0)?.submenu,
-              let updater = updaterController else { return }
-        let item = NSMenuItem(
-            title: "Check for Updates…",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
-            keyEquivalent: ""
-        )
-        item.target = updater
-        appMenu.insertItem(item, at: 1)
-        // Keep the visual separation clean — the system inserts a
-        // separator after the About item by default; our new entry
-        // jumps before that separator so the menu reads:
-        //   About Pidgy
-        //   Check for Updates…
-        //   ────
-        //   (rest of the standard items)
+    /// Manual "Check for Updates…" trigger, invoked from the SwiftUI
+    /// `.commands` menu item in PidgyApp. Forces an immediate appcast
+    /// check and shows Sparkle's standard update UI (or the "you're up
+    /// to date" dialog). Safe to call before the updater is ready —
+    /// it just no-ops.
+    func triggerCheckForUpdates() {
+        updaterController?.checkForUpdates(nil)
+    }
+
+    /// Whether the "Check for Updates…" menu item should be enabled —
+    /// false under tests (no updater) so the command can grey out.
+    var canCheckForUpdates: Bool {
+        updaterController != nil
     }
 
     /// Cancel the background graph-build loop. Called by
