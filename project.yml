@@ -315,7 +315,7 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         SWIFT_VERSION: "5.10"
         PRODUCT_NAME: Pidgy
-        MARKETING_VERSION: "1.0.4"
+        MARKETING_VERSION: "1.0.5"
         # CFBundleVersion — Sparkle's PRIMARY update comparator. It
         # compares this integer (exposed as sparkle:version in the
         # appcast), NOT the marketing string. It MUST increase by at
@@ -325,7 +325,8 @@ targets:
         # to each other. Bump this on every single release.
         #   1.0.0–1.0.3 → 1   (broken: all equal)
         #   1.0.4       → 2
-        CURRENT_PROJECT_VERSION: 2
+        #   1.0.5       → 3
+        CURRENT_PROJECT_VERSION: 3
         INFOPLIST_FILE: Sources/App/Info.plist
         ENABLE_APP_SANDBOX: false
         GENERATE_INFOPLIST_FILE: false
