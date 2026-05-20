@@ -321,17 +321,11 @@ struct DashboardTasksPage: View {
 
     private var ownerPickerPopover: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .font(PidgyDashboardTheme.captionMediumFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                TextField("Add a person to filter", text: $ownerSearchQuery)
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .textFieldStyle(.plain)
-            }
-            .frame(height: 30)
-            .padding(.horizontal, 10)
-            .background(DashboardCapsuleBackground())
+            DashboardSearchField(
+                placeholder: "Add a person to filter",
+                text: $ownerSearchQuery,
+                size: .compact
+            )
 
             ScrollView {
                 LazyVStack(spacing: 2) {

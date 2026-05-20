@@ -21,6 +21,12 @@ struct DashboardTopicsPage: View {
     @State private var semanticSummary: String?
     @State private var semanticSearchError: String?
     @State private var isLoadingSemanticResults = false
+    /// True once we've waited long enough that an empty `topics` array
+    /// almost certainly means "no topics" rather than "still loading".
+    /// Drives the skeleton-vs-empty-state choice in `body` below — the
+    /// page used to flash "No topics yet" for a beat on first open even
+    /// when topics were about to populate, which read as broken.
+    @State private var topicLoadGracePeriodElapsed = false
 
     private var topicOptions: [DashboardTopicOption] {
         var options = topics
@@ -324,6 +330,14 @@ struct DashboardTopicsPage: View {
                     commandRow
 
                     contentSections
+                } else if topics.isEmpty && !topicLoadGracePeriodElapsed {
+                    // First-load skeleton — the indexer typically
+                    // populates `topics` within a second or two on
+                    // launch, but the empty-state copy read as
+                    // "broken" during that window. Show placeholders
+                    // until the grace period elapses or topics arrive.
+                    topicsLoadingSkeleton
+                        .padding(.top, 32)
                 } else {
                     DashboardEmptyState(
                         systemImage: "folder",
@@ -343,6 +357,12 @@ struct DashboardTopicsPage: View {
         .background(PidgyDashboardTheme.paper)
         .task {
             selectDefaultTopicIfNeeded()
+            // Wait long enough that an empty topics array reasonably
+            // means "no topics exist" rather than "still loading".
+            // 2.5s comfortably covers the indexer's typical cold-start
+            // population time.
+            try? await Task.sleep(for: .seconds(2.5))
+            topicLoadGracePeriodElapsed = true
         }
         .task(id: topicSignalRefreshKey) {
             await rebuildTopicChatSignals()
@@ -356,6 +376,37 @@ struct DashboardTopicsPage: View {
         .onChange(of: topics.map(\.id)) {
             selectDefaultTopicIfNeeded()
         }
+    }
+
+    /// Skeleton placeholder rendered before any topic is selected
+    /// AND while the first-load grace period is still running. Mimics
+    /// the populated layout — hero title block, search box, command
+    /// row, and a few content rows — so the page doesn't appear to
+    /// pop content in from a blank canvas.
+    private var topicsLoadingSkeleton: some View {
+        VStack(spacing: 24) {
+            // Hero — title + meta strip.
+            VStack(spacing: 10) {
+                DashboardSkeletonBlock(width: 260, height: 30, cornerRadius: 8)
+                DashboardSkeletonBlock(width: 180, height: 12, cornerRadius: 5)
+            }
+
+            // Search box.
+            DashboardSkeletonBlock(width: 520, height: 36, cornerRadius: 10)
+
+            // Command row pills.
+            HStack(spacing: 8) {
+                DashboardSkeletonBlock(width: 90, height: 28, cornerRadius: 14)
+                DashboardSkeletonBlock(width: 110, height: 28, cornerRadius: 14)
+                DashboardSkeletonBlock(width: 80, height: 28, cornerRadius: 14)
+                DashboardSkeletonBlock(width: 100, height: 28, cornerRadius: 14)
+            }
+            .padding(.top, 2)
+
+            DashboardSkeletonRows(count: 6)
+                .padding(.top, 12)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func topicHero(_ topic: DashboardTopicOption) -> some View {
@@ -411,18 +462,12 @@ struct DashboardTopicsPage: View {
     }
 
     private func searchBox(_ topic: DashboardTopicOption) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .font(PidgyDashboardTheme.metadataMediumFont)
-                .foregroundStyle(PidgyDashboardTheme.secondary)
-            TextField("Search \(topic.name)", text: $searchText)
-                .font(PidgyDashboardTheme.rowTitleFont)
-                .textFieldStyle(.plain)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 20)
-        .frame(maxWidth: 620)
-        .background(DashboardSearchFieldBackground())
+        DashboardSearchField(
+            placeholder: "Search \(topic.name)",
+            text: $searchText,
+            size: .prominent,
+            maxWidth: 620
+        )
     }
 
     private var commandRow: some View {

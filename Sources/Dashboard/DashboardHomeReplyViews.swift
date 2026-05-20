@@ -144,6 +144,7 @@ struct DashboardHomePage: View {
 }
 
 struct DashboardReplyQueuePage: View {
+    @EnvironmentObject private var attentionStore: AttentionStore
     let items: [FollowUpItem]
     let isLoading: Bool
     let processedCount: Int
@@ -156,20 +157,48 @@ struct DashboardReplyQueuePage: View {
     let onOpenChat: (TGChat) -> Void
 
     @State private var filter: DashboardReplyFilter = .onMe
+    @State private var searchText = ""
+    /// User-controlled sort direction. `true` = newest activity at
+    /// the top (default, canonical messaging-app behaviour); `false`
+    /// = oldest at the top (useful when triaging chats you've been
+    /// ignoring longest). Persisted across launches.
+    @AppStorage("pidgyReplyQueueNewestFirst") private var sortNewestFirst = true
 
     private var filteredItems: [FollowUpItem] {
+        let categoryFiltered: [FollowUpItem]
         switch filter {
         case .onMe:
-            return items.filter { $0.category == .onMe }
+            categoryFiltered = items.filter { $0.category == .onMe }
         case .onThem:
-            return items.filter { $0.category == .onThem }
+            categoryFiltered = items.filter { $0.category == .onThem }
         case .quiet:
-            return items.filter { $0.category == .quiet }
+            categoryFiltered = items.filter { $0.category == .quiet }
+        }
+
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let searched: [FollowUpItem]
+        if query.isEmpty {
+            searched = categoryFiltered
+        } else {
+            searched = categoryFiltered.filter { item in
+                if item.chat.title.lowercased().contains(query) { return true }
+                if (item.suggestedAction ?? "").lowercased().contains(query) { return true }
+                return item.lastMessage.displayText.lowercased().contains(query)
+            }
+        }
+
+        // `timeSinceLastActivity` is "how long ago" — smaller means
+        // more recent. Ascending = newest first (the default);
+        // descending = oldest first.
+        return searched.sorted { a, b in
+            sortNewestFirst
+                ? a.timeSinceLastActivity < b.timeSinceLastActivity
+                : a.timeSinceLastActivity > b.timeSinceLastActivity
         }
     }
 
     private var selectedItem: FollowUpItem? {
-        selectedChatId.flatMap { id in filteredItems.first { $0.chat.id == id } }
+        selectedChatId.flatMap { id in items.first { $0.chat.id == id } }
     }
 
     var body: some View {
@@ -194,6 +223,7 @@ struct DashboardReplyQueuePage: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 header
+                controlsRow
                 queueRows
             }
             .frame(maxWidth: PidgyDashboardTheme.pageMaxWidth, alignment: .leading)
@@ -206,10 +236,13 @@ struct DashboardReplyQueuePage: View {
 
     private var compactList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
-                .padding(.horizontal, 28)
-                .padding(.top, 28)
-                .padding(.bottom, 14)
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                controlsRow
+            }
+            .padding(.horizontal, 28)
+            .padding(.top, 28)
+            .padding(.bottom, 14)
 
             ScrollView {
                 queueRows
@@ -221,29 +254,87 @@ struct DashboardReplyQueuePage: View {
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Reply queue")
-                    .font(PidgyDashboardTheme.pageTitleFont)
-                    .tracking(-0.6)
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                if isLoading, totalCount > 0 {
-                    Text("Analyzing \(processedCount)/\(totalCount) chats")
-                        .font(PidgyDashboardTheme.pageSubtitleFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                }
+        // Title + progress only. Segmented filter + search live in
+        // `controlsRow` below the title (Rahul's request: filters
+        // moved out of the top-right corner so the title gets the
+        // whole header line, and a search box sits next to them).
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Reply queue")
+                .font(PidgyDashboardTheme.pageTitleFont)
+                .tracking(-0.6)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+            if isLoading, totalCount > 0 {
+                Text("Analyzing \(processedCount)/\(totalCount) chats")
+                    .font(PidgyDashboardTheme.pageSubtitleFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(selectedItem == nil ? EdgeInsets(top: 0, leading: 8, bottom: 12, trailing: 8) : EdgeInsets())
+    }
 
-            Spacer()
-
+    /// Single row directly under the title:
+    ///   [ON ME] [ON THEM] [QUIET]                          [🔍 Search]
+    /// Segmented filter on the left, compact fixed-width search
+    /// anchored on the right with a Spacer between. Counts on the
+    /// segments reflect the unfiltered totals per category — they
+    /// should not change when search narrows the visible list,
+    /// otherwise the user can't see whether the other tabs have
+    /// content.
+    private var controlsRow: some View {
+        HStack(spacing: 10) {
             DashboardSegmentedReplyFilter(
                 selection: $filter,
                 onMeCount: items.filter { $0.category == .onMe }.count,
                 onThemCount: items.filter { $0.category == .onThem }.count,
                 quietCount: items.filter { $0.category == .quiet }.count
             )
+
+            Spacer(minLength: 12)
+
+            sortToggle
+
+            searchBox
+                .frame(width: 220)
         }
-        .padding(selectedItem == nil ? EdgeInsets(top: 0, leading: 8, bottom: 22, trailing: 8) : EdgeInsets())
+        .padding(selectedItem == nil ? EdgeInsets(top: 4, leading: 8, bottom: 22, trailing: 8) : EdgeInsets(top: 4, leading: 0, bottom: 22, trailing: 0))
+    }
+
+    /// Compact icon+text button that flips the queue between
+    /// newest-first and oldest-first. Sits to the immediate left of
+    /// the search box so the row reads `[segments] … [sort] [search]`.
+    /// The arrow indicates CURRENT direction; the label tells the
+    /// user what they'll see.
+    private var sortToggle: some View {
+        Button {
+            sortNewestFirst.toggle()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: sortNewestFirst ? "arrow.down" : "arrow.up")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(sortNewestFirst ? "Newest" : "Oldest")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(PidgyDashboardTheme.secondary)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(PidgyDashboardTheme.sidebar)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(PidgyDashboardTheme.rule, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(sortNewestFirst ? "Sorted newest first — click to flip" : "Sorted oldest first — click to flip")
+    }
+
+    private var searchBox: some View {
+        // Shared component — same chrome as Topics/People/Tasks
+        // search inputs, just at the .compact size variant.
+        DashboardSearchField(placeholder: "Search", text: $searchText, size: .compact)
     }
 
     private var queueRows: some View {
@@ -251,6 +342,14 @@ struct DashboardReplyQueuePage: View {
             if filteredItems.isEmpty && isLoading {
                 DashboardSkeletonRows(count: selectedItem == nil ? 9 : 7)
                     .padding(.top, 6)
+            } else if filteredItems.isEmpty && !searchText.isEmpty {
+                DashboardEmptyState(
+                    systemImage: "magnifyingglass",
+                    title: "No matches",
+                    subtitle: "Try a different search or switch tabs."
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.top, 36)
             } else if filteredItems.isEmpty {
                 DashboardEmptyState(
                     systemImage: "checkmark.circle",
@@ -270,6 +369,30 @@ struct DashboardReplyQueuePage: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    // Right-click → native NSMenu with the "Hide from
+                    // queue" action. macOS users expect right-click
+                    // menus to look native; that's fine here. The
+                    // styled-popover treatment is reserved for places
+                    // where the menu is the primary affordance (e.g.
+                    // the sidebar account menu).
+                    .contextMenu {
+                        // Hide = suppress this chat in the reply queue
+                        // only (sticky, reversible from Preferences).
+                        Button("Hide from queue", systemImage: "eye.slash") {
+                            attentionStore.excludeChat(id: item.chat.id)
+                        }
+                        // Archive = remove the chat from EVERY pipeline
+                        // (reply queue + tasks), like a bot. Reversible
+                        // from Preferences → Archived chats.
+                        Button("Archive chat", systemImage: "archivebox") {
+                            ArchivedChatsStore.shared.archive(item.chat.id)
+                            attentionStore.dropChat(id: item.chat.id)
+                            ToastCenter.shared.show(
+                                "Archived \(item.chat.title). Remove it anytime from Preferences → Archived chats.",
+                                icon: "archivebox"
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -277,16 +400,39 @@ struct DashboardReplyQueuePage: View {
 }
 
 struct DashboardReplyDetail: View {
+    @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var aiService: AIService
     let item: FollowUpItem?
     let onOpenChat: (TGChat) -> Void
     let onClose: () -> Void
 
     @State private var conversationContext: [DatabaseManager.MessageRecord] = []
     @State private var isLoadingContext = false
+    /// Sender display names resolved on-demand for group messages
+    /// whose cached `senderName` was nil. Keyed by sender user id.
+    /// Populated by `resolveMissingSenderNames`.
+    @State private var resolvedSenderNames: [Int64: String] = [:]
+
+    // Suggested replies (#20) — populated when the user taps
+    // "Suggest replies". Held per-item so switching items resets.
+    @State private var suggestedReplies: [String] = []
+    @State private var isGeneratingReplies = false
+    @State private var suggestedRepliesError: String?
+    @State private var suggestedRepliesForChatId: Int64?
+
+    // Catch-up summary (#21) — populated for QUIET items when the
+    // user taps "Catch me up".
+    @State private var catchUpText: String = ""
+    @State private var isGeneratingCatchUp = false
+    @State private var catchUpError: String?
+    @State private var catchUpForChatId: Int64?
 
     /// Same cap as the Task Evidence section — enough to read the back-and-
     /// forth that triggered the suggestion without becoming a full transcript.
     private static let maxEvidenceRows = 5
+    /// More history than `maxEvidenceRows` so the suggested-replies
+    /// and catch-up prompts have enough context to be useful.
+    private static let maxAIContextRows = 25
 
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
@@ -320,6 +466,23 @@ struct DashboardReplyDetail: View {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .stroke(PidgyDashboardTheme.rule)
                         )
+                }
+
+                // QUIET items: offer the AI catch-up summary first —
+                // it's the most useful thing for a chat the user has
+                // been ignoring. On non-quiet items, we skip this
+                // section entirely (the chat is already active).
+                if item.category == .quiet {
+                    catchUpSection(for: item)
+                }
+
+                // Suggested replies — for chats where the user
+                // probably wants to type something back. ON ME is the
+                // obvious case (the ball is in their court), but we
+                // also offer it on ON THEM in case they want to
+                // proactively nudge.
+                if item.category != .quiet {
+                    suggestedRepliesSection(for: item)
                 }
 
                 let evidenceItems = mergedEvidenceItems(for: item)
@@ -366,7 +529,237 @@ struct DashboardReplyDetail: View {
         }
         .task(id: item?.chat.id) {
             await loadConversationContext()
+            // Reset AI sections when switching items — the previous
+            // chat's suggestions / summary are no longer relevant.
+            suggestedReplies = []
+            suggestedRepliesError = nil
+            suggestedRepliesForChatId = nil
+            catchUpText = ""
+            catchUpError = nil
+            catchUpForChatId = nil
         }
+    }
+
+    // MARK: - Suggested replies section (#20)
+
+    @ViewBuilder
+    private func suggestedRepliesSection(for item: FollowUpItem) -> some View {
+        DashboardDetailSection(title: "Suggested replies") {
+            VStack(alignment: .leading, spacing: 10) {
+                if !aiService.isConfigured {
+                    Text("Connect an AI provider in Preferences to enable suggested replies.")
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                } else if let error = suggestedRepliesError {
+                    Text(error)
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.red)
+                } else if suggestedRepliesForChatId == item.chat.id && !suggestedReplies.isEmpty {
+                    ForEach(Array(suggestedReplies.enumerated()), id: \.offset) { _, reply in
+                        suggestedReplyChip(reply)
+                    }
+                    Button {
+                        Task { await generateSuggestedReplies(for: item) }
+                    } label: {
+                        Label("Regenerate", systemImage: "arrow.clockwise")
+                            .font(PidgyDashboardTheme.captionMediumFont)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .padding(.top, 2)
+                } else if isGeneratingReplies && suggestedRepliesForChatId == item.chat.id {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                        Text("Drafting 3 options…")
+                            .font(PidgyDashboardTheme.detailBodyFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                    }
+                } else {
+                    Button {
+                        Task { await generateSuggestedReplies(for: item) }
+                    } label: {
+                        Label("Suggest replies", systemImage: "sparkles")
+                            .font(PidgyDashboardTheme.captionMediumFont)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(DashboardCapsuleBackground())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                }
+            }
+        }
+    }
+
+    private func suggestedReplyChip(_ reply: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(reply)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .lineSpacing(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(reply, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+                    .padding(6)
+                    .background(
+                        Circle().fill(PidgyDashboardTheme.sidebar)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Copy to clipboard")
+        }
+        .padding(12)
+        .background(PidgyDashboardTheme.paper)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(PidgyDashboardTheme.rule)
+        )
+    }
+
+    private func generateSuggestedReplies(for item: FollowUpItem) async {
+        suggestedRepliesError = nil
+        isGeneratingReplies = true
+        suggestedRepliesForChatId = item.chat.id
+        defer { isGeneratingReplies = false }
+        do {
+            let messages = await loadAIContextMessages(for: item.chat.id)
+            guard !messages.isEmpty else {
+                suggestedRepliesError = "No recent messages to draft from."
+                suggestedReplies = []
+                return
+            }
+            let myUserId = telegramService.currentUser?.id ?? 0
+            let replies = try await aiService.suggestReplies(
+                chatTitle: item.chat.title,
+                messages: messages,
+                myUserId: Int64(myUserId)
+            )
+            if replies.isEmpty {
+                suggestedRepliesError = "The model returned no usable replies."
+            } else {
+                suggestedReplies = replies
+            }
+        } catch {
+            suggestedRepliesError = error.localizedDescription
+            suggestedReplies = []
+        }
+    }
+
+    // MARK: - Catch-up summary section (#21, QUIET only)
+
+    @ViewBuilder
+    private func catchUpSection(for item: FollowUpItem) -> some View {
+        DashboardDetailSection(title: "Catch me up") {
+            VStack(alignment: .leading, spacing: 10) {
+                if !aiService.isConfigured {
+                    Text("Connect an AI provider in Preferences to enable catch-up summaries.")
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                } else if let error = catchUpError {
+                    Text(error)
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.red)
+                } else if catchUpForChatId == item.chat.id && !catchUpText.isEmpty {
+                    Text(catchUpText)
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .lineSpacing(3)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(PidgyDashboardTheme.paper)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(PidgyDashboardTheme.rule)
+                        )
+                } else if isGeneratingCatchUp && catchUpForChatId == item.chat.id {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                        Text("Summarizing the last week…")
+                            .font(PidgyDashboardTheme.detailBodyFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                    }
+                } else {
+                    Button {
+                        Task { await generateCatchUpSummary(for: item) }
+                    } label: {
+                        Label("Catch me up", systemImage: "sparkles")
+                            .font(PidgyDashboardTheme.captionMediumFont)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(DashboardCapsuleBackground())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                }
+            }
+        }
+    }
+
+    private func generateCatchUpSummary(for item: FollowUpItem) async {
+        catchUpError = nil
+        isGeneratingCatchUp = true
+        catchUpForChatId = item.chat.id
+        defer { isGeneratingCatchUp = false }
+        do {
+            let messages = await loadAIContextMessages(for: item.chat.id)
+            guard !messages.isEmpty else {
+                catchUpError = "No recent messages to summarize."
+                return
+            }
+            let myUserId = telegramService.currentUser?.id ?? 0
+            let summary = try await aiService.catchUpSummary(
+                chatTitle: item.chat.title,
+                messages: messages,
+                myUserId: Int64(myUserId)
+            )
+            catchUpText = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if catchUpText.isEmpty {
+                catchUpError = "The model returned an empty summary."
+            }
+        } catch {
+            catchUpError = error.localizedDescription
+        }
+    }
+
+    /// Loads ~25 recent messages for an AI prompt and converts them
+    /// into TGMessage. Returns `[]` if the chat isn't cached locally
+    /// (e.g. user opened a chat the indexer hasn't reached yet).
+    private func loadAIContextMessages(for chatId: Int64) async -> [TGMessage] {
+        let records = await DatabaseManager.shared.loadMessages(
+            chatId: chatId,
+            limit: Self.maxAIContextRows
+        )
+        return records.compactMap { record -> TGMessage? in
+            guard let text = record.textContent,
+                  !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            // We don't store the sender's user ID in the local cache,
+            // only the display name. The AI's [ME] marking only
+            // needs `isOutgoing` to be correct (conversationSnippets
+            // routes via `isOutgoing` first); the senderId fallback
+            // path requires myUserId > 0 to fire, which we pass as
+            // 0 here. So `.chat(chatId)` is fine as a placeholder.
+            return TGMessage(
+                id: record.id,
+                chatId: chatId,
+                senderId: .chat(chatId),
+                date: record.date,
+                textContent: text,
+                mediaType: nil,
+                isOutgoing: record.isOutgoing,
+                chatTitle: nil,
+                senderName: record.senderName
+            )
+        }.sorted { $0.date < $1.date }
     }
 
     private func loadConversationContext() async {
@@ -381,6 +774,31 @@ struct DashboardReplyDetail: View {
             limit: Self.maxEvidenceRows + 2
         )
         conversationContext = recent.sorted { $0.date < $1.date }
+        await resolveMissingSenderNames(in: recent)
+    }
+
+    /// Group-chat messages frequently have a nil `senderName` in the
+    /// local cache (the message was stored before its sender's user
+    /// record was fetched), which used to render as "Unknown" in the
+    /// right-hand detail pane. Resolve those names from TelegramService
+    /// (cache, then a TDLib fetch) and stash them keyed by sender user
+    /// id so the synchronous row builders can pick them up.
+    private func resolveMissingSenderNames(in records: [DatabaseManager.MessageRecord]) async {
+        let unresolved = Set(
+            records
+                .filter { ($0.senderName?.trimmingCharacters(in: .whitespaces).isEmpty ?? true) && !$0.isOutgoing }
+                .compactMap { $0.senderUserId }
+        )
+        guard !unresolved.isEmpty else { return }
+        var resolved = resolvedSenderNames
+        for userId in unresolved where resolved[userId] == nil {
+            if let name = await telegramService.resolveDisplayName(for: userId) {
+                resolved[userId] = name
+            }
+        }
+        if resolved != resolvedSenderNames {
+            resolvedSenderNames = resolved
+        }
     }
 
     /// Treats the FollowUpItem's `lastMessage` as the "source" — it's the
@@ -406,7 +824,7 @@ struct DashboardReplyDetail: View {
         let source = EvidenceContextItem(
             id: sourceId,
             date: item.lastMessage.date,
-            senderName: item.lastMessage.senderName ?? "Unknown",
+            senderName: sourceSenderLabel(for: item),
             isOutgoing: item.lastMessage.isOutgoing,
             text: item.lastMessage.displayText,
             isSource: true
@@ -418,7 +836,33 @@ struct DashboardReplyDetail: View {
     private func senderLabel(for record: DatabaseManager.MessageRecord) -> String {
         if record.isOutgoing { return "You" }
         let trimmed = record.senderName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "Unknown" : trimmed
+        if !trimmed.isEmpty { return trimmed }
+        // Fall back to a name we resolved on-demand for group
+        // messages whose cached senderName was nil.
+        if let userId = record.senderUserId, let resolved = resolvedSenderNames[userId] {
+            return resolved
+        }
+        return unknownSenderFallback
+    }
+
+    private func sourceSenderLabel(for item: FollowUpItem) -> String {
+        if item.lastMessage.isOutgoing { return "You" }
+        let trimmed = item.lastMessage.senderName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty { return trimmed }
+        if let userId = item.lastMessage.senderUserId, let resolved = resolvedSenderNames[userId] {
+            return resolved
+        }
+        return unknownSenderFallback
+    }
+
+    /// Graceful last resort when a sender name truly can't be
+    /// resolved (anonymous group admin, or a user TDLib won't return).
+    /// For a 1:1 DM the other party IS the chat, so use the chat
+    /// title; for a group, "Someone" reads far less broken than the
+    /// old bare "Unknown".
+    private var unknownSenderFallback: String {
+        guard let item else { return "Someone" }
+        return item.chat.chatType.isPrivate ? item.chat.title : "Someone"
     }
 
     private func nonEmptyDisplayText(for record: DatabaseManager.MessageRecord) -> String {

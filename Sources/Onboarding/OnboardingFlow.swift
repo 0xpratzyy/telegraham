@@ -229,25 +229,11 @@ struct OnboardingFlow: View {
                     .padding(.top, 56)
                     .padding(.bottom, 36)
 
-                    // × close — present on every step except .done where the
-                    // primary CTA replaces it.
-                    if step != .done {
-                        Button(action: skipFlow) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Color.Pidgy.fg3)
-                                .frame(width: 30, height: 30)
-                                .background(
-                                    Circle().fill(Color.Pidgy.bg2)
-                                )
-                                .overlay(
-                                    Circle().stroke(Color.Pidgy.border1, lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, 18)
-                        .padding(.trailing, 18)
-                    }
+                    // No × close button — onboarding is mandatory. Without
+                    // Telegram credentials in place, nothing else in the
+                    // app actually works, so letting users dismiss the
+                    // modal mid-flow just dropped them into a non-functional
+                    // dashboard. They can quit the app to abort.
                 }
             }
         }
@@ -283,14 +269,6 @@ struct OnboardingFlow: View {
 
     private func advance(to next: OnboardingStep) {
         withAnimation(.easeOut(duration: 0.32)) { step = next }
-    }
-
-    private func skipFlow() {
-        // Closing without finishing setup leaves the completion flag unset
-        // so the modal reopens on the next launch — Telegram still isn't
-        // connected, the launcher panel can't do anything useful, the user
-        // would just be in the wrong place. Better to nudge them back.
-        onClose(false)
     }
 
     private func completeOnboarding() {
@@ -486,9 +464,46 @@ struct OnboardingFlow: View {
 
     private static func extractErrorMessage(_ error: Swift.Error) -> String {
         if let tdError = error as? TDLibKit.Error {
-            return "Error \(tdError.code): \(tdError.message)"
+            return friendlyAuthMessage(code: tdError.code, message: tdError.message)
         }
         return error.localizedDescription
+    }
+
+    /// Maps raw TDLib auth errors (e.g. "PASSWORD_HASH_INVALID",
+    /// code 400) to plain-language copy. Telegram surfaces these as
+    /// SCREAMING_SNAKE_CASE tokens with an HTTP-ish code, which read
+    /// as scary developer noise to a normal user ("Error 400:
+    /// PASSWORD_HASH_INVALID"). Anything we don't have a friendly
+    /// mapping for falls back to a sanitized version of the token.
+    private static func friendlyAuthMessage(code: Int, message: String) -> String {
+        let token = message.uppercased()
+        switch token {
+        case let t where t.contains("PASSWORD_HASH_INVALID"):
+            return "Incorrect password. Please try again."
+        case let t where t.contains("PHONE_CODE_INVALID"):
+            return "That code didn't match. Double-check it and try again."
+        case let t where t.contains("PHONE_CODE_EXPIRED"):
+            return "That code expired. Request a new one and try again."
+        case let t where t.contains("PHONE_NUMBER_INVALID"):
+            return "That phone number doesn't look right. Check the country code and try again."
+        case let t where t.contains("PHONE_NUMBER_BANNED"):
+            return "This phone number is banned from Telegram."
+        case let t where t.contains("PHONE_NUMBER_FLOOD"):
+            return "Too many attempts from this number. Wait a bit before trying again."
+        case let t where t.contains("FLOOD_WAIT"):
+            return "Too many attempts. Please wait a moment and try again."
+        case let t where t.contains("PASSWORD_TOO_FRESH"):
+            return "Telegram is still securing this password change. Try again in a little while."
+        case let t where t.contains("SESSION_PASSWORD_NEEDED"):
+            return "This account needs its two-factor password to continue."
+        default:
+            // Sanitize the raw token into something readable rather
+            // than exposing "Error 400: SOME_RAW_TOKEN".
+            let readable = message
+                .replacingOccurrences(of: "_", with: " ")
+                .lowercased()
+            return "Couldn't continue (\(readable)). Please try again."
+        }
     }
 }
 

@@ -14,7 +14,12 @@ struct DashboardView: View {
     @StateObject private var attentionStore = AttentionStore.shared
     @StateObject private var taskIndex = TaskIndexCoordinator.shared
     @StateObject private var navigation = DashboardNavigationStore.shared
+    @StateObject private var archivedChatsStore = ArchivedChatsStore.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
+    /// Sidebar collapse — Granola-style. When true the sidebar is
+    /// fully hidden (not icon-only) and the main content fills the
+    /// width. Toggled by the header button or ⌘S. Persisted.
+    @AppStorage("pidgySidebarCollapsed") private var isSidebarCollapsed = false
 
     @State private var selectedTaskId: Int64?
     @State private var selectedReplyChatId: Int64?
@@ -32,7 +37,7 @@ struct DashboardView: View {
         let chromePolicy = DashboardChromePolicy.policy(for: currentPage)
 
         HStack(spacing: 0) {
-            if chromePolicy.showsDashboardSidebar {
+            if chromePolicy.showsDashboardSidebar && !isSidebarCollapsed {
                 DashboardSidebar(
                     selection: $navigation.selectedPage,
                     selectedTopicId: $selectedTopicId,
@@ -59,6 +64,13 @@ struct DashboardView: View {
                     },
                     onSendFeedback: { isShowingFeedbackSheet = true }
                 )
+                // Subtle: a short fade plus a small leftward nudge,
+                // not a full slide-out. The bulk of the visible motion
+                // is the main content gently reflowing to fill the
+                // gap (animated by `toggleSidebar`'s spring).
+                .transition(
+                    .opacity.combined(with: .offset(x: -10))
+                )
             }
 
             VStack(spacing: 0) {
@@ -78,7 +90,11 @@ struct DashboardView: View {
                         isRefreshing: currentPage == .replyQueue
                             ? attentionStore.isFollowUpsLoading
                             : taskIndex.isUserInitiatedRefreshing,
-                        onRefresh: refreshDashboard
+                        onRefresh: refreshDashboard,
+                        // Reserve room for the floating show-sidebar
+                        // button when collapsed (button is 30pt + 12pt
+                        // leading pad; clear it with a touch more).
+                        leadingInset: isSidebarCollapsed ? 44 : 0
                     )
                 }
 
@@ -92,6 +108,10 @@ struct DashboardView: View {
                     ))
             }
             .animation(PidgyMotion.easeOut, value: currentPage)
+        }
+        .overlay(ToastOverlay())
+        .onReceive(NotificationCenter.default.publisher(for: .pidgyToggleSidebar)) { _ in
+            toggleSidebar()
         }
         .preferredColorScheme(.dark)
         .frame(minWidth: 1120, minHeight: 720)
@@ -125,6 +145,36 @@ struct DashboardView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut("f", modifiers: [.command, .shift])
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+        // ⌘S toggles the sidebar (Granola convention). Same hidden-
+        // button technique as ⌘⇧F above.
+        .background {
+            Button(action: toggleSidebar) {
+                EmptyView()
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("s", modifiers: [.command])
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+        // ⌘K opens the "Jump to anything" launcher panel. The sidebar
+        // button already advertises this shortcut but nothing was
+        // bound to it — this registers the actual key. Posts the same
+        // notification the sidebar button does; AppDelegate toggles
+        // the launcher panel. Works even when the sidebar (and its
+        // button) is collapsed.
+        .background {
+            Button {
+                NotificationCenter.default.post(name: .requestLauncherToggle, object: nil)
+            } label: {
+                EmptyView()
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("k", modifiers: [.command])
             .opacity(0)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
@@ -226,9 +276,21 @@ struct DashboardView: View {
         telegramService.visibleChats.map(\.id).sorted()
     }
 
+    /// `taskIndex.tasks` minus any chats the user has archived.
+    /// Archiving filters out future task extraction at the pipeline
+    /// level, but already-extracted tasks for a just-archived chat
+    /// would linger until the next scan — this drops them from the
+    /// UI immediately. Single chokepoint so every tasks surface
+    /// (page, home, counts) respects the archive.
+    private var activeTasks: [DashboardTask] {
+        let archived = archivedChatsStore.ids
+        guard !archived.isEmpty else { return taskIndex.tasks }
+        return taskIndex.tasks.filter { !archived.contains($0.chatId) }
+    }
+
     private var myTasks: [DashboardTask] {
         DashboardTaskFilter.apply(
-            taskIndex.tasks,
+            activeTasks,
             ownerFilter: .mine,
             currentUser: telegramService.currentUser
         )
@@ -383,10 +445,11 @@ struct DashboardView: View {
                 },
                 onOpenChat: { chat in openChat(chat) }
             )
+            .environmentObject(attentionStore)
 
         case .tasks:
             DashboardTasksPage(
-                tasks: taskIndex.tasks,
+                tasks: activeTasks,
                 evidenceByTaskId: taskIndex.evidenceByTaskId,
                 ownerPeople: allContacts,
                 currentUser: telegramService.currentUser,
@@ -409,7 +472,7 @@ struct DashboardView: View {
         case .topics:
             DashboardTopicsPage(
                 topics: taskIndex.topics,
-                tasks: taskIndex.tasks,
+                tasks: activeTasks,
                 followUpItems: attentionStore.followUpItems,
                 selectedTopicId: $selectedTopicId,
                 onOpenTask: { task in
@@ -428,7 +491,7 @@ struct DashboardView: View {
                 topContacts: topContacts,
                 staleContacts: staleContacts,
                 allContacts: allContacts,
-                tasks: taskIndex.tasks,
+                tasks: activeTasks,
                 followUpItems: attentionStore.followUpItems,
                 selectedPersonId: $selectedPersonId,
                 onOpenTask: { task in
@@ -528,6 +591,14 @@ struct DashboardView: View {
         sidebarTopicItems = items
     }
 
+    private func toggleSidebar() {
+        // Gentle spring, no bounce (high damping) — the content
+        // glides into place rather than snapping or sliding hard.
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
+            isSidebarCollapsed.toggle()
+        }
+    }
+
     private func refreshDashboard() {
         // The ONE refresh entry point. Bound to the top-bar button and the
         // burger menu's "Refresh dashboard". Incremental: only chats with
@@ -597,7 +668,7 @@ final class DashboardNavigationStore: ObservableObject {
 }
 
 enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
-    case dashboard = "Dashboard"
+    case dashboard = "Home"
     case replyQueue = "Reply queue"
     case tasks = "Tasks"
     case topics = "Topics"
@@ -663,6 +734,10 @@ struct DashboardTopBar: View {
     let lastRefreshAt: Date?
     let isRefreshing: Bool
     let onRefresh: () -> Void
+    /// Extra leading space reserved for the floating "show sidebar"
+    /// button when the sidebar is collapsed, so the breadcrumb
+    /// doesn't render underneath it.
+    var leadingInset: CGFloat = 0
 
     var body: some View {
         HStack(spacing: 12) {
@@ -675,6 +750,7 @@ struct DashboardTopBar: View {
                     .foregroundStyle(PidgyDashboardTheme.secondary)
                     .lineLimit(1)
             }
+            .padding(.leading, leadingInset)
 
             Spacer()
 

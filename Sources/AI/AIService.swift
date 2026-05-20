@@ -193,6 +193,47 @@ final class AIService: ObservableObject {
         )
     }
 
+    /// Suggested-reply chips for the reply-queue detail pane.
+    /// Returns up to 3 short reply options the user can copy or
+    /// click-to-send. Uses the existing `summarize` provider entry
+    /// point with a focused prompt rather than introducing a new
+    /// AIProvider method — same call shape, just parsed differently.
+    func suggestReplies(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> [String] {
+        let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
+        guard !snippets.isEmpty else { return [] }
+        let prompt = """
+        You are helping a user (marked [ME] in the transcript) draft \
+        a reply to the latest message in this chat. Read the recent \
+        conversation, then suggest exactly 3 short reply options the \
+        user could send. Each option must be ONE LINE, at most 18 \
+        words, plain text only (no markdown, no quotes, no numbering, \
+        no leading dash). Output the 3 options separated by newlines, \
+        nothing else.
+        """
+        let response = try await provider.summarize(messages: snippets, prompt: prompt)
+        let lines = response
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "-*•\"' ")) }
+            .filter { !$0.isEmpty }
+        return Array(lines.prefix(3))
+    }
+
+    /// Catch-up summary for a quiet group — what the user missed in
+    /// the last week or so. Used by the reply-queue detail pane's
+    /// "Catch me up" action on QUIET items.
+    func catchUpSummary(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> String {
+        let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
+        guard !snippets.isEmpty else { return "" }
+        let prompt = """
+        Summarize the recent activity in this group chat for a user \
+        who has been quiet. Write 2-3 short sentences capturing the \
+        main topics, any open questions, and whose turn it is to \
+        respond. Plain text only. No bullet points.
+        """
+        return try await provider.summarize(messages: snippets, prompt: prompt)
+    }
+
     /// Generate a follow-up suggestion for a conversation. Marks the user's own messages with [ME].
     /// Returns (isRelevant, suggestedAction). AI decides if the chat is BD-relevant.
     func followUpSuggestion(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> (Bool, String) {

@@ -31,6 +31,12 @@ struct DashboardPreferencesPage: View {
     @State private var isLoadingRoutingDebug = false
     @State private var showDeleteConfirmation = false
     @State private var isResetting = false
+    @StateObject private var archivedChatsStore = ArchivedChatsStore.shared
+    /// Resolved chats for the archived-chats list, keyed by chat id.
+    /// Stores the full TGChat (not just the title) so each row can
+    /// render the chat's avatar + DM/group shape. Populated on
+    /// appear / when the set changes.
+    @State private var archivedChats: [Int64: TGChat] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -466,7 +472,7 @@ struct DashboardPreferencesPage: View {
                 )
             }
 
-            PrefSection(bottomBorder: false) {
+            PrefSection(bottomBorder: !archivedChatsStore.ids.isEmpty) {
                 PrefSectionHead(title: "Privacy", subtitle: "Keep the AI surface explicit")
                 PrefField(
                     label: "Include bot chats",
@@ -502,6 +508,79 @@ struct DashboardPreferencesPage: View {
                         )
                 )
                 .padding(.top, 14)
+            }
+
+            // Archived chats live at the very bottom — it's a
+            // management list the user only visits occasionally, not
+            // a daily setting.
+            archivedChatsSection
+        }
+    }
+
+    /// Archived chats — chats the user removed from every pipeline
+    /// (reply queue + tasks) via the row's "Archive chat" action.
+    /// Lists them with an Unarchive button. Hidden entirely when
+    /// nothing is archived so the section doesn't add noise.
+    @ViewBuilder
+    private var archivedChatsSection: some View {
+        let archivedIds = Array(archivedChatsStore.ids).sorted()
+        if !archivedIds.isEmpty {
+            PrefSection(bottomBorder: false) {
+                PrefSectionHead(
+                    title: "Archived chats",
+                    subtitle: "Removed from the reply queue and tasks. Unarchive to bring them back."
+                ) {
+                    PrefPill(text: "\(archivedIds.count)", tone: .mono)
+                }
+
+                VStack(spacing: 0) {
+                    ForEach(archivedIds, id: \.self) { chatId in
+                        HStack(spacing: 11) {
+                            DashboardTelegramAvatar(
+                                chat: archivedChats[chatId],
+                                fallbackTitle: archivedChats[chatId]?.title ?? "Chat",
+                                size: 30
+                            )
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(archivedChats[chatId]?.title ?? "Chat \(chatId)")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.Pidgy.fg1)
+                                    .lineLimit(1)
+                                Text(archivedChatKindLabel(for: chatId))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.Pidgy.fg3)
+                            }
+                            Spacer(minLength: 12)
+                            PrefGhostButton(title: "Unarchive", systemImage: "tray.and.arrow.up") {
+                                archivedChatsStore.unarchive(chatId)
+                                // Bring the chat back into the
+                                // pipelines on the next refresh.
+                                onRefreshDashboard()
+                            }
+                        }
+                        .padding(.vertical, 8)
+                        if chatId != archivedIds.last {
+                            Divider().overlay(Color.Pidgy.border1)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .task(id: archivedChatsStore.ids) {
+                await resolveArchivedChats()
+            }
+        }
+    }
+
+    private func archivedChatKindLabel(for chatId: Int64) -> String {
+        guard let chat = archivedChats[chatId] else { return "" }
+        return chat.chatType.isOneOnOne ? "Direct message" : "Group"
+    }
+
+    private func resolveArchivedChats() async {
+        for chatId in archivedChatsStore.ids where archivedChats[chatId] == nil {
+            if let chat = try? await telegramService.getChat(id: chatId) {
+                archivedChats[chatId] = chat
             }
         }
     }

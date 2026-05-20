@@ -5,7 +5,19 @@ import Foundation
 final class AttentionStore: ObservableObject {
     static let shared = AttentionStore()
 
+    /// Backing storage for `followUpItems`. The published projection
+    /// below filters out excluded chats so any view consuming the
+    /// store gets the user's hide-from-queue choices for free.
+    private var allFollowUpItems: [FollowUpItem] = []
+
     @Published private(set) var followUpItems: [FollowUpItem] = []
+    /// Chat IDs the user explicitly hid from the reply queue via the
+    /// "Hide from queue" context menu action. Persisted in UserDefaults
+    /// so the choice survives launches.
+    @Published private(set) var excludedChatIds: Set<Int64> = {
+        let raw = UserDefaults.standard.array(forKey: AppConstants.Preferences.excludedFromReplyQueueKey) ?? []
+        return Set(raw.compactMap { ($0 as? NSNumber)?.int64Value })
+    }()
     @Published private(set) var isFollowUpsLoading = false
     @Published private(set) var pipelineProcessedCount = 0
     @Published private(set) var pipelineTotalCount = 0
@@ -35,11 +47,50 @@ final class AttentionStore: ObservableObject {
     }
 
     func pipelineCategory(for chatId: Int64) -> FollowUpItem.Category? {
-        followUpItems.first(where: { $0.chat.id == chatId })?.category
+        allFollowUpItems.first(where: { $0.chat.id == chatId })?.category
     }
 
     func pipelineSuggestion(for chatId: Int64) -> String? {
-        followUpItems.first(where: { $0.chat.id == chatId })?.suggestedAction
+        allFollowUpItems.first(where: { $0.chat.id == chatId })?.suggestedAction
+    }
+
+    /// Hide a chat from the reply queue. The full pipeline result for
+    /// the chat stays cached so we can restore it later; we just
+    /// stop including it in the published view.
+    func excludeChat(id: Int64) {
+        guard !excludedChatIds.contains(id) else { return }
+        excludedChatIds.insert(id)
+        persistExcludedChatIds()
+        republishFiltered()
+    }
+
+    /// Restore a previously-hidden chat to the reply queue.
+    func unexcludeChat(id: Int64) {
+        guard excludedChatIds.remove(id) != nil else { return }
+        persistExcludedChatIds()
+        republishFiltered()
+    }
+
+    /// Drop a chat from the in-memory queue without persisting an
+    /// exclusion. Used after archiving a chat in Telegram: the chat
+    /// leaves the main list so the next refresh won't surface it
+    /// anyway, but this gives immediate feedback. If the user
+    /// unarchives in Telegram, it returns on the next refresh —
+    /// unlike `excludeChat`, which is a sticky user preference.
+    func dropChat(id: Int64) {
+        guard allFollowUpItems.contains(where: { $0.chat.id == id }) else { return }
+        allFollowUpItems.removeAll { $0.chat.id == id }
+        republishFiltered()
+    }
+
+    private func persistExcludedChatIds() {
+        let raw = excludedChatIds.map { NSNumber(value: $0) }
+        UserDefaults.standard.set(raw, forKey: AppConstants.Preferences.excludedFromReplyQueueKey)
+    }
+
+    private func republishFiltered() {
+        followUpItems = allFollowUpItems.filter { !excludedChatIds.contains($0.chat.id) }
+        postOnMeBadge()
     }
 
     func loadFollowUps(
@@ -129,15 +180,14 @@ final class AttentionStore: ObservableObject {
                     )
                     initialItems.append(contentsOf: ruleBasedItems)
                 }
-                self.followUpItems = initialItems
+                self.allFollowUpItems = initialItems
                 self.sortPipelineItems()
                 self.pipelineProcessedCount = initialItems.count
                 self.pipelineTotalCount = initialItems.count
-                self.postOnMeBadge()
                 return
             }
 
-            self.followUpItems = initialItems
+            self.allFollowUpItems = initialItems
             self.sortPipelineItems()
 
             guard !staleChats.isEmpty else {
@@ -312,8 +362,8 @@ final class AttentionStore: ObservableObject {
                 telegramService: telegramService,
                 includeBots: includeBots
             ).map(\.id))
-            if followUpItems.contains(where: { !candidateIds.contains($0.chat.id) }) {
-                followUpItems.removeAll { !candidateIds.contains($0.chat.id) }
+            if allFollowUpItems.contains(where: { !candidateIds.contains($0.chat.id) }) {
+                allFollowUpItems.removeAll { !candidateIds.contains($0.chat.id) }
                 sortPipelineItems()
             }
         }
@@ -360,13 +410,17 @@ final class AttentionStore: ObservableObject {
     }
 
     private func upsertPipelineItem(_ item: FollowUpItem) {
-        followUpItems.removeAll { $0.chat.id == item.chat.id }
-        followUpItems.append(item)
+        allFollowUpItems.removeAll { $0.chat.id == item.chat.id }
+        allFollowUpItems.append(item)
         sortPipelineItems()
     }
 
+    /// Canonical sort: priority categories first (ON ME → ON THEM →
+    /// QUIET), then newest-activity-first within each. After
+    /// resorting, republish the filtered view so any UI bound to
+    /// `followUpItems` sees the new order with excluded chats hidden.
     private func sortPipelineItems() {
-        followUpItems.sort { a, b in
+        allFollowUpItems.sort { a, b in
             let order: [FollowUpItem.Category] = [.onMe, .onThem, .quiet]
             let aIndex = order.firstIndex(of: a.category) ?? 2
             let bIndex = order.firstIndex(of: b.category) ?? 2
@@ -375,7 +429,7 @@ final class AttentionStore: ObservableObject {
             }
             return a.timeSinceLastActivity < b.timeSinceLastActivity
         }
-        postOnMeBadge()
+        republishFiltered()
     }
 
     private func postOnMeBadge() {

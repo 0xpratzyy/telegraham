@@ -326,6 +326,17 @@ enum AppConstants {
         static let dashboardTaskTriageContextVersionKey = "dashboardTaskTriageContextVersion"
         static let dashboardTaskPinnedOwnersKey = "dashboardTaskPinnedOwners"
         static let didCompleteOnboardingKey = "pidgyDidCompleteOnboarding"
+        /// Set of chat IDs (Int64, serialized as NSNumber array) the
+        /// user has explicitly hidden from the reply queue via the
+        /// row context menu's "Hide from queue" action. Filtered out
+        /// of AttentionStore.followUpItems before any UI sees them.
+        static let excludedFromReplyQueueKey = "pidgyExcludedFromReplyQueue"
+        /// Set of chat IDs the user has ARCHIVED — removed from every
+        /// dashboard pipeline (reply queue AND tasks), the same way
+        /// bots are filtered. Distinct from `excludedFromReplyQueueKey`
+        /// which only hides a chat from the reply queue. Managed from
+        /// Preferences → Archived chats.
+        static let archivedChatsKey = "pidgyArchivedChats"
         /// Toggle for the decorative pigeon flock on the home
         /// dashboard's "What to do now" squiggle. Default: on. When
         /// off, the squiggle falls back to a plain divider line.

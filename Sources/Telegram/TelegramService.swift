@@ -491,6 +491,28 @@ class TelegramService: ObservableObject {
         return false
     }
 
+    /// Best-effort display name for a user id from the in-memory
+    /// cache only (synchronous, no network). Returns nil if the user
+    /// hasn't been fetched yet.
+    func cachedDisplayName(for userId: Int64) -> String? {
+        userCache[userId]?.displayName
+    }
+
+    /// Resolve a user's display name, fetching from TDLib if it
+    /// isn't cached. Used by the reply-queue detail pane to fill in
+    /// group-message sender names that were nil at cache time (which
+    /// otherwise render as "Unknown").
+    func resolveDisplayName(for userId: Int64) async -> String? {
+        if let cached = userCache[userId]?.displayName, !cached.isEmpty {
+            return cached
+        }
+        if let user = try? await getUser(id: userId) {
+            let name = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }
+        return nil
+    }
+
     /// Strong bot check for private chats using Telegram's user.type metadata.
     func isBotChat(_ chat: TGChat) async -> Bool {
         guard case .privateChat(let userId) = chat.chatType else { return false }

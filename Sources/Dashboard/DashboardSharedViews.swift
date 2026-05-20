@@ -8,8 +8,12 @@ enum PidgyBranding {
 }
 
 enum PidgyDashboardTheme {
-    static let paper = Color.Pidgy.bg1
-    static let sidebar = Color.Pidgy.bg2
+    // Inverted from the original (sidebar brighter than main) so the
+    // main pane is the brighter surface and the sidebar reads as the
+    // chrome around it. Lines up better with macOS apps that put
+    // the workspace forward (Notes, Mail).
+    static let paper = Color.Pidgy.bg2
+    static let sidebar = Color.Pidgy.bg1
     static let raised = Color.Pidgy.bg3
     static let deep = Color.Pidgy.bg0
     static let primary = Color.Pidgy.fg1
@@ -654,6 +658,116 @@ struct DashboardSearchFieldBackground: View {
                     .stroke(PidgyDashboardTheme.rule)
             )
             .shadow(color: Color.black.opacity(0.18), radius: 6, y: 2)
+    }
+}
+
+/// Shared search-input field. Three size variants cover every
+/// current call site (reply queue, topics, people, tasks owner
+/// popover) so we don't end up with 4 slightly-different
+/// implementations again. Always shows the magnifying-glass leading
+/// icon, optional clear (×) button trailing once there's text. Pass
+/// an optional `maxWidth` to cap the standard/prominent variants on
+/// wide layouts.
+struct DashboardSearchField: View {
+    enum Size {
+        /// Height 28pt. For controls rows alongside segmented filters
+        /// (reply queue) and inside popovers (tasks owner picker).
+        case compact
+        /// Height ~36pt. For inline list filters (people page).
+        case standard
+        /// Height ~60pt. For page-level hero search (topics page).
+        case prominent
+    }
+
+    let placeholder: String
+    @Binding var text: String
+    var size: Size = .standard
+    var maxWidth: CGFloat? = nil
+
+    var body: some View {
+        HStack(spacing: iconGap) {
+            Image(systemName: "magnifyingglass")
+                .font(iconFont)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+            TextField(placeholder, text: $text)
+                .font(textFont)
+                .textFieldStyle(.plain)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(iconFont)
+                        .foregroundStyle(PidgyDashboardTheme.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
+        .background(background)
+        .frame(maxWidth: maxWidth ?? .infinity)
+    }
+
+    // MARK: - Size-derived constants
+
+    private var iconGap: CGFloat {
+        switch size {
+        case .compact: return 7
+        case .standard: return 8
+        case .prominent: return 10
+        }
+    }
+
+    private var horizontalPadding: CGFloat {
+        switch size {
+        case .compact: return 10
+        case .standard: return 12
+        case .prominent: return 16
+        }
+    }
+
+    private var verticalPadding: CGFloat {
+        switch size {
+        case .compact: return 6
+        case .standard: return 10
+        case .prominent: return 20
+        }
+    }
+
+    private var iconFont: Font {
+        switch size {
+        case .compact: return .system(size: 11, weight: .medium)
+        case .standard: return PidgyDashboardTheme.metadataMediumFont
+        case .prominent: return PidgyDashboardTheme.metadataMediumFont
+        }
+    }
+
+    private var textFont: Font {
+        switch size {
+        case .compact: return PidgyDashboardTheme.detailBodyFont
+        case .standard: return PidgyDashboardTheme.metadataFont
+        case .prominent: return PidgyDashboardTheme.rowTitleFont
+        }
+    }
+
+    @ViewBuilder
+    private var background: some View {
+        switch size {
+        case .compact:
+            // Tight, no shadow — sits inline with other 28pt
+            // controls (sort toggle, segmented filter) and shouldn't
+            // visually dominate them.
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(PidgyDashboardTheme.sidebar)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(PidgyDashboardTheme.rule, lineWidth: 1)
+                )
+        case .standard, .prominent:
+            DashboardSearchFieldBackground()
+        }
     }
 }
 

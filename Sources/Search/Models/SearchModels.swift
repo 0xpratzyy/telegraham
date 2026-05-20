@@ -138,7 +138,16 @@ struct SearchChatEligibilityFilter {
         var included: [TGChat] = []
         var exclusions: [Exclusion] = []
 
+        // User-archived chats are removed from every pipeline up
+        // front — read once here so the per-chat loop is a cheap
+        // set lookup.
+        let archivedIds = ArchivedChatsStore.archivedIds()
+
         for chat in chats {
+            if archivedIds.contains(chat.id) {
+                exclusions.append(Exclusion(reason: "archived by user", chatTitle: chat.title))
+                continue
+            }
             guard let lastMessage = chat.lastMessage else {
                 exclusions.append(Exclusion(reason: "no last message", chatTitle: chat.title))
                 continue

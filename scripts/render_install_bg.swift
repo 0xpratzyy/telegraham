@@ -73,27 +73,42 @@ func parseArgs() -> Options {
 @available(macOS 13.0, *)
 struct StaticInstallBackground: View {
     let wallpaper: NSImage
+    let canvasSize: CGSize
+
+    // The static elements (gradient, arrow, pill) are anchored to
+    // the design's nominal 720×452 area, top-left of the canvas.
+    // Finder draws the Pidgy.app and Applications icons at
+    // (188, 220) and (532, 220) of the WINDOW content view, and
+    // Finder anchors the background image top-left too — so as
+    // long as the design elements stay at those coordinates inside
+    // the canvas, the arrow lines up with the icons regardless of
+    // how much extra wallpaper bleed exists at the right / bottom.
+    private static let designWidth: CGFloat = 720
+    private static let designHeight: CGFloat = 452
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topLeading) {
+            // Wallpaper fills the full canvas so resizing the DMG
+            // window reveals more of the artwork rather than empty
+            // padding. macOS Finder draws background images at
+            // native size top-left-anchored with no tile / scale,
+            // so we just render bigger.
             Image(nsImage: wallpaper)
                 .resizable()
                 .interpolation(.high)
                 .scaledToFill()
-                .frame(width: 720, height: 452)
+                .frame(width: canvasSize.width, height: canvasSize.height)
                 .clipped()
 
-            // Bottom-darkening gradient. Two design jobs in one:
-            //   1. Keep the instruction pill legible at the very
-            //      bottom.
-            //   2. Make the strip behind the Finder labels (y ≈ 290
-            //      in stage coords, about 64% of the 452pt height)
-            //      dark enough that macOS auto-picks WHITE text for
-            //      the labels — there's no AppleScript hook to set
-            //      the label colour directly, so wallpaper luminance
-            //      is the lever. The previous 3-stop gradient only
-            //      reached 0.35 opacity by y=290 and labels rendered
-            //      black against the bright sky.
+            // Bottom-darkening gradient — anchored to the 452pt
+            // design area, not the full canvas. The stops are
+            // calibrated against y=290 (label row) being at the
+            // ~64% mark; stretching them over 632pt would push the
+            // darkening below the labels and they'd flip black
+            // again. Anything past the design's 452pt bottom is
+            // just additional dark padding (intentional — the
+            // wallpaper at y=452+ would otherwise read as bright
+            // sky against the dark pill).
             LinearGradient(
                 stops: [
                     .init(color: Color(red: 8 / 255, green: 10 / 255, blue: 16 / 255).opacity(0.02), location: 0),
@@ -105,22 +120,32 @@ struct StaticInstallBackground: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
+            .frame(width: Self.designWidth, height: Self.designHeight, alignment: .topLeading)
 
-            // Static dashed arrow at dashPhase 0 — the marching-ants
-            // motion is the live-view bonus; in a baked PNG the arrow
-            // is a single frame.
+            // Dashed arrow at dashPhase 0, anchored to the design's
+            // coordinate system. `.position(x:y:)` treats the value
+            // as the CENTER of the view in its containing space —
+            // the parent ZStack is the full canvas, so (360, 220)
+            // here puts the arrow center exactly between the icon
+            // resting positions on the default 720×480 window.
             StaticDashedArrow()
                 .frame(width: 216, height: 80)
                 .position(x: 360, y: 220)
 
-            // Frosted-glass instruction pill, anchored bottom-center.
+            // Frosted-glass instruction pill, anchored to the
+            // bottom-center of the DESIGN area (y ≈ 430, just above
+            // the design's 452pt bottom), not the full canvas. The
+            // canvas extends beyond the typical window so a resize
+            // reveals more wallpaper, not a pill that's drifted out
+            // of view.
             VStack {
                 Spacer()
                 StaticInstructionPill()
                     .padding(.bottom, 22)
             }
+            .frame(width: Self.designWidth, height: Self.designHeight, alignment: .top)
         }
-        .frame(width: 720, height: 452)
+        .frame(width: canvasSize.width, height: canvasSize.height)
         .background(Color(red: 0x1A / 255.0, green: 0x2A / 255.0, blue: 0x3F / 255.0))
     }
 }
@@ -260,20 +285,20 @@ func renderInstallBackground() throws {
         withIntermediateDirectories: true
     )
 
-    let view = StaticInstallBackground(wallpaper: wallpaper)
+    // Canvas is 1.4× the nominal 720×452 design — gives Finder room
+    // to keep wallpaper visible when the user enlarges the DMG window.
+    let canvasSize = CGSize(width: 1008, height: 632)
+    let view = StaticInstallBackground(wallpaper: wallpaper, canvasSize: canvasSize)
     let renderer = ImageRenderer(content: view)
     renderer.scale = opts.scale
-    // Force a known size — ImageRenderer otherwise derives it from
-    // intrinsic content size, which on a ZStack with a `.background`
-    // can ambiguously round to 0×0.
-    renderer.proposedSize = ProposedViewSize(width: 720, height: 452)
+    renderer.proposedSize = ProposedViewSize(width: canvasSize.width, height: canvasSize.height)
 
     guard let cgImage = renderer.cgImage else {
         FileHandle.standardError.write(Data("error: ImageRenderer produced no CGImage\n".utf8))
         exit(1)
     }
     let bitmap = NSBitmapImageRep(cgImage: cgImage)
-    bitmap.size = NSSize(width: 720, height: 452)
+    bitmap.size = NSSize(width: canvasSize.width, height: canvasSize.height)
     guard let png = bitmap.representation(using: .png, properties: [:]) else {
         FileHandle.standardError.write(Data("error: PNG encoding failed\n".utf8))
         exit(1)

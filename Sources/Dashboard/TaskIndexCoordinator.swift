@@ -607,8 +607,12 @@ final class TaskIndexCoordinator: ObservableObject {
         telegramService: TelegramService,
         includeBotsInAISearch: Bool
     ) async -> [TGChat] {
+        // Drop user-archived chats before any task extraction —
+        // mirrors the reply-queue eligibility filter so archiving a
+        // chat removes it from BOTH surfaces.
+        let archivedIds = ArchivedChatsStore.archivedIds()
         let sorted = chats
-            .filter { $0.isInMainList && !$0.chatType.isChannel }
+            .filter { $0.isInMainList && !$0.chatType.isChannel && !archivedIds.contains($0.id) }
             .sorted {
                 let lhsDate = $0.lastMessage?.date ?? .distantPast
                 let rhsDate = $1.lastMessage?.date ?? .distantPast

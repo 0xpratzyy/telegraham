@@ -565,12 +565,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             defer: false
         )
         window.title = PidgyBranding.dashboardWindowTitle
+        // Hide the centered "Pidgy" title text — the sidebar already
+        // brands the app, and the bare title in the transparent
+        // titlebar just adds noise. Traffic lights + titlebar accessory
+        // (sidebar toggle) stay.
+        window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unifiedCompact
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = hostingView
         window.center()
         window.isReleasedWhenClosed = false
+
+        // Sidebar toggle pinned to the title bar, immediately to the
+        // right of the traffic lights (Granola-style). A `.leading`
+        // titlebar accessory always shows there regardless of which
+        // page is up; it posts `.pidgyToggleSidebar`, which
+        // DashboardView animates.
+        let toggle = NSTitlebarAccessoryViewController()
+        toggle.layoutAttribute = .leading
+        let toggleHost = NSHostingView(rootView: SidebarToggleTitlebarButton())
+        toggleHost.frame = NSRect(x: 0, y: 0, width: 42, height: 28)
+        toggle.view = toggleHost
+        window.addTitlebarAccessoryViewController(toggle)
+
         self.dashboardWindow = window
 
         window.makeKeyAndOrderFront(nil)
