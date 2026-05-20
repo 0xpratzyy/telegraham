@@ -18,7 +18,14 @@ struct PidgyApp: App {
                 Button("Check for Updates…") {
                     appDelegate.triggerCheckForUpdates()
                 }
-                .disabled(!appDelegate.canCheckForUpdates)
+                // No `.disabled` guard: SwiftUI evaluates the menu's
+                // enabled state once at build time — before
+                // applicationDidFinishLaunching wires up the updater —
+                // and `canCheckForUpdates` (a plain computed property)
+                // isn't observable, so a disabled state would stick
+                // forever. The action safely no-ops if the updater
+                // isn't ready, and by the time a user can click it,
+                // it always is.
             }
         }
     }

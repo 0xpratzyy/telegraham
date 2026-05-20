@@ -390,12 +390,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         updaterController?.checkForUpdates(nil)
     }
 
-    /// Whether the "Check for Updates…" menu item should be enabled —
-    /// false under tests (no updater) so the command can grey out.
-    var canCheckForUpdates: Bool {
-        updaterController != nil
-    }
-
     /// Cancel the background graph-build loop. Called by
     /// `PreferencesResetService.deleteAllLocalData` before the DB file is
     /// removed — otherwise the loop's next iteration would `await
