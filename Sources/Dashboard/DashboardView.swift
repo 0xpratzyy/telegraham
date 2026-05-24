@@ -91,9 +91,11 @@ struct DashboardView: View {
                             ? attentionStore.isFollowUpsLoading
                             : taskIndex.isUserInitiatedRefreshing,
                         onRefresh: refreshDashboard,
-                        // Reserve room for the floating show-sidebar
-                        // button when collapsed (button is 30pt + 12pt
-                        // leading pad; clear it with a touch more).
+                        // When the sidebar is collapsed the top bar
+                        // shifts to the window's left edge, where the
+                        // titlebar's traffic lights + sidebar-toggle
+                        // accessory sit. Inset the breadcrumb so it
+                        // doesn't tuck under those controls.
                         leadingInset: isSidebarCollapsed ? 44 : 0
                     )
                 }
@@ -734,9 +736,9 @@ struct DashboardTopBar: View {
     let lastRefreshAt: Date?
     let isRefreshing: Bool
     let onRefresh: () -> Void
-    /// Extra leading space reserved for the floating "show sidebar"
-    /// button when the sidebar is collapsed, so the breadcrumb
-    /// doesn't render underneath it.
+    /// Extra leading space for the breadcrumb when the sidebar is
+    /// collapsed, so it clears the titlebar's traffic lights +
+    /// sidebar-toggle accessory at the window's left edge.
     var leadingInset: CGFloat = 0
 
     var body: some View {

@@ -261,8 +261,13 @@ fi
 #   - Toolbar + status bar hidden so the wallpaper reads cleanly
 #
 # Pipe stderr through so AppleScript errors actually surface
-# instead of disappearing into a black hole.
-osascript 2>&1 <<APPLESCRIPT
+# instead of disappearing into a black hole. The `|| ...` is
+# essential: under `set -e` a bare osascript that exits nonzero
+# would abort the whole script BEFORE the `APPLESCRIPT_RC` capture
+# below, skipping the cleanup detach and leaving the scratch volume
+# mounted (which then trips the stale-volume guard on the next run).
+APPLESCRIPT_RC=0
+osascript 2>&1 <<APPLESCRIPT || APPLESCRIPT_RC=$?
 tell application "Finder"
   tell disk "$DMG_VOLUME_NAME"
     open
@@ -286,7 +291,6 @@ tell application "Finder"
   end tell
 end tell
 APPLESCRIPT
-APPLESCRIPT_RC=$?
 if [ "$APPLESCRIPT_RC" -ne 0 ]; then
   echo "error: AppleScript customization failed (exit $APPLESCRIPT_RC)" >&2
   hdiutil detach "$MOUNT_DEV" -force >/dev/null 2>&1 || true
@@ -351,9 +355,11 @@ fi
 if [ "$PUBLISH" -eq 1 ]; then
   # Sparkle's sign_update tool lives inside the resolved SPM
   # checkout. We find it dynamically because the path includes
-  # a hash that changes per Xcode version. Prefer the local
-  # /tmp build artifact (recent) and fall back to user DerivedData.
-  SIGN_UPDATE=$(find /private/tmp/pidgy-bug3-test-20260514 \
+  # a hash that changes per Xcode version. Prefer THIS build's
+  # DerivedData ($DERIVED — where xcodebuild just unpacked the
+  # Sparkle SPM artifact), then fall back to the user's global
+  # DerivedData.
+  SIGN_UPDATE=$(find "$DERIVED" \
                      -name "sign_update" -type f \
                      -not -path "*old_dsa*" 2>/dev/null | head -1)
   if [ -z "$SIGN_UPDATE" ]; then

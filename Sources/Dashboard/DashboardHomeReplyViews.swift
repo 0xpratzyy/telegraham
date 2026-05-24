@@ -369,12 +369,10 @@ struct DashboardReplyQueuePage: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    // Right-click → native NSMenu with the "Hide from
-                    // queue" action. macOS users expect right-click
-                    // menus to look native; that's fine here. The
-                    // styled-popover treatment is reserved for places
-                    // where the menu is the primary affordance (e.g.
-                    // the sidebar account menu).
+                    // Right-click → native NSMenu with the per-chat
+                    // actions. macOS users expect right-click menus to
+                    // look native, so this intentionally uses the
+                    // system context menu.
                     .contextMenu {
                         // Hide = suppress this chat in the reply queue
                         // only (sticky, reversible from Preferences).
@@ -528,15 +526,18 @@ struct DashboardReplyDetail: View {
             .background(DashboardCapsuleBackground())
         }
         .task(id: item?.chat.id) {
-            await loadConversationContext()
-            // Reset AI sections when switching items — the previous
-            // chat's suggestions / summary are no longer relevant.
+            // Reset AI sections FIRST, before any await. The error
+            // branches aren't chat-scoped, and loadConversationContext
+            // awaits DB reads + TDLib name lookups — so if we reset
+            // afterwards, the previous chat's error would render under
+            // the newly-selected chat for the whole load window.
             suggestedReplies = []
             suggestedRepliesError = nil
             suggestedRepliesForChatId = nil
             catchUpText = ""
             catchUpError = nil
             catchUpForChatId = nil
+            await loadConversationContext()
         }
     }
 
@@ -742,16 +743,17 @@ struct DashboardReplyDetail: View {
         return records.compactMap { record -> TGMessage? in
             guard let text = record.textContent,
                   !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-            // We don't store the sender's user ID in the local cache,
-            // only the display name. The AI's [ME] marking only
-            // needs `isOutgoing` to be correct (conversationSnippets
-            // routes via `isOutgoing` first); the senderId fallback
-            // path requires myUserId > 0 to fire, which we pass as
-            // 0 here. So `.chat(chatId)` is fine as a placeholder.
+            // Map the real sender user id when we have it (same as
+            // SummaryEngine / TaskIndexCoordinator / PersonProfileService),
+            // falling back to the chat id for anonymous senders. This
+            // keeps per-user [ME] attribution correct even if a caller
+            // later passes a real myUserId.
+            let senderId: TGMessage.MessageSenderId = record.senderUserId
+                .map { .user($0) } ?? .chat(chatId)
             return TGMessage(
                 id: record.id,
                 chatId: chatId,
-                senderId: .chat(chatId),
+                senderId: senderId,
                 date: record.date,
                 textContent: text,
                 mediaType: nil,

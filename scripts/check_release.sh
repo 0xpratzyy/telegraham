@@ -68,15 +68,22 @@ case "$MODE" in
     echo "── Preflight (run before make_dmg.sh --publish) ──"
 
     # 1. Build number strictly greater than the live appcast's top.
-    #    THE bug that broke 1.0.0–1.0.3.
+    #    THE bug that broke 1.0.0–1.0.3. This check must fail CLOSED:
+    #    an unreachable appcast or a non-numeric operand is a FAIL,
+    #    never a WARN — otherwise a network blip silently turns the
+    #    one check that matters into a no-op and green-lights a
+    #    can't-update build.
+    TOP_BUILD="$(appcast_top_build)"
     if [ -z "$APPCAST" ]; then
-      warn "appcast unreachable — can't confirm build number is newer"
-    elif [ -z "$(appcast_top_build)" ]; then
-      warn "appcast has no sparkle:version to compare against"
-    elif [ "$BUILDNUM" -gt "$(appcast_top_build)" ] 2>/dev/null; then
-      pass "CURRENT_PROJECT_VERSION ($BUILDNUM) > shipped build ($(appcast_top_build)) — Sparkle will see it as newer"
+      fail "appcast unreachable ($FEED_URL) — cannot confirm the build number is newer. Re-run online; do NOT ship blind."
+    elif ! printf '%s' "$TOP_BUILD" | grep -qE '^[0-9]+$'; then
+      fail "appcast has no numeric sparkle:version to compare against (got '$TOP_BUILD')"
+    elif ! printf '%s' "$BUILDNUM" | grep -qE '^[0-9]+$'; then
+      fail "couldn't read a numeric CURRENT_PROJECT_VERSION from project.yml (got '$BUILDNUM') — check the line isn't quoted/reformatted"
+    elif [ "$BUILDNUM" -gt "$TOP_BUILD" ]; then
+      pass "CURRENT_PROJECT_VERSION ($BUILDNUM) > shipped build ($TOP_BUILD) — Sparkle will see it as newer"
     else
-      fail "CURRENT_PROJECT_VERSION ($BUILDNUM) is NOT greater than shipped build ($(appcast_top_build)). Sparkle compares this integer; bump it or no update is offered."
+      fail "CURRENT_PROJECT_VERSION ($BUILDNUM) is NOT greater than shipped build ($TOP_BUILD). Sparkle compares this integer; bump it or no update is offered."
     fi
 
     # 2. Marketing version bumped vs appcast top.
