@@ -343,7 +343,7 @@ final class SlackService: ObservableObject, MessageSource {
         // Only spend rate budget on channels we don't already have cached —
         // the on-load enrichment surfaces the rest instantly. Across launches
         // this covers the whole workspace without re-fetching what we have.
-        // Cap per pass: each channel sleeps ~60s for rate limits, so an
+        // Cap per pass: chatHistory is paced ~1/min by SlackRateLimiter, so an
         // unbounded loop would run for hours. Remaining channels are picked up
         // on later passes (they still have lastMessage == nil).
         let pending = chats.filter { $0.isInMainList && $0.lastMessage == nil }
@@ -360,7 +360,7 @@ final class SlackService: ObservableObject, MessageSource {
                     chats[index] = chats[index].updating(lastMessage: newest)
                 }
             }
-            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            // Pacing handled centrally by SlackRateLimiter (inside chatHistory).
         }
     }
 

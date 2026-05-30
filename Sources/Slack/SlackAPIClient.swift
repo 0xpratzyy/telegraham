@@ -155,6 +155,11 @@ actor SlackAPIClient {
         }
         request.httpBody = Self.encodeForm(form)
 
+        // Proactively pace the tightly-limited read endpoints (~1/min each) so
+        // concurrent callers don't burst into simultaneous 429s. No-op for
+        // generous endpoints. The 429 retry below remains as a backstop.
+        await SlackRateLimiter.shared.acquireIfLimited(method)
+
         // One retry honoring Retry-After on a 429.
         for attempt in 0..<2 {
             let data: Data
