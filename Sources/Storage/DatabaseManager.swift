@@ -30,6 +30,31 @@ actor DatabaseManager {
         let textContent: String?
         let mediaTypeRaw: String?
         let isOutgoing: Bool
+        /// Which account this row belongs to. Defaults to `.telegram` so
+        /// legacy rows and Telegram-only write paths are unaffected.
+        let source: SourceID
+
+        init(
+            id: Int64,
+            chatId: Int64,
+            senderUserId: Int64?,
+            senderName: String?,
+            date: Date,
+            textContent: String?,
+            mediaTypeRaw: String?,
+            isOutgoing: Bool,
+            source: SourceID = .telegram
+        ) {
+            self.id = id
+            self.chatId = chatId
+            self.senderUserId = senderUserId
+            self.senderName = senderName
+            self.date = date
+            self.textContent = textContent
+            self.mediaTypeRaw = mediaTypeRaw
+            self.isOutgoing = isOutgoing
+            self.source = source
+        }
     }
 
     struct ScoredMessageRecord: Sendable, Equatable {
@@ -256,7 +281,7 @@ actor DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                         FROM messages
                         WHERE chat_id = ?
                         ORDER BY date DESC, id DESC
@@ -285,7 +310,7 @@ actor DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                         FROM messages
                         WHERE chat_id = ?
                           AND (? IS NULL OR date >= ?)
@@ -347,7 +372,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                             FROM messages
                             WHERE (\(senderClauses))
                               AND (? IS NULL OR date >= ?)
@@ -363,7 +388,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                             FROM messages
                             WHERE (\(senderClauses))
                               AND (? IS NULL OR date >= ?)
@@ -955,7 +980,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -970,7 +995,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -1022,7 +1047,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -1037,7 +1062,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -1090,7 +1115,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                             FROM messages
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0
@@ -1106,7 +1131,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                             FROM messages
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0
@@ -1140,7 +1165,7 @@ actor DatabaseManager {
                     guard let row = try Row.fetchOne(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                             FROM messages
                             WHERE id = ? AND chat_id = ?
                             LIMIT 1
@@ -2035,7 +2060,7 @@ actor DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
                         FROM messages
                         WHERE sender_user_id = ?
                         ORDER BY date DESC, id DESC
@@ -2463,15 +2488,16 @@ actor DatabaseManager {
             try db.execute(
                 sql: """
                     INSERT INTO messages
-                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id, chat_id) DO UPDATE SET
                         sender_user_id = excluded.sender_user_id,
                         sender_name = excluded.sender_name,
                         date = excluded.date,
                         text_content = excluded.text_content,
                         media_type = excluded.media_type,
-                        is_outgoing = excluded.is_outgoing
+                        is_outgoing = excluded.is_outgoing,
+                        source = excluded.source
                     """,
                 arguments: [
                     record.id,
@@ -2481,7 +2507,8 @@ actor DatabaseManager {
                     record.date.timeIntervalSince1970,
                     record.textContent,
                     record.mediaTypeRaw,
-                    record.isOutgoing ? 1 : 0
+                    record.isOutgoing ? 1 : 0,
+                    record.source.rawValue
                 ]
             )
             if contentChanged {
@@ -2716,6 +2743,11 @@ actor DatabaseManager {
     private static func messageRecord(from row: Row) -> MessageRecord {
         let timestamp: Double = row["date"]
         let isOutgoingValue: Int64 = row["is_outgoing"]
+        // Defensive: SELECTs that don't project `source` (or rows that
+        // predate the column) decode as nil — treat those as Telegram,
+        // which matches every pre-multi-source row.
+        let sourceRaw: String? = row["source"]
+        let source = sourceRaw.flatMap(SourceID.init(rawValue:)) ?? .telegram
 
         return MessageRecord(
             id: row["id"],
@@ -2725,7 +2757,8 @@ actor DatabaseManager {
             date: Date(timeIntervalSince1970: timestamp),
             textContent: row["text_content"],
             mediaTypeRaw: row["media_type"],
-            isOutgoing: isOutgoingValue != 0
+            isOutgoing: isOutgoingValue != 0,
+            source: source
         )
     }
 
@@ -2750,5 +2783,65 @@ actor DatabaseManager {
             messageCountAtExtraction: row["message_count_at_extraction"] ?? 0,
             lastExtractedAt: Date(timeIntervalSince1970: timestamp)
         )
+    }
+
+    // MARK: - ID Map (source-neutral id minting)
+
+    /// Reserved floor for synthetic ids minted for non-Telegram sources.
+    /// Telegram uses native `Int64` ids in the lower portion of the
+    /// space; anything we mint sits at or above 9e18 so the two spaces
+    /// never collide — meaning existing Telegram rows stay untouched
+    /// and we don't have to migrate them through the map.
+    static let idMapReservedBandFloor: Int64 = 9_000_000_000_000_000_000
+
+    /// Returns the synthetic `Int64` id for `(source, nativeId)`,
+    /// allocating a new one in the reserved high band the first time we
+    /// see the pair. Telegram callers should not use this — they
+    /// already have a stable Int64 id from TDLib.
+    ///
+    /// Allocation is a single global `MAX(int_id) + 1` across the shared
+    /// reserved band (≥ `idMapReservedBandFloor`), so every source draws
+    /// from one monotonic counter and two accounts can never be handed
+    /// the same id. (A per-source MAX would give every source the floor
+    /// as its first id and collide on the `int_id` PRIMARY KEY the moment
+    /// a second non-Telegram account connected.) The lookup-and-insert
+    /// runs in one write so concurrent mints can't race onto the same id.
+    func mintId(source: SourceID, nativeId: String) async throws -> Int64 {
+        guard let pool = databasePool else { throw DatabaseManagerError.unavailable }
+        let sourceRaw = source.rawValue
+        return try await pool.write { db in
+            if let existing = try Int64.fetchOne(
+                db,
+                sql: "SELECT int_id FROM id_map WHERE source = ? AND native_id = ?",
+                arguments: [sourceRaw, nativeId]
+            ) {
+                return existing
+            }
+            let currentMax = try Int64.fetchOne(
+                db,
+                sql: "SELECT MAX(int_id) FROM id_map"
+            ) ?? (Self.idMapReservedBandFloor - 1)
+            let nextId = max(currentMax, Self.idMapReservedBandFloor - 1) + 1
+            try db.execute(
+                sql: "INSERT INTO id_map (int_id, source, native_id) VALUES (?, ?, ?)",
+                arguments: [nextId, sourceRaw, nativeId]
+            )
+            return nextId
+        }
+    }
+
+    /// Reverse lookup — recover the backend's native id (e.g. a Slack
+    /// "C0123ABC") from a synthetic Int64. Needed by adapters that have
+    /// to call the underlying API using the real id.
+    func nativeId(source: SourceID, intId: Int64) async throws -> String? {
+        guard let pool = databasePool else { throw DatabaseManagerError.unavailable }
+        let sourceRaw = source.rawValue
+        return try await pool.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT native_id FROM id_map WHERE source = ? AND int_id = ?",
+                arguments: [sourceRaw, intId]
+            )
+        }
     }
 }

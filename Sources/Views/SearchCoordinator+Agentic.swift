@@ -52,8 +52,8 @@ extension SearchCoordinator {
         }
 
         let chatById = Dictionary(uniqueKeysWithValues: allChats.map { ($0.id, $0) })
-        let myUserId = telegramService.currentUser?.id ?? 0
-        let myUsername = telegramService.currentUser?.username
+        let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
+        let myUsername = SourceRegistry.shared.currentUser(for: .telegram)?.username
 
         if replyQueueQuery {
             let execution = await ReplyQueueEngine.shared.search(
@@ -1188,7 +1188,7 @@ extension SearchCoordinator {
 
         if textMessages.count < desiredCount || (requiresDateProbe && inRangeCount(from: textMessages) < desiredCount) {
             let firstFetchLimit = requiresDateProbe ? max(desiredCount, step) : desiredCount
-            if let fetched = try? await telegramService.getChatHistory(chatId: chat.id, limit: firstFetchLimit),
+            if let fetched = try? await SourceRegistry.shared.chatHistory(for: chat, limit: firstFetchLimit),
                !fetched.isEmpty {
                 await cache.cacheMessages(chatId: chat.id, messages: fetched)
                 for message in fetched {
@@ -1211,8 +1211,8 @@ extension SearchCoordinator {
                 let fetchLimit = min(step, remaining)
                 guard fetchLimit > 0 else { break }
 
-                guard let older = try? await telegramService.getChatHistory(
-                    chatId: chat.id,
+                guard let older = try? await SourceRegistry.shared.chatHistory(
+                    for: chat,
                     fromMessageId: oldestKnownId,
                     limit: fetchLimit
                 ), !older.isEmpty else {
@@ -1278,8 +1278,8 @@ extension SearchCoordinator {
             return applyTimeRange(messages, timeRange: timeRange)
         }
 
-        if let older = try? await telegramService.getChatHistory(
-            chatId: chat.id,
+        if let older = try? await SourceRegistry.shared.chatHistory(
+            for: chat,
             fromMessageId: oldestKnownId,
             limit: toFetch
         ), !older.isEmpty {

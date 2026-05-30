@@ -69,6 +69,26 @@ enum DeepLinkGenerator {
         return false
     }
 
+    /// Opens a Slack chat in the Slack app, falling back to the web client.
+    /// The synthetic chat id is resolved back to its native Slack id
+    /// (`C…`/`D…`/`G…`) via the id map, then we try `slack://` and finally
+    /// `https://app.slack.com`. `chat.source.account` holds the team id.
+    @MainActor @discardableResult
+    static func openSlackChat(_ chat: TGChat) async -> Bool {
+        guard let channel = try? await DatabaseManager.shared.nativeId(source: chat.source, intId: chat.id) else {
+            return false
+        }
+        let team = chat.source.account
+        let candidates = [
+            "slack://channel?team=\(team)&id=\(channel)",
+            "https://app.slack.com/client/\(team)/\(channel)"
+        ].compactMap(URL.init(string:))
+        for url in candidates where NSWorkspace.shared.open(url) {
+            return true
+        }
+        return false
+    }
+
     /// Opens a URL with the default handler (Telegram for tg:// links).
     @discardableResult
     static func openInTelegram(_ url: URL) -> Bool {

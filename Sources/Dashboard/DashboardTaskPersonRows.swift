@@ -50,7 +50,7 @@ struct DashboardTaskRow: View {
     }
 
     private var chat: TGChat? {
-        telegramService.visibleChats.first { $0.id == task.chatId }
+        SourceRegistry.shared.visibleChats.first { $0.id == task.chatId }
             ?? telegramService.chats.first { $0.id == task.chatId }
     }
 
@@ -119,7 +119,7 @@ struct DashboardPersonRow: View {
     }
 
     private var privateChat: TGChat? {
-        let allChats = telegramService.visibleChats + telegramService.chats
+        let allChats = SourceRegistry.shared.visibleChats + telegramService.chats
         return allChats.first { chat in
             guard case .privateChat(let userId) = chat.chatType else { return false }
             return userId == contact.entityId

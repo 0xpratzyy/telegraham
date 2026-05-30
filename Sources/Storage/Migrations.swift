@@ -477,6 +477,50 @@ enum PidgyMigrations {
             try db.execute(sql: "DROP TABLE IF EXISTS ai_usage")
         }
 
+        migrator.registerMigration("v17_id_map_and_message_source") { db in
+            // Source-neutral identifier mapping table.
+            //
+            // Pidgy was Telegram-only, where every chat / message id is a stable
+            // Int64 the backend assigns. Slack identifies chats and messages with
+            // strings ("C0123ABC", "1700000000.000100"), so for non-Telegram
+            // sources we mint a synthetic Int64 per (source, native_id) pair and
+            // keep the reverse lookup here. Telegram entities never go through
+            // this table — they keep their native ids, which fit in the lower
+            // portion of the Int64 space. Slack synthetic ids are minted in the
+            // reserved high band (>= 9e18) so the two spaces never collide and
+            // existing Telegram rows in `messages` / caches stay untouched.
+            try db.execute(sql: """
+                CREATE TABLE id_map (
+                    int_id INTEGER PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    native_id TEXT NOT NULL,
+                    UNIQUE(source, native_id)
+                )
+                """)
+
+            // Supports MAX(int_id) WHERE source = ? for fast next-id allocation.
+            // The UNIQUE constraint already gives us the (source, native_id)
+            // lookup index; this adds the source-only filter.
+            try db.execute(sql: """
+                CREATE INDEX idx_id_map_source
+                ON id_map(source)
+                """)
+
+            // Additive `source` column on the messages cache so it can hold
+            // Telegram + Slack rows side-by-side. Default keeps every existing
+            // row tagged 'telegram' — this is a free, non-breaking change for
+            // anyone upgrading.
+            try db.execute(sql: """
+                ALTER TABLE messages
+                ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram'
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX idx_messages_source
+                ON messages(source)
+                """)
+        }
+
         return migrator
     }
 }

@@ -236,14 +236,16 @@ struct DashboardEvidenceContextRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            // Left gutter — bright on the source message that drove
-            // extraction, faint on surrounding context messages.
-            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                .fill(item.isSource ? PidgyDashboardTheme.brand : Color.Pidgy.border2)
-                .frame(width: 2)
-                .frame(maxHeight: .infinity)
+            // Per-sender avatar makes the evidence read like a chat thread.
+            // The source message that drove extraction keeps its tinted
+            // background + badge for emphasis.
+            AvatarView(
+                initials: Self.initials(from: item.senderName),
+                colorIndex: abs(item.senderName.hashValue % 8),
+                size: 26
+            )
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(item.senderName)
                         .font(PidgyDashboardTheme.metadataMediumFont)
@@ -285,6 +287,14 @@ struct DashboardEvidenceContextRow: View {
                       ? PidgyDashboardTheme.brand.opacity(0.06)
                       : Color.clear)
         )
+    }
+
+    private static func initials(from name: String) -> String {
+        let words = name.split(separator: " ")
+        if words.count >= 2 {
+            return "\(words[0].prefix(1))\(words[1].prefix(1))".uppercased()
+        }
+        return String(name.prefix(2)).uppercased()
     }
 }
 
@@ -415,10 +425,10 @@ struct DashboardPersonDetail: View {
 
     private func loadAIProfile(for contact: RelationGraph.Node?) async {
         guard let contact, aiService.isConfigured else { return }
-        let myUserId = telegramService.currentUser?.id ?? 0
+        let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
         let chatTitleResolver: (Int64) -> String = { [weak telegramService] chatId in
             guard let telegramService else { return "" }
-            if let chat = (telegramService.visibleChats + telegramService.chats).first(where: { $0.id == chatId }) {
+            if let chat = (SourceRegistry.shared.visibleChats + telegramService.chats).first(where: { $0.id == chatId }) {
                 return chat.title
             }
             return ""
@@ -450,7 +460,7 @@ struct DashboardPersonDetail: View {
     }
 
     private var allChats: [TGChat] {
-        let allChats = telegramService.visibleChats + telegramService.chats
+        let allChats = SourceRegistry.shared.visibleChats + telegramService.chats
         var seen = Set<Int64>()
         return allChats.filter { seen.insert($0.id).inserted }
     }

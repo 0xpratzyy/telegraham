@@ -13,7 +13,11 @@ struct ReplySignalEvaluation {
 
 enum ConversationReplyHeuristics {
     static func messageIsFromMe(_ message: TGMessage, myUserId: Int64) -> Bool {
-        if case .user(let senderId) = message.senderId {
+        // `isOutgoing` is the authoritative "I sent this" flag, and the
+        // only reliable signal for non-Telegram sources where the sender
+        // id is a minted/synthetic value rather than `myUserId`.
+        if message.isOutgoing { return true }
+        if case .user(let senderId) = message.senderId, myUserId > 0 {
             return senderId == myUserId
         }
         return false

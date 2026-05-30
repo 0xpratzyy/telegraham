@@ -358,7 +358,8 @@ struct DashboardTelegramAvatar: View {
             // convention) so the list scans faster — squircle = group,
             // circle = person. Falls back to circle when the chat hasn't
             // been resolved yet (unknown chats default to person-shape).
-            shape: (chat?.chatType.isOneOnOne ?? true) ? .circle : .squircle
+            shape: (chat?.chatType.isOneOnOne ?? true) ? .circle : .squircle,
+            sourceKind: chat?.source.kind
         )
         .onAppear(perform: requestPhotoIfNeeded)
     }

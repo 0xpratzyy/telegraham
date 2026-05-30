@@ -5,6 +5,7 @@ struct DashboardPreferencesPage: View {
     @EnvironmentObject private var aiService: AIService
     @StateObject private var indexingProgress = IndexScheduler.shared.progress
     @StateObject private var recentSyncProgress = RecentSyncCoordinator.shared.progress
+    @ObservedObject private var slack = SlackConnectionManager.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
 
@@ -96,7 +97,7 @@ struct DashboardPreferencesPage: View {
         }
         .onChange(of: includeBotsInAISearch) {
             telegramService.scheduleBotMetadataWarm(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch
             )
             Task {
@@ -253,7 +254,7 @@ struct DashboardPreferencesPage: View {
             DashboardPreferenceStatusItem(
                 title: "Telegram",
                 value: authStateDescription,
-                caption: telegramService.currentUser?.displayName ?? "No local account",
+                caption: SourceRegistry.shared.currentUser(for: .telegram)?.displayName ?? "No local account",
                 systemImage: "paperplane",
                 tint: telegramService.authState == .ready ? PidgyDashboardTheme.green : PidgyDashboardTheme.yellow
             ),
@@ -303,6 +304,36 @@ struct DashboardPreferencesPage: View {
         }
     }
 
+    private var slackConnected: Bool {
+        if case .connected = slack.state { return true }
+        return false
+    }
+
+    private var slackStatusHint: String {
+        switch slack.state {
+        case .unavailable: return "Slack isn't enabled in this build"
+        case .disconnected: return "Sign in with Slack to add your channels"
+        case .connecting: return "Opening Slack in your browser…"
+        case .connected(let workspace): return workspace
+        case .failed(let message): return message
+        }
+    }
+
+    @ViewBuilder
+    private var slackActionButton: some View {
+        if slackConnected {
+            PrefGhostButton(title: "Disconnect", systemImage: "rectangle.portrait.and.arrow.right", tone: .danger) {
+                slack.disconnect()
+            }
+        } else if slack.state == .connecting {
+            ProgressView().controlSize(.small)
+        } else if slack.state != .unavailable {
+            PrefGhostButton(title: "Connect Slack", systemImage: "link") {
+                Task { await slack.connect() }
+            }
+        }
+    }
+
     private var accountPage: some View {
         VStack(alignment: .leading, spacing: 0) {
             PrefSection(topPadding: 0) {
@@ -313,7 +344,7 @@ struct DashboardPreferencesPage: View {
                     PrefPill(text: authStateDescription, tone: telegramService.authState == .ready ? .green : .amber)
                 }
 
-                if let user = telegramService.currentUser {
+                if let user = SourceRegistry.shared.currentUser(for: .telegram) {
                     PrefField(
                         label: "Account",
                         hint: user.displayName,
@@ -354,12 +385,30 @@ struct DashboardPreferencesPage: View {
                 .padding(.top, 8)
             }
 
+            PrefSection {
+                PrefSectionHead(
+                    title: "Slack",
+                    subtitle: "Connect a workspace (read-only)"
+                ) {
+                    PrefPill(
+                        text: slackConnected ? "Connected" : "Not connected",
+                        tone: slackConnected ? .green : .amber
+                    )
+                }
+
+                PrefField(
+                    label: "Workspace",
+                    hint: slackStatusHint,
+                    right: { slackActionButton }
+                )
+            }
+
             PrefSection(bottomBorder: false) {
                 PrefSectionHead(title: "Account health", subtitle: "What the rest of the app can see")
                 HStack(alignment: .top, spacing: 24) {
                     PrefStatTile(
                         eyebrow: "Visible chats",
-                        value: integerString(telegramService.visibleChats.count),
+                        value: integerString(SourceRegistry.shared.visibleChats.count),
                         hint: "Loaded in the current session",
                         dot: .blue
                     )

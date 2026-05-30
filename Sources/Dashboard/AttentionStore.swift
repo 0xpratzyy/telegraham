@@ -140,7 +140,7 @@ final class AttentionStore: ObservableObject {
                 self.runQueuedRefreshIfNeeded()
             }
 
-            let myUserId = telegramService.currentUser?.id ?? 0
+            let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
             let cache = MessageCacheService.shared
 
             // First pass: prefer cached AI categories for every candidate.
@@ -176,7 +176,7 @@ final class AttentionStore: ObservableObject {
                 if !chatsWithoutCache.isEmpty {
                     let ruleBasedItems = FollowUpPipelineAnalyzer.buildRuleBasedFallbackItems(
                         from: chatsWithoutCache,
-                        myUserId: telegramService.currentUser?.id
+                        myUserId: SourceRegistry.shared.currentUser(for: .telegram)?.id
                     )
                     initialItems.append(contentsOf: ruleBasedItems)
                 }
@@ -301,11 +301,11 @@ final class AttentionStore: ObservableObject {
         backgroundRefreshTask?.cancel()
         backgroundRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let myUserId = telegramService.currentUser?.id ?? 0
+            let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
 
             var staleChats: [TGChat] = []
             for item in followUpItems {
-                guard let currentChat = telegramService.visibleChats.first(where: { $0.id == item.chat.id }),
+                guard let currentChat = SourceRegistry.shared.visibleChats.first(where: { $0.id == item.chat.id }),
                       let currentLastMessage = currentChat.lastMessage else {
                     continue
                 }
@@ -402,10 +402,16 @@ final class AttentionStore: ObservableObject {
         telegramService: TelegramService,
         includeBots: Bool
     ) -> [TGChat] {
+        // Reads run through SourceRegistry now so any newly-registered
+        // source (Slack, eventually others) automatically flows into the
+        // same reply queue without further changes here. `telegramService`
+        // is kept in the signature for now so downstream helpers that
+        // still take it (FollowUpPipelineAnalyzer.categorizeChat) compile
+        // unchanged; Batch B migrates those to be source-neutral.
         FollowUpPipelineAnalyzer.collectCandidateChats(
-            from: telegramService.visibleChats,
+            from: SourceRegistry.shared.visibleChats,
             includeBots: includeBots,
-            isLikelyBot: { telegramService.isLikelyBotChat($0) }
+            isLikelyBot: { SourceRegistry.shared.isLikelyBot(chat: $0) }
         )
     }
 

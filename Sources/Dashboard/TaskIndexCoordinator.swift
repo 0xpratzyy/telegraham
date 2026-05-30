@@ -330,14 +330,19 @@ final class TaskIndexCoordinator: ObservableObject {
             return
         }
 
-        guard telegramService.authState == .ready else {
+        // Source-neutral readiness: proceed when at least one registered
+        // source is ready. With only Telegram registered today this is
+        // equivalent to checking `authState == .ready`; once a Slack
+        // source is in the registry it lets task indexing surface what's
+        // available while another source is still mid-setup.
+        guard SourceRegistry.shared.anyReady else {
             lastError = "Telegram is not ready yet."
             logger.warning("refreshNow: Telegram not ready (state=\(String(describing: telegramService.authState), privacy: .public))")
             return
         }
 
         await telegramService.ensureBotFilterMetadataReady(
-            for: telegramService.visibleChats,
+            for: SourceRegistry.shared.visibleChats,
             includeBots: includeBotsInAISearch,
             priority: .background
         )
@@ -347,9 +352,9 @@ final class TaskIndexCoordinator: ObservableObject {
             aiService: aiService,
             includeBotsInAISearch: includeBotsInAISearch
         )
-        let myUserId = telegramService.currentUser?.id ?? 0
+        let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
         let candidateChats = await Self.candidateChats(
-            from: telegramService.visibleChats,
+            from: SourceRegistry.shared.visibleChats,
             telegramService: telegramService,
             includeBotsInAISearch: includeBotsInAISearch
         )
@@ -529,7 +534,7 @@ final class TaskIndexCoordinator: ObservableObject {
         let stored = await DatabaseManager.shared.loadDashboardTopics()
 
         let excludedChatIds = await Self.botChatIds(
-            in: telegramService.visibleChats,
+            in: SourceRegistry.shared.visibleChats,
             telegramService: telegramService,
             includeBotsInAISearch: includeBotsInAISearch
         )
@@ -542,7 +547,7 @@ final class TaskIndexCoordinator: ObservableObject {
         }
 
         let titleByChatId = Dictionary(
-            uniqueKeysWithValues: telegramService.visibleChats.map { ($0.id, $0.title) }
+            uniqueKeysWithValues: SourceRegistry.shared.visibleChats.map { ($0.id, $0.title) }
         )
         let messages = records.map { record in
             Self.tgMessage(
@@ -571,7 +576,7 @@ final class TaskIndexCoordinator: ObservableObject {
     ) async -> [DashboardTask] {
         guard let telegramService else { return loadedTasks }
         let taskChatIds = Set(loadedTasks.map(\.chatId))
-        var relevantChats = telegramService.visibleChats.filter { taskChatIds.contains($0.id) }
+        var relevantChats = SourceRegistry.shared.visibleChats.filter { taskChatIds.contains($0.id) }
         var resolvedChatIds = Set(relevantChats.map(\.id))
 
         for chatId in taskChatIds.subtracting(resolvedChatIds) {

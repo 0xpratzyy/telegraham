@@ -88,8 +88,8 @@ final class ReplyQueueEngine {
         onProgress: ((SearchExecution) -> Void)? = nil
     ) async -> SearchExecution {
         let totalStartedAt = Date()
-        let myUserId = telegramService.currentUser?.id ?? 0
-        let myUsername = telegramService.currentUser?.username
+        let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
+        let myUsername = SourceRegistry.shared.currentUser(for: .telegram)?.username
 
         let aiInvocation: AIInvocation? = {
             guard aiService.isConfigured,
@@ -1006,7 +1006,7 @@ final class ReplyQueueEngine {
                 replyQueueQuery: replyQueueQuery
             ),
             includeBots: includeBotsInAISearch,
-            isLikelyBot: { telegramService.isLikelyBotChat($0) }
+            isLikelyBot: { SourceRegistry.shared.isLikelyBot(chat:$0) }
         )
 
         return (

@@ -141,6 +141,7 @@ final class PanelManager {
                 })
                 .environmentObject(telegramService)
                 .environmentObject(aiService)
+                .environmentObject(SourceRegistry.shared)
         )
         hostingView.translatesAutoresizingMaskIntoConstraints = false
 

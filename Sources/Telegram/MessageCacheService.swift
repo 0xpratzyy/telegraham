@@ -41,6 +41,29 @@ actor MessageCacheService {
         let textContent: String?
         let mediaTypeRaw: String?
         let isOutgoing: Bool
+        let source: SourceID
+
+        init(
+            id: Int64,
+            chatId: Int64,
+            senderUserId: Int64?,
+            senderName: String?,
+            date: Date,
+            textContent: String?,
+            mediaTypeRaw: String?,
+            isOutgoing: Bool,
+            source: SourceID = .telegram
+        ) {
+            self.id = id
+            self.chatId = chatId
+            self.senderUserId = senderUserId
+            self.senderName = senderName
+            self.date = date
+            self.textContent = textContent
+            self.mediaTypeRaw = mediaTypeRaw
+            self.isOutgoing = isOutgoing
+            self.source = source
+        }
 
         static func == (lhs: CachedMessage, rhs: CachedMessage) -> Bool {
             lhs.id == rhs.id
@@ -196,7 +219,8 @@ actor MessageCacheService {
                 date: old.date,
                 textContent: textContent,
                 mediaTypeRaw: mediaType?.rawValue,
-                isOutgoing: old.isOutgoing
+                isOutgoing: old.isOutgoing,
+                source: old.source
             )
             memoryCache[chatId] = existing
         }
@@ -390,7 +414,8 @@ extension MessageCacheService.CachedMessage {
             date: msg.date,
             textContent: msg.textContent,
             mediaTypeRaw: msg.mediaType?.rawValue,
-            isOutgoing: msg.isOutgoing
+            isOutgoing: msg.isOutgoing,
+            source: msg.source
         )
     }
 
@@ -403,7 +428,8 @@ extension MessageCacheService.CachedMessage {
             date: record.date,
             textContent: record.textContent,
             mediaTypeRaw: record.mediaTypeRaw,
-            isOutgoing: record.isOutgoing
+            isOutgoing: record.isOutgoing,
+            source: record.source
         )
     }
 
@@ -424,7 +450,8 @@ extension MessageCacheService.CachedMessage {
             mediaType: mediaTypeRaw.flatMap { TGMessage.MediaType(rawValue: $0) },
             isOutgoing: isOutgoing,
             chatTitle: nil,
-            senderName: senderName
+            senderName: senderName,
+            source: source
         )
     }
 
@@ -437,7 +464,8 @@ extension MessageCacheService.CachedMessage {
             date: date,
             textContent: textContent,
             mediaTypeRaw: mediaTypeRaw,
-            isOutgoing: isOutgoing
+            isOutgoing: isOutgoing,
+            source: source
         )
     }
 }

@@ -25,6 +25,7 @@ enum LauncherChromeAction: String, CaseIterable, Identifiable {
 struct LauncherView: View {
     @EnvironmentObject var telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
+    @EnvironmentObject var registry: SourceRegistry
     @ObservedObject var photoManager = ChatPhotoManager.shared
     @StateObject private var searchCoordinator = SearchCoordinator()
     @StateObject private var attentionStore = AttentionStore.shared
@@ -93,20 +94,41 @@ struct LauncherView: View {
             Set(followUpItems.filter { $0.category == subFilter }.map(\.chat.id))
         }
 
-        return LauncherVisibleChatsFilter.filterChats(
-            from: telegramService.visibleChats,
+        let filtered = LauncherVisibleChatsFilter.filterChats(
+            from: SourceRegistry.shared.visibleChats,
             scope: queryScope(for: activeFilter),
             pipelineMatchingIds: pipelineMatchingIds,
             searchText: searchText,
             searchResultChatIds: searchResultChatIds,
             includeBots: includeBotsInAISearch,
-            isLikelyBot: { telegramService.isLikelyBotChat($0) }
+            isLikelyBot: { SourceRegistry.shared.isLikelyBot(chat:$0) }
         )
+        // Browse view (no query): keep each source's own ordering — Telegram's
+        // smart order stays intact, so muted / low-priority groups don't float
+        // up — and only interleave non-Telegram chats by recency relative to
+        // the Telegram list, so Slack slots in without reordering Telegram
+        // among itself. Search results keep their relevance order.
+        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return filtered }
+        var incoming = filtered
+            .filter { $0.source.kind != .telegram }
+            .sorted { ($0.lastActivityDate ?? .distantPast) > ($1.lastActivityDate ?? .distantPast) }
+        guard !incoming.isEmpty else { return filtered }
+        var merged: [TGChat] = []
+        merged.reserveCapacity(filtered.count)
+        for chat in filtered where chat.source.kind == .telegram {
+            let chatDate = chat.lastActivityDate ?? .distantPast
+            while let next = incoming.first, (next.lastActivityDate ?? .distantPast) > chatDate {
+                merged.append(incoming.removeFirst())
+            }
+            merged.append(chat)
+        }
+        merged.append(contentsOf: incoming)
+        return merged
     }
 
     private var aiSearchSourceChats: [TGChat] {
-        telegramService.visibleChats.filter { chat in
-            includeBotsInAISearch || !telegramService.isLikelyBotChat(chat)
+        SourceRegistry.shared.visibleChats.filter { chat in
+            includeBotsInAISearch || !SourceRegistry.shared.isLikelyBot(chat:chat)
         }
     }
 
@@ -171,8 +193,8 @@ struct LauncherView: View {
                     currentResolution: resolution,
                     cachedMessageCount: recentMessages.count
                 ),
-                   let fetched = try? await telegramService.getChatHistory(
-                    chatId: chat.id,
+                   let fetched = try? await SourceRegistry.shared.chatHistory(
+                    for: chat,
                     limit: LauncherChatPreviewResolver.contextMessageLimit
                    ),
                    !fetched.isEmpty {
@@ -249,7 +271,7 @@ struct LauncherView: View {
             isSearchFocused = true
             selectedIndex = 0
             telegramService.scheduleBotMetadataWarm(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch
             )
             refreshChatPreviews()
@@ -274,7 +296,7 @@ struct LauncherView: View {
             guard !telegramService.chats.isEmpty else { return }
 
             await telegramService.ensureBotFilterMetadataReady(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch,
                 priority: .background
             )
@@ -296,7 +318,7 @@ struct LauncherView: View {
                 .debounce(for: .seconds(10), scheduler: RunLoop.main)
         ) { _ in
             telegramService.scheduleBotMetadataWarm(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch
             )
             backgroundRefreshPipeline()
@@ -337,7 +359,7 @@ struct LauncherView: View {
         }
         .onChange(of: includeBotsInAISearch) {
             telegramService.scheduleBotMetadataWarm(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch
             )
             refreshChatPreviews()
@@ -400,7 +422,7 @@ struct LauncherView: View {
             // Connection status
             HStack(spacing: 4) {
                 StatusDot(isConnected: telegramService.authState == .ready)
-                if let user = telegramService.currentUser {
+                if let user = SourceRegistry.shared.currentUser(for: .telegram) {
                     Text(user.firstName)
                         .font(Font.Pidgy.monoSm)
                         .foregroundStyle(Color.Pidgy.fg3)
@@ -1621,6 +1643,11 @@ struct LauncherView: View {
 
     private func openChat(_ chat: TGChat) {
         Task { @MainActor in
+            if chat.source.kind == .slack {
+                _ = await DeepLinkGenerator.openSlackChat(chat)
+                NSApp.keyWindow?.orderOut(nil)
+                return
+            }
             Task {
                 await IndexScheduler.shared.prioritize(chatId: chat.id)
                 await RecentSyncCoordinator.shared.prioritize(chatId: chat.id)

@@ -109,6 +109,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // is bundled — source builds make zero network calls.
         PidgyTelemetry.start()
 
+        // Register the Telegram source with the SourceRegistry so the
+        // rest of the app (reply queue, tasks, search) can read a
+        // unified inbox via `SourceRegistry.shared` instead of holding
+        // the concrete `TelegramService`. Done immediately so the
+        // registry has the source before any consumer queries it; the
+        // source's `isReady` (from the MessageSource conformance)
+        // reflects whether `start(apiId:apiHash:)` has been called and
+        // TDLib has reached `authorizationStateReady`.
+        SourceRegistry.shared.register(telegramService)
+
+        // Restore a previously-connected Slack workspace (if any) and
+        // register it as a second source. No-op when Slack isn't bundled
+        // or the user hasn't connected yet.
+        SlackConnectionManager.shared.restore()
+
         // Sparkle auto-updater. `startingUpdater: true` kicks off an
         // immediate background appcast check; the periodic cadence
         // then follows `SUScheduledCheckInterval` from Info.plist.
@@ -550,6 +565,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let dashboardView = DashboardView()
             .environmentObject(telegramService)
             .environmentObject(aiService)
+            .environmentObject(SourceRegistry.shared)
 
         let hostingView = NSHostingView(rootView: dashboardView)
 
@@ -598,15 +614,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             let didTimeout = Date() >= timeoutAt
             let isReady = Self.isStartupPipelineReady(
                 authState: telegramService.authState,
-                hasCurrentUser: telegramService.currentUser != nil,
-                hasVisibleChats: !telegramService.visibleChats.isEmpty,
+                hasCurrentUser: SourceRegistry.shared.currentUser(for: .telegram) != nil,
+                hasVisibleChats: !SourceRegistry.shared.visibleChats.isEmpty,
                 isLoading: telegramService.isLoading,
                 didTimeout: didTimeout
             )
 
             if isReady {
                 logger.info(
-                    "Startup readiness satisfied auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
+                    "Startup readiness satisfied auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(SourceRegistry.shared.currentUser(for: .telegram) != nil) visibleChats=\(SourceRegistry.shared.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
                 )
                 return
             }
@@ -618,7 +634,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             if lastLoggedSecond != elapsedSecond, elapsedSecond % 2 == 0 || didTimeout {
                 lastLoggedSecond = elapsedSecond
                 logger.info(
-                    "Startup readiness waiting auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(self.telegramService.currentUser != nil) visibleChats=\(self.telegramService.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
+                    "Startup readiness waiting auth=\(String(describing: self.telegramService.authState), privacy: .public) currentUser=\(SourceRegistry.shared.currentUser(for: .telegram) != nil) visibleChats=\(SourceRegistry.shared.visibleChats.count) isLoading=\(self.telegramService.isLoading) timedOut=\(didTimeout)"
                 )
             }
 

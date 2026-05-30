@@ -30,6 +30,8 @@
 	<string>$(PIDGY_BUNDLED_OPENAI_API_KEY)</string>
 	<key>PidgyBundledSentryDsn</key>
 	<string>$(PIDGY_SENTRY_DSN)</string>
+	<key>PidgyBundledSlackClientId</key>
+	<string>$(PIDGY_SLACK_CLIENT_ID)</string>
 	<key>PidgyBundledTelegramApiHash</key>
 	<string>$(PIDGY_TG_API_HASH)</string>
 	<key>PidgyBundledTelegramApiId</key>

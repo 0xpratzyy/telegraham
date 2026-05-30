@@ -98,7 +98,7 @@ enum FollowUpPipelineAnalyzer {
         let maxAIAttempts = 2
         let defaultNeedMoreMessages = 20
         let cache = MessageCacheService.shared
-        let currentUser = await telegramService.currentUser
+        let currentUser = await SourceRegistry.shared.currentUser(for: .telegram)
         let resolvedMemberCount = await telegramService.resolvedMemberCount(for: chat)
         let effectiveChat = chat.updating(memberCount: resolvedMemberCount ?? chat.memberCount)
 
@@ -110,8 +110,8 @@ enum FollowUpPipelineAnalyzer {
 
         if allMessages.count < initialWindowSize {
             do {
-                let fetched = try await telegramService.getChatHistory(
-                    chatId: chat.id,
+                let fetched = try await SourceRegistry.shared.chatHistory(
+                    for: chat,
                     limit: initialWindowSize
                 )
                 allMessages = fetched
@@ -141,8 +141,8 @@ enum FollowUpPipelineAnalyzer {
                 guard oldestId != 0 else { break }
 
                 do {
-                    let moreMessages = try await telegramService.getChatHistory(
-                        chatId: chat.id,
+                    let moreMessages = try await SourceRegistry.shared.chatHistory(
+                        for: chat,
                         fromMessageId: oldestId,
                         limit: fetchLimit
                     )

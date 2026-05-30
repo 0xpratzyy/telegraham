@@ -27,6 +27,11 @@ enum BundledSecrets {
     /// include one — the AI Settings page falls back to BYO key.
     static let openAIApiKey: String? = stringValue(forKey: "PidgyBundledOpenAIApiKey")
 
+    /// Slack app Client ID for the "Connect Slack" OAuth (PKCE) flow, from
+    /// `PIDGY_SLACK_CLIENT_ID`. Public value — no secret needed with PKCE.
+    /// Nil/blank means Slack is disabled (the Connect button stays hidden).
+    static let slackClientId: String? = stringValue(forKey: "PidgyBundledSlackClientId")
+
     /// Sentry DSN baked in for crash + error telemetry
     /// (`PIDGY_SENTRY_DSN`). Returns nil when blank — `PidgyTelemetry.start`
     /// then skips Sentry init entirely so source builds never make
@@ -99,6 +104,12 @@ enum BundledSecrets {
     /// works on first launch without the user pasting a key.
     static var hasBundledOpenAIKey: Bool {
         openAIApiKey?.isEmpty == false
+    }
+
+    /// True when a Slack Client ID is baked in — gates whether the
+    /// "Connect Slack" entry point is shown.
+    static var hasSlackClientId: Bool {
+        slackClientId?.isEmpty == false
     }
 
     private static func stringValue(forKey key: String) -> String? {

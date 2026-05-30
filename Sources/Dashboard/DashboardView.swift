@@ -11,6 +11,7 @@ enum DashboardReplyQueueMetrics {
 struct DashboardView: View {
     @EnvironmentObject private var telegramService: TelegramService
     @EnvironmentObject private var aiService: AIService
+    @EnvironmentObject private var registry: SourceRegistry
     @StateObject private var attentionStore = AttentionStore.shared
     @StateObject private var taskIndex = TaskIndexCoordinator.shared
     @StateObject private var navigation = DashboardNavigationStore.shared
@@ -45,11 +46,11 @@ struct DashboardView: View {
                     replyCount: DashboardReplyQueueMetrics.sidebarCount(for: attentionStore.followUpItems),
                     openTaskCount: myOpenTaskCount,
                     peopleCount: allContacts.count,
-                    visibleChatCount: telegramService.visibleChats.count,
+                    visibleChatCount: SourceRegistry.shared.visibleChats.count,
                     lastRefreshAt: taskIndex.lastRefreshAt,
-                    accountUser: telegramService.currentUser,
-                    accountName: telegramService.currentUser?.displayName ?? "You",
-                    canLogOut: telegramService.currentUser != nil,
+                    accountUser: SourceRegistry.shared.currentUser(for: .telegram),
+                    accountName: SourceRegistry.shared.currentUser(for: .telegram)?.displayName ?? "You",
+                    canLogOut: SourceRegistry.shared.currentUser(for: .telegram) != nil,
                     onAddTopic: { isAddingTopic = true },
                     onRemoveTopic: { topicId in
                         Task {
@@ -129,7 +130,7 @@ struct DashboardView: View {
         .sheet(isPresented: $isShowingFeedbackSheet) {
             PidgyFeedbackSheet(
                 currentViewLabel: currentPage.feedbackLabel,
-                userFirstName: telegramService.currentUser?.firstName,
+                userFirstName: SourceRegistry.shared.currentUser(for: .telegram)?.firstName,
                 onClose: { isShowingFeedbackSheet = false }
             )
             .preferredColorScheme(.dark)
@@ -188,7 +189,7 @@ struct DashboardView: View {
                 includeBots: includeBotsInAISearch
             )
             telegramService.scheduleBotMetadataWarm(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch
             )
             async let peopleLoad: Void = loadPeople()
@@ -228,7 +229,7 @@ struct DashboardView: View {
         }
         .onChange(of: includeBotsInAISearch) {
             telegramService.scheduleBotMetadataWarm(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch
             )
             Task {
@@ -253,7 +254,7 @@ struct DashboardView: View {
         }
         .onChange(of: visibleChatIDs) {
             telegramService.scheduleBotMetadataWarm(
-                for: telegramService.visibleChats,
+                for: SourceRegistry.shared.visibleChats,
                 includeBots: includeBotsInAISearch
             )
             attentionStore.hydrateCachedFollowUps(
@@ -275,7 +276,7 @@ struct DashboardView: View {
     }
 
     private var visibleChatIDs: [Int64] {
-        telegramService.visibleChats.map(\.id).sorted()
+        SourceRegistry.shared.visibleChats.map(\.id).sorted()
     }
 
     /// `taskIndex.tasks` minus any chats the user has archived.
@@ -294,7 +295,7 @@ struct DashboardView: View {
         DashboardTaskFilter.apply(
             activeTasks,
             ownerFilter: .mine,
-            currentUser: telegramService.currentUser
+            currentUser: SourceRegistry.shared.currentUser(for: .telegram)
         )
     }
 
@@ -314,7 +315,7 @@ struct DashboardView: View {
         // update when chats are added/removed or renamed; the preview-text
         // contribution to topic matching is a minor signal not worth the
         // CPU cost of recomputing on every inbound message.
-        let chatKey = telegramService.visibleChats
+        let chatKey = SourceRegistry.shared.visibleChats
             .map { "\($0.id):\($0.title)" }
             .joined(separator: "|")
         return "\(topicKey)#\(chatKey)"
@@ -322,7 +323,7 @@ struct DashboardView: View {
 
     private var addTopicSuggestions: [DashboardTopicSuggestion] {
         var suggestionsByName: [String: (name: String, count: Int, score: Double, seed: Int64)] = [:]
-        let groupChatIds = Set((telegramService.visibleChats + telegramService.chats).compactMap { chat -> Int64? in
+        let groupChatIds = Set((SourceRegistry.shared.visibleChats + telegramService.chats).compactMap { chat -> Int64? in
             if case .privateChat = chat.chatType { return nil }
             return chat.id
         })
@@ -454,7 +455,7 @@ struct DashboardView: View {
                 tasks: activeTasks,
                 evidenceByTaskId: taskIndex.evidenceByTaskId,
                 ownerPeople: allContacts,
-                currentUser: telegramService.currentUser,
+                currentUser: SourceRegistry.shared.currentUser(for: .telegram),
                 // User-initiated only — see top-bar binding above.
                 isRefreshing: taskIndex.isUserInitiatedRefreshing,
                 aiConfigured: aiService.isConfigured,
@@ -562,7 +563,7 @@ struct DashboardView: View {
 
     private func rebuildSidebarTopicItems() async {
         let topics = taskIndex.topics
-        let snapshots = telegramService.visibleChats.map {
+        let snapshots = SourceRegistry.shared.visibleChats.map {
             DashboardTopicMatcher.ChatSnapshot(
                 id: $0.id,
                 title: $0.title,
@@ -630,7 +631,7 @@ struct DashboardView: View {
     }
 
     private func openChat(chatId: Int64) {
-        guard let chat = (telegramService.visibleChats.first { $0.id == chatId }
+        guard let chat = (SourceRegistry.shared.visibleChats.first { $0.id == chatId }
             ?? telegramService.chats.first { $0.id == chatId }) else {
             return
         }
@@ -639,6 +640,10 @@ struct DashboardView: View {
 
     private func openChat(_ chat: TGChat) {
         Task { @MainActor in
+            if chat.source.kind == .slack {
+                _ = await DeepLinkGenerator.openSlackChat(chat)
+                return
+            }
             Task {
                 await IndexScheduler.shared.prioritize(chatId: chat.id)
                 await RecentSyncCoordinator.shared.prioritize(chatId: chat.id)

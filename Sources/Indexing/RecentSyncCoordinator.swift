@@ -179,7 +179,7 @@ actor RecentSyncCoordinator {
 
     private func snapshot(using telegramService: TelegramService) async -> [TGChat] {
         let visibleChats = await MainActor.run {
-            telegramService.visibleChats
+            SourceRegistry.shared.visibleChats
         }
         let resolvedChats = await resolveMemberCountsIfNeeded(
             in: visibleChats,
@@ -351,12 +351,22 @@ actor RecentSyncCoordinator {
         using telegramService: TelegramService
     ) async -> RecentSyncOutcome {
         do {
-            let messages = try await telegramService.getChatHistory(
-                chatId: chat.id,
-                limit: AppConstants.RecentSync.latestWindowPerChat,
-                onlyLocal: false,
-                priority: .background
-            )
+            let messages: [TGMessage]
+            if chat.source.kind == .telegram {
+                messages = try await telegramService.getChatHistory(
+                    chatId: chat.id,
+                    limit: AppConstants.RecentSync.latestWindowPerChat,
+                    onlyLocal: false,
+                    priority: .background
+                )
+            } else {
+                // Non-Telegram chats can't take Telegram's rate-limiter
+                // knobs; route through the registry to the owning source.
+                messages = try await SourceRegistry.shared.chatHistory(
+                    for: chat,
+                    limit: AppConstants.RecentSync.latestWindowPerChat
+                )
+            }
 
             if !messages.isEmpty {
                 await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: messages, append: false)

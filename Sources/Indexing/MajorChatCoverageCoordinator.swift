@@ -777,12 +777,21 @@ actor MajorChatCoverageCoordinator {
             let messages: [TGMessage]
             do {
                 messages = try await withHistoryFetchTimeout(seconds: historyFetchTimeoutSeconds) {
-                    try await telegramService.getChatHistory(
-                        chatId: chat.id,
+                    if chat.source.kind == .telegram {
+                        return try await telegramService.getChatHistory(
+                            chatId: chat.id,
+                            fromMessageId: requestCursor,
+                            limit: batchSize,
+                            onlyLocal: onlyLocal,
+                            priority: .background
+                        )
+                    }
+                    // Non-Telegram chats route to the owning source
+                    // (no Telegram rate-limiter knobs).
+                    return try await SourceRegistry.shared.chatHistory(
+                        for: chat,
                         fromMessageId: requestCursor,
-                        limit: batchSize,
-                        onlyLocal: onlyLocal,
-                        priority: .background
+                        limit: batchSize
                     )
                 }
             } catch let error as CoverageTimeoutError {
@@ -1164,7 +1173,8 @@ actor MajorChatCoverageCoordinator {
             date: message.date,
             textContent: message.textContent,
             mediaTypeRaw: message.mediaType?.rawValue,
-            isOutgoing: message.isOutgoing
+            isOutgoing: message.isOutgoing,
+            source: message.source
         )
     }
 

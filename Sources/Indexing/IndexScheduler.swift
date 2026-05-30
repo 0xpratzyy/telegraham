@@ -273,7 +273,7 @@ actor IndexScheduler {
 
     private func snapshot(using telegramService: TelegramService) async -> (currentUserId: Int64?, chats: [TGChat]) {
         let snapshot = await MainActor.run {
-            (telegramService.currentUser?.id, telegramService.visibleChats)
+            (SourceRegistry.shared.currentUser(for: .telegram)?.id, SourceRegistry.shared.visibleChats)
         }
         let resolvedChats = await resolveMemberCountsIfNeeded(
             in: snapshot.1,
@@ -373,13 +373,22 @@ actor IndexScheduler {
         var indexedMessageCount = 0
 
         do {
-            let batch = try await telegramService.getChatHistory(
-                chatId: chat.id,
-                fromMessageId: cursor,
-                limit: AppConstants.Indexing.batchSize,
-                onlyLocal: false,
-                priority: .background
-            )
+            let batch: [TGMessage]
+            if chat.source.kind == .telegram {
+                batch = try await telegramService.getChatHistory(
+                    chatId: chat.id,
+                    fromMessageId: cursor,
+                    limit: AppConstants.Indexing.batchSize,
+                    onlyLocal: false,
+                    priority: .background
+                )
+            } else {
+                batch = try await SourceRegistry.shared.chatHistory(
+                    for: chat,
+                    fromMessageId: cursor,
+                    limit: AppConstants.Indexing.batchSize
+                )
+            }
 
             let oldestBatchMessageId = batch.min { lhs, rhs in
                 if lhs.date != rhs.date {
@@ -397,7 +406,8 @@ actor IndexScheduler {
                     date: message.date,
                     textContent: message.textContent,
                     mediaTypeRaw: message.mediaType?.rawValue,
-                    isOutgoing: message.isOutgoing
+                    isOutgoing: message.isOutgoing,
+                    source: message.source
                 )
             }
 

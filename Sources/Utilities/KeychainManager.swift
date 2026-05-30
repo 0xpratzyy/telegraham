@@ -18,6 +18,12 @@ enum KeychainManager {
         case aiModelClaude = "com.pidgy.aiModel.claude"
         case aiApiKey = "com.pidgy.aiApiKey"
         case aiModel = "com.pidgy.aiModel"
+        case slackAccessToken = "com.pidgy.slack.accessToken"
+        case slackRefreshToken = "com.pidgy.slack.refreshToken"
+        case slackTeamId = "com.pidgy.slack.teamId"
+        case slackTeamName = "com.pidgy.slack.teamName"
+        case slackAuthedUserId = "com.pidgy.slack.authedUserId"
+        case slackTokenExpiry = "com.pidgy.slack.tokenExpiry"
     }
 
     enum KeychainError: Error, LocalizedError {
@@ -51,7 +57,9 @@ enum KeychainManager {
         .apiHash,
         .aiApiKey,
         .aiApiKeyOpenAI,
-        .aiApiKeyClaude
+        .aiApiKeyClaude,
+        .slackAccessToken,
+        .slackRefreshToken
     ]
 
     private static var storageDirOverride: URL?

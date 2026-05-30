@@ -204,9 +204,9 @@ actor GraphBuilder {
     }
 
     private func performBuild(using telegramService: TelegramService, forceFullScan: Bool) async {
-        let currentUser = await MainActor.run { telegramService.currentUser }
+        let currentUser = await MainActor.run { SourceRegistry.shared.currentUser(for: .telegram) }
         let visibleChats = await MainActor.run {
-            telegramService.visibleChats
+            SourceRegistry.shared.visibleChats
                 .filter {
                     if case .secretChat = $0.chatType {
                         return false

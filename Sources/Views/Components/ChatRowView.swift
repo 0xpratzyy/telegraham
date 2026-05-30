@@ -19,7 +19,9 @@ struct ChatRowView: View {
                     initials: chat.initials,
                     colorIndex: chat.colorIndex,
                     size: 32,
-                    photo: photoManager.photos[chat.id]
+                    photo: photoManager.photos[chat.id],
+                    avatarURL: chat.avatarURL,
+                    sourceKind: chat.source.kind
                 )
                 .onAppear {
                     if let fileId = chat.smallPhotoFileId {

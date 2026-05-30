@@ -689,7 +689,7 @@ struct DashboardTopicsPage: View {
 
     private var allChats: [TGChat] {
         var seen = Set<Int64>()
-        return (telegramService.visibleChats + telegramService.chats).filter {
+        return (SourceRegistry.shared.visibleChats + telegramService.chats).filter {
             seen.insert($0.id).inserted
         }
     }
