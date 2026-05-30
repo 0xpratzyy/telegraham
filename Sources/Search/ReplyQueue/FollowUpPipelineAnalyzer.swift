@@ -98,7 +98,9 @@ enum FollowUpPipelineAnalyzer {
         let maxAIAttempts = 2
         let defaultNeedMoreMessages = 20
         let cache = MessageCacheService.shared
-        let currentUser = await SourceRegistry.shared.currentUser(for: .telegram)
+        // Per-chat identity: use THIS chat's account so "from me" is correct for
+        // Slack/other sources too (Telegram chats resolve identically).
+        let currentUser = await SourceRegistry.shared.currentUser(forAccount: chat.source)
         let resolvedMemberCount = await telegramService.resolvedMemberCount(for: chat)
         let effectiveChat = chat.updating(memberCount: resolvedMemberCount ?? chat.memberCount)
 

@@ -670,7 +670,7 @@ struct DashboardReplyDetail: View {
                 suggestedReplies = []
                 return
             }
-            let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
+            let myUserId = SourceRegistry.shared.currentUser(forAccount: item.chat.source)?.id ?? 0
             let replies = try await aiService.suggestReplies(
                 chatTitle: item.chat.title,
                 messages: messages,
@@ -750,7 +750,7 @@ struct DashboardReplyDetail: View {
                 catchUpError = "No recent messages to summarize."
                 return
             }
-            let myUserId = SourceRegistry.shared.currentUser(for: .telegram)?.id ?? 0
+            let myUserId = SourceRegistry.shared.currentUser(forAccount: item.chat.source)?.id ?? 0
             let summary = try await aiService.catchUpSummary(
                 chatTitle: item.chat.title,
                 messages: messages,
