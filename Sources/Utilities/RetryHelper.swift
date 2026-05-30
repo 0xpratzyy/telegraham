@@ -13,10 +13,13 @@ enum RetryHelper {
         initialDelay: Duration = .milliseconds(500),
         operation: () async throws -> T
     ) async throws -> T {
+        // Guard a misconfigured 0/negative count: `1...maxAttempts` would trap,
+        // and the loop would leave `lastError` nil for the throw below.
+        let attempts = max(1, maxAttempts)
         var lastError: Error?
         var delay = initialDelay
 
-        for attempt in 1...maxAttempts {
+        for attempt in 1...attempts {
             do {
                 return try await operation()
             } catch {
@@ -34,12 +37,18 @@ enum RetryHelper {
                     }
                 }
 
-                if attempt < maxAttempts {
-                    try? await Task.sleep(for: delay)
-                    delay *= 2
+                if attempt < attempts {
+                    // Exponential backoff + jitter so parallel callers don't
+                    // resynchronize into a burst against the provider. Capped so
+                    // a deep retry chain can't sleep absurdly long.
+                    let jitter = Duration.milliseconds(Int.random(in: 0...250))
+                    try? await Task.sleep(for: delay + jitter)
+                    delay = min(delay * 2, .seconds(20))
                 }
             }
         }
-        throw lastError!
+        // Unreachable in practice (attempts >= 1 always sets lastError on the
+        // failing path); the fallback just avoids a force-unwrap.
+        throw lastError ?? CancellationError()
     }
 }

@@ -60,9 +60,18 @@ final class SlackConnectionManager: ObservableObject {
             let refresh = access.userRefreshToken
             let expiry = access.userExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
 
-            try? KeychainManager.save(token, for: .slackAccessToken)
-            try? KeychainManager.save(teamId, for: .slackTeamId)
-            try? KeychainManager.save(authedUser, for: .slackAuthedUserId)
+            // token + team + user ids are what restore() needs next launch —
+            // if they don't persist, the user appears connected now and
+            // mysteriously logs out next launch. Surface that rather than
+            // swallow it. The rest (teamName/refresh/expiry) stay best-effort.
+            do {
+                try KeychainManager.save(token, for: .slackAccessToken)
+                try KeychainManager.save(teamId, for: .slackTeamId)
+                try KeychainManager.save(authedUser, for: .slackAuthedUserId)
+            } catch {
+                state = .failed("Couldn't save Slack credentials to the Keychain. Please try connecting again.")
+                return
+            }
             if let teamName { try? KeychainManager.save(teamName, for: .slackTeamName) }
             if let refresh { try? KeychainManager.save(refresh, for: .slackRefreshToken) }
             if let expiry { try? KeychainManager.save(String(expiry.timeIntervalSince1970), for: .slackTokenExpiry) }

@@ -342,7 +342,7 @@ struct DashboardInitialsAvatar: View {
 
 struct DashboardTelegramAvatar: View {
     @EnvironmentObject private var telegramService: TelegramService
-    @ObservedObject private var photoManager = ChatPhotoManager.shared
+    @State private var photo: NSImage?
 
     let chat: TGChat?
     let fallbackTitle: String
@@ -353,7 +353,7 @@ struct DashboardTelegramAvatar: View {
             initials: chat?.initials ?? fallbackInitials,
             colorIndex: chat?.colorIndex ?? abs(fallbackTitle.hashValue % 8),
             size: size,
-            photo: chat.flatMap { photoManager.photos[$0.id] },
+            photo: photo,
             // Groups + channels render as rounded squares (Telegram
             // convention) so the list scans faster — squircle = group,
             // circle = person. Falls back to circle when the chat hasn't
@@ -361,8 +361,11 @@ struct DashboardTelegramAvatar: View {
             shape: (chat?.chatType.isOneOnOne ?? true) ? .circle : .squircle,
             sourceKind: chat?.source.kind
         )
-        .onAppear(perform: requestPhotoIfNeeded)
+        // Load into LOCAL state so a photo arrival re-renders only this avatar.
+        .task(id: photoKey) { await loadPhoto() }
     }
+
+    private var photoKey: String { "\(chat?.id ?? 0):\(chat?.smallPhotoFileId ?? 0)" }
 
     private var fallbackInitials: String {
         let words = fallbackTitle.split(separator: " ")
@@ -372,15 +375,15 @@ struct DashboardTelegramAvatar: View {
         return String(fallbackTitle.prefix(2)).uppercased()
     }
 
-    private func requestPhotoIfNeeded() {
-        guard let chat, let fileId = chat.smallPhotoFileId else { return }
-        photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
+    private func loadPhoto() async {
+        guard let chat, let fileId = chat.smallPhotoFileId else { photo = nil; return }
+        photo = await ChatPhotoManager.shared.image(forChat: chat.id, fileId: fileId, telegramService: telegramService)
     }
 }
 
 struct DashboardTelegramUserAvatar: View {
     @EnvironmentObject private var telegramService: TelegramService
-    @ObservedObject private var photoManager = UserPhotoManager.shared
+    @State private var photo: NSImage?
 
     let user: TGUser?
     let fallbackTitle: String
@@ -391,16 +394,15 @@ struct DashboardTelegramUserAvatar: View {
             initials: user?.initials ?? fallbackInitials,
             colorIndex: colorIndex,
             size: size,
-            photo: user.flatMap { photoManager.photos[$0.id] }
+            photo: photo
         )
         .frame(width: size, height: size)
         .clipShape(Circle())
         .overlay(Circle().stroke(Color.white.opacity(0.12)))
-        .onAppear(perform: requestPhotoIfNeeded)
-        .onChange(of: user?.smallPhotoFileId) {
-            requestPhotoIfNeeded()
-        }
+        .task(id: photoKey) { await loadPhoto() }
     }
+
+    private var photoKey: String { "\(user?.id ?? 0):\(user?.smallPhotoFileId ?? 0)" }
 
     private var colorIndex: Int {
         if let user {
@@ -419,9 +421,9 @@ struct DashboardTelegramUserAvatar: View {
         return "?"
     }
 
-    private func requestPhotoIfNeeded() {
-        guard let user, let fileId = user.smallPhotoFileId else { return }
-        photoManager.requestPhoto(userId: user.id, fileId: fileId, telegramService: telegramService)
+    private func loadPhoto() async {
+        guard let user, let fileId = user.smallPhotoFileId else { photo = nil; return }
+        photo = await UserPhotoManager.shared.image(forUser: user.id, fileId: fileId, telegramService: telegramService)
     }
 }
 

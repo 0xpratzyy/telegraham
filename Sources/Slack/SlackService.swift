@@ -32,6 +32,26 @@ final class SlackService: ObservableObject, MessageSource {
     /// re-hitting the id_map on every message map.
     private var idCache: [String: Int64] = [:]
     private var userCache: [String: TGUser] = [:]
+    /// Thread roots already hydrated this session (keyed by native id) so each
+    /// thread costs at most one `conversations.replies` paging pass per launch.
+    private var hydratedThreadRoots: Set<String> = []
+    /// Dedupes concurrent token refreshes. Slack rotates the refresh token on
+    /// every use, so two refreshes racing would each invalidate the other's
+    /// token and lock the workspace out until a full re-OAuth.
+    private var refreshInFlight: Task<Void, Never>?
+
+    /// Hard caps so a huge workspace / a malformed-or-looping cursor can't spin
+    /// a `while cursor` loop forever or accumulate unbounded remote-sized data.
+    private static let maxPaginationPages = 50
+    private static let maxWarmedUsers = 2_000
+    private static let maxIdCacheEntries = 20_000
+    private static let maxHydratedThreadRoots = 1_000
+    /// Replies are rate-limited (~1/min); cap on-demand thread paging so a
+    /// giant thread can't stall the panel for many minutes.
+    private static let maxReplyPages = 4
+    /// Channels proactively synced per `syncRecentMessages` pass (each sleeps
+    /// ~60s to respect Slack's limit, so an unbounded loop would run for hours).
+    private static let maxChannelsPerSyncPass = 20
 
     init(
         clientId: String,
@@ -71,9 +91,11 @@ final class SlackService: ObservableObject, MessageSource {
     /// rate-limits hard). Paginated; tolerant of partial failure.
     private func warmUserCache() async {
         var cursor: String?
+        var pages = 0
         repeat {
             guard let page = try? await api.usersList(cursor: cursor) else { break }
             for user in page.members ?? [] where userCache[user.id] == nil {
+                guard userCache.count < Self.maxWarmedUsers else { break }
                 guard let id = await mintId(user.id) else { continue }
                 let displayName = user.profile?.displayName?.nilIfEmpty
                     ?? user.realName
@@ -91,7 +113,8 @@ final class SlackService: ObservableObject, MessageSource {
                 )
             }
             cursor = page.responseMetadata?.nextCursor
-        } while !(cursor ?? "").isEmpty
+            pages += 1
+        } while !(cursor ?? "").isEmpty && pages < Self.maxPaginationPages && userCache.count < Self.maxWarmedUsers
     }
 
     /// One-time pass to decode Slack markup in already-cached message text
@@ -114,10 +137,33 @@ final class SlackService: ObservableObject, MessageSource {
     /// Refresh the access token if rotation is on and it's near expiry.
     /// No-op when there's no expiry (long-lived token) or no refresh token.
     private func ensureValidToken() async {
+        guard refreshToken != nil else { return }
+        // Still comfortably valid? nothing to do.
+        if let expiry = tokenExpiry, Date() < expiry.addingTimeInterval(-60) { return }
+        // Single-flight: if a refresh is already running, await it instead of
+        // starting a second one. Concurrent refreshes each rotate (and thereby
+        // invalidate) the other's `xoxe` refresh token, which locks the
+        // workspace out until a manual reconnect.
+        if let inFlight = refreshInFlight {
+            await inFlight.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performTokenRefresh()
+        }
+        refreshInFlight = task
+        await task.value
+        refreshInFlight = nil
+    }
+
+    /// The actual refresh, only ever run one-at-a-time via `ensureValidToken`'s
+    /// single-flight. Refreshes when the expiry is unknown (connected before
+    /// rotation handling) or near lapse; `xoxe` access tokens always rotate so
+    /// an unknown expiry can't be trusted.
+    private func performTokenRefresh() async {
         guard let refresh = refreshToken else { return }
-        // Refresh when the expiry is unknown (connected before rotation
-        // handling → no stored expiry) or within 60s of lapsing. `xoxe`
-        // access tokens always rotate, so an unknown expiry can't be trusted.
+        // A refresh that finished while we were queued may have already renewed.
         if let expiry = tokenExpiry, Date() < expiry.addingTimeInterval(-60) { return }
         guard let access = try? await api.refreshToken(clientId: clientId, refreshToken: refresh),
               let newToken = access.userAccessToken else { return }
@@ -168,6 +214,62 @@ final class SlackService: ObservableObject, MessageSource {
         return mapped
     }
 
+    /// Fetch the thread that `messageId` belongs to (Slack returns replies only
+    /// via `conversations.replies`, never in channel history), cache it, and
+    /// return parent + replies. Deduped to one network call per thread root per
+    /// session; called on demand when an evidence panel for a Slack message opens.
+    func hydrateThread(messageId: Int64, threadRootId: Int64?) async -> [TGMessage] {
+        await ensureValidToken()
+        // The thread is keyed by its parent; if the source is a reply we already
+        // know the parent's synthetic id, otherwise the message is its own root.
+        let rootId = threadRootId ?? messageId
+        guard let rootNative = try? await db.nativeId(source: sourceID, intId: rootId),
+              let (channelNative, rootTs) = Self.parseMessageNative(rootNative) else { return [] }
+        // Skip only if we already paged this thread to completion this session.
+        guard !hydratedThreadRoots.contains(rootNative) else { return [] }
+        guard let channelId = await mintId(channelNative) else { return [] }
+
+        // Page through replies (each page is rate-limited ~1/min) up to a cap so
+        // a giant thread can't stall the panel — but no longer truncate at 30.
+        var mapped: [TGMessage] = []
+        var cursor: String?
+        var pages = 0
+        var reachedEnd = false
+        repeat {
+            guard let history = try? await api.conversationsReplies(channel: channelNative, ts: rootTs, cursor: cursor) else { break }
+            for message in history.messages ?? [] {
+                if let tg = await mapMessage(message, channelNative: channelNative, channelId: channelId, channelTitle: nil) {
+                    mapped.append(tg)
+                }
+            }
+            cursor = history.responseMetadata?.nextCursor
+            pages += 1
+            if (cursor ?? "").isEmpty { reachedEnd = true }
+        } while !(cursor ?? "").isEmpty && pages < Self.maxReplyPages
+
+        // Mark fully hydrated only once we've paged to the end, so a partial
+        // fetch (rate-limit / cap hit) can be retried on a later open.
+        if reachedEnd {
+            if hydratedThreadRoots.count >= Self.maxHydratedThreadRoots {
+                hydratedThreadRoots.removeAll(keepingCapacity: true)
+            }
+            hydratedThreadRoots.insert(rootNative)
+        }
+        guard !mapped.isEmpty else { return [] }
+        // Merge (append: true) so we add the thread to the channel's cache
+        // instead of clobbering its already-cached history with just replies.
+        await MessageCacheService.shared.cacheMessages(chatId: channelId, messages: mapped, append: true)
+        return mapped
+    }
+
+    /// "msg:<channel>:<ts>" → (channel, ts). Slack channel ids and message
+    /// timestamps contain no ":", so a 3-way split is unambiguous.
+    private static func parseMessageNative(_ native: String) -> (channel: String, ts: String)? {
+        let parts = native.components(separatedBy: ":")
+        guard parts.count == 3, parts[0] == "msg" else { return nil }
+        return (parts[1], parts[2])
+    }
+
     func user(id: Int64) async throws -> TGUser? {
         await ensureValidToken()
         guard let native = try await db.nativeId(source: sourceID, intId: id) else { return nil }
@@ -188,6 +290,8 @@ final class SlackService: ObservableObject, MessageSource {
 
         var collected: [TGChat] = []
         var cursor: String?
+        var pages = 0
+        var pageError = false
         repeat {
             do {
                 let page = try await api.conversationsList(cursor: cursor)
@@ -198,9 +302,16 @@ final class SlackService: ObservableObject, MessageSource {
                 }
                 cursor = page.responseMetadata?.nextCursor
             } catch {
+                pageError = true
                 break
             }
-        } while !(cursor ?? "").isEmpty
+            pages += 1
+        } while !(cursor ?? "").isEmpty && pages < Self.maxPaginationPages
+
+        // A mid-pagination failure leaves `collected` partial. Don't replace an
+        // already-published (fuller) chat list with a truncated one on a
+        // transient error — keep what we have and let the next pass retry.
+        if pageError && collected.count < chats.count { return }
 
         // Enrich each chat with its latest already-cached message so it shows
         // a preview/timestamp and sorts by recency immediately, instead of
@@ -216,7 +327,12 @@ final class SlackService: ObservableObject, MessageSource {
         }
 
         chats = enriched
-        isLoaded = true
+        // Ready on a clean load, or a partial-but-non-empty one (a rate-limited
+        // workspace still shows what it can); a totally failed first load stays
+        // not-ready so the next sync pass retries.
+        if !pageError || !enriched.isEmpty {
+            isLoaded = true
+        }
     }
 
     /// Proactively cache recent history per channel so Slack messages flow
@@ -227,7 +343,11 @@ final class SlackService: ObservableObject, MessageSource {
         // Only spend rate budget on channels we don't already have cached —
         // the on-load enrichment surfaces the rest instantly. Across launches
         // this covers the whole workspace without re-fetching what we have.
+        // Cap per pass: each channel sleeps ~60s for rate limits, so an
+        // unbounded loop would run for hours. Remaining channels are picked up
+        // on later passes (they still have lastMessage == nil).
         let pending = chats.filter { $0.isInMainList && $0.lastMessage == nil }
+            .prefix(Self.maxChannelsPerSyncPass)
         for chat in pending {
             if let messages = try? await chatHistory(chatId: chat.id, fromMessageId: 0, limit: perChannelLimit),
                !messages.isEmpty {
@@ -312,6 +432,14 @@ final class SlackService: ObservableObject, MessageSource {
         let date = Self.ts(fromMessageNative: message.ts).flatMap(Double.init).map { Date(timeIntervalSince1970: $0) }
             ?? Date(timeIntervalSince1970: Double(message.ts) ?? 0)
 
+        // A `thread_ts` that differs from this message's own `ts` means it's a
+        // reply hanging off a parent; point it at the parent's synthetic id so
+        // the evidence panel can nest it. When they're equal this *is* the root.
+        var threadRootId: Int64?
+        if let threadTs = message.threadTs, threadTs != message.ts {
+            threadRootId = await mintId("msg:\(channelNative):\(threadTs)")
+        }
+
         return TGMessage(
             id: id,
             chatId: channelId,
@@ -322,7 +450,8 @@ final class SlackService: ObservableObject, MessageSource {
             isOutgoing: message.user == authedUserNativeId,
             chatTitle: channelTitle,
             senderName: senderName,
-            source: sourceID
+            source: sourceID,
+            threadRootId: threadRootId
         )
     }
 
@@ -396,6 +525,9 @@ final class SlackService: ObservableObject, MessageSource {
     private func mintId(_ nativeId: String) async -> Int64? {
         if let cached = idCache[nativeId] { return cached }
         guard let id = try? await db.mintId(source: sourceID, nativeId: nativeId) else { return nil }
+        // Bounded: this is a pure lookup cache — evicting just means the next
+        // miss re-reads the persistent id_map (same id back), no correctness hit.
+        if idCache.count >= Self.maxIdCacheEntries { idCache.removeAll(keepingCapacity: true) }
         idCache[nativeId] = id
         return id
     }

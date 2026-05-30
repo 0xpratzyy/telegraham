@@ -12,6 +12,9 @@ struct TGMessage: Identifiable, Equatable, Sendable {
     let senderName: String?
     /// Which account this message came from. Defaults to `.telegram`.
     let source: SourceID
+    /// For Slack thread replies, the synthetic id of the thread's parent
+    /// (thread-starting) message; nil for top-level messages.
+    let threadRootId: Int64?
 
     init(
         id: Int64,
@@ -23,7 +26,8 @@ struct TGMessage: Identifiable, Equatable, Sendable {
         isOutgoing: Bool,
         chatTitle: String?,
         senderName: String?,
-        source: SourceID = .telegram
+        source: SourceID = .telegram,
+        threadRootId: Int64? = nil
     ) {
         self.id = id
         self.chatId = chatId
@@ -35,13 +39,15 @@ struct TGMessage: Identifiable, Equatable, Sendable {
         self.chatTitle = chatTitle
         self.senderName = senderName
         self.source = source
+        self.threadRootId = threadRootId
     }
 
     func updating(textContent: String?) -> TGMessage {
         TGMessage(
             id: id, chatId: chatId, senderId: senderId, date: date,
             textContent: textContent, mediaType: mediaType, isOutgoing: isOutgoing,
-            chatTitle: chatTitle, senderName: senderName, source: source
+            chatTitle: chatTitle, senderName: senderName, source: source,
+            threadRootId: threadRootId
         )
     }
 

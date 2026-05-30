@@ -33,6 +33,8 @@ actor DatabaseManager {
         /// Which account this row belongs to. Defaults to `.telegram` so
         /// legacy rows and Telegram-only write paths are unaffected.
         let source: SourceID
+        /// Slack thread parent's synthetic id (nil for top-level messages).
+        let threadRootId: Int64?
 
         init(
             id: Int64,
@@ -43,7 +45,8 @@ actor DatabaseManager {
             textContent: String?,
             mediaTypeRaw: String?,
             isOutgoing: Bool,
-            source: SourceID = .telegram
+            source: SourceID = .telegram,
+            threadRootId: Int64? = nil
         ) {
             self.id = id
             self.chatId = chatId
@@ -54,6 +57,7 @@ actor DatabaseManager {
             self.mediaTypeRaw = mediaTypeRaw
             self.isOutgoing = isOutgoing
             self.source = source
+            self.threadRootId = threadRootId
         }
     }
 
@@ -281,7 +285,7 @@ actor DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE chat_id = ?
                         ORDER BY date DESC, id DESC
@@ -310,7 +314,7 @@ actor DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE chat_id = ?
                           AND (? IS NULL OR date >= ?)
@@ -372,7 +376,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE (\(senderClauses))
                               AND (? IS NULL OR date >= ?)
@@ -388,7 +392,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE (\(senderClauses))
                               AND (? IS NULL OR date >= ?)
@@ -980,7 +984,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source, m.thread_root_id,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -995,7 +999,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source, m.thread_root_id,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -1047,7 +1051,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source, m.thread_root_id,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -1062,7 +1066,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source, m.thread_root_id,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -1115,7 +1119,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0
@@ -1131,7 +1135,7 @@ actor DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0
@@ -1165,7 +1169,7 @@ actor DatabaseManager {
                     guard let row = try Row.fetchOne(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE id = ? AND chat_id = ?
                             LIMIT 1
@@ -2060,7 +2064,7 @@ actor DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE sender_user_id = ?
                         ORDER BY date DESC, id DESC
@@ -2488,8 +2492,8 @@ actor DatabaseManager {
             try db.execute(
                 sql: """
                     INSERT INTO messages
-                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id, chat_id) DO UPDATE SET
                         sender_user_id = excluded.sender_user_id,
                         sender_name = excluded.sender_name,
@@ -2497,7 +2501,8 @@ actor DatabaseManager {
                         text_content = excluded.text_content,
                         media_type = excluded.media_type,
                         is_outgoing = excluded.is_outgoing,
-                        source = excluded.source
+                        source = excluded.source,
+                        thread_root_id = excluded.thread_root_id
                     """,
                 arguments: [
                     record.id,
@@ -2508,7 +2513,8 @@ actor DatabaseManager {
                     record.textContent,
                     record.mediaTypeRaw,
                     record.isOutgoing ? 1 : 0,
-                    record.source.rawValue
+                    record.source.rawValue,
+                    record.threadRootId
                 ]
             )
             if contentChanged {
@@ -2748,6 +2754,7 @@ actor DatabaseManager {
         // which matches every pre-multi-source row.
         let sourceRaw: String? = row["source"]
         let source = sourceRaw.flatMap(SourceID.init(rawValue:)) ?? .telegram
+        let threadRootId: Int64? = row["thread_root_id"]
 
         return MessageRecord(
             id: row["id"],
@@ -2758,7 +2765,8 @@ actor DatabaseManager {
             textContent: row["text_content"],
             mediaTypeRaw: row["media_type"],
             isOutgoing: isOutgoingValue != 0,
-            source: source
+            source: source,
+            threadRootId: threadRootId
         )
     }
 

@@ -41,6 +41,26 @@ class ChatPhotoManager: ObservableObject {
             }
         }
     }
+
+    private var inFlight: [Int64: Task<NSImage?, Never>] = [:]
+
+    /// Cached-or-download, single-flighted per chat. Returns the image so the
+    /// caller can hold it in LOCAL view state instead of observing the shared
+    /// @Published dict (which re-renders every avatar-bearing row per load).
+    func image(forChat chatId: Int64, fileId: Int, telegramService: TelegramService) async -> NSImage? {
+        if let cached = photos[chatId] { return cached }
+        if let existing = inFlight[chatId] { return await existing.value }
+        let task = Task<NSImage?, Never> { [weak self] in
+            let path = (try? await telegramService.downloadFile(fileId: fileId)) ?? ""
+            guard !path.isEmpty, let image = NSImage(contentsOfFile: path) else { return nil }
+            self?.photos[chatId] = image
+            return image
+        }
+        inFlight[chatId] = task
+        let result = await task.value
+        inFlight[chatId] = nil
+        return result
+    }
 }
 
 /// Manages downloading and caching Telegram user profile photos.
@@ -77,6 +97,25 @@ final class UserPhotoManager: ObservableObject {
                 print("[UserPhotoManager] Failed to download photo for user \(userId): \(error)")
             }
         }
+    }
+
+    private var inFlight: [Int64: Task<NSImage?, Never>] = [:]
+
+    /// Cached-or-download, single-flighted per user (see ChatPhotoManager.image).
+    func image(forUser userId: Int64, fileId: Int, telegramService: TelegramService) async -> NSImage? {
+        if let cached = photos[userId] { return cached }
+        if let existing = inFlight[userId] { return await existing.value }
+        let task = Task<NSImage?, Never> { [weak self] in
+            let path = (try? await telegramService.downloadFile(fileId: fileId)) ?? ""
+            guard !path.isEmpty, let image = NSImage(contentsOfFile: path) else { return nil }
+            let thumb = Self.circularThumbnail(from: image, side: Self.accountMenuThumbnailSide)
+            self?.photos[userId] = thumb
+            return thumb
+        }
+        inFlight[userId] = task
+        let result = await task.value
+        inFlight[userId] = nil
+        return result
     }
 
     private static func circularThumbnail(from image: NSImage, side: CGFloat) -> NSImage {

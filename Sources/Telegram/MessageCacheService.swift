@@ -15,6 +15,29 @@ actor MessageCacheService {
     private var memoryCache: [Int64: CachedChatMessages] = [:]
     private var pipelineCache: [Int64: CachedPipelineCategory] = [:]
 
+    /// Resident-chat caps. These maps were capped per-chat (message count) but
+    /// unbounded in chat count — a slow leak for a long-running menu-bar app
+    /// that sweeps across many chats. SQLite is the source of truth, so evicting
+    /// a chat just means the next access re-reads it.
+    private static let maxCachedChats = 300
+    private static let maxPipelineCachedChats = 2_000
+
+    private func evictMemoryCacheIfNeeded(keeping chatId: Int64) {
+        guard memoryCache.count > Self.maxCachedChats else { return }
+        let excess = memoryCache.count - Self.maxCachedChats
+        for key in memoryCache.keys.filter({ $0 != chatId }).prefix(excess) {
+            memoryCache.removeValue(forKey: key)
+        }
+    }
+
+    private func evictPipelineCacheIfNeeded(keeping chatId: Int64) {
+        guard pipelineCache.count > Self.maxPipelineCachedChats else { return }
+        let excess = pipelineCache.count - Self.maxPipelineCachedChats
+        for key in pipelineCache.keys.filter({ $0 != chatId }).prefix(excess) {
+            pipelineCache.removeValue(forKey: key)
+        }
+    }
+
     // MARK: - Codable Models
 
     struct CachedPipelineCategory: Codable {
@@ -42,6 +65,7 @@ actor MessageCacheService {
         let mediaTypeRaw: String?
         let isOutgoing: Bool
         let source: SourceID
+        let threadRootId: Int64?
 
         init(
             id: Int64,
@@ -52,7 +76,8 @@ actor MessageCacheService {
             textContent: String?,
             mediaTypeRaw: String?,
             isOutgoing: Bool,
-            source: SourceID = .telegram
+            source: SourceID = .telegram,
+            threadRootId: Int64? = nil
         ) {
             self.id = id
             self.chatId = chatId
@@ -63,6 +88,7 @@ actor MessageCacheService {
             self.mediaTypeRaw = mediaTypeRaw
             self.isOutgoing = isOutgoing
             self.source = source
+            self.threadRootId = threadRootId
         }
 
         static func == (lhs: CachedMessage, rhs: CachedMessage) -> Bool {
@@ -102,6 +128,7 @@ actor MessageCacheService {
             oldestMessageId: records.last?.id
         )
         memoryCache[chatId] = cached
+        evictMemoryCacheIfNeeded(keeping: chatId)
         return (cached.messages.map { $0.toTGMessage() }, .sqlite)
     }
 
@@ -145,6 +172,7 @@ actor MessageCacheService {
             oldestMessageId: allMessages.last?.id
         )
         memoryCache[chatId] = entry
+        evictMemoryCacheIfNeeded(keeping: chatId)
 
         let recordsToPersist = append ? newCachedMessages : entry.messages
         await DatabaseManager.shared.upsertLiveMessages(
@@ -220,7 +248,8 @@ actor MessageCacheService {
                 textContent: textContent,
                 mediaTypeRaw: mediaType?.rawValue,
                 isOutgoing: old.isOutgoing,
-                source: old.source
+                source: old.source,
+                threadRootId: old.threadRootId
             )
             memoryCache[chatId] = existing
         }
@@ -280,6 +309,7 @@ actor MessageCacheService {
             return nil
         }
         pipelineCache[chatId] = cached
+        evictPipelineCacheIfNeeded(keeping: chatId)
         return cached
     }
 
@@ -298,6 +328,7 @@ actor MessageCacheService {
             schemaVersion: Self.pipelineCacheSchemaVersion
         )
         pipelineCache[chatId] = cached
+        evictPipelineCacheIfNeeded(keeping: chatId)
 
         await DatabaseManager.shared.savePipelineCache(
             DatabaseManager.PipelineCacheRecord(
@@ -366,6 +397,7 @@ actor MessageCacheService {
             oldestMessageId: records.last?.id
         )
         memoryCache[chatId] = cached
+        evictMemoryCacheIfNeeded(keeping: chatId)
         return cached
     }
 
@@ -415,7 +447,8 @@ extension MessageCacheService.CachedMessage {
             textContent: msg.textContent,
             mediaTypeRaw: msg.mediaType?.rawValue,
             isOutgoing: msg.isOutgoing,
-            source: msg.source
+            source: msg.source,
+            threadRootId: msg.threadRootId
         )
     }
 
@@ -429,7 +462,8 @@ extension MessageCacheService.CachedMessage {
             textContent: record.textContent,
             mediaTypeRaw: record.mediaTypeRaw,
             isOutgoing: record.isOutgoing,
-            source: record.source
+            source: record.source,
+            threadRootId: record.threadRootId
         )
     }
 
@@ -451,7 +485,8 @@ extension MessageCacheService.CachedMessage {
             isOutgoing: isOutgoing,
             chatTitle: nil,
             senderName: senderName,
-            source: source
+            source: source,
+            threadRootId: threadRootId
         )
     }
 
@@ -465,7 +500,8 @@ extension MessageCacheService.CachedMessage {
             textContent: textContent,
             mediaTypeRaw: mediaTypeRaw,
             isOutgoing: isOutgoing,
-            source: source
+            source: source,
+            threadRootId: threadRootId
         )
     }
 }

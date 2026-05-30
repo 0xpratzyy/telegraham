@@ -108,6 +108,25 @@ actor SlackAPIClient {
         return try await post("conversations.history", form: form, authorized: true)
     }
 
+    /// Replies in a single thread. `ts` is the thread parent's timestamp.
+    /// Returns the parent followed by its replies; same envelope shape as
+    /// `conversations.history`. Subject to the same paced rate limit, so
+    /// callers fetch on demand (one open thread at a time) rather than in bulk.
+    func conversationsReplies(
+        channel: String,
+        ts: String,
+        limit: Int = 30,
+        cursor: String? = nil
+    ) async throws -> SlackHistory {
+        var form = [
+            "channel": channel,
+            "ts": ts,
+            "limit": String(limit)
+        ]
+        if let cursor { form["cursor"] = cursor }
+        return try await post("conversations.replies", form: form, authorized: true)
+    }
+
     func usersInfo(user: String) async throws -> SlackUsersInfo {
         try await post("users.info", form: ["user": user], authorized: true)
     }

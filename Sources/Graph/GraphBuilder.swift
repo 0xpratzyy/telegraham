@@ -208,6 +208,11 @@ actor GraphBuilder {
         let visibleChats = await MainActor.run {
             SourceRegistry.shared.visibleChats
                 .filter {
+                    // People graph is Telegram-only for now: Slack/other-source
+                    // chats carry synthetic ids this Telegram resolver would
+                    // mis-key into wrong/empty nodes. Re-enable per-source when
+                    // a source-neutral user resolver exists.
+                    guard $0.source.kind == .telegram else { return false }
                     if case .secretChat = $0.chatType {
                         return false
                     }

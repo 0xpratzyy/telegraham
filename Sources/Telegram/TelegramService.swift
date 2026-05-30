@@ -227,6 +227,9 @@ class TelegramService: ObservableObject {
         if let cached = normalizedMemberCount(chat.memberCount) {
             return cached
         }
+        // Non-Telegram chats (Slack, …) carry synthetic ids that aren't valid
+        // TDLib group/supergroup ids — never issue a TDLib lookup for them.
+        guard chat.source.kind == .telegram else { return nil }
 
         let fetchedCount: Int?
         switch chat.chatType {

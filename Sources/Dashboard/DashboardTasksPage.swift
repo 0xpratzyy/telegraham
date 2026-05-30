@@ -427,7 +427,8 @@ struct DashboardTasksPage: View {
     }
 
     private var taskRows: some View {
-        VStack(spacing: 0) {
+        // Lazy so a large extracted-task set realizes only the on-screen rows.
+        LazyVStack(spacing: 0) {
             if shouldShowTaskSkeleton {
                 DashboardSkeletonRows(count: selectedTask == nil ? 9 : 7)
                     .padding(.top, 6)

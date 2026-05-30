@@ -72,6 +72,11 @@ final class FloatingPanel: NSPanel {
 
 // MARK: - Panel Manager
 
+// @MainActor: builds AppKit windows + SwiftUI hosting views and reads
+// @MainActor singletons (SourceRegistry.shared, the services). All callers are
+// already on the main actor; this annotation makes that contract explicit and
+// removes the cross-isolation access warning (an error under Swift 6).
+@MainActor
 final class PanelManager {
     private var launcherWindow: NSWindow?
     private let telegramService: TelegramService

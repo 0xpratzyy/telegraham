@@ -26,7 +26,6 @@ struct LauncherView: View {
     @EnvironmentObject var telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
     @EnvironmentObject var registry: SourceRegistry
-    @ObservedObject var photoManager = ChatPhotoManager.shared
     @StateObject private var searchCoordinator = SearchCoordinator()
     @StateObject private var attentionStore = AttentionStore.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
@@ -1223,17 +1222,7 @@ struct LauncherView: View {
     @ViewBuilder
     private func avatarForChat(chat: TGChat?, fallbackTitle: String) -> some View {
         if let chat {
-            AvatarView(
-                initials: chat.initials,
-                colorIndex: chat.colorIndex,
-                size: 26,
-                photo: photoManager.photos[chat.id]
-            )
-            .onAppear {
-                if let fileId = chat.smallPhotoFileId {
-                    photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
-                }
-            }
+            LauncherChatAvatar(chat: chat)
         } else {
             // Fallback: generate initials from title
             let words = fallbackTitle.split(separator: " ")
@@ -1815,6 +1804,30 @@ struct LauncherOnboardingHandoff: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(PidgySpace.s6)
+    }
+}
+
+/// A launcher chat avatar that loads its Telegram photo into LOCAL state, so a
+/// photo arrival re-renders only this avatar instead of the whole LauncherView
+/// (which previously observed ChatPhotoManager's shared @Published dict and
+/// recomputed `displayedChats` on every single photo load).
+private struct LauncherChatAvatar: View {
+    @EnvironmentObject private var telegramService: TelegramService
+    @State private var photo: NSImage?
+    let chat: TGChat
+    var size: CGFloat = 26
+
+    var body: some View {
+        AvatarView(
+            initials: chat.initials,
+            colorIndex: chat.colorIndex,
+            size: size,
+            photo: photo
+        )
+        .task(id: "\(chat.id):\(chat.smallPhotoFileId ?? 0)") {
+            guard let fileId = chat.smallPhotoFileId else { return }
+            photo = await ChatPhotoManager.shared.image(forChat: chat.id, fileId: fileId, telegramService: telegramService)
+        }
     }
 }
 

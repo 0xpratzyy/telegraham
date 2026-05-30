@@ -59,10 +59,21 @@ protocol MessageSource: AnyObject {
     /// routing the check per-source keeps the rest of the app from
     /// having to know what "bot" means on each backend.
     func isLikelyBot(chat: TGChat) -> Bool
+
+    /// Fetch + cache the thread a message belongs to and return its messages
+    /// (parent + replies) tagged with `threadRootId`, so the evidence panel
+    /// can render them nested. Needed for sources whose main history call
+    /// omits replies (Slack); sources without that gap return `[]` via the
+    /// default below. `threadRootId` is the caller's known parent id, if any.
+    func hydrateThread(messageId: Int64, threadRootId: Int64?) async -> [TGMessage]
 }
 
 extension MessageSource {
     /// Provider of this source, derived from `sourceID`. Convenient for
     /// badges / filters that don't care *which* account it is.
     nonisolated var kind: MessageSourceKind { sourceID.kind }
+
+    /// Default: nothing to hydrate — the source's history already contains
+    /// whatever replies exist, or it has no thread concept.
+    func hydrateThread(messageId: Int64, threadRootId: Int64?) async -> [TGMessage] { [] }
 }

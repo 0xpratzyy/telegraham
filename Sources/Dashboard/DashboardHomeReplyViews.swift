@@ -338,7 +338,9 @@ struct DashboardReplyQueuePage: View {
     }
 
     private var queueRows: some View {
-        VStack(spacing: 0) {
+        // Lazy so a busy account's (uncapped) attention list realizes only the
+        // rows on screen instead of building hundreds at once on the main actor.
+        LazyVStack(spacing: 0) {
             if filteredItems.isEmpty && isLoading {
                 DashboardSkeletonRows(count: selectedItem == nil ? 9 : 7)
                     .padding(.top, 6)
@@ -425,9 +427,10 @@ struct DashboardReplyDetail: View {
     @State private var catchUpError: String?
     @State private var catchUpForChatId: Int64?
 
-    /// Same cap as the Task Evidence section — enough to read the back-and-
-    /// forth that triggered the suggestion without becoming a full transcript.
-    private static let maxEvidenceRows = 5
+    /// Surrounding (non-thread) context shown around the source in the
+    /// Evidence panel. The detail pane scrolls, so this is generous — thread
+    /// replies render in full (never capped) and the user can scroll for more.
+    private static let maxEvidenceRows = 16
     /// More history than `maxEvidenceRows` so the suggested-replies
     /// and catch-up prompts have enough context to be useful.
     private static let maxAIContextRows = 25
@@ -484,19 +487,49 @@ struct DashboardReplyDetail: View {
                 }
 
                 let evidenceItems = mergedEvidenceItems(for: item)
+                let evidenceSourceId = item.lastMessage.id
                 DashboardDetailSection(
                     title: "Evidence",
                     trailing: evidenceTrailing(for: evidenceItems)
                 ) {
-                    VStack(spacing: 6) {
-                        if evidenceItems.isEmpty {
-                            Text(isLoadingContext
-                                 ? "Loading nearby messages…"
-                                 : "No recent messages found for this chat.")
-                                .font(PidgyDashboardTheme.detailBodyFont)
-                                .foregroundStyle(PidgyDashboardTheme.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
+                    if evidenceItems.isEmpty {
+                        Text(isLoadingContext
+                             ? "Loading nearby messages…"
+                             : "No recent messages found for this chat.")
+                            .font(PidgyDashboardTheme.detailBodyFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if evidenceItems.count > 7 {
+                        // Long thread / history: a focused, scrollable box that
+                        // opens centered on the source message — a few messages
+                        // above and below — so the user lands on what matters
+                        // and can scroll for the rest of the thread.
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                // Lazy: a 30+-message thread realizes only the
+                                // visible rows; scrollTo(center) still works.
+                                LazyVStack(spacing: 6) {
+                                    ForEach(evidenceItems) { row in
+                                        DashboardEvidenceContextRow(item: row)
+                                            .id(row.id)
+                                    }
+                                }
+                                .padding(.vertical, 2)
+                            }
+                            .frame(height: 340)
+                            .onAppear { centerEvidenceOnSource(proxy, sourceId: evidenceSourceId) }
+                            .onChange(of: conversationContext.count) {
+                                centerEvidenceOnSource(proxy, sourceId: evidenceSourceId)
+                            }
+                            // Re-center when the user switches to a different
+                            // item (the detail view is reused, so onAppear
+                            // won't fire again).
+                            .onChange(of: evidenceSourceId) {
+                                centerEvidenceOnSource(proxy, sourceId: evidenceSourceId)
+                            }
+                        }
+                    } else {
+                        VStack(spacing: 6) {
                             ForEach(evidenceItems) { row in
                                 DashboardEvidenceContextRow(item: row)
                             }
@@ -765,18 +798,39 @@ struct DashboardReplyDetail: View {
     }
 
     private func loadConversationContext() async {
-        guard let chatId = item?.chat.id else {
+        guard let chat = item?.chat else {
             conversationContext = []
             return
         }
+        let chatId = chat.id
         isLoadingContext = true
         defer { isLoadingContext = false }
         let recent = await DatabaseManager.shared.loadMessages(
             chatId: chatId,
-            limit: Self.maxEvidenceRows + 2
+            limit: Self.maxEvidenceRows + 12
         )
         conversationContext = recent.sorted { $0.date < $1.date }
         await resolveMissingSenderNames(in: recent)
+
+        // Slack thread replies aren't returned by the channel-history call, so
+        // hydrate the source message's thread on demand and merge it in. The
+        // cached rows above already painted; this fills the thread underneath.
+        guard chat.source.kind != .telegram, let activeItem = item else { return }
+        let pinnedSourceId = activeItem.lastMessage.id
+        let threadMessages = await SourceRegistry.shared.source(for: chat)?
+            .hydrateThread(
+                messageId: activeItem.lastMessage.id,
+                threadRootId: activeItem.lastMessage.threadRootId
+            ) ?? []
+        // Drop the result if the user moved to a different item meanwhile.
+        guard item?.lastMessage.id == pinnedSourceId, !threadMessages.isEmpty else { return }
+
+        var byId: [Int64: DatabaseManager.MessageRecord] = [:]
+        for record in conversationContext { byId[record.id] = record }
+        for message in threadMessages {
+            byId[message.id] = MessageCacheService.CachedMessage.from(message).toDatabaseRecord()
+        }
+        conversationContext = byId.values.sorted { $0.date < $1.date }
     }
 
     /// Group-chat messages frequently have a nil `senderName` in the
@@ -809,9 +863,17 @@ struct DashboardReplyDetail: View {
     /// list with just the last message if the DB hasn't cached the chat yet.
     private func mergedEvidenceItems(for item: FollowUpItem) -> [EvidenceContextItem] {
         let sourceId = item.lastMessage.id
-        let context = conversationContext
-            .filter { $0.id != sourceId }
-            .suffix(Self.maxEvidenceRows - 1)
+        // Show the full thread (parent + every reply, never capped) plus a
+        // generous, scrollable window of the surrounding conversation. The
+        // detail pane scrolls, so the user can keep reading for more context.
+        let sourceThreadKey = item.lastMessage.threadRootId ?? sourceId
+        func threadKey(_ record: DatabaseManager.MessageRecord) -> Int64 { record.threadRootId ?? record.id }
+
+        let candidates = conversationContext.filter { $0.id != sourceId }
+        let threadMembers = candidates.filter { threadKey($0) == sourceThreadKey }
+        let others = candidates.filter { threadKey($0) != sourceThreadKey }
+        let chosen = threadMembers + others.suffix(Self.maxEvidenceRows)
+        let context = chosen
             .map { record in
                 EvidenceContextItem(
                     id: record.id,
@@ -819,7 +881,8 @@ struct DashboardReplyDetail: View {
                     senderName: senderLabel(for: record),
                     isOutgoing: record.isOutgoing,
                     text: nonEmptyDisplayText(for: record),
-                    isSource: false
+                    isSource: false,
+                    threadRootId: record.threadRootId
                 )
             }
 
@@ -829,10 +892,23 @@ struct DashboardReplyDetail: View {
             senderName: sourceSenderLabel(for: item),
             isOutgoing: item.lastMessage.isOutgoing,
             text: item.lastMessage.displayText,
-            isSource: true
+            isSource: true,
+            threadRootId: item.lastMessage.threadRootId
         )
 
-        return (context + [source]).sorted { $0.date < $1.date }
+        let chronological = (context + [source]).sorted { $0.date < $1.date }
+        return EvidenceContextItem.nested(chronological)
+    }
+
+    /// Position the (long) Evidence list so the source message sits centered —
+    /// a few messages visible above and below — instead of buried at the end of
+    /// a 30-row thread. Deferred a tick so the rows have laid out before we
+    /// scroll; re-runs when the thread hydrates and the list grows.
+    private func centerEvidenceOnSource(_ proxy: ScrollViewProxy, sourceId: Int64) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            proxy.scrollTo(sourceId, anchor: .center)
+        }
     }
 
     private func senderLabel(for record: DatabaseManager.MessageRecord) -> String {

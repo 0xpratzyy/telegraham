@@ -3,7 +3,7 @@ import SwiftUI
 /// Clean two-line chat row for the launcher results list.
 struct ChatRowView: View {
     @EnvironmentObject var telegramService: TelegramService
-    @ObservedObject var photoManager = ChatPhotoManager.shared
+    @State private var photo: NSImage?
 
     let chat: TGChat
     let isHighlighted: Bool
@@ -19,14 +19,14 @@ struct ChatRowView: View {
                     initials: chat.initials,
                     colorIndex: chat.colorIndex,
                     size: 32,
-                    photo: photoManager.photos[chat.id],
+                    photo: photo,
                     avatarURL: chat.avatarURL,
                     sourceKind: chat.source.kind
                 )
-                .onAppear {
-                    if let fileId = chat.smallPhotoFileId {
-                        photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
-                    }
+                // Local-state load → only this row redraws when its photo lands.
+                .task(id: "\(chat.id):\(chat.smallPhotoFileId ?? 0)") {
+                    guard let fileId = chat.smallPhotoFileId else { return }
+                    photo = await ChatPhotoManager.shared.image(forChat: chat.id, fileId: fileId, telegramService: telegramService)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {

@@ -521,6 +521,14 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v18_message_thread_root") { db in
+            // Slack thread linkage: the synthetic id of a reply's thread
+            // parent (nil for top-level messages). Lets the evidence pane
+            // nest replies under their thread-starting message. Additive +
+            // nullable — a free, non-breaking change for existing rows.
+            try db.execute(sql: "ALTER TABLE messages ADD COLUMN thread_root_id INTEGER")
+        }
+
         return migrator
     }
 }

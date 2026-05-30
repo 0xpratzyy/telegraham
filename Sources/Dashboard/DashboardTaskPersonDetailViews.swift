@@ -11,11 +11,10 @@ struct DashboardTaskDetail: View {
     @State private var conversationContext: [DatabaseManager.MessageRecord] = []
     @State private var isLoadingContext = false
 
-    /// Hard cap on the merged Evidence list (source snippets + nearby
-    /// chat context). The trigger snippet alone is often opaque, but five
-    /// messages is enough to read the surrounding ask without turning the
-    /// section into a full chat transcript.
-    private static let maxEvidenceRows = 5
+    /// Surrounding chat context shown alongside the source snippets in the
+    /// merged Evidence list. The detail pane scrolls, so this is generous —
+    /// every source snippet is always shown and the user can scroll for more.
+    private static let maxEvidenceRows = 16
 
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
@@ -150,7 +149,7 @@ struct DashboardTaskDetail: View {
         // still have enough non-source rows to fill the merged list.
         let recent = await DatabaseManager.shared.loadMessages(
             chatId: chatId,
-            limit: Self.maxEvidenceRows + 4
+            limit: Self.maxEvidenceRows + 12
         )
         conversationContext = recent.sorted { $0.date < $1.date }
     }
@@ -186,18 +185,17 @@ struct DashboardTaskDetail: View {
                            : "Unknown"),
                     isOutgoing: record.isOutgoing,
                     text: nonEmptyDisplayText(for: record),
-                    isSource: false
+                    isSource: false,
+                    threadRootId: record.threadRootId
                 )
             }
 
-        let cap = Self.maxEvidenceRows
-        let sourceCapped = Array(sourceItems.prefix(cap))
-        let remaining = max(0, cap - sourceCapped.count)
-        // Take the most recent context messages so the user sees the
-        // freshest surrounding conversation.
-        let contextTrailing = Array(contextItems.suffix(remaining))
+        // Always show every source snippet, plus a generous, scrollable window
+        // of surrounding context. The detail pane scrolls for anything beyond.
+        let contextTrailing = Array(contextItems.suffix(Self.maxEvidenceRows))
 
-        return (sourceCapped + contextTrailing).sorted { $0.date < $1.date }
+        let chronological = (sourceItems + contextTrailing).sorted { $0.date < $1.date }
+        return EvidenceContextItem.nested(chronological)
     }
 
     private func nonEmptyDisplayText(for record: DatabaseManager.MessageRecord) -> String {
@@ -229,12 +227,65 @@ struct EvidenceContextItem: Identifiable, Equatable {
     let isOutgoing: Bool
     let text: String
     let isSource: Bool
+    /// Synthetic id of the thread's parent message, when this row is a reply.
+    var threadRootId: Int64? = nil
+    /// Set during nesting — replies render indented beneath their parent.
+    var isReply: Bool = false
+}
+
+extension EvidenceContextItem {
+    /// Reorders a chronological list so thread replies sit directly beneath
+    /// their parent (flagged `isReply` for indentation). Replies whose parent
+    /// isn't present keep their natural chronological slot as top-level rows.
+    /// Returns the input untouched when nothing is threaded (the Telegram case).
+    static func nested(_ items: [EvidenceContextItem]) -> [EvidenceContextItem] {
+        let present = Set(items.map(\.id))
+        var repliesByRoot: [Int64: [EvidenceContextItem]] = [:]
+        for item in items {
+            if let root = item.threadRootId, root != item.id, present.contains(root) {
+                repliesByRoot[root, default: []].append(item)
+            }
+        }
+        guard !repliesByRoot.isEmpty else { return items }
+
+        var out: [EvidenceContextItem] = []
+        out.reserveCapacity(items.count)
+        for item in items {
+            // Replies are emitted under their parent below — skip them here.
+            if let root = item.threadRootId, root != item.id, present.contains(root) { continue }
+            out.append(item)
+            for reply in (repliesByRoot[item.id] ?? []).sorted(by: { $0.date < $1.date }) {
+                var nestedReply = reply
+                nestedReply.isReply = true
+                out.append(nestedReply)
+            }
+        }
+        return out
+    }
 }
 
 struct DashboardEvidenceContextRow: View {
     let item: EvidenceContextItem
 
     var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            if item.isReply {
+                // Thread rail: a vertical stem with a short elbow into the
+                // avatar, drawn in a fixed gutter so replies indent beneath
+                // their parent message — matching a chat thread's shape.
+                ThreadReplyConnector()
+                    .stroke(
+                        PidgyDashboardTheme.brand.opacity(0.3),
+                        style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
+                    )
+                    .frame(width: 16)
+                    .padding(.leading, 7)
+            }
+            rowBody
+        }
+    }
+
+    private var rowBody: some View {
         HStack(alignment: .top, spacing: 10) {
             // Per-sender avatar makes the evidence read like a chat thread.
             // The source message that drove extraction keeps its tinted
@@ -242,7 +293,7 @@ struct DashboardEvidenceContextRow: View {
             AvatarView(
                 initials: Self.initials(from: item.senderName),
                 colorIndex: abs(item.senderName.hashValue % 8),
-                size: 26
+                size: item.isReply ? 22 : 26
             )
 
             VStack(alignment: .leading, spacing: 3) {
@@ -295,6 +346,21 @@ struct DashboardEvidenceContextRow: View {
             return "\(words[0].prefix(1))\(words[1].prefix(1))".uppercased()
         }
         return String(name.prefix(2)).uppercased()
+    }
+}
+
+/// Vertical thread rail + elbow used to indent reply rows beneath their parent.
+private struct ThreadReplyConnector: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let x = rect.midX
+        // Continuous vertical rail down the gutter…
+        path.move(to: CGPoint(x: x, y: rect.minY))
+        path.addLine(to: CGPoint(x: x, y: rect.maxY))
+        // …with a short elbow into the avatar at the row's vertical center.
+        path.move(to: CGPoint(x: x, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        return path
     }
 }
 
