@@ -970,17 +970,15 @@ extension SearchCoordinator {
             }
 
             let newestFirst = rangedMessages.sorted { $0.date > $1.date }
-            let inboundMessages = newestFirst.filter { message in
-                if case .user(let senderId) = message.senderId {
-                    return senderId != myUserId
-                }
-                return true
+            // isOutgoing-aware so "mine vs theirs" is correct for every source:
+            // a user's own Slack message has a synthetic sender id that never
+            // equals the Telegram myUserId, so a bare id comparison would
+            // misclassify it as inbound. messageIsFromMe checks isOutgoing first.
+            let inboundMessages = newestFirst.filter {
+                !ConversationReplyHeuristics.messageIsFromMe($0, myUserId: myUserId)
             }
-            let outboundMessages = newestFirst.filter { message in
-                if case .user(let senderId) = message.senderId {
-                    return senderId == myUserId
-                }
-                return false
+            let outboundMessages = newestFirst.filter {
+                ConversationReplyHeuristics.messageIsFromMe($0, myUserId: myUserId)
             }
             let latestInboundText = inboundMessages.first(where: { ($0.textContent?.isEmpty == false) })
             let latestOutboundText = outboundMessages.first(where: { ($0.textContent?.isEmpty == false) })
