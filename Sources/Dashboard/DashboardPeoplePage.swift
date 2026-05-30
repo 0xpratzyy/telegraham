@@ -44,16 +44,27 @@ struct DashboardPeoplePage: View {
         !renderWindow.hasLoadedAll(totalCount: visibleSignals.count)
     }
 
-    private var peopleInputSignature: String {
-        let contactIds = baseContacts.prefix(50).map(\.entityId).map(String.init).joined(separator: ",")
-        let staleIds = staleContacts.prefix(50).map(\.entityId).map(String.init).joined(separator: ",")
-        let taskVersion = tasks
-            .map { "\($0.id):\($0.status.rawValue):\($0.updatedAt.timeIntervalSince1970):\($0.snoozedUntil?.timeIntervalSince1970 ?? 0)" }
-            .joined(separator: "|")
-        let replyVersion = followUpItems
-            .map { "\($0.chat.id):\($0.category.rawValue):\($0.lastMessage.id)" }
-            .joined(separator: "|")
-        return "\(baseContacts.count)#\(contactIds)#\(staleIds)#\(taskVersion)#\(replyVersion)"
+    private var peopleInputSignature: Int {
+        // A cheap hash over the same fields the old signature String captured —
+        // identical change-sensitivity, but without the per-render String
+        // allocations + joins it used to build on every body evaluation.
+        var hasher = Hasher()
+        let base = baseContacts
+        hasher.combine(base.count)
+        for node in base.prefix(50) { hasher.combine(node.entityId) }
+        for node in staleContacts.prefix(50) { hasher.combine(node.entityId) }
+        for task in tasks {
+            hasher.combine(task.id)
+            hasher.combine(task.status.rawValue)
+            hasher.combine(task.updatedAt)
+            hasher.combine(task.snoozedUntil)
+        }
+        for item in followUpItems {
+            hasher.combine(item.chat.id)
+            hasher.combine(item.category.rawValue)
+            hasher.combine(item.lastMessage.id)
+        }
+        return hasher.finalize()
     }
 
     var body: some View {

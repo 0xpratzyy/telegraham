@@ -993,7 +993,12 @@ struct LauncherView: View {
     // MARK: - Chat Results List (standard mode)
 
     private var chatResultsList: some View {
-        ScrollViewReader { proxy in
+        // Compute the filtered+merged list ONCE per render instead of ~4× (it
+        // was read separately for the count, the empty-check, the ForEach, and
+        // the scroll handler). Still recomputed every render, so no stale-list
+        // risk — just not repeated within a render. Matters most while typing.
+        let displayed = displayedChats
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
                     // Pipeline sub-filter bar
@@ -1018,7 +1023,7 @@ struct LauncherView: View {
                     }
 
                     if !searchText.isEmpty {
-                        Text("\(displayedChats.count) result\(displayedChats.count == 1 ? "" : "s")")
+                        Text("\(displayed.count) result\(displayed.count == 1 ? "" : "s")")
                             .font(Font.Pidgy.monoSm)
                             .foregroundStyle(Color.Pidgy.fg3)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1026,7 +1031,7 @@ struct LauncherView: View {
                             .padding(.top, 2)
                     }
 
-                    if displayedChats.isEmpty {
+                    if displayed.isEmpty {
                         if pipelineSubFilter != nil {
                             EmptyStateView(
                                 icon: "checkmark.circle",
@@ -1045,7 +1050,7 @@ struct LauncherView: View {
                             )
                         }
                     } else {
-                        ForEach(Array(displayedChats.enumerated()), id: \.element.id) { index, chat in
+                        ForEach(Array(displayed.enumerated()), id: \.element.id) { index, chat in
                             ChatRowView(
                                 chat: chat,
                                 isHighlighted: index == selectedIndex,
@@ -1062,9 +1067,9 @@ struct LauncherView: View {
                 .padding(.vertical, 2)
             }
             .onChange(of: selectedIndex) { _, newIndex in
-                if newIndex < displayedChats.count {
+                if newIndex < displayed.count {
                     withAnimation(.easeOut(duration: 0.1)) {
-                        proxy.scrollTo(displayedChats[newIndex].id, anchor: .center)
+                        proxy.scrollTo(displayed[newIndex].id, anchor: .center)
                     }
                 }
             }
