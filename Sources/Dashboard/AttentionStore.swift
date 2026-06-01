@@ -12,12 +12,11 @@ final class AttentionStore: ObservableObject {
 
     @Published private(set) var followUpItems: [FollowUpItem] = []
     /// Chat IDs the user explicitly hid from the reply queue via the
-    /// "Hide from queue" context menu action. Persisted in UserDefaults
-    /// so the choice survives launches.
-    @Published private(set) var excludedChatIds: Set<Int64> = {
-        let raw = UserDefaults.standard.array(forKey: AppConstants.Preferences.excludedFromReplyQueueKey) ?? []
-        return Set(raw.compactMap { ($0 as? NSNumber)?.int64Value })
-    }()
+    /// chatId → the latest message id when the chat was hidden via "Hide from
+    /// queue". The chat is suppressed in the reply queue ONLY until a newer
+    /// message arrives, then it resurfaces — a one-time dismissal, not a
+    /// permanent mute (use Archive for that). Persisted across launches.
+    @Published private(set) var hiddenChats: [Int64: Int64] = AttentionStore.loadHiddenChats()
     @Published private(set) var isFollowUpsLoading = false
     @Published private(set) var pipelineProcessedCount = 0
     @Published private(set) var pipelineTotalCount = 0
@@ -36,6 +35,7 @@ final class AttentionStore: ObservableObject {
     /// stays decoupled — it only flips when AI is genuinely active, so
     /// the Refresh button doesn't flicker on every cache-hit refresh.
     private var isExecuting = false
+    private var didMigrateLegacyHides = false
 
     private init() {}
 
@@ -54,20 +54,19 @@ final class AttentionStore: ObservableObject {
         allFollowUpItems.first(where: { $0.chat.id == chatId })?.suggestedAction
     }
 
-    /// Hide a chat from the reply queue. The full pipeline result for
-    /// the chat stays cached so we can restore it later; we just
-    /// stop including it in the published view.
-    func excludeChat(id: Int64) {
-        guard !excludedChatIds.contains(id) else { return }
-        excludedChatIds.insert(id)
-        persistExcludedChatIds()
+    /// One-time "Hide from queue": dismiss this chat's CURRENT item. It stays
+    /// hidden only until a message newer than `upToMessageId` arrives, then it
+    /// resurfaces automatically. Pass the chat's latest message id.
+    func excludeChat(id: Int64, upToMessageId: Int64) {
+        hiddenChats[id] = upToMessageId
+        persistHiddenChats()
         republishFiltered()
     }
 
-    /// Restore a previously-hidden chat to the reply queue.
+    /// Restore a previously-hidden chat to the reply queue immediately.
     func unexcludeChat(id: Int64) {
-        guard excludedChatIds.remove(id) != nil else { return }
-        persistExcludedChatIds()
+        guard hiddenChats.removeValue(forKey: id) != nil else { return }
+        persistHiddenChats()
         republishFiltered()
     }
 
@@ -83,13 +82,47 @@ final class AttentionStore: ObservableObject {
         republishFiltered()
     }
 
-    private func persistExcludedChatIds() {
-        let raw = excludedChatIds.map { NSNumber(value: $0) }
-        UserDefaults.standard.set(raw, forKey: AppConstants.Preferences.excludedFromReplyQueueKey)
+    private static func loadHiddenChats() -> [Int64: Int64] {
+        let raw = UserDefaults.standard.dictionary(forKey: AppConstants.Preferences.hiddenQueueItemsKey) ?? [:]
+        var result: [Int64: Int64] = [:]
+        for (key, value) in raw {
+            if let chatId = Int64(key), let msgId = (value as? NSNumber)?.int64Value {
+                result[chatId] = msgId
+            }
+        }
+        return result
+    }
+
+    private func persistHiddenChats() {
+        let raw = Dictionary(uniqueKeysWithValues: hiddenChats.map { (String($0.key), NSNumber(value: $0.value)) })
+        UserDefaults.standard.set(raw, forKey: AppConstants.Preferences.hiddenQueueItemsKey)
+    }
+
+    /// One-time migration of the legacy permanent-hide Set into the new
+    /// dismiss-until-next-message map. Each old hidden chat is dismissed at its
+    /// current latest message, so it resurfaces on new activity instead of
+    /// staying hidden forever. Runs once, then clears the legacy key.
+    func migrateLegacyHidesIfNeeded() async {
+        let defaults = UserDefaults.standard
+        guard let legacy = defaults.array(forKey: AppConstants.Preferences.excludedFromReplyQueueKey),
+              !legacy.isEmpty else { return }
+        let ids = legacy.compactMap { ($0 as? NSNumber)?.int64Value }
+        for id in ids where hiddenChats[id] == nil {
+            let latest = await DatabaseManager.shared.loadMessages(chatId: id, limit: 1).first?.id ?? 0
+            hiddenChats[id] = latest
+        }
+        persistHiddenChats()
+        defaults.removeObject(forKey: AppConstants.Preferences.excludedFromReplyQueueKey)
+        republishFiltered()
     }
 
     private func republishFiltered() {
-        followUpItems = allFollowUpItems.filter { !excludedChatIds.contains($0.chat.id) }
+        // A hidden chat is suppressed only until a message newer than the one it
+        // was hidden at arrives — then it resurfaces (one-time dismissal).
+        followUpItems = allFollowUpItems.filter { item in
+            guard let watermark = hiddenChats[item.chat.id] else { return true }
+            return item.lastMessage.id > watermark
+        }
         postOnMeBadge()
     }
 
@@ -99,6 +132,10 @@ final class AttentionStore: ObservableObject {
         includeBots: Bool,
         force: Bool = false
     ) {
+        if !didMigrateLegacyHides {
+            didMigrateLegacyHides = true
+            Task { await migrateLegacyHidesIfNeeded() }
+        }
         guard !isExecuting else {
             queueRefresh(
                 telegramService: telegramService,

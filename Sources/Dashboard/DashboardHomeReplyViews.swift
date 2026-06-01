@@ -379,7 +379,9 @@ struct DashboardReplyQueuePage: View {
                         // Hide = suppress this chat in the reply queue
                         // only (sticky, reversible from Preferences).
                         Button("Hide from queue", systemImage: "eye.slash") {
-                            attentionStore.excludeChat(id: item.chat.id)
+                            // One-time dismissal: hides this chat only until a
+                            // message newer than its current one arrives.
+                            attentionStore.excludeChat(id: item.chat.id, upToMessageId: item.lastMessage.id)
                         }
                         // Archive = remove the chat from EVERY pipeline
                         // (reply queue + tasks), like a bot. Reversible

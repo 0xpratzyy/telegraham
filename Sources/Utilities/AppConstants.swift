@@ -331,6 +331,11 @@ enum AppConstants {
         /// row context menu's "Hide from queue" action. Filtered out
         /// of AttentionStore.followUpItems before any UI sees them.
         static let excludedFromReplyQueueKey = "pidgyExcludedFromReplyQueue"
+        /// chatId(String) → latest message id (NSNumber) at hide time. "Hide
+        /// from queue" is a one-time dismissal: the chat is suppressed only
+        /// until a NEWER message arrives, then it resurfaces automatically.
+        /// Supersedes the legacy `excludedFromReplyQueueKey` Set (migrated once).
+        static let hiddenQueueItemsKey = "pidgyHiddenQueueItems"
         /// Set of chat IDs the user has ARCHIVED — removed from every
         /// dashboard pipeline (reply queue AND tasks), the same way
         /// bots are filtered. Distinct from `excludedFromReplyQueueKey`
