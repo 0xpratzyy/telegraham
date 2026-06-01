@@ -277,6 +277,27 @@ actor DatabaseManager {
         }
     }
 
+    /// Replace the "Unknown"/blank sender name on a user's messages once the
+    /// real name is resolved, so the reply detail + future graph builds reflect
+    /// it. Only touches rows that are still placeholders.
+    func backfillSenderName(userId: Int64, name: String) async {
+        guard let pool = await ensureDatabase() else { return }
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE messages SET sender_name = ?
+                        WHERE sender_user_id = ?
+                          AND (sender_name IS NULL OR TRIM(sender_name) = '' OR sender_name = 'Unknown')
+                        """,
+                    arguments: [name, userId]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to backfill sender name for \(userId): \(error)")
+        }
+    }
+
     func loadMessages(chatId: Int64, limit: Int) async -> [MessageRecord] {
         guard let pool = await ensureDatabase() else { return [] }
 

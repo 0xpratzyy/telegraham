@@ -125,6 +125,21 @@ actor RelationGraph {
         }
     }
 
+    /// Overwrite a node's display name — used by the name-backfill to replace
+    /// the "Unknown" placeholder once TDLib resolves the real name.
+    func updateDisplayName(entityId: Int64, name: String) async {
+        do {
+            try await DatabaseManager.shared.write { db in
+                try db.execute(
+                    sql: "UPDATE nodes SET display_name = ? WHERE entity_id = ?",
+                    arguments: [name, entityId]
+                )
+            }
+        } catch {
+            print("[RelationGraph] Failed to update display name for \(entityId): \(error)")
+        }
+    }
+
     func getNode(entityId: Int64) async -> Node? {
         do {
             return try await DatabaseManager.shared.read { db in

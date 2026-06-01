@@ -369,6 +369,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             // graph indefinitely.
             self.graphBuildLoopTask = Task.detached { [telegramService] in
                 while !Task.isCancelled {
+                    // Recover real names for existing "Unknown" person nodes
+                    // FIRST, so the heavy build below (background-throttled
+                    // getUser) doesn't starve it. Once-per-session per id, so
+                    // deleted accounts aren't re-fetched forever.
+                    await GraphBuilder.shared.resolveMissingNames(using: telegramService)
+                    if Task.isCancelled { return }
                     await GraphBuilder.shared.buildIfNeeded(using: telegramService)
                     if Task.isCancelled { return }
                     try? await Task.sleep(for: .seconds(120))

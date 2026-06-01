@@ -85,6 +85,9 @@ actor GraphBuilder {
 
     private var buildTask: Task<Void, Never>?
     private var resolvedUsers: [Int64: UserSnapshot?] = [:]
+    /// Person-node ids whose name we've already tried to resolve this session,
+    /// so deleted/unresolvable accounts aren't re-fetched on every build cycle.
+    private var attemptedNameResolution: Set<Int64> = []
 
     func buildIfNeeded(using telegramService: TelegramService) async {
         if let buildTask {
@@ -384,6 +387,50 @@ actor GraphBuilder {
 
         resolvedUsers[userId] = snapshot
         return snapshot
+    }
+
+    /// Backfill real names for person nodes still showing the "Unknown"
+    /// placeholder. A name that wasn't resolvable when the graph was first built
+    /// is often a transient TDLib miss; re-fetch from TDLib and persist the real
+    /// name to the node + its messages. Genuinely deleted accounts return nil
+    /// and stay "Unknown". Each id is attempted at most once per session so
+    /// deleted accounts aren't re-hit on every build cycle.
+    func resolveMissingNames(using telegramService: TelegramService, limit: Int = 100) async {
+        let ids: [Int64] = (try? await DatabaseManager.shared.read { db in
+            try Int64.fetchAll(db, sql: """
+                SELECT entity_id FROM nodes
+                WHERE entity_type = 'user'
+                  AND (display_name IS NULL OR TRIM(display_name) = '' OR display_name = 'Unknown')
+                ORDER BY interaction_score DESC
+                LIMIT ?
+                """, arguments: [limit])
+        }) ?? []
+
+        func usable(_ s: String?) -> String? {
+            guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty,
+                  t.caseInsensitiveCompare("unknown") != .orderedSame else { return nil }
+            return t
+        }
+
+        var recovered = 0
+        for id in ids where !attemptedNameResolution.contains(id) {
+            attemptedNameResolution.insert(id)
+            // 1) the user's profile name; 2) fall back to the private-chat
+            // title, which often keeps a locally-saved contact name even when
+            // the profile itself is empty/deleted.
+            var name = usable(await telegramService.resolveDisplayName(for: id))
+            if name == nil {
+                name = usable((try? await telegramService.getChat(id: id))?.title)
+            }
+            guard let resolved = name else { continue }
+            await RelationGraph.shared.updateDisplayName(entityId: id, name: resolved)
+            await DatabaseManager.shared.backfillSenderName(userId: id, name: resolved)
+            resolvedUsers[id] = UserSnapshot(id: id, displayName: resolved, username: nil, isBot: nil)
+            recovered += 1
+        }
+        if recovered > 0 {
+            logger.info("resolveMissingNames: recovered \(recovered, privacy: .public) of \(ids.count, privacy: .public) unnamed person nodes")
+        }
     }
 
     private func upsertSelfNode(_ currentUser: TGUser) async {
