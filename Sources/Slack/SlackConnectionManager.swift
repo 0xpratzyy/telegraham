@@ -84,7 +84,10 @@ final class SlackConnectionManager: ObservableObject {
 
     /// Disconnect: drop the source from the registry and clear stored tokens.
     func disconnect() {
-        if let service { SourceRegistry.shared.unregister(service) }
+        if let service {
+            service.shutdown()
+            SourceRegistry.shared.unregister(service)
+        }
         service = nil
         for key: KeychainManager.Key in [.slackAccessToken, .slackRefreshToken, .slackTeamId, .slackTeamName, .slackAuthedUserId] {
             try? KeychainManager.delete(for: key)
@@ -94,6 +97,8 @@ final class SlackConnectionManager: ObservableObject {
 
     private func activate(teamId: String, teamName: String?, authedUser: String, token: String, refresh: String?, expiry: Date?) {
         guard let clientId = BundledSecrets.slackClientId else { return }
+        // Cancel any prior service's loop before replacing it (reconnect path).
+        self.service?.shutdown()
         let service = SlackService(
             clientId: clientId,
             teamId: teamId,

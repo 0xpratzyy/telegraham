@@ -40,6 +40,19 @@ final class SlackService: ObservableObject, MessageSource {
     /// token and lock the workspace out until a full re-OAuth.
     private var refreshInFlight: Task<Void, Never>?
 
+    /// The dedicated background freshness+depth loop; cancelled on disconnect.
+    private var refreshLoopTask: Task<Void, Never>?
+    /// Chats already breadth-fetched this session (so a genuinely-empty channel
+    /// isn't re-polled every tick). Only set on a *successful* first fetch, so a
+    /// transient failure still retries.
+    private var breadthAttempted: Set<Int64> = []
+    /// Chats deepened to `depthTargetPerChat` (or with no older history left) —
+    /// skipped by the Stage-2 depth backfill.
+    private var fullyDeepened: Set<Int64> = []
+    /// Freshness/breadth slots spent since the last depth slot — drives the
+    /// depth reservation in `selectNextTarget`.
+    private var ticksSinceDepth = 0
+
     /// Hard caps so a huge workspace / a malformed-or-looping cursor can't spin
     /// a `while cursor` loop forever or accumulate unbounded remote-sized data.
     private static let maxPaginationPages = 50
@@ -49,9 +62,35 @@ final class SlackService: ObservableObject, MessageSource {
     /// Replies are rate-limited (~1/min); cap on-demand thread paging so a
     /// giant thread can't stall the panel for many minutes.
     private static let maxReplyPages = 4
-    /// Channels proactively synced per `syncRecentMessages` pass (each sleeps
-    /// ~60s to respect Slack's limit, so an unbounded loop would run for hours).
-    private static let maxChannelsPerSyncPass = 20
+
+    // MARK: Background refresh-loop tuning
+    //
+    // `conversations.history` is paced to ~1/min by `SlackRateLimiter`, so the
+    // loop's hard ceiling is one chat per ~minute regardless. These knobs only
+    // decide *which* chat each scarce slot is spent on, and when to idle.
+
+    /// Slack's hard per-request object cap on the non-Marketplace tier — one
+    /// `history` call can never return more than this many messages.
+    private static let slackPageSize = 15
+    /// Extra spacing on top of the rate limiter so the loop doesn't permanently
+    /// saturate the shared `history` bucket — leaves a window for interactive
+    /// chat opens to slip a fetch in.
+    private static let refreshHeadroomSeconds: UInt64 = 12
+    /// Sleep when nothing is due (everything fresh and fully deepened).
+    private static let refreshIdleSeconds: UInt64 = 45
+    /// Freshness windows by activity: a chat becomes "due" for a new-message
+    /// poll once this long has elapsed since its last sync. Active chats poll
+    /// often, dormant ones rarely — so the 1/min budget favors what's moving.
+    private static let freshWindowActive: TimeInterval = 5 * 60     // last activity < 1 day
+    private static let freshWindowWarm: TimeInterval = 20 * 60      // < 1 week
+    private static let freshWindowCold: TimeInterval = 60 * 60      // older / unknown
+    /// Stage 2 depth backfill: page older history (≤15/min) until a chat has at
+    /// least this many cached messages, then stop deepening it.
+    private static let depthTargetPerChat = 100
+    /// Reserve 1 slot for depth after this many freshness/breadth slots, so a
+    /// steady stream of active-chat freshness can't starve history backfill
+    /// (without it, depth only runs when the whole workspace goes quiet).
+    private static let depthEveryNTicks = 4
 
     init(
         clientId: String,
@@ -83,7 +122,7 @@ final class SlackService: ObservableObject, MessageSource {
         await warmUserCache()
         await loadConversations()
         await reformatCachedSlackText()
-        await syncRecentMessages()
+        startRefreshLoop()
     }
 
     /// Bulk-load workspace members once so message-mention decoding resolves
@@ -335,33 +374,202 @@ final class SlackService: ObservableObject, MessageSource {
         }
     }
 
-    /// Proactively cache recent history per channel so Slack messages flow
-    /// into search / reply queue / tasks without the user opening each chat.
-    /// Paced ~1 channel/min to respect Slack's non-Marketplace
-    /// `conversations.history` limit; browsing caches on demand separately.
-    func syncRecentMessages(perChannelLimit: Int = 15) async {
-        // Only spend rate budget on channels we don't already have cached —
-        // the on-load enrichment surfaces the rest instantly. Across launches
-        // this covers the whole workspace without re-fetching what we have.
-        // Cap per pass: chatHistory is paced ~1/min by SlackRateLimiter, so an
-        // unbounded loop would run for hours. Remaining channels are picked up
-        // on later passes (they still have lastMessage == nil).
-        let pending = chats.filter { $0.isInMainList && $0.lastMessage == nil }
-            .prefix(Self.maxChannelsPerSyncPass)
-        for chat in pending {
-            if let messages = try? await chatHistory(chatId: chat.id, fromMessageId: 0, limit: perChannelLimit),
-               !messages.isEmpty {
-                await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: messages)
-                // Attach the newest message so the chat shows a preview /
-                // timestamp and sorts by recency instead of sinking to the
-                // bottom of the unified list.
-                if let newest = messages.max(by: { $0.date < $1.date }),
-                   let index = chats.firstIndex(where: { $0.id == chat.id }) {
-                    chats[index] = chats[index].updating(lastMessage: newest)
-                }
-            }
-            // Pacing handled centrally by SlackRateLimiter (inside chatHistory).
+    // MARK: - Background refresh loop
+
+    /// Start the dedicated Slack freshness+depth loop. Replaces riding inside
+    /// `RecentSyncCoordinator`'s Telegram batches, where one Slack chat's ~60s
+    /// rate-limit slot stalled the three Telegram chats sharing its batch. Now
+    /// one Slack chat is refreshed per paced slot, chosen by what's most worth
+    /// spending the scarce budget on.
+    func startRefreshLoop() {
+        guard refreshLoopTask == nil else { return }
+        refreshLoopTask = Task { [weak self] in
+            await self?.refreshLoop()
         }
+    }
+
+    /// Stop the loop (disconnect / replace). Safe to call repeatedly.
+    func shutdown() {
+        refreshLoopTask?.cancel()
+        refreshLoopTask = nil
+    }
+
+    private func refreshLoop() async {
+        while !Task.isCancelled {
+            guard let target = await selectNextTarget() else {
+                // Nothing due and nothing left to deepen — idle briefly.
+                try? await Task.sleep(for: .seconds(Self.refreshIdleSeconds))
+                continue
+            }
+
+            switch target {
+            case .freshen(let chat): await refreshNewest(chat)
+            case .deepen(let chat): await backfillOlder(chat)
+            }
+            if Task.isCancelled { return }
+
+            // The history call already blocked ~60s on the rate limiter; a small
+            // extra gap keeps the loop from permanently owning the shared bucket
+            // so an interactive chat-open can still slip a fetch through.
+            try? await Task.sleep(for: .seconds(Self.refreshHeadroomSeconds))
+        }
+    }
+
+    private enum RefreshTarget {
+        case freshen(TGChat)   // poll for messages newer than what's cached (or the first fetch)
+        case deepen(TGChat)    // Stage 2: page older history toward the depth target
+    }
+
+    /// Choose which chat the next paced slot is spent on. Freshness leads, but
+    /// roughly 1 slot in `depthEveryNTicks + 1` is reserved for depth so steady
+    /// active-chat freshness can't starve history backfill. Within each, most
+    /// recently active first.
+    /// • (reserved) deepen an active chat below the depth target,
+    /// • freshen a content chat past its activity-scaled window,
+    /// • seed a never-fetched chat (breadth),
+    /// • else deepen whatever backfill remains.
+    private func selectNextTarget() async -> RefreshTarget? {
+        let slackChats = chats.filter { $0.isInMainList }
+        guard !slackChats.isEmpty else { return nil }
+
+        let withContent = slackChats.filter { $0.lastMessage != nil }
+        let states = withContent.isEmpty ? [:] : await db.loadRecentSyncStates(in: withContent.map(\.id))
+        let now = Date()
+
+        let dueChat = withContent
+            .filter { chat in
+                guard let at = states[chat.id]?.lastRecentSyncAt else { return true }
+                return now.timeIntervalSince(at) >= freshnessWindow(for: chat)
+            }
+            .max(by: { ($0.lastActivityDate ?? .distantPast) < ($1.lastActivityDate ?? .distantPast) })
+
+        let breadthChat = slackChats.first(where: { $0.lastMessage == nil && !breadthAttempted.contains($0.id) })
+
+        let deepenChat = withContent
+            .filter { !fullyDeepened.contains($0.id) }
+            .max(by: { ($0.lastActivityDate ?? .distantPast) < ($1.lastActivityDate ?? .distantPast) })
+
+        // Reserved depth slot: only when freshness/breadth work is actually
+        // competing for the budget (otherwise depth runs freely below).
+        if let deepenChat, (dueChat != nil || breadthChat != nil), ticksSinceDepth >= Self.depthEveryNTicks {
+            ticksSinceDepth = 0
+            return .deepen(deepenChat)
+        }
+
+        // 1) Freshness, 2) breadth — each counts toward the next reserved slot.
+        if let dueChat { ticksSinceDepth += 1; return .freshen(dueChat) }
+        if let breadthChat { ticksSinceDepth += 1; return .freshen(breadthChat) }
+
+        // 3) Depth, unconstrained when there's no freshness work left to do.
+        if let deepenChat { ticksSinceDepth = 0; return .deepen(deepenChat) }
+
+        return nil
+    }
+
+    /// Shorter freshness window for recently-active chats, so the scarce budget
+    /// keeps live conversations current and barely touches dormant ones.
+    private func freshnessWindow(for chat: TGChat) -> TimeInterval {
+        guard let last = chat.lastActivityDate else { return Self.freshWindowCold }
+        let age = Date().timeIntervalSince(last)
+        if age < 24 * 60 * 60 { return Self.freshWindowActive }
+        if age < 7 * 24 * 60 * 60 { return Self.freshWindowWarm }
+        return Self.freshWindowCold
+    }
+
+    /// Pull messages newer than the newest cached one (incremental, so the slot
+    /// isn't wasted re-fetching the same 15), or the latest page for a chat with
+    /// nothing cached. Caches, updates the preview, records sync state, and
+    /// notifies downstream indexers.
+    ///
+    /// Note: a single page is capped at 15 by Slack, so a firehose channel that
+    /// produced >15 messages within one freshness window keeps only the newest
+    /// 15 of that burst (older-but-unseen middle is left to Stage-2 depth). That
+    /// trade favors recent activity — what the reply queue cares about — over
+    /// perfect continuity on high-velocity channels, within the 1/min budget.
+    private func refreshNewest(_ chat: TGChat) async {
+        let cachedNewest = await db.loadMessages(chatId: chat.id, limit: 1).first
+        var messages: [TGMessage] = []
+        if let cachedNewest,
+           let native = try? await db.nativeId(source: sourceID, intId: cachedNewest.id),
+           let ts = Self.ts(fromMessageNative: native) {
+            messages = (try? await fetchHistory(chat: chat, oldest: ts)) ?? []
+        } else {
+            // First fetch. Distinguish a successful-but-empty channel (mark done,
+            // don't re-poll) from a transient failure (leave for retry).
+            do {
+                messages = try await fetchHistory(chat: chat, oldest: nil)
+                breadthAttempted.insert(chat.id)
+            } catch {
+                return
+            }
+        }
+
+        if !messages.isEmpty {
+            await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: messages, append: true)
+            if let newest = messages.max(by: { $0.date < $1.date }),
+               let index = chats.firstIndex(where: { $0.id == chat.id }) {
+                chats[index] = chats[index].updating(lastMessage: newest)
+            }
+            postLocalUpdate(chatId: chat.id, count: messages.count)
+        }
+
+        // Record the poll even on no yield, so an idle chat isn't re-polled until
+        // its freshness window lapses again.
+        let latestId = messages.max(by: { $0.date < $1.date })?.id
+            ?? cachedNewest?.id
+            ?? chat.lastMessage?.id
+            ?? 0
+        if latestId != 0 {
+            await db.saveRecentSyncState(chatId: chat.id, latestSyncedMessageId: latestId, syncedAt: Date())
+        }
+    }
+
+    /// Stage 2: page one window of history *older* than the oldest cached
+    /// message, until the chat reaches the depth target or runs out of history.
+    private func backfillOlder(_ chat: TGChat) async {
+        let cached = await db.loadMessages(chatId: chat.id, limit: Self.depthTargetPerChat)
+        guard cached.count < Self.depthTargetPerChat, let oldest = cached.last else {
+            fullyDeepened.insert(chat.id)   // already deep enough
+            return
+        }
+        let older = (try? await chatHistory(chatId: chat.id, fromMessageId: oldest.id, limit: Self.slackPageSize)) ?? []
+        guard !older.isEmpty else {
+            fullyDeepened.insert(chat.id)   // no older history left
+            return
+        }
+        await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: older, append: true)
+        postLocalUpdate(chatId: chat.id, count: older.count)
+    }
+
+    /// One `conversations.history` page. With `oldest` set, returns messages
+    /// strictly newer than it (incremental poll); without, the latest page.
+    private func fetchHistory(chat: TGChat, oldest: String?) async throws -> [TGMessage] {
+        await ensureValidToken()
+        guard let channelNative = try await db.nativeId(source: sourceID, intId: chat.id) else { return [] }
+        let history = try await api.conversationsHistory(
+            channel: channelNative,
+            oldest: oldest,
+            limit: Self.slackPageSize
+        )
+        var mapped: [TGMessage] = []
+        for message in history.messages ?? [] {
+            if let tg = await mapMessage(message, channelNative: channelNative, channelId: chat.id, channelTitle: nil) {
+                mapped.append(tg)
+            }
+        }
+        return mapped
+    }
+
+    /// Tell downstream consumers (TaskIndex, GraphBuilder, search) that fresh
+    /// Slack messages just landed — the same signal `RecentSyncCoordinator`
+    /// posts for Telegram, which Slack no longer rides inside.
+    private func postLocalUpdate(chatId: Int64, count: Int) {
+        guard count > 0 else { return }
+        NotificationCenter.default.post(
+            name: .pidgyMessagesUpdatedLocally,
+            object: nil,
+            userInfo: ["chatIds": [chatId], "messageCount": count]
+        )
     }
 
     // MARK: - Mapping

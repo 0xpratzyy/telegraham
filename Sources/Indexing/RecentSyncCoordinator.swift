@@ -181,8 +181,13 @@ actor RecentSyncCoordinator {
         let visibleChats = await MainActor.run {
             SourceRegistry.shared.visibleChats
         }
+        // Slack runs its own paced refresh loop (`SlackService`). It must NOT
+        // ride inside this Telegram batch group: one Slack chat's ~60s
+        // rate-limit slot would stall the Telegram chats sharing its batch, and
+        // Telegram-only member-count resolution below doesn't apply to it.
+        let telegramChats = visibleChats.filter { $0.source.kind == .telegram }
         let resolvedChats = await resolveMemberCountsIfNeeded(
-            in: visibleChats,
+            in: telegramChats,
             using: telegramService
         )
         return resolvedChats.filter(Self.isIndexable)
