@@ -36,6 +36,13 @@ skills-lock.json
 # Beta credentials baked into the build via xcconfig — never check these in.
 Config/BetaSecrets.local.xcconfig
 
+# Eval harness secrets + outputs (tools/model_swap_eval.py). The .local file
+# holds OPENROUTER_API_KEY / LANGSMITH_API_KEY; never check it in.
+.env.eval.local
+.env.eval
+tools/model_swap_eval_out/
+__pycache__/
+
 # Packaged distribution artifacts (Pidgy-<sha>.dmg etc.)
 dist/
 
