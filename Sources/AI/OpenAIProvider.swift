@@ -292,8 +292,17 @@ final class OpenAIProvider: AIProvider {
         // "low" cuts the reasoning tokens 3-5× and keeps quality on
         // structured outputs. Only emit for gpt-5* models — older
         // chat-completions models 400 on this param.
+        //
+        // pipelineTriage is the high-volume single-chat per-message call and
+        // the bulk of our gpt-5 spend. There "minimal" cuts cost ~66% (skips
+        // the ~260 reasoning tokens/call) with no measured drop in the critical
+        // on_me recall — see docs/model_swap_eval_RESULTS.md. The larger
+        // multi-candidate calls (agenticSearch, dashboardTaskTriage) stay on
+        // "low": minimal saves little there (~25%) and reasoning does real
+        // cross-candidate work. NB: gpt-5.1+ renamed "minimal" → "none", so
+        // this value must change if we move off gpt-5.0.
         if model.hasPrefix("gpt-5") {
-            body["reasoning_effort"] = "low"
+            body["reasoning_effort"] = requestKind == .pipelineTriage ? "minimal" : "low"
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
