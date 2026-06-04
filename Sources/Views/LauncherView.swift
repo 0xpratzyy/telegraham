@@ -102,27 +102,23 @@ struct LauncherView: View {
             includeBots: includeBotsInAISearch,
             isLikelyBot: { SourceRegistry.shared.isLikelyBot(chat:$0) }
         )
-        // Browse view (no query): keep each source's own ordering — Telegram's
-        // smart order stays intact, so muted / low-priority groups don't float
-        // up — and only interleave non-Telegram chats by recency relative to
-        // the Telegram list, so Slack slots in without reordering Telegram
-        // among itself. Search results keep their relevance order.
+        // Browse view (no query): one unified list, most-recent-first across
+        // every source — so a recent Telegram DM never sinks below an older
+        // Slack channel, and Slack never floats above more-recent Telegram.
+        // (Replaces the old "preserve Telegram's order, slot Slack in by
+        // recency" scheme, which mis-placed chats whenever Telegram's `order`
+        // wasn't tracking recency.) Search results keep their relevance order.
         guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return filtered }
-        var incoming = filtered
-            .filter { $0.source.kind != .telegram }
-            .sorted { ($0.lastActivityDate ?? .distantPast) > ($1.lastActivityDate ?? .distantPast) }
-        guard !incoming.isEmpty else { return filtered }
-        var merged: [TGChat] = []
-        merged.reserveCapacity(filtered.count)
-        for chat in filtered where chat.source.kind == .telegram {
-            let chatDate = chat.lastActivityDate ?? .distantPast
-            while let next = incoming.first, (next.lastActivityDate ?? .distantPast) > chatDate {
-                merged.append(incoming.removeFirst())
-            }
-            merged.append(chat)
+        // Most-recent-first, unified across sources — but Telegram chats the
+        // user archived (TDLib `order` 0) sink to the bottom instead of floating
+        // up on recency. Slack legitimately carries order 0, so it's exempt:
+        // only Telegram chats are bucketed by the archived test.
+        return filtered.sorted { lhs, rhs in
+            let lhsArchived = lhs.source.kind == .telegram && lhs.order == 0
+            let rhsArchived = rhs.source.kind == .telegram && rhs.order == 0
+            if lhsArchived != rhsArchived { return !lhsArchived }
+            return (lhs.lastActivityDate ?? .distantPast) > (rhs.lastActivityDate ?? .distantPast)
         }
-        merged.append(contentsOf: incoming)
-        return merged
     }
 
     private var aiSearchSourceChats: [TGChat] {
