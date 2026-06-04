@@ -78,7 +78,25 @@ final class SlackConnectionManager: ObservableObject {
 
             activate(teamId: teamId, teamName: teamName, authedUser: authedUser, token: token, refresh: refresh, expiry: expiry)
         } catch {
-            state = .failed(error.localizedDescription)
+            state = .failed(Self.connectFailureMessage(for: error))
+        }
+    }
+
+    /// Turn a connect failure into actionable guidance. The most common
+    /// real-world cause — a workspace that requires admin approval for app
+    /// installs — never calls our redirect back (Slack shows the user a
+    /// "request sent to your admins" page instead), so it reaches us as a
+    /// denial or a timeout. We can't detect the pending state precisely, but
+    /// we can stop calling it a bare "timed out" and point the user at the
+    /// likely fix.
+    private static func connectFailureMessage(for error: Error) -> String {
+        switch error {
+        case SlackOAuth.OAuthError.denied:
+            return "Slack sign-in was cancelled or blocked. If your workspace requires admin approval for apps, ask an admin to approve Pidgy, then Connect again."
+        case LocalCallbackServer.CallbackError.timedOut:
+            return "Slack sign-in didn't finish. If your workspace requires admin approval, your request may now be pending with an admin — reconnect once it's approved."
+        default:
+            return error.localizedDescription
         }
     }
 
