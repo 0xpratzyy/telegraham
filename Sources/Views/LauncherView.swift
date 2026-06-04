@@ -318,6 +318,15 @@ struct LauncherView: View {
             )
             backgroundRefreshPipeline()
         }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .pidgyMessagesUpdatedLocally)
+                .debounce(for: .seconds(10), scheduler: RunLoop.main)
+        ) { _ in
+            // New messages from ANY source (Slack included) re-run the queue
+            // refresh — not only Telegram's $chats — so Slack pings surface in
+            // the reply queue even when Telegram is quiet.
+            backgroundRefreshPipeline()
+        }
         .onChange(of: telegramService.botMetadataRefreshVersion) {
             refreshBotFilteredUI()
         }

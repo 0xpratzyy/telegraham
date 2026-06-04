@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 let dashboardUncategorizedTopicId: Int64 = Int64.min
 
@@ -251,6 +252,19 @@ struct DashboardView: View {
                     telegramService: telegramService
                 )
             }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .pidgyMessagesUpdatedLocally)
+                .debounce(for: .seconds(10), scheduler: RunLoop.main)
+        ) { _ in
+            // New messages from any source (Slack included) re-run the
+            // reply-queue refresh so its "needs reply" classification stays
+            // live, not only when the visible chat set changes.
+            attentionStore.backgroundRefreshPipeline(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBots: includeBotsInAISearch
+            )
         }
         .onChange(of: visibleChatIDs) {
             telegramService.scheduleBotMetadataWarm(
