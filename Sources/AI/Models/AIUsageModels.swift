@@ -93,11 +93,21 @@ struct AIUsageBreakdownRow: Identifiable, Equatable {
     let metrics: AIUsageMetrics
 }
 
+/// One calendar day's rolled-up usage, for the day-by-day cost view.
+struct DailyUsagePoint: Identifiable, Equatable {
+    let dayStart: Date
+    let metrics: AIUsageMetrics
+    var id: Date { dayStart }
+}
+
 struct AIUsageOverview: Equatable {
     let last30Days: AIUsageMetrics
     let lifetime: AIUsageMetrics
     let byFeature30Days: [AIUsageBreakdownRow]
     let byModel30Days: [AIUsageBreakdownRow]
+    /// One entry per calendar day, oldest → newest, covering the trailing 30
+    /// days. Days with no usage are included as zero so the series is continuous.
+    let daily30Days: [DailyUsagePoint]
 
     var hasUsage: Bool {
         lifetime.requestCount > 0
@@ -107,7 +117,8 @@ struct AIUsageOverview: Equatable {
         last30Days: .zero,
         lifetime: .zero,
         byFeature30Days: [],
-        byModel30Days: []
+        byModel30Days: [],
+        daily30Days: []
     )
 }
 

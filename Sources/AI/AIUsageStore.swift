@@ -74,6 +74,7 @@ actor AIUsageStore {
         var last30 = AIUsageMetrics.zero
         var featureMetrics: [AIRequestKind: AIUsageMetrics] = [:]
         var modelMetrics: [String: (provider: AIUsageProvider, model: String, metrics: AIUsageMetrics)] = [:]
+        var dailyMetrics: [Date: AIUsageMetrics] = [:]
 
         for record in allRecords {
             accumulate(record: record, into: &lifetime)
@@ -81,6 +82,10 @@ actor AIUsageStore {
             guard record.dayStart >= last30Cutoff else { continue }
 
             accumulate(record: record, into: &last30)
+
+            var dayTotal = dailyMetrics[record.dayStart] ?? .zero
+            accumulate(record: record, into: &dayTotal)
+            dailyMetrics[record.dayStart] = dayTotal
 
             var featureTotal = featureMetrics[record.requestKind] ?? .zero
             accumulate(record: record, into: &featureTotal)
@@ -115,11 +120,20 @@ actor AIUsageStore {
             }
             .sorted(by: sortBreakdownRows)
 
+        // Continuous daily series (oldest → newest) over the trailing 30 days,
+        // zero-filled, for the day-by-day cost view and the cost sparkline.
+        var daily30Days: [DailyUsagePoint] = []
+        for offset in stride(from: 29, through: 0, by: -1) {
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: todayStart) else { continue }
+            daily30Days.append(DailyUsagePoint(dayStart: day, metrics: dailyMetrics[day] ?? .zero))
+        }
+
         return AIUsageOverview(
             last30Days: last30,
             lifetime: lifetime,
             byFeature30Days: byFeature30Days,
-            byModel30Days: byModel30Days
+            byModel30Days: byModel30Days,
+            daily30Days: daily30Days
         )
     }
 
