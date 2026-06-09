@@ -47,9 +47,29 @@ MARKETING=$(grep -E '^\s*MARKETING_VERSION:' "$PROJECT_YML" | head -1 | sed -E '
 BUILDNUM=$(grep -E '^\s*CURRENT_PROJECT_VERSION:' "$PROJECT_YML" | head -1 | sed -E 's/.*CURRENT_PROJECT_VERSION:[[:space:]]*([0-9]+).*/\1/')
 
 # ── Fetch the live appcast (SUFeedURL) ──────────────────────────────
-FEED_URL=$(grep -E 'SUFeedURL:' "$PROJECT_YML" | head -1 | sed -E 's/.*(https?:\/\/[^[:space:]]+).*/\1/')
-[ -z "$FEED_URL" ] && FEED_URL="https://raw.githubusercontent.com/0xpratzyy/pidgy-releases/main/appcast.xml"
+# CHECK_RELEASE_FEED_URL overrides the feed (e.g. a file:// fixture) so this
+# checker can be exercised offline against a crafted appcast. Falls back to the
+# SUFeedURL in project.yml, then the canonical releases feed.
+FEED_URL="${CHECK_RELEASE_FEED_URL:-}"
+if [ -z "$FEED_URL" ]; then
+  FEED_URL=$(grep -E 'SUFeedURL:' "$PROJECT_YML" | head -1 | sed -E 's/.*(https?:\/\/[^[:space:]]+).*/\1/')
+  [ -z "$FEED_URL" ] && FEED_URL="https://raw.githubusercontent.com/0xpratzyy/pidgy-releases/main/appcast.xml"
+fi
 APPCAST="$(curl -fsSL "$FEED_URL" 2>/dev/null || echo "")"
+
+# Strip XML comments BEFORE any version/enclosure parsing below. The appcast's
+# doc-comment header has carried a sample <item> with a real version string
+# sitting ABOVE <channel>; without this, the grep-based readers treat that
+# commented version as the live "top" and emit spurious version-mismatch FAILs
+# on a perfectly good release (hit 2026-06-10 cutting 1.0.9 — the comment held a
+# 1.0.8 sample, so preflight/postflight compared against 1.0.8, not the real
+# channel top). Only real <channel> items must be parsed. perl -0777 slurps the
+# whole document so comments spanning multiple lines are removed in one pass.
+# Do NOT drop this guard: reintroducing comment-sensitive parsing silently
+# breaks the version checks that are the entire point of this script.
+if [ -n "$APPCAST" ] && command -v perl >/dev/null 2>&1; then
+  APPCAST="$(printf '%s' "$APPCAST" | perl -0777 -pe 's/<!--.*?-->//gs')"
+fi
 
 # Newest <item> values (first occurrence = top of channel = newest).
 appcast_top_short() { printf '%s' "$APPCAST" | grep -oE '<sparkle:shortVersionString>[^<]+' | head -1 | sed -E 's/.*>//'; }
