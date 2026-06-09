@@ -56,3 +56,6 @@ yc-coding-agent-session-*.md
 *-session-transcript-*.md
 *-eval-session-*.md
 .claude/worktrees/*/yc-coding-agent-session-*.md
+
+# wrangler local state (account cache, dev logs)
+.wrangler/
