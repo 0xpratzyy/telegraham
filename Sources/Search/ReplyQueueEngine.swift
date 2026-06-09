@@ -75,6 +75,9 @@ final class ReplyQueueEngine {
         let providerType: AIProviderConfig.ProviderType
         let apiKey: String
         let model: String
+        /// Non-nil when OpenAI requests route through the AI proxy Worker
+        /// (issue #26); `apiKey` is then the proxy gate token.
+        let openAIEndpointURL: URL?
     }
 
     func search(
@@ -99,7 +102,8 @@ final class ReplyQueueEngine {
             return AIInvocation(
                 providerType: aiService.providerType,
                 apiKey: aiService.configuredAPIKey,
-                model: aiService.providerModel
+                model: aiService.providerModel,
+                openAIEndpointURL: aiService.configuredOpenAIEndpointURL
             )
         }()
 
@@ -755,7 +759,11 @@ final class ReplyQueueEngine {
         let provider: AIProvider
         switch providerConfig.providerType {
         case .openai:
-            provider = OpenAIProvider(apiKey: providerConfig.apiKey, model: providerConfig.model)
+            provider = OpenAIProvider(
+                apiKey: providerConfig.apiKey,
+                model: providerConfig.model,
+                endpointURL: providerConfig.openAIEndpointURL ?? AppConstants.AI.openAIBaseURL
+            )
         case .claude:
             provider = ClaudeProvider(apiKey: providerConfig.apiKey, model: providerConfig.model)
         case .none:

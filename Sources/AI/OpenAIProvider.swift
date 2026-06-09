@@ -3,6 +3,12 @@ import Foundation
 final class OpenAIProvider: AIProvider {
     private let apiKey: String
     private let model: String
+    /// Where requests are sent. Defaults to OpenAI directly; the zero-setup
+    /// flow overrides this with the AI proxy Worker URL (issue #26), in
+    /// which case `apiKey` is the revocable proxy gate token rather than a
+    /// raw OpenAI key. The request/response shape is identical either way —
+    /// the proxy forwards the body verbatim.
+    let endpointURL: URL
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = AppConstants.AI.requestTimeoutSeconds
@@ -10,9 +16,14 @@ final class OpenAIProvider: AIProvider {
         return URLSession(configuration: config)
     }()
 
-    init(apiKey: String, model: String = AppConstants.AI.defaultOpenAIModel) {
+    init(
+        apiKey: String,
+        model: String = AppConstants.AI.defaultOpenAIModel,
+        endpointURL: URL = AppConstants.AI.openAIBaseURL
+    ) {
         self.apiKey = apiKey
         self.model = model
+        self.endpointURL = endpointURL
     }
 
     // MARK: - AIProvider
@@ -270,7 +281,7 @@ final class OpenAIProvider: AIProvider {
         // PIDGY_BUNDLED_LANGSMITH_API_KEY is empty.
         let startedAt = Date()
 
-        var request = URLRequest(url: AppConstants.AI.openAIBaseURL)
+        var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
