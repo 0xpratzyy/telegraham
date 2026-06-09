@@ -7183,17 +7183,29 @@ final class PidgyCoreTests: XCTestCase {
             let focusedGroupChatId: Int64 = 7810
             let now = Date()
 
-            let directRecords: [DatabaseManager.MessageRecord] = (0..<12).map { index in
-                DatabaseManager.MessageRecord(
+            // Built with a for-loop, not (0..<12).map — the closure
+            // version (inline array literal + Int64/TimeInterval mixed
+            // arithmetic) compiled locally but blew the type-checker's
+            // time budget on the slower macos-26 GitHub runner
+            // ("unable to type-check this expression in reasonable
+            // time"). A loop type-checks each statement independently.
+            let directTexts: [String] = [
+                "done", "one min", "check once", "hmm", "okay", "yess",
+                "cool", "got it", "later", "noted", "fine", "send?"
+            ]
+            var directRecords: [DatabaseManager.MessageRecord] = []
+            for index in 0..<12 {
+                let secondsAgo: TimeInterval = Double(index + 1) * 300
+                directRecords.append(DatabaseManager.MessageRecord(
                     id: Int64(830 + index),
                     chatId: noisyDirectChatId,
                     senderUserId: 42,
                     senderName: "Akhil B",
-                    date: now.addingTimeInterval(TimeInterval(-(index + 1) * 300)),
-                    textContent: ["done", "one min", "check once", "hmm", "okay", "yess", "cool", "got it", "later", "noted", "fine", "send?"][index],
+                    date: now.addingTimeInterval(-secondsAgo),
+                    textContent: directTexts[index],
                     mediaTypeRaw: nil,
                     isOutgoing: false
-                )
+                ))
             }
 
             let focusedFirstRecord = DatabaseManager.MessageRecord(
