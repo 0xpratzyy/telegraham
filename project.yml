@@ -26,6 +26,22 @@ packages:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
 
+# Explicit shared scheme so `xcodebuild -scheme Pidgy test` behaves the
+# same everywhere (CI, pre-push hook, fresh clones) instead of relying
+# on Xcode's implicit scheme auto-creation, which only happens reliably
+# when the project is opened in the IDE.
+schemes:
+  Pidgy:
+    build:
+      targets:
+        Pidgy: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - PidgyTests
+
 targets:
   Pidgy:
     type: application
