@@ -24,6 +24,8 @@ struct DashboardPreferencesPage: View {
     @State private var testConnectionStatus: DashboardPreferenceStatus?
     @State private var usageOverview: AIUsageOverview = .empty
     @State private var isLoadingUsage = false
+    @State private var dailyRangeDays = 14
+    @State private var hoveredDay: Date?
     @State private var graphDebugSummary: GraphBuilder.DebugSummary = .empty
     @State private var isLoadingDiagnostics = false
     @State private var routingDebugQuery = "who do I need to reply to"
@@ -650,6 +652,25 @@ struct DashboardPreferencesPage: View {
                 }
             }
 
+            // ── Day by day ── per-day cost vs a derived daily budget
+            PrefSection {
+                PrefSectionHead(
+                    title: "Day by day",
+                    subtitle: "Cost per day · budget ~\(currencyString(dailyBudgetUSD))/day"
+                ) {
+                    dailyRangeChips
+                }
+                if dailyUsagePoints.allSatisfy({ $0.metrics.estimatedCostUSD == 0 }) {
+                    Text("No tracked usage in the last \(dailyRangeDays) days yet.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                        .padding(.vertical, 8)
+                } else {
+                    dailyBudgetChart
+                        .padding(.top, 10)
+                }
+            }
+
             // ── By feature ── horizontal bar chart
             PrefSection {
                 PrefSectionHead(title: "By feature", subtitle: "Last 30 days")
@@ -730,8 +751,13 @@ struct DashboardPreferencesPage: View {
         .frame(height: 8)
     }
 
+    private static let monthlyCapUSD: Double = 50
+
+    /// Even daily allowance derived from the monthly cap (~$1.67 on a $50 cap).
+    private var dailyBudgetUSD: Double { Self.monthlyCapUSD / 30 }
+
     private var lifetimeCapProgress: Double {
-        let cap: Double = 50
+        let cap = Self.monthlyCapUSD
         guard cap > 0 else { return 0 }
         return min(1, max(0, usageOverview.lifetime.estimatedCostUSD / cap))
     }
@@ -740,19 +766,127 @@ struct DashboardPreferencesPage: View {
         "\(Int((lifetimeCapProgress * 100).rounded()))%"
     }
 
-    /// Generates a 30-point sparkline from the data we have. If we only have a
-    /// total, fall back to a flat trend so the chart still renders cleanly. We
-    /// don't have day-level cost data live yet, so this is a reasonable
-    /// placeholder until we start storing daily aggregates.
-    private var pricingTrendData: [Double] {
-        let total = usageOverview.last30Days.estimatedCostUSD
-        guard total > 0 else { return Array(repeating: 0.4, count: 30) }
-        // Smooth random-ish curve seeded by total, just for visual texture.
-        return (0..<30).map { i in
-            let phase = Double(i) / 29
-            let bump = sin(phase * 5) * 0.18 + cos(phase * 3) * 0.10
-            return max(0, total / 30 * (1 + bump))
+    /// Trailing N days (oldest → newest) for the day-by-day bar chart, where N
+    /// is the selected date-range filter.
+    private var dailyUsagePoints: [DailyUsagePoint] {
+        Array(usageOverview.daily30Days.suffix(dailyRangeDays))
+    }
+
+    private static let dayLabelFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
+
+    private func dayLabel(_ date: Date?) -> String {
+        guard let date else { return "" }
+        return Self.dayLabelFormatter.string(from: date)
+    }
+
+    /// Date-range filter chips (7 / 14 / 30 days) for the section header.
+    private var dailyRangeChips: some View {
+        HStack(spacing: 4) {
+            ForEach([7, 14, 30], id: \.self) { days in
+                let selected = dailyRangeDays == days
+                Text("\(days)D")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(selected ? Color.Pidgy.accentFg : Color.Pidgy.fg3)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(selected ? Color.Pidgy.accentFg.opacity(0.16) : Color.clear))
+                    .contentShape(Capsule())
+                    .onTapGesture { dailyRangeDays = days }
+            }
         }
+    }
+
+    /// Vertical per-day cost bars over the selected range, scaled against the
+    /// busier of the peak day or the daily budget, with a dashed budget line
+    /// and over-budget days flagged amber.
+    private var dailyBudgetChart: some View {
+        let days = dailyUsagePoints
+        let maxCost = days.map(\.metrics.estimatedCostUSD).max() ?? 0
+        let scaleMax = Swift.max(maxCost, dailyBudgetUSD) * 1.15
+        let chartHeight: CGFloat = 140
+        let spacing: CGFloat = days.count <= 7 ? 7 : (days.count <= 14 ? 4 : 2)
+        return VStack(alignment: .leading, spacing: 9) {
+            ZStack(alignment: .bottom) {
+                HStack(alignment: .bottom, spacing: spacing) {
+                    ForEach(days) { point in
+                        let cost = point.metrics.estimatedCostUSD
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            RoundedRectangle(cornerRadius: 2.5)
+                                .fill(cost > dailyBudgetUSD ? Color.Pidgy.warning : Color.Pidgy.accentFg)
+                                .opacity(hoveredDay == nil || hoveredDay == point.dayStart ? 1 : 0.4)
+                                .frame(height: Swift.max(cost > 0 ? 3 : 0, chartHeight * CGFloat(cost / scaleMax)))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .overlay(alignment: .top) {
+                            if hoveredDay == point.dayStart {
+                                dailyTooltip(point)
+                                    .fixedSize()
+                                    .offset(y: -8)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .onHover { hovering in
+                            if hovering { hoveredDay = point.dayStart }
+                            else if hoveredDay == point.dayStart { hoveredDay = nil }
+                        }
+                    }
+                }
+                .frame(height: chartHeight, alignment: .bottom)
+                // Daily budget threshold line (value is in the section subtitle).
+                Rectangle()
+                    .fill(Color.Pidgy.fg3.opacity(0.5))
+                    .frame(height: 1)
+                    .padding(.bottom, chartHeight * CGFloat(dailyBudgetUSD / scaleMax))
+            }
+            .frame(height: chartHeight, alignment: .bottom)
+            // x-axis: oldest · middle · newest
+            HStack(spacing: 0) {
+                Text(dayLabel(days.first?.dayStart))
+                Spacer()
+                if days.count >= 5 {
+                    Text(dayLabel(days[days.count / 2].dayStart))
+                    Spacer()
+                }
+                Text(dayLabel(days.last?.dayStart))
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(Color.Pidgy.fg3)
+        }
+    }
+
+    /// Hover tooltip card: the day and its $/day cost (amber when over budget).
+    private func dailyTooltip(_ point: DailyUsagePoint) -> some View {
+        let cost = point.metrics.estimatedCostUSD
+        return HStack(spacing: 6) {
+            Text(dayLabel(point.dayStart))
+                .foregroundStyle(Color.Pidgy.fg3)
+            Text("\(currencyString(cost))/day")
+                .fontWeight(.semibold)
+                .foregroundStyle(cost > dailyBudgetUSD ? Color.Pidgy.warning : Color.Pidgy.fg1)
+        }
+        .font(.system(size: 11))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.Pidgy.bg4)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.Pidgy.border3, lineWidth: 1))
+        )
+        .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+    }
+
+    /// Real per-day cost series (oldest → newest) driving the 30D cost
+    /// sparkline — now backed by stored daily aggregates instead of a
+    /// synthetic curve. Flat zero line when there's no usage yet.
+    private var pricingTrendData: [Double] {
+        let costs = usageOverview.daily30Days.map(\.metrics.estimatedCostUSD)
+        return costs.contains(where: { $0 > 0 }) ? costs : Array(repeating: 0, count: 30)
     }
 
     private var pricingFeatureRows: [PrefBarRow] {
