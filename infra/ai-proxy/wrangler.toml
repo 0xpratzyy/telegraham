@@ -1,0 +1,25 @@
+# Pidgy AI proxy — Cloudflare Worker config (issue #26).
+# Deploy steps + secrets: see README.md in this directory.
+
+name = "pidgy-ai-proxy"
+main = "worker.js"
+compatibility_date = "2026-06-01"
+
+# Spend backstop: requests/day across the whole beta cohort. Counters live in
+# the RATE KV namespace (day-bucket counts only — never message content).
+[vars]
+DAILY_REQUEST_CAP = "5000"
+
+# Created by: wrangler kv namespace create RATE
+# Paste the generated id below before first deploy.
+[[kv_namespaces]]
+binding = "RATE"
+id = "494a6795a9394d8f832c71db6dfcab0d"
+
+# Privacy invariants (issue #26): bare Worker on purpose — NOT AI Gateway
+# (it logs prompts by default). Do not add tail consumers, Workers Logs,
+# Logpush, or analytics bindings to this Worker; request/response bodies
+# must never persist on infra we run.
+# Secrets are NOT set here — set via:
+#   wrangler secret put OPENAI_API_KEY
+#   wrangler secret put PIDGY_PROXY_TOKEN
