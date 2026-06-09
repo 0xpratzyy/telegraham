@@ -49,7 +49,7 @@ enum ReplyQueueTriagePrompt {
 
     Valid classification values: "on_me", "worth_checking", "on_them", "quiet", "need_more"
     Valid urgency values: "high", "medium", "low"
-    """
+    """ + PromptSafety.untrustedContentClause
 
     static func userMessage(
         query: String,
@@ -105,21 +105,21 @@ enum ReplyQueueTriagePrompt {
             text += "closureAfterLatestActionable: \(digest.closureAfterLatestActionable)\n"
             text += "latestActionableStillAfterMyReply: \(digest.latestActionableStillAfterMyReply)\n"
             if candidate.chatType == "group", let earlierRequestForInputText = digest.earlierRequestForInputText {
-                text += "earlierRequestForInputText: \(earlierRequestForInputText)\n"
+                text += "earlierRequestForInputText: \(PromptSafety.fence(earlierRequestForInputText))\n"
             }
             if let latestActionableInboundText = digest.latestActionableInboundText {
-                text += "latestActionableInboundText: \(latestActionableInboundText)\n"
+                text += "latestActionableInboundText: \(PromptSafety.fence(latestActionableInboundText))\n"
             }
             if let latestCommitmentText = digest.latestCommitmentText {
-                text += "latestCommitmentText: \(latestCommitmentText)\n"
+                text += "latestCommitmentText: \(PromptSafety.fence(latestCommitmentText))\n"
             }
             if let latestClosureText = digest.latestClosureText {
-                text += "latestClosureText: \(latestClosureText)\n"
+                text += "latestClosureText: \(PromptSafety.fence(latestClosureText))\n"
             }
             text += "Key snippets:\n"
 
             for message in ownershipDigestSnippets(from: candidate.messages, chatType: candidate.chatType) {
-                text += "[messageId: \(message.messageId)] [\(message.relativeTimestamp)] \(message.senderFirstName): \(message.text)\n"
+                text += "[messageId: \(message.messageId)] [\(message.relativeTimestamp)] \(message.senderFirstName): \(PromptSafety.fence(message.text))\n"
             }
         }
 

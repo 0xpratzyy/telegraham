@@ -396,11 +396,28 @@ final class TaskIndexCoordinator: ObservableObject {
 
             guard let triage = triageByChatId[pending.chat.id] else { continue }
             if triage.route == .completedTask {
-                await DatabaseManager.shared.completeOpenDashboardTasks(
-                    chatId: pending.chat.id,
-                    matchingTaskIds: triage.completedTaskIds,
-                    matchingSourceMessageIds: triage.supportingMessageIds
-                )
+                // Prompt-injection defense (issue #30): force-completing real
+                // tasks is driven by AI output over attacker-controlled message
+                // text. Only honor it when corroborated by a genuine outgoing
+                // message from the user in this window — "from me" is derived
+                // structurally from isOutgoing / the sender id, never from
+                // message content, so a crafted inbound message cannot spoof it.
+                // An uncorroborated completion is advisory only: leave the task
+                // open for the user and just advance the sync cursor.
+                let corroboratedByMe = pending.messages.contains { msg in
+                    if msg.isOutgoing { return true }
+                    if case .user(let uid) = msg.senderId { return myUserId > 0 && uid == myUserId }
+                    return false
+                }
+                if corroboratedByMe {
+                    await DatabaseManager.shared.completeOpenDashboardTasks(
+                        chatId: pending.chat.id,
+                        matchingTaskIds: triage.completedTaskIds,
+                        matchingSourceMessageIds: triage.supportingMessageIds
+                    )
+                } else {
+                    logger.warning("refreshNow: completed_task for chat \(pending.chat.id, privacy: .public) lacks an outgoing [ME] message; treating as advisory (task left open)")
+                }
                 await DatabaseManager.shared.updateDashboardTaskSyncState(
                     chatId: pending.chat.id,
                     latestMessageId: pending.latestMessageId
@@ -409,11 +426,29 @@ final class TaskIndexCoordinator: ObservableObject {
             }
 
             guard triage.route == .effortTask else {
-                await DatabaseManager.shared.ignoreOpenDashboardTasks(
-                    chatId: pending.chat.id,
-                    matchingTaskIds: pending.openTasks.map(\.id),
-                    matchingSourceMessageIds: triage.supportingMessageIds
-                )
+                // Prompt-injection defense (issue #30, suppression half): a crafted
+                // inbound message can reliably force a non-effort route, and the old
+                // blanket matchingTaskIds wiped every open task in the chat. Honor
+                // the suppression per task only when the triage decision cites that
+                // task's OWN stored source evidence in supportingMessageIds — the
+                // flow the system prompt prescribes for legitimate stale cleanup.
+                // A new attacker message can never cite the old evidence rows, so
+                // uncited tasks stay open (advisory); the sync cursor still advances.
+                let supporting = Set(triage.supportingMessageIds)
+                let citedTaskIds = pending.openTasks.compactMap { task -> Int64? in
+                    let evidence = pending.openTaskEvidenceByTaskId[task.id] ?? []
+                    guard evidence.contains(where: { supporting.contains($0.messageId) }) else { return nil }
+                    return task.id
+                }
+                if !citedTaskIds.isEmpty {
+                    await DatabaseManager.shared.ignoreOpenDashboardTasks(
+                        chatId: pending.chat.id,
+                        matchingTaskIds: citedTaskIds,
+                        matchingSourceMessageIds: []
+                    )
+                } else if !pending.openTasks.isEmpty {
+                    logger.warning("refreshNow: \(String(describing: triage.route), privacy: .public) for chat \(pending.chat.id, privacy: .public) cites no open-task source evidence; leaving \(pending.openTasks.count, privacy: .public) task(s) open (advisory)")
+                }
                 await DatabaseManager.shared.updateDashboardTaskSyncState(
                     chatId: pending.chat.id,
                     latestMessageId: pending.latestMessageId
@@ -437,12 +472,20 @@ final class TaskIndexCoordinator: ObservableObject {
                     _ = await DatabaseManager.shared.upsertDashboardTasks(evidencedCandidates)
                 }
                 let retainedFingerprints = Set(evidencedCandidates.map(\.stableFingerprint))
+                let retainedCitedMessageIds = Set(evidencedCandidates.flatMap { $0.sourceMessages.map(\.messageId) })
                 // If extraction returns the same source under a corrected owner/fingerprint,
                 // retire the stale row instead of leaving duplicate "Me" ownership behind.
+                // Prompt-injection defense (issue #30, suppression half): retire ONLY when
+                // a retained candidate cites the stale task's own evidence — a genuine
+                // correction of the same underlying ask. An attacker message that fools
+                // extraction into returning nothing (or unrelated tasks) cites none of the
+                // old evidence rows, so real tasks survive. The corrected-owner flow keeps
+                // working because the replacement re-cites the same source messages.
                 let staleOpenTaskIds = pending.openTasks.compactMap { task -> Int64? in
                     guard !retainedFingerprints.contains(task.stableFingerprint) else { return nil }
                     let evidence = pending.openTaskEvidenceByTaskId[task.id] ?? []
                     guard !evidence.isEmpty else { return nil }
+                    guard evidence.contains(where: { retainedCitedMessageIds.contains($0.messageId) }) else { return nil }
                     return task.id
                 }
                 if !staleOpenTaskIds.isEmpty {

@@ -25,12 +25,12 @@ enum DashboardTopicPrompt {
     - Keep official capitalization and acronyms from chat titles and messages.
     - Do not include private identifiers, phone numbers, or message IDs in topic names.
     - If the evidence is thin, return fewer topics.
-    """
+    """ + PromptSafety.untrustedContentClause
 
     static func userMessage(snippets: [MessageSnippet]) -> String {
         var text = "Recent Telegram snippets:\n"
         for snippet in MessageSnippet.truncateToTokenBudget(snippets) {
-            text += "[\(snippet.relativeTimestamp)] \(snippet.chatName) / \(snippet.senderFirstName): \(snippet.text)\n"
+            text += "[\(snippet.relativeTimestamp)] \(snippet.chatName) / \(snippet.senderFirstName): \(PromptSafety.fence(snippet.text))\n"
         }
         return text
     }
@@ -189,7 +189,7 @@ enum DashboardTaskPrompt {
     - [ME]: "let me check with the team and revert" -> no task yet;
       this is conversational, no concrete deliverable named. Reply
       Queue territory if anything.
-    """
+    """ + PromptSafety.untrustedContentClause
 
     static func userMessage(
         chat: TGChat,
@@ -214,7 +214,7 @@ enum DashboardTaskPrompt {
         """
 
         for snippet in MessageSnippet.truncateToTokenBudget(snippets, maxChars: 8000) {
-            text += "[messageId: \(snippet.messageId)] [\(snippet.relativeTimestamp)] \(snippet.senderFirstName): \(snippet.text)\n"
+            text += "[messageId: \(snippet.messageId)] [\(snippet.relativeTimestamp)] \(snippet.senderFirstName): \(PromptSafety.fence(snippet.text))\n"
         }
 
         return text
@@ -293,7 +293,7 @@ enum DashboardTaskTriagePrompt {
     - For completed_task, supportingMessageIds should point at the completion evidence and, when visible, the original ask.
     - Do not create tasks for bots, channels, announcements, or generic chatter.
     - Return exactly one decision for every candidate chatId.
-    """
+    """ + PromptSafety.untrustedContentClause
 
     static func userMessage(candidates: [DashboardTaskTriageCandidateDTO]) -> String {
         var text = "Candidate chats:\n"
@@ -321,14 +321,14 @@ enum DashboardTaskTriagePrompt {
                         text += "  Existing open task source evidence:\n"
                         for source in task.sourceMessages.prefix(5) {
                             let date = source.dateISO8601 ?? "unknown-date"
-                            text += "  - [messageId: \(source.messageId)] [\(date)] \(source.senderName): \(source.text)\n"
+                            text += "  - [messageId: \(source.messageId)] [\(date)] \(source.senderName): \(PromptSafety.fence(source.text))\n"
                         }
                     }
                 }
             }
             text += "Messages in chronological order:\n"
             for snippet in MessageSnippet.truncateToTokenBudget(candidate.messages, maxChars: 6000) {
-                text += "[messageId: \(snippet.messageId)] [\(snippet.relativeTimestamp)] \(snippet.senderFirstName): \(snippet.text)\n"
+                text += "[messageId: \(snippet.messageId)] [\(snippet.relativeTimestamp)] \(snippet.senderFirstName): \(PromptSafety.fence(snippet.text))\n"
             }
         }
 
