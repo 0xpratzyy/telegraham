@@ -8624,6 +8624,63 @@ final class PidgyCoreTests: XCTestCase {
         )
     }
 
+    // MARK: - AI proxy routing (issue #26)
+
+    func testOpenAIProviderDefaultsToDirectEndpointAndAcceptsOverride() {
+        XCTAssertEqual(
+            OpenAIProvider(apiKey: "sk-test").endpointURL,
+            AppConstants.AI.openAIBaseURL
+        )
+        let proxy = URL(string: "https://pidgy-ai-proxy.example.workers.dev/v1/chat/completions")!
+        XCTAssertEqual(
+            OpenAIProvider(apiKey: "gate-token", endpointURL: proxy).endpointURL,
+            proxy
+        )
+    }
+
+    @MainActor
+    func testAIServiceConfigureThreadsProxyEndpointAndByoClearsIt() {
+        let service = AIService(
+            testingProvider: NoAIProvider(),
+            providerType: .none,
+            providerModel: "",
+            isConfigured: false
+        )
+        let proxy = URL(string: "https://pidgy-ai-proxy.example.workers.dev/v1/chat/completions")!
+
+        // Zero-setup proxy mode: gate token + proxy endpoint, never persisted.
+        service.configure(
+            type: .openai,
+            apiKey: "gate-token",
+            model: nil,
+            persist: false,
+            openAIEndpointURL: proxy
+        )
+        XCTAssertTrue(service.isConfigured)
+        XCTAssertEqual(service.configuredOpenAIEndpointURL, proxy)
+        XCTAssertEqual((service.provider as? OpenAIProvider)?.endpointURL, proxy)
+
+        // BYO key reconfigure goes direct to OpenAI and clears the proxy state.
+        service.configure(type: .openai, apiKey: "sk-byo", model: nil, persist: false)
+        XCTAssertNil(service.configuredOpenAIEndpointURL)
+        XCTAssertEqual(
+            (service.provider as? OpenAIProvider)?.endpointURL,
+            AppConstants.AI.openAIBaseURL
+        )
+
+        // Full reset drops the endpoint with the rest of the config.
+        service.configure(
+            type: .openai,
+            apiKey: "gate-token",
+            model: nil,
+            persist: false,
+            openAIEndpointURL: proxy
+        )
+        service.clearConfigurationState()
+        XCTAssertNil(service.configuredOpenAIEndpointURL)
+        XCTAssertFalse(service.isConfigured)
+    }
+
     func testDashboardPromptsDoNotPromoteSomeoneElseCoordinationToUserTask() {
         XCTAssertTrue(
             DashboardTaskTriagePrompt.systemPrompt.contains("let's find a time")

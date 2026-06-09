@@ -35,6 +35,12 @@ final class AIService: ObservableObject {
     /// without having to re-await the @MainActor service mid-loop. Setter
     /// stays private — the only writer is the configuration path.
     private(set) var configuredAPIKey: String = ""
+    /// Non-nil when the OpenAI provider targets the AI proxy Worker instead
+    /// of api.openai.com (issue #26) — `configuredAPIKey` is then the proxy
+    /// gate token, not a raw OpenAI key. Snapshot-readable for the same
+    /// reason as `configuredAPIKey`; never persisted (the proxy bootstrap
+    /// re-reads the bundle each launch, mirroring the bundled-key flow).
+    private(set) var configuredOpenAIEndpointURL: URL?
 
     init() {
         self.queryRouter = QueryRouter(aiProvider: NoAIProvider())
@@ -61,7 +67,12 @@ final class AIService: ObservableObject {
         type: AIProviderConfig.ProviderType,
         apiKey: String,
         model: String? = nil,
-        persist: Bool = true
+        persist: Bool = true,
+        // Non-nil routes OpenAI through the AI proxy Worker (issue #26);
+        // `apiKey` is then the proxy gate token. Only the zero-setup
+        // bootstrap passes this — BYO keys always go direct to OpenAI
+        // (their key, their bill, no transit through our infra).
+        openAIEndpointURL: URL? = nil
     ) {
         let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedModel = normalizedModel(
@@ -73,7 +84,11 @@ final class AIService: ObservableObject {
         case .claude:
             provider = ClaudeProvider(apiKey: apiKey, model: resolvedModel)
         case .openai:
-            provider = OpenAIProvider(apiKey: apiKey, model: resolvedModel)
+            provider = OpenAIProvider(
+                apiKey: apiKey,
+                model: resolvedModel,
+                endpointURL: openAIEndpointURL ?? AppConstants.AI.openAIBaseURL
+            )
         case .none:
             provider = NoAIProvider()
         }
@@ -82,6 +97,7 @@ final class AIService: ObservableObject {
         providerType = type
         providerModel = resolvedModel
         configuredAPIKey = apiKey
+        configuredOpenAIEndpointURL = type == .openai ? openAIEndpointURL : nil
         isConfigured = type != .none && !apiKey.isEmpty
         // The bundled-key bootstrap calls this with `persist: false` so the
         // baked-in beta key never lands in the user's Keychain — that way
@@ -543,8 +559,23 @@ final class AIService: ObservableObject {
     }
 
     private func applyBundledOpenAIKeyIfAvailable() {
-        guard let bundled = BundledSecrets.openAIApiKey else { return }
         let model = normalizedModel(type: .openai, model: AppConstants.AI.defaultOpenAIModel)
+        // Prefer the AI proxy when the build bundles one (issue #26): the
+        // gate token stands in for the key and the raw OpenAI key no longer
+        // needs to ship. `persist: false` for the same reason as the bundled
+        // key — rotating the token in a follow-up build must take effect.
+        if let proxyURL = BundledSecrets.aiProxyURL,
+           let proxyToken = BundledSecrets.aiProxyToken {
+            configure(
+                type: .openai,
+                apiKey: proxyToken,
+                model: model,
+                persist: false,
+                openAIEndpointURL: proxyURL
+            )
+            return
+        }
+        guard let bundled = BundledSecrets.openAIApiKey else { return }
         configure(type: .openai, apiKey: bundled, model: model, persist: false)
     }
 
@@ -612,6 +643,7 @@ final class AIService: ObservableObject {
         providerType = .none
         providerModel = ""
         configuredAPIKey = ""
+        configuredOpenAIEndpointURL = nil
         isConfigured = false
     }
 }

@@ -27,6 +27,30 @@ enum BundledSecrets {
     /// include one — the AI Settings page falls back to BYO key.
     static let openAIApiKey: String? = stringValue(forKey: "PidgyBundledOpenAIApiKey")
 
+    /// AI proxy endpoint (`PIDGY_AI_PROXY_URL`) — the deployed
+    /// infra/ai-proxy Worker's chat-completions URL. When present together
+    /// with `aiProxyToken`, the zero-setup flow routes OpenAI requests
+    /// through the proxy with the revocable gate token, so the raw OpenAI
+    /// key no longer needs to ship in the bundle (issue #26).
+    static let aiProxyURL: URL? = {
+        guard let raw = stringValue(forKey: "PidgyBundledAIProxyURL"),
+              let url = URL(string: raw),
+              url.scheme == "https"
+        else { return nil }
+        return url
+    }()
+
+    /// Gate token (`PIDGY_AI_PROXY_TOKEN`) the app presents to the AI proxy
+    /// as its Bearer credential. Bundled → extractable like any baked-in
+    /// value, but revocable server-side and worthless outside the proxy.
+    static let aiProxyToken: String? = stringValue(forKey: "PidgyBundledAIProxyToken")
+
+    /// True when both proxy values are present — the zero-setup AI
+    /// bootstrap then prefers the proxy over the bundled raw key.
+    static var hasBundledAIProxy: Bool {
+        aiProxyURL != nil && (aiProxyToken?.isEmpty == false)
+    }
+
     /// Sentry DSN baked in for crash + error telemetry
     /// (`PIDGY_SENTRY_DSN`). Returns nil when blank — `PidgyTelemetry.start`
     /// then skips Sentry init entirely so source builds never make

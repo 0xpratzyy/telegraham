@@ -22,6 +22,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>PidgyBuildCommitSHA</key>
 	<string>$(PIDGY_BUILD_COMMIT_SHA)</string>
+	<key>PidgyBundledAIProxyToken</key>
+	<string>$(PIDGY_AI_PROXY_TOKEN)</string>
+	<key>PidgyBundledAIProxyURL</key>
+	<string>$(PIDGY_AI_PROXY_URL)</string>
 	<key>PidgyBundledLangSmithApiKey</key>
 	<string>$(PIDGY_BUNDLED_LANGSMITH_API_KEY)</string>
 	<key>PidgyBundledLangSmithProject</key>
