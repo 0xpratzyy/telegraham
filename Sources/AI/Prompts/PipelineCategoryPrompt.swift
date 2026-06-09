@@ -153,7 +153,7 @@ enum PipelineCategoryPrompt {
 
     Prefer decision whenever possible.
     The caller allows only one retry. If this is the second pass, always return "status":"decision".
-    """
+    """ + PromptSafety.untrustedContentClause
 
     static func userMessage(context: PipelineChatContext, snippets: [MessageSnippet]) -> String {
         var text = "Chat: \"\(context.chatTitle)\" (\(context.chatType)"
@@ -180,7 +180,7 @@ enum PipelineCategoryPrompt {
 
         text += "Messages in chronological order (oldest first):\n"
         for s in snippets {
-            text += "[messageId: \(s.messageId)] [\(s.relativeTimestamp)] \(s.senderFirstName): \(s.text)\n"
+            text += "[messageId: \(s.messageId)] [\(s.relativeTimestamp)] \(s.senderFirstName): \(PromptSafety.fence(s.text))\n"
         }
         return text
     }
