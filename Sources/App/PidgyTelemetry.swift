@@ -169,7 +169,11 @@ enum PidgyTelemetry {
         "api_key", "openai_key", "telegram_api_hash"
     ]
 
-    private static func scrubEvent(_ event: Event) {
+    // Internal (not private) so PidgyTelemetryScrubTests can pin the
+    // PII guarantees — this function is the only thing between raw
+    // Telegram data and Sentry's servers, and the README's privacy
+    // table promises exactly what it strips.
+    static func scrubEvent(_ event: Event) {
         if var extra = event.extra {
             for key in extra.keys where piiKeysToRedact.contains(key) {
                 extra[key] = "<redacted>"
@@ -184,7 +188,8 @@ enum PidgyTelemetry {
         event.user = nil
     }
 
-    private static func scrubBreadcrumb(_ crumb: Breadcrumb) {
+    // Internal for tests — see scrubEvent.
+    static func scrubBreadcrumb(_ crumb: Breadcrumb) {
         if var data = crumb.data {
             for key in data.keys where piiKeysToRedact.contains(key) {
                 data[key] = "<redacted>"

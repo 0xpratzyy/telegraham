@@ -1,0 +1,66 @@
+name: CI
+
+# Two gates on every PR and every push to main:
+#   1. secret-scan — tree-wide credential-pattern scan (cheap Linux
+#      runner). Server-side backstop for the opt-in pre-push hook.
+#   2. build-test — xcodegen + Debug build + full XCTest suite on a
+#      macOS 26 arm64 runner (deployment target is macOS 26, so older
+#      images can't link).
+#
+# Credentials: CI builds with the committed empty BetaSecrets.xcconfig —
+# that path is fully supported (see README "You can leave any value
+# blank"). No secrets are configured in this workflow on purpose.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked files for credential patterns
+        run: bash scripts/scan_secrets.sh
+
+  build-test:
+    name: Build & test (macOS 26)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # Cache resolved SPM checkouts keyed on the committed
+      # Package.resolved. TDLibKit alone is hundreds of MB, so a warm
+      # cache cuts several minutes per run.
+      - name: Cache SPM packages
+        uses: actions/cache@v4
+        with:
+          path: SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('Pidgy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Build and run tests
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Pidgy.xcodeproj \
+            -scheme Pidgy \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -clonedSourcePackagesDirPath SourcePackages \
+            test
