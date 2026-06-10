@@ -3050,6 +3050,139 @@ final class PidgyCoreTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testAttentionStoreBackgroundRefreshSkipsExcludedChatsAndStillDiscoversNewOnes() async throws {
+        try await withTempDatabase { _ in
+            let excludedChatId: Int64 = 46_001
+            let newChatId: Int64 = 46_002
+            let now = Date()
+
+            let excludedChat = makeChat(
+                id: excludedChatId,
+                title: "Hidden one",
+                chatType: .privateChat(userId: 46_101),
+                unreadCount: 1,
+                lastMessageDate: now.addingTimeInterval(-300)
+            )
+            let newChat = makeChat(
+                id: newChatId,
+                title: "Fresh one",
+                chatType: .privateChat(userId: 46_102),
+                unreadCount: 1,
+                lastMessageDate: now
+            )
+
+            // Cache pipeline results for both chats' current last messages
+            // so every legitimate path below is a cache-hit (zero AI).
+            for chat in [excludedChat, newChat] {
+                guard let lastMessage = chat.lastMessage else {
+                    XCTFail("Expected test chat to have a last message")
+                    return
+                }
+                await MessageCacheService.shared.cachePipelineCategory(
+                    chatId: chat.id,
+                    category: "on_me",
+                    suggestedAction: "Reply.",
+                    lastMessageId: lastMessage.id
+                )
+                await MessageCacheService.shared.cacheMessages(chatId: chat.id, messages: [lastMessage])
+            }
+
+            // New activity in the excluded chat: a NEWER last message than
+            // the cached one, so any path that re-processes this chat
+            // misses the cache and must call the AI — which is exactly
+            // what this test asserts never happens.
+            let excludedChatWithNewMessage = TGChat(
+                id: excludedChatId,
+                title: "Hidden one",
+                chatType: .privateChat(userId: 46_101),
+                unreadCount: 2,
+                lastMessage: makeTGMessage(
+                    id: excludedChatId * 100 + 1,
+                    chatId: excludedChatId,
+                    text: "newer ping",
+                    date: now.addingTimeInterval(60)
+                ),
+                memberCount: nil,
+                order: excludedChatId,
+                isInMainList: true,
+                smallPhotoFileId: nil
+            )
+
+            let telegramService = PipelineTestTelegramService(
+                currentUser: TGUser(
+                    id: 99,
+                    firstName: "Pratyush",
+                    lastName: "",
+                    username: "pratzyy",
+                    phoneNumber: nil,
+                    isBot: false
+                ),
+                historyByChatId: [
+                    excludedChatId: [excludedChatWithNewMessage.lastMessage].compactMap { $0 },
+                    newChatId: [newChat.lastMessage].compactMap { $0 }
+                ]
+            )
+            telegramService.chats = [excludedChat]
+
+            let callCounter = PipelineCategorizationCallCounter()
+            let aiService = AIService(
+                testingProvider: CountingPipelineAIProvider(
+                    callCounter: callCounter,
+                    pipelineCategoryResult: PipelineCategoryDTO(
+                        status: "decision",
+                        category: "on_me",
+                        urgency: "high",
+                        suggestedAction: "Reply."
+                    )
+                )
+            )
+
+            let store = AttentionStore.shared
+            let stampBefore = store.lastFollowUpsRefreshAt
+            store.loadFollowUps(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBots: true
+            )
+            for _ in 0..<100 where store.lastFollowUpsRefreshAt == stampBefore {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(store.followUpItems.map(\.chat.id), [excludedChatId])
+
+            // User hides the chat from the reply queue. The projection
+            // empties, but the chat stays tracked in the store.
+            store.excludeChat(id: excludedChatId)
+            XCTAssertTrue(store.followUpItems.isEmpty)
+
+            // New activity arrives in the excluded chat AND a brand-new
+            // chat appears. The background refresh must (a) still run and
+            // discover the new chat even though the visible projection is
+            // empty, and (b) not spend an AI call re-categorizing the
+            // excluded chat's new message.
+            telegramService.chats = [excludedChatWithNewMessage, newChat]
+            store.backgroundRefreshPipeline(
+                telegramService: telegramService,
+                aiService: aiService,
+                includeBots: true
+            )
+            for _ in 0..<100 where !store.followUpItems.contains(where: { $0.chat.id == newChatId }) {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+
+            XCTAssertEqual(store.followUpItems.map(\.chat.id), [newChatId])
+            let aiCallCount = await callCounter.currentValue()
+            XCTAssertEqual(
+                aiCallCount, 0,
+                "excluded chat's new activity must not trigger AI categorization"
+            )
+
+            // Exclusions persist to the real com.pidgy.app UserDefaults
+            // domain (tests are hosted in Pidgy.app) — undo ours.
+            store.unexcludeChat(id: excludedChatId)
+        }
+    }
+
     func testTDLibClientWrapperRecreatesUpdateStreamAfterClose() {
         let wrapper = TDLibClientWrapper()
         let initialGeneration = wrapper.updateStreamGenerationForTesting

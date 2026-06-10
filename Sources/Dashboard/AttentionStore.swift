@@ -296,7 +296,11 @@ final class AttentionStore: ObservableObject {
         aiService: AIService,
         includeBots: Bool
     ) {
-        guard !followUpItems.isEmpty, aiService.isConfigured, !isExecuting else { return }
+        // Gate on allFollowUpItems (everything tracked), not the
+        // excluded-filtered projection: if the user excludes every
+        // visible item, the projection is empty but new chats must
+        // still be discoverable by this refresh.
+        guard !allFollowUpItems.isEmpty, aiService.isConfigured, !isExecuting else { return }
 
         backgroundRefreshTask?.cancel()
         backgroundRefreshTask = Task { @MainActor [weak self] in
@@ -314,7 +318,14 @@ final class AttentionStore: ObservableObject {
                 }
             }
 
-            let existingIds = Set(followUpItems.map(\.chat.id))
+            // "Already tracked" must come from allFollowUpItems, not the
+            // excluded-filtered projection. With the filtered list, an
+            // excluded chat with new activity re-entered through the
+            // newCandidates path below and got re-categorized — an AI
+            // call spent on a chat the user explicitly hid. (The
+            // staleChats loop above intentionally iterates the filtered
+            // list for the same reason: no AI refresh for hidden chats.)
+            let existingIds = Set(allFollowUpItems.map(\.chat.id))
             let newCandidates = collectPipelineCandidates(
                 telegramService: telegramService,
                 includeBots: includeBots
