@@ -137,6 +137,40 @@ final class PidgyTelemetryScrubTests: XCTestCase {
         XCTAssertNil(crumb.data)
     }
 
+    // MARK: - AI failure-shape throttle
+
+    func testAIFailureThrottleSuppressesRepeatsWithinWindow() {
+        // Unique key per run — the throttle table is process-global and
+        // tests run hosted in the real app.
+        let key = "test_\(UUID().uuidString)"
+        let t0 = Date(timeIntervalSince1970: 1_760_000_000)
+
+        XCTAssertTrue(PidgyTelemetry.shouldSendAIFailure(key: key, now: t0))
+        XCTAssertFalse(
+            PidgyTelemetry.shouldSendAIFailure(key: key, now: t0.addingTimeInterval(10)),
+            "same shape within the window must be suppressed"
+        )
+        XCTAssertTrue(
+            PidgyTelemetry.shouldSendAIFailure(
+                key: key,
+                now: t0.addingTimeInterval(PidgyTelemetry.aiFailureThrottleInterval + 1)
+            ),
+            "shape may be sent again after the window"
+        )
+    }
+
+    func testAIFailureThrottleKeysAreIndependent() {
+        let now = Date(timeIntervalSince1970: 1_760_000_000)
+        let keyA = "test_\(UUID().uuidString)"
+        let keyB = "test_\(UUID().uuidString)"
+
+        XCTAssertTrue(PidgyTelemetry.shouldSendAIFailure(key: keyA, now: now))
+        XCTAssertTrue(
+            PidgyTelemetry.shouldSendAIFailure(key: keyB, now: now),
+            "throttling one failure shape must not silence a different one"
+        )
+    }
+
     /// Canary: redaction must replace values with a non-empty marker,
     /// not delete the key — a deleted key looks identical to "was never
     /// set", which would make Sentry triage misleading about what
