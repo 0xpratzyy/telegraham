@@ -27,6 +27,12 @@ struct DashboardView: View {
     @State private var selectedTopicId: Int64?
     @State private var isAddingTopic = false
     @State private var isShowingFeedbackSheet = false
+    @State private var feedbackPrefillText: String?
+    /// Launcher "Flag answer" hand-off. Observed (not notification-
+    /// driven) so presentation can't race the window lifecycle: the
+    /// pending value sits in the store until this view consumes it,
+    /// whether the dashboard was already open or had to be created.
+    @ObservedObject private var feedbackPrefillStore = FeedbackPrefillStore.shared
     @State private var topContacts: [RelationGraph.Node] = []
     @State private var staleContacts: [RelationGraph.Node] = []
     @State private var allContacts: [RelationGraph.Node] = []
@@ -130,10 +136,21 @@ struct DashboardView: View {
             PidgyFeedbackSheet(
                 currentViewLabel: currentPage.feedbackLabel,
                 userFirstName: telegramService.currentUser?.firstName,
-                onClose: { isShowingFeedbackSheet = false }
+                attachmentText: feedbackPrefillText,
+                onClose: {
+                    isShowingFeedbackSheet = false
+                    feedbackPrefillText = nil
+                }
             )
             .preferredColorScheme(.dark)
             .presentationBackground(Color.Pidgy.bg2)
+        }
+        // Launcher "Flag answer" hand-off. onChange covers prefills
+        // parked while this view is alive; onAppear covers the cold
+        // path where the prefill was parked before the window existed.
+        .onAppear { presentPendingFeedbackPrefillIfNeeded() }
+        .onChange(of: feedbackPrefillStore.pending) {
+            presentPendingFeedbackPrefillIfNeeded()
         }
         // ⌘⇧F anywhere in the dashboard opens Send Feedback. The
         // shortcut lives on a hidden Button rendered as a background
@@ -519,6 +536,12 @@ struct DashboardView: View {
                 }
             )
         }
+    }
+
+    private func presentPendingFeedbackPrefillIfNeeded() {
+        guard let prefill = FeedbackPrefillStore.shared.consume() else { return }
+        feedbackPrefillText = prefill
+        isShowingFeedbackSheet = true
     }
 
     private func addTopic(_ name: String) {

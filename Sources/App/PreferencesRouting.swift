@@ -8,6 +8,11 @@ extension Notification.Name {
     /// so AppDelegate (which builds the title-bar accessory) can post
     /// it without importing the view layer.
     static let pidgyToggleSidebar = Notification.Name("com.pidgy.toggleSidebar")
+    /// Posted by the launcher's "Flag answer" affordance after parking a
+    /// prefill in FeedbackPrefillStore. AppDelegate opens the dashboard
+    /// window; DashboardView consumes the pending prefill and presents
+    /// the feedback sheet.
+    static let pidgyOpenFeedbackWithPrefill = Notification.Name("com.pidgy.openFeedbackWithPrefill")
 }
 
 enum PreferencesRouting {

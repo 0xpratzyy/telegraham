@@ -168,6 +168,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
+        // Launcher "Flag answer" → dashboard feedback sheet. The prefill
+        // itself travels via FeedbackPrefillStore; this just makes sure
+        // the dashboard window exists for DashboardView to consume it.
+        NotificationCenter.default.addObserver(
+            forName: .pidgyOpenFeedbackWithPrefill,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.openDashboard()
+            }
+        }
+
         NotificationCenter.default.addObserver(
             forName: .requestLauncherToggle,
             object: nil,

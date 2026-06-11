@@ -390,10 +390,22 @@ struct DashboardReplyQueuePage: View {
                                 icon: "archivebox"
                             )
                         }
+                        Divider()
+                        // Wrong category / bad suggestion → feedback
+                        // sheet with the triage context as a removable
+                        // attachment. Also saved locally as an eval
+                        // fixture. See FlaggedAnswerFixture.
+                        Button("Flag this triage…", systemImage: "flag") {
+                            flagReplyTriage(item)
+                        }
                     }
                 }
             }
         }
+    }
+
+    private func flagReplyTriage(_ item: FollowUpItem) {
+        FlaggedAnswerFixture.replyTriage(item).submitToFeedbackSheet()
     }
 }
 
@@ -511,19 +523,35 @@ struct DashboardReplyDetail: View {
                 )
             }
         } actions: {
-            // Single primary action — the top-bar Refresh covers re-analysis.
+            // Primary action — the top-bar Refresh covers re-analysis.
             // Per-detail Refresh buttons were removed because the global
             // top-bar refresh is the one source of truth for the user.
-            Button {
-                if let item { onOpenChat(item.chat) }
-            } label: {
-                Label("Open in chat", systemImage: "paperplane")
+            HStack(spacing: 8) {
+                Button {
+                    if let item { onOpenChat(item.chat) }
+                } label: {
+                    Label("Open in chat", systemImage: "paperplane")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 36)
+                .background(DashboardCapsuleBackground())
+
+                if let item {
+                    Button {
+                        FlaggedAnswerFixture.replyTriage(item).submitToFeedbackSheet()
+                    } label: {
+                        Image(systemName: "flag")
+                            .frame(width: 36, height: 36)
+                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .background(DashboardCapsuleBackground())
+                    .help("Wrong category or suggestion? Flag this triage — you'll review what's shared before sending.")
+                }
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(PidgyDashboardTheme.primary)
-            .frame(maxWidth: .infinity)
-            .frame(height: 36)
-            .background(DashboardCapsuleBackground())
         }
         .task(id: item?.chat.id) {
             // Reset AI sections FIRST, before any await. The error
