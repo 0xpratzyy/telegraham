@@ -82,35 +82,12 @@ enum BundledSecrets {
         return stringValue(forKey: "PidgyBuildCommitSHA") ?? "unknown"
     }()
 
-    /// LangSmith API key for LLM call tracing (`PIDGY_BUNDLED_LANGSMITH_API_KEY`).
-    /// When nil/empty, `LangSmithTracer.record` is a no-op so no traces leave
-    /// the device. Intended as temporary observability scaffolding — remove
-    /// once we've extracted the eval fixtures we need.
-    ///
-    /// **Release builds always return nil** — the LangSmith tracer ships
-    /// raw prompt + response (Telegram message text) to LangChain's servers,
-    /// which is fine for dev-loop debugging but inappropriate for distributed
-    /// builds. The xcconfig also keeps the key out of the Release Info.plist
-    /// for defense in depth; this Swift gate ensures even a Debug-keyed
-    /// build that somehow ends up shipped won't actually trace.
-    static let langSmithApiKey: String? = {
-        #if DEBUG
-        return stringValue(forKey: "PidgyBundledLangSmithApiKey")
-        #else
-        return nil
-        #endif
-    }()
-
-    /// Optional override for the LangSmith project name traces land in
-    /// (`PIDGY_BUNDLED_LANGSMITH_PROJECT`). Defaults to "pidgy-dev" when blank.
-    /// Release-gated for symmetry with the key.
-    static let langSmithProjectName: String? = {
-        #if DEBUG
-        return stringValue(forKey: "PidgyBundledLangSmithProject")
-        #else
-        return nil
-        #endif
-    }()
+    // NOTE: the LangSmith key accessors were removed deliberately. LLM
+    // traces (which contain raw Telegram message text) are now written
+    // by LocalAITraceRecorder to a local file only — no third-party
+    // tracing endpoint exists in the app, in any configuration. Don't
+    // reintroduce a remote tracing key without revisiting the privacy
+    // promises in README "Telemetry honesty".
 
     /// True when both Telegram credentials are present — the auth flow can
     /// then skip its credential entry step and go straight to QR / phone.

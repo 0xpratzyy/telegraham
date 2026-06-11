@@ -40,6 +40,15 @@ final class QueryRouter: ObservableObject {
             )
             return merge(baseSpec: baseSpec, plan: plan, timezone: timezone, now: now)
         } catch {
+            // Deliberate graceful degradation — but count the shape so
+            // we learn when planner fallbacks spike in the field. No
+            // query content leaves the device.
+            PidgyTelemetry.captureAIFailure(
+                provider: "router",
+                model: "",
+                runName: "query_planner",
+                errorClass: "planner_fallback"
+            )
             return baseSpec
         }
     }

@@ -269,14 +269,14 @@ final class OpenAIProvider: AIProvider {
         userMessage: String,
         requestKind: AIRequestKind? = nil,
         responseFormat: [String: Any]? = nil,
-        // Optional Telegram chat_id passed through to LangSmith trace
+        // Optional Telegram chat_id passed through to local trace
         // metadata so per-chat decisions can be filtered + replayed.
         // Only the per-chat methods (categorizePipelineChat,
         // extractDashboardTasks) populate this; batch/cross-chat calls
         // leave it nil.
         chatId: Int64? = nil
     ) async throws -> String {
-        // LangSmith tracing scaffolding — captures start/end so we can replay
+        // Local trace recording — captures start/end so we can replay
         // and compare prompt versions while iterating on accuracy. No-op when
         // PIDGY_BUNDLED_LANGSMITH_API_KEY is empty.
         let startedAt = Date()
@@ -324,9 +324,9 @@ final class OpenAIProvider: AIProvider {
         } catch {
             // Skip tracing cancellations — they're benign Swift Task aborts
             // (a newer refresh superseded this one). Tracing them clutters
-            // LangSmith with red errors that aren't real failures.
+            // the local trace log with red errors that are not real failures.
             if !(error is CancellationError) && (error as NSError).code != NSURLErrorCancelled {
-                LangSmithTracer.shared.record(
+                LocalAITraceRecorder.shared.record(
                     provider: "openai",
                     model: model,
                     runName: requestKind?.rawValue ?? "openai_chat",
@@ -341,12 +341,13 @@ final class OpenAIProvider: AIProvider {
                     costUSD: nil,
                     chatId: chatId
                 )
+                PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "transport")
             }
             throw error
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            LangSmithTracer.shared.record(
+            LocalAITraceRecorder.shared.record(
                 provider: "openai", model: model,
                 runName: requestKind?.rawValue ?? "openai_chat",
                 systemPrompt: systemPrompt, userMessage: userMessage,
@@ -355,12 +356,13 @@ final class OpenAIProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
+            PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "invalid_response")
             throw AIError.invalidResponse
         }
 
         guard httpResponse.statusCode == 200 else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            LangSmithTracer.shared.record(
+            LocalAITraceRecorder.shared.record(
                 provider: "openai", model: model,
                 runName: requestKind?.rawValue ?? "openai_chat",
                 systemPrompt: systemPrompt, userMessage: userMessage,
@@ -369,6 +371,7 @@ final class OpenAIProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
+            PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "http_\(httpResponse.statusCode)")
             throw AIError.httpError(httpResponse.statusCode, errorBody)
         }
 
@@ -377,7 +380,7 @@ final class OpenAIProvider: AIProvider {
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any],
               let content = extractMessageContent(from: message["content"]) else {
-            LangSmithTracer.shared.record(
+            LocalAITraceRecorder.shared.record(
                 provider: "openai", model: model,
                 runName: requestKind?.rawValue ?? "openai_chat",
                 systemPrompt: systemPrompt, userMessage: userMessage,
@@ -387,6 +390,7 @@ final class OpenAIProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
+            PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "parse")
             throw AIError.invalidResponse
         }
 
@@ -402,12 +406,11 @@ final class OpenAIProvider: AIProvider {
         }
 
         // OpenAI's gpt-5 family automatically caches prompt prefixes
-        // ≥1024 tokens at a 50% discount, but the LangSmith trace
-        // metadata.usage.prompt_token_details.cached_tokens that LangSmith
-        // displays comes from this `usage.prompt_tokens_details.cached_tokens`
-        // field. Surface it via extraTags so we can confirm caching is
-        // active for the hot pipelineTriage prompt (7.6KB system, ~80%
-        // of our LLM volume).
+        // ≥1024 tokens at a 50% discount; the cached amount is reported
+        // in this `usage.prompt_tokens_details.cached_tokens` field.
+        // Surface it via extraTags so the local trace log can confirm
+        // caching is active for the hot pipelineTriage prompt (7.6KB
+        // system, ~80% of our LLM volume).
         let cachedTokens: Int? = (json["usage"] as? [String: Any])
             .flatMap { $0["prompt_tokens_details"] as? [String: Any] }
             .flatMap { $0["cached_tokens"] as? Int }
@@ -417,7 +420,7 @@ final class OpenAIProvider: AIProvider {
             extraTags["cached_tokens"] = String(cachedTokens)
         }
 
-        LangSmithTracer.shared.record(
+        LocalAITraceRecorder.shared.record(
             provider: "openai",
             model: model,
             runName: requestKind?.rawValue ?? "openai_chat",

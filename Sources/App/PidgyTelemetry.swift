@@ -103,6 +103,54 @@ enum PidgyTelemetry {
         }
     }
 
+    // MARK: - AI failure shapes
+
+    /// Content-free signal that an AI pipeline call failed. Sends ONLY
+    /// the failure's shape — provider, model, run name, error class —
+    /// never the prompt, response, or any message content. The full
+    /// detail stays on-device in the local trace file
+    /// (LocalAITraceRecorder); this just tells us THAT a class of
+    /// failure is happening in the field and how often.
+    ///
+    /// Throttled per (runName, errorClass): a provider outage repeats
+    /// the same shape hundreds of times and one event per window is
+    /// all the signal we need.
+    static func captureAIFailure(
+        provider: String,
+        model: String,
+        runName: String,
+        errorClass: String
+    ) {
+        guard shouldSendAIFailure(key: "\(runName)|\(errorClass)", now: Date()) else { return }
+        capture(
+            message: "ai_failure: \(runName) [\(errorClass)]",
+            level: .warning,
+            extras: [
+                "provider": provider,
+                "model": model,
+                "run_name": runName,
+                "error_class": errorClass
+            ]
+        )
+    }
+
+    static let aiFailureThrottleInterval: TimeInterval = 300
+
+    private static let aiFailureThrottleLock = NSLock()
+    nonisolated(unsafe) private static var lastAIFailureSendByKey: [String: Date] = [:]
+
+    /// Internal (not private) so tests can pin the throttle behavior.
+    static func shouldSendAIFailure(key: String, now: Date) -> Bool {
+        aiFailureThrottleLock.lock()
+        defer { aiFailureThrottleLock.unlock() }
+        if let last = lastAIFailureSendByKey[key],
+           now.timeIntervalSince(last) < aiFailureThrottleInterval {
+            return false
+        }
+        lastAIFailureSendByKey[key] = now
+        return true
+    }
+
     /// Drop a breadcrumb. Threaded through scrubBreadcrumb so message
     /// bodies / sender names never land verbatim in the trail.
     static func breadcrumb(_ message: String, category: String, level: SentryLevel = .info) {

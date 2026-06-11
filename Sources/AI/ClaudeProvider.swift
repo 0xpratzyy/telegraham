@@ -240,10 +240,10 @@ final class ClaudeProvider: AIProvider {
         userMessage: String,
         requestKind: AIRequestKind? = nil,
         // See OpenAIProvider.makeRequest for rationale — Telegram chat_id
-        // for LangSmith trace metadata, only set by per-chat call sites.
+        // for local trace metadata, only set by per-chat call sites.
         chatId: Int64? = nil
     ) async throws -> String {
-        // LangSmith tracing scaffolding — see OpenAIProvider.makeRequest for
+        // Local trace recording — see OpenAIProvider.makeRequest for
         // rationale. No-op when PIDGY_BUNDLED_LANGSMITH_API_KEY is empty.
         let startedAt = Date()
         let runName = requestKind?.rawValue ?? "claude_chat"
@@ -269,7 +269,7 @@ final class ClaudeProvider: AIProvider {
         } catch {
             // Skip tracing cancellations — see OpenAIProvider for rationale.
             if !(error is CancellationError) && (error as NSError).code != NSURLErrorCancelled {
-                LangSmithTracer.shared.record(
+                LocalAITraceRecorder.shared.record(
                     provider: "claude", model: model, runName: runName,
                     systemPrompt: systemPrompt, userMessage: userMessage,
                     startedAt: startedAt, completedAt: Date(),
@@ -277,12 +277,13 @@ final class ClaudeProvider: AIProvider {
                     inputTokens: nil, outputTokens: nil, costUSD: nil,
                     chatId: chatId
                 )
+                PidgyTelemetry.captureAIFailure(provider: "claude", model: model, runName: runName, errorClass: "transport")
             }
             throw error
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            LangSmithTracer.shared.record(
+            LocalAITraceRecorder.shared.record(
                 provider: "claude", model: model, runName: runName,
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
@@ -290,12 +291,13 @@ final class ClaudeProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
+            PidgyTelemetry.captureAIFailure(provider: "claude", model: model, runName: runName, errorClass: "invalid_response")
             throw AIError.invalidResponse
         }
 
         guard httpResponse.statusCode == 200 else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            LangSmithTracer.shared.record(
+            LocalAITraceRecorder.shared.record(
                 provider: "claude", model: model, runName: runName,
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
@@ -303,6 +305,7 @@ final class ClaudeProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
+            PidgyTelemetry.captureAIFailure(provider: "claude", model: model, runName: runName, errorClass: "http_\(httpResponse.statusCode)")
             throw AIError.httpError(httpResponse.statusCode, errorBody)
         }
 
@@ -310,7 +313,7 @@ final class ClaudeProvider: AIProvider {
               let content = json["content"] as? [[String: Any]],
               let firstBlock = content.first,
               let text = firstBlock["text"] as? String else {
-            LangSmithTracer.shared.record(
+            LocalAITraceRecorder.shared.record(
                 provider: "claude", model: model, runName: runName,
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
@@ -319,6 +322,7 @@ final class ClaudeProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
+            PidgyTelemetry.captureAIFailure(provider: "claude", model: model, runName: runName, errorClass: "parse")
             throw AIError.invalidResponse
         }
 
@@ -333,7 +337,7 @@ final class ClaudeProvider: AIProvider {
             )
         }
 
-        LangSmithTracer.shared.record(
+        LocalAITraceRecorder.shared.record(
             provider: "claude",
             model: model,
             runName: runName,

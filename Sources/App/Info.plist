@@ -26,10 +26,6 @@
 	<string>$(PIDGY_AI_PROXY_TOKEN)</string>
 	<key>PidgyBundledAIProxyURL</key>
 	<string>$(PIDGY_AI_PROXY_URL)</string>
-	<key>PidgyBundledLangSmithApiKey</key>
-	<string>$(PIDGY_BUNDLED_LANGSMITH_API_KEY)</string>
-	<key>PidgyBundledLangSmithProject</key>
-	<string>$(PIDGY_BUNDLED_LANGSMITH_PROJECT)</string>
 	<key>PidgyBundledOpenAIApiKey</key>
 	<string>$(PIDGY_BUNDLED_OPENAI_API_KEY)</string>
 	<key>PidgyBundledSentryDsn</key>
