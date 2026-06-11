@@ -444,9 +444,24 @@ struct DashboardTasksPage: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        // Bad extraction (wrong owner, not a task,
+                        // duplicate…) → feedback sheet with the task
+                        // context as a removable attachment, plus a
+                        // local eval fixture. See FlaggedAnswerFixture.
+                        Button("Flag this task…", systemImage: "flag") {
+                            flagTask(task)
+                        }
+                    }
                 }
             }
         }
+    }
+
+    private func flagTask(_ task: DashboardTask) {
+        FlaggedAnswerFixture
+            .task(task, evidence: evidenceByTaskId[task.id] ?? [])
+            .submitToFeedbackSheet()
     }
 
     private func statusCount(_ status: DashboardTaskStatus) -> Int {

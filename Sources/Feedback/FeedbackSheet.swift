@@ -31,6 +31,25 @@ struct PidgyFeedbackSheet: View {
     let userFirstName: String?
     let onClose: () -> Void
 
+    /// `attachmentText` carries the launcher's "Flag answer" context
+    /// (query + answer + shown results). It renders as a visible,
+    /// removable attachment panel — the text area stays free for the
+    /// user's own "what was wrong" note. Nil for the normal feedback
+    /// path.
+    let attachmentText: String?
+
+    init(
+        currentViewLabel: String,
+        userFirstName: String?,
+        attachmentText: String? = nil,
+        onClose: @escaping () -> Void
+    ) {
+        self.currentViewLabel = currentViewLabel
+        self.userFirstName = userFirstName
+        self.attachmentText = attachmentText
+        self.onClose = onClose
+    }
+
     enum Kind: String, CaseIterable, Identifiable {
         case bug, idea, other
         var id: String { rawValue }
@@ -63,6 +82,7 @@ struct PidgyFeedbackSheet: View {
     @State private var email: String = ""
     @State private var isSubmitting = false
     @State private var didJustSubmit = false
+    @State private var includeAttachment = true
     @FocusState private var focus: FocusField?
 
     private var canSubmit: Bool {
@@ -123,12 +143,64 @@ struct PidgyFeedbackSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             kindSelector
             textArea
+            if attachmentText != nil, includeAttachment {
+                attachmentPanel
+            }
             emailField
             metadataPanel
         }
         .padding(.horizontal, 22)
         .padding(.top, 14)
         .padding(.bottom, 18)
+    }
+
+    /// The flagged-answer context, shown as a removable attachment.
+    /// Everything in it is visible and scrollable — what you see here
+    /// is exactly what's appended to your note on Send; hit Remove and
+    /// none of it leaves the machine.
+    private var attachmentPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "flag")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.Pidgy.fg3)
+                Text("Flagged answer — attached")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Color.Pidgy.fg2)
+                Spacer(minLength: 0)
+                Button {
+                    includeAttachment = false
+                } label: {
+                    Text("Remove")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                }
+                .buttonStyle(.plain)
+                .help("Send your note without the flagged answer context")
+            }
+            ScrollView {
+                Text(attachmentText ?? "")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.Pidgy.fg2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 120)
+            Text("Sent together with your note. Hit Remove if you'd rather not share it.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(Color.Pidgy.fg4)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.Pidgy.bg1)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.Pidgy.border1)
+                )
+        )
     }
 
     private var kindSelector: some View {
@@ -175,7 +247,7 @@ struct PidgyFeedbackSheet: View {
                         }
                     }
                 if text.isEmpty {
-                    Text(kind.placeholder)
+                    Text(attachmentText != nil ? "What was wrong with this answer?" : kind.placeholder)
                         .font(.system(size: 13))
                         .foregroundStyle(Color.Pidgy.fg4)
                         .padding(.horizontal, 14)
@@ -267,8 +339,14 @@ struct PidgyFeedbackSheet: View {
             HStack(spacing: 6) {
                 Image(systemName: "cpu")
                     .font(.system(size: 11))
-                Text("No message content or contacts are sent.")
-                    .font(.system(size: 11.5))
+                // With a flagged answer attached, chat content IS being
+                // shared (visibly, above) — the privacy line must say so.
+                Text(
+                    attachmentText != nil && includeAttachment
+                        ? "Only your note and the attachment above are sent."
+                        : "No message content or contacts are sent."
+                )
+                .font(.system(size: 11.5))
             }
             .foregroundStyle(Color.Pidgy.fg4)
             Spacer(minLength: 0)
@@ -331,8 +409,16 @@ struct PidgyFeedbackSheet: View {
         guard canSubmit else { return }
         isSubmitting = true
 
+        // The flagged-answer attachment travels in the message body so
+        // it lands where feedback is read — but only if the user kept
+        // it (the attachment panel has a Remove button).
+        var message = text
+        if let attachmentText, includeAttachment {
+            message += "\n\n— Flagged answer context —\n\(attachmentText)"
+        }
+
         PidgyTelemetry.submitFeedback(
-            message: text,
+            message: message,
             kind: kind.rawValue,
             email: email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? nil

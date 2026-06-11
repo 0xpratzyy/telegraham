@@ -613,6 +613,69 @@ struct LauncherView: View {
         return String(format: "%.0fs", clamped)
     }
 
+    /// Quiet footer under finished AI answers: a one-line invitation
+    /// to flag a wrong answer, with the privacy promise spelled out
+    /// right where the user reads it.
+    private var flagAnswerFooter: some View {
+        HStack(spacing: 6) {
+            Spacer()
+            Text("Answer wrong or unhelpful?")
+                .font(Font.Pidgy.meta)
+                .foregroundStyle(Color.Pidgy.fg2.opacity(0.7))
+            Button(action: flagCurrentAnswer) {
+                HStack(spacing: 4) {
+                    Image(systemName: "flag")
+                        .font(Font.Pidgy.meta)
+                    Text("Flag this answer")
+                        .font(Font.Pidgy.meta)
+                }
+                .foregroundStyle(Color.Pidgy.fg2)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.Pidgy.bg4.opacity(0.55))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Opens Send Feedback prefilled with this query and answer — you review and edit everything before anything is sent. A copy is always saved locally.")
+        }
+        .padding(.horizontal, PidgySpace.s3)
+        .padding(.top, 2)
+        .padding(.bottom, 8)
+    }
+
+    /// "Flag answer": always saves a local fixture (raw material for
+    /// the eval-oracle refresh loop), then hands a fully-visible
+    /// prefill to the dashboard feedback sheet — the user reviews and
+    /// edits everything before any send. Nothing is shared silently;
+    /// see FlaggedAnswerFixture for the privacy model.
+    private func flagCurrentAnswer() {
+        let fixture = FlaggedAnswerFixture(
+            query: searchCoordinator.currentQuerySpec?.rawQuery ?? searchText,
+            route: (aiSearchMode ?? searchCoordinator.routedQueryIntent)
+                .map { String(describing: $0) } ?? "unknown",
+            resultTitle: summaryOutput?.title,
+            resultText: summaryOutput?.summaryText,
+            supportingSnippets: aiResults.prefix(5).map(flaggedSnippet(for:))
+        )
+        fixture.submitToFeedbackSheet()
+        // Unlike the dashboard's flag affordances, the launcher must
+        // also make sure the dashboard window exists for the sheet.
+        NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
+    }
+
+    private func flaggedSnippet(for result: AISearchResult) -> String {
+        switch result {
+        case .semanticResult(let r):
+            return "\(r.chatTitle): \(r.matchingMessages.first ?? r.reason)"
+        case .agenticResult(let r):
+            return "\(r.chatTitle): \(r.reason)"
+        case .patternResult(let r):
+            return "\(r.chatTitle): \(r.snippet)"
+        case .replyQueueResult(let r):
+            return "\(r.chatTitle): \(r.suggestedAction)"
+        }
+    }
+
     private func aiModeLabel(intent: QueryIntent) -> String {
         switch intent {
         case .semanticSearch:
@@ -939,8 +1002,10 @@ struct LauncherView: View {
                 }
             } else if let aiSearchMode, aiSearchMode != .unsupported, !aiResults.isEmpty {
                 aiResultsList
+                flagAnswerFooter
             } else if aiSearchMode == .summarySearch, let summaryOutput {
                 summaryOnlyStateView(summaryOutput)
+                flagAnswerFooter
             } else if aiSearchMode == .messageSearch && aiResults.isEmpty {
                 EmptyStateView(
                     icon: "magnifyingglass",

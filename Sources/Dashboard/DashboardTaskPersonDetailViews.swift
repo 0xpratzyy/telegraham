@@ -112,21 +112,37 @@ struct DashboardTaskDetail: View {
                 )
             }
         } actions: {
-            // Single primary action only — Mark Done when a task is
-            // selected, nothing when the empty state is shown. The global
+            // Primary action — Mark Done when a task is selected,
+            // nothing when the empty state is shown. The global
             // top-bar Refresh covers re-evaluation; no per-detail Refresh.
             if let task {
-                Button {
-                    onUpdateStatus(task, .done, nil)
-                } label: {
-                    Label("Mark Done", systemImage: "checkmark")
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                HStack(spacing: 8) {
+                    Button {
+                        onUpdateStatus(task, .done, nil)
+                    } label: {
+                        Label("Mark Done", systemImage: "checkmark")
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 36)
+                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .background(DashboardCapsuleBackground())
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    Button {
+                        FlaggedAnswerFixture
+                            .task(task, evidence: evidence)
+                            .submitToFeedbackSheet()
+                    } label: {
+                        Image(systemName: "flag")
+                            .frame(width: 36, height: 36)
+                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .background(DashboardCapsuleBackground())
+                    .help("Not a task, wrong owner, or a duplicate? Flag it — you'll review what's shared before sending.")
                 }
-                .buttonStyle(.plain)
-                .background(DashboardCapsuleBackground())
-                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
         }
         .foregroundStyle(PidgyDashboardTheme.primary)
