@@ -117,13 +117,22 @@ struct DashboardTaskDetail: View {
             // top-bar Refresh covers re-evaluation; no per-detail Refresh.
             if let task {
                 HStack(spacing: 8) {
+                    // Status-aware primary action: open/snoozed tasks
+                    // get Mark Done; closed tasks (done or ignored —
+                    // whether by hand or auto-complete) get Re-open.
+                    // Re-opening stamps a user touch, so the
+                    // auto-complete pass leaves it alone for a full
+                    // quiet window.
                     Button {
-                        onUpdateStatus(task, .done, nil)
+                        onUpdateStatus(task, task.isClosed ? .open : .done, nil)
                     } label: {
-                        Label("Mark Done", systemImage: "checkmark")
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 36)
-                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        Label(
+                            task.isClosed ? "Re-open" : "Mark Done",
+                            systemImage: task.isClosed ? "arrow.uturn.backward" : "checkmark"
+                        )
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .background(DashboardCapsuleBackground())

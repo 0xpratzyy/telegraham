@@ -158,7 +158,9 @@ enum PreferencesResetPlan {
         AppConstants.Preferences.dashboardTaskTriageContextVersionKey,
         AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
         AppConstants.Preferences.didCompleteOnboardingKey,
-        AppConstants.Preferences.showPigeonFlockKey
+        AppConstants.Preferences.showPigeonFlockKey,
+        AppConstants.Preferences.dashboardTaskAutoExpireDaysKey,
+        AppConstants.Preferences.chatOpenTargetKey
     ]
 
     static func pidgyDataDirectory(in applicationSupportDirectory: URL?) -> URL? {

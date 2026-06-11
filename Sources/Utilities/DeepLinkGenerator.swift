@@ -1,52 +1,123 @@
 import AppKit
 
+/// Where "Open in chat" sends the user. Configurable in Preferences and
+/// asked once on the onboarding Done screen; until the user chooses, the
+/// default is detected from whether a tg:// handler (Telegram Desktop /
+/// macOS Telegram) is installed.
+enum ChatOpenTarget: String, CaseIterable, Identifiable {
+    case desktop
+    case web
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .desktop: return "Telegram Desktop"
+        case .web: return "Telegram Web"
+        }
+    }
+
+    /// The user's choice, or the detected default when they never chose.
+    static var current: ChatOpenTarget {
+        if let raw = UserDefaults.standard.string(forKey: AppConstants.Preferences.chatOpenTargetKey),
+           let target = ChatOpenTarget(rawValue: raw) {
+            return target
+        }
+        return detectedDefault()
+    }
+
+    /// Desktop when something handles tg:// URLs, web otherwise.
+    static func detectedDefault() -> ChatOpenTarget {
+        guard let probe = URL(string: "tg://resolve") else { return .web }
+        return NSWorkspace.shared.urlForApplication(toOpen: probe) != nil ? .desktop : .web
+    }
+}
+
 enum DeepLinkGenerator {
-    /// Build multiple candidate deep links (documented first, legacy fallback last).
-    /// We try candidates in order until one is accepted by the OS handler.
+    /// TDLib message ids are MTProto server ids shifted left 20 bits.
+    /// Telegram's link formats (t.me/c/…, privatepost, openmessage)
+    /// expect the SERVER id — passing the raw TDLib id navigates to a
+    /// nonsense message. Locally-generated ids (drafts, scheduled) are
+    /// not exact multiples of 2^20; return nil for those so callers
+    /// skip message anchoring instead of deep-linking to garbage.
+    static func serverMessageId(_ tdlibMessageId: Int64) -> Int64? {
+        let serverId = tdlibMessageId >> 20
+        guard serverId > 0, serverId << 20 == tdlibMessageId else { return nil }
+        return serverId
+    }
+
+    /// Build candidate links (most specific first; legacy fallbacks
+    /// last). Candidates are tried in order until the OS accepts one —
+    /// note NSWorkspace only confirms a handler accepted the URL, not
+    /// that Telegram navigated successfully, so ORDER matters.
     static func candidateChatURLs(
         chat: TGChat,
         username: String? = nil,
-        phoneNumber: String? = nil
+        phoneNumber: String? = nil,
+        target: ChatOpenTarget = .current
     ) -> [URL] {
         var candidates: [String] = []
 
-        switch chat.chatType {
-        case .privateChat(let userId):
+        switch target {
+        case .web:
+            // Web K accepts #@username, #<user_id> for DMs, and the
+            // raw (negative) TDLib chat id for groups and supergroups.
+            // Message-level anchors aren't reliably supported — open
+            // the chat itself.
             if let username, !username.isEmpty {
-                candidates.append("tg://resolve?domain=\(username)")
+                candidates.append("https://web.telegram.org/k/#@\(username)")
             }
-            if let phone = sanitizePhone(phoneNumber), !phone.isEmpty {
-                candidates.append("tg://resolve?phone=\(phone)")
+            switch chat.chatType {
+            case .privateChat(let userId):
+                candidates.append("https://web.telegram.org/k/#\(userId)")
+            case .basicGroup, .supergroup:
+                candidates.append("https://web.telegram.org/k/#\(chat.id)")
+            case .secretChat:
+                return []
             }
-            // Legacy fallbacks for clients that still support them.
-            candidates.append("tg://openmessage?chat_id=\(chat.id)")
-            candidates.append("tg://user?id=\(userId)")
 
-        case .basicGroup(let groupId):
-            // Basic groups are easiest to open via their MTProto-style negative group ID.
-            // Put the most specific candidates first because NSWorkspace only tells us that
-            // Telegram accepted the URL, not that it navigated to the intended chat.
-            let mtprotoGroupId = -abs(groupId)
-            if let messageId = chat.lastMessage?.id {
-                candidates.append("tg://openmessage?chat_id=\(mtprotoGroupId)&message_id=\(messageId)")
-                candidates.append("tg://openmessage?chat_id=\(chat.id)&message_id=\(messageId)")
-            }
-            candidates.append("tg://openmessage?chat_id=\(mtprotoGroupId)")
-            candidates.append("tg://openmessage?chat_id=\(chat.id)")
-            candidates.append("tg://openmessage?chat_id=\(groupId)")
+        case .desktop:
+            let lastServerMessageId = chat.lastMessage.flatMap { serverMessageId($0.id) }
 
-        case .supergroup(let supergroupId, _):
-            if let username, !username.isEmpty {
-                candidates.append("tg://resolve?domain=\(username)")
-            }
-            // Official private message-link format for private supergroups/channels.
-            candidates.append("tg://privatepost?channel=\(supergroupId)&post=1")
-            candidates.append("https://t.me/c/\(supergroupId)/1")
-            // Legacy fallback.
-            candidates.append("tg://openmessage?chat_id=\(chat.id)")
+            switch chat.chatType {
+            case .privateChat(let userId):
+                if let username, !username.isEmpty {
+                    candidates.append("tg://resolve?domain=\(username)")
+                }
+                if let phone = sanitizePhone(phoneNumber), !phone.isEmpty {
+                    candidates.append("tg://resolve?phone=\(phone)")
+                }
+                candidates.append("tg://openmessage?user_id=\(userId)")
+                candidates.append("tg://openmessage?chat_id=\(chat.id)")
 
-        case .secretChat:
-            return []
+            case .basicGroup:
+                // Basic (legacy, non-super) groups have NO working tg://
+                // deep link on macOS: tdesktop accepts
+                // tg://openmessage?chat_id=… (so NSWorkspace reports
+                // success and fallbacks never fire) but silently refuses
+                // to navigate — verified live on com.tdesktop.Telegram
+                // 2026-06-11. Telegram Web handles the raw negative chat
+                // id reliably, so basic groups go to the browser even
+                // when the user prefers the desktop app.
+                candidates.append("https://web.telegram.org/k/#\(chat.id)")
+
+            case .supergroup(let supergroupId, _):
+                if let username, !username.isEmpty {
+                    candidates.append("tg://resolve?domain=\(username)")
+                }
+                // privatepost / t.me/c need a real message to land on —
+                // use the latest message's SERVER id. (This used to
+                // hardcode post=1, which is virtually always a deleted
+                // message → Telegram showed "message not found".)
+                if let lastServerMessageId {
+                    candidates.append("tg://privatepost?channel=\(supergroupId)&post=\(lastServerMessageId)")
+                    candidates.append("https://t.me/c/\(supergroupId)/\(lastServerMessageId)")
+                }
+                candidates.append("tg://openmessage?chat_id=\(chat.id)")
+
+            case .secretChat:
+                return []
+            }
         }
 
         var seen = Set<String>()
@@ -60,9 +131,15 @@ enum DeepLinkGenerator {
     static func openChat(
         _ chat: TGChat,
         username: String? = nil,
-        phoneNumber: String? = nil
+        phoneNumber: String? = nil,
+        target: ChatOpenTarget = .current
     ) -> Bool {
-        let urls = candidateChatURLs(chat: chat, username: username, phoneNumber: phoneNumber)
+        let urls = candidateChatURLs(
+            chat: chat,
+            username: username,
+            phoneNumber: phoneNumber,
+            target: target
+        )
         for url in urls where NSWorkspace.shared.open(url) {
             return true
         }

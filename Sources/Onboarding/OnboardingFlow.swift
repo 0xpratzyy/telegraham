@@ -1418,6 +1418,10 @@ private struct DoneStep: View {
 
     @State private var checkScale: CGFloat = 0.4
     @State private var checkOpacity: Double = 0
+    /// Asked once, here, right after the user connected Telegram —
+    /// pre-selected by detecting whether a tg:// handler is installed.
+    /// Changeable any time in Preferences → "Open chats in".
+    @State private var chatOpenTarget: ChatOpenTarget = .current
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1448,6 +1452,43 @@ private struct DoneStep: View {
                 .lineSpacing(3)
                 .padding(.top, 12)
                 .frame(maxWidth: 440)
+
+            VStack(spacing: 10) {
+                Text("Where should chats open?")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.Pidgy.fg2)
+                HStack(spacing: 8) {
+                    ForEach(ChatOpenTarget.allCases) { option in
+                        Button {
+                            chatOpenTarget = option
+                            UserDefaults.standard.set(
+                                option.rawValue,
+                                forKey: AppConstants.Preferences.chatOpenTargetKey
+                            )
+                        } label: {
+                            Text(option.label)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(chatOpenTarget == option ? Color.Pidgy.fg1 : Color.Pidgy.fg3)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .background(
+                                    Capsule()
+                                        .fill(chatOpenTarget == option ? Color.Pidgy.bg4 : Color.clear)
+                                        .overlay(
+                                            Capsule().stroke(
+                                                chatOpenTarget == option ? Color.Pidgy.accentFg.opacity(0.6) : Color.Pidgy.border2
+                                            )
+                                        )
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                Text("You can change this anytime in Preferences.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.Pidgy.fg4)
+            }
+            .padding(.top, 24)
 
             OnboardingPrimaryButton(title: "Open Pidgy", trailingChevron: true, action: onFinish)
                 .padding(.top, 28)

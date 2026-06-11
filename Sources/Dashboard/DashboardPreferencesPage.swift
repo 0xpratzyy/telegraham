@@ -7,6 +7,10 @@ struct DashboardPreferencesPage: View {
     @StateObject private var recentSyncProgress = RecentSyncCoordinator.shared.progress
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
+    @AppStorage(AppConstants.Preferences.dashboardTaskAutoExpireDaysKey)
+    private var taskAutoExpireDays = AppConstants.Preferences.dashboardTaskAutoExpireDaysDefault
+    @AppStorage(AppConstants.Preferences.chatOpenTargetKey)
+    private var chatOpenTargetRaw: String = ChatOpenTarget.detectedDefault().rawValue
 
     let onBackToDashboard: () -> Void
     let onRefreshDashboard: () -> Void
@@ -470,6 +474,34 @@ struct DashboardPreferencesPage: View {
                     hint: "Show the animated flock under the page title. Drag the line to bounce them; click any to shoo.",
                     right: {
                         PrefToggle(isOn: $showPigeonFlock)
+                    }
+                )
+                PrefField(
+                    label: "Open chats in",
+                    hint: "Where \"Open in chat\" takes you. Telegram Web works even without the Telegram app installed.",
+                    right: {
+                        PrefOptionMenu(
+                            options: [(0, "Telegram Desktop"), (1, "Telegram Web")],
+                            selection: Binding(
+                                get: { chatOpenTargetRaw == ChatOpenTarget.web.rawValue ? 1 : 0 },
+                                set: { chatOpenTargetRaw = ($0 == 1 ? ChatOpenTarget.web : ChatOpenTarget.desktop).rawValue }
+                            )
+                        )
+                    }
+                )
+                PrefField(
+                    label: "Auto-complete stale tasks",
+                    hint: "Open AI-extracted tasks with no fresh chat activity are marked Done after this long. Re-open one from the Done filter and it stays put.",
+                    right: {
+                        PrefOptionMenu(
+                            options: [
+                                (7, "7 days"),
+                                (14, "14 days"),
+                                (30, "30 days"),
+                                (0, "Never")
+                            ],
+                            selection: $taskAutoExpireDays
+                        )
                     }
                 )
             }
@@ -2778,6 +2810,53 @@ private struct PrefToggle: View {
         }
         .buttonStyle(.plain)
         .animation(PidgyMotion.easeOut, value: isOn)
+    }
+}
+
+/// Compact value picker for preference rows — a borderless Menu
+/// rendered as a small bordered chip, visually paired with PrefToggle.
+private struct PrefOptionMenu: View {
+    let options: [(value: Int, label: String)]
+    @Binding var selection: Int
+
+    private var currentLabel: String {
+        options.first(where: { $0.value == selection })?.label ?? "\(selection) days"
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(options, id: \.value) { option in
+                Button {
+                    selection = option.value
+                } label: {
+                    if option.value == selection {
+                        Label(option.label, systemImage: "checkmark")
+                    } else {
+                        Text(option.label)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(currentLabel)
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(Color.Pidgy.fg1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.Pidgy.bg3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.Pidgy.border2)
+                    )
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
 }
 

@@ -154,6 +154,17 @@ struct DashboardTask: Identifiable, Sendable, Equatable, Hashable {
     let dueAt: Date?
     let snoozedUntil: Date?
     let latestSourceDate: Date?
+    /// When the user last changed this task's status by hand (done /
+    /// snooze / ignore / re-open). Nil = never touched (including
+    /// auto-completed tasks). The auto-complete pass treats a fresh
+    /// touch as a clock reset — see
+    /// TaskIndexCoordinator.tasksDueForExpiry.
+    let statusSetByUserAt: Date?
+
+    /// Done or ignored — terminal unless the user re-opens.
+    var isClosed: Bool {
+        status == .done || status == .ignored
+    }
 
     var isActionableNow: Bool {
         switch status {

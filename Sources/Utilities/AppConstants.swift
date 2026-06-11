@@ -341,5 +341,17 @@ enum AppConstants {
         /// dashboard's "What to do now" squiggle. Default: on. When
         /// off, the squiggle falls back to a plain divider line.
         static let showPigeonFlockKey = "showPigeonFlock"
+
+        /// Days of evidence silence after which an open AI-extracted
+        /// task is automatically marked Done. A user re-opening such a
+        /// task shields it for a full window (status_set_by_user_at).
+        /// 0 = never auto-complete. Default when the key is unset: 30.
+        static let dashboardTaskAutoExpireDaysKey = "dashboardTaskAutoExpireDays"
+        static let dashboardTaskAutoExpireDaysDefault = 30
+
+        /// Where "Open in chat" lands: "desktop" (tg:// deep links) or
+        /// "web" (web.telegram.org). Unset = auto-detect from whether a
+        /// tg:// handler is installed. See ChatOpenTarget.
+        static let chatOpenTargetKey = "pidgyChatOpenTarget"
     }
 }
