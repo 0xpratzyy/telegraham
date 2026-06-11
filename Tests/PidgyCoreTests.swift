@@ -222,7 +222,8 @@ final class PidgyCoreTests: XCTestCase {
                     messageId: message.id,
                     chatId: chatId,
                     vector: [0.1, 0.2, 0.3],
-                    textPreview: message.textContent ?? ""
+                    textPreview: message.textContent ?? "",
+                    modelVersion: EmbeddingService.legacyModelVersion
                 )
             ])
 
@@ -629,6 +630,112 @@ final class PidgyCoreTests: XCTestCase {
             [6],
             "a fresh touch shields for a full window; an old touch does not"
         )
+    }
+
+    func testIndexSchedulerPauseIsALeaseNotALatch() async throws {
+        // Regression: the launcher pauses indexing from .onAppear, but an
+        // NSPanel hidden via orderOut never fires .onDisappear — the old
+        // boolean latch stayed paused for entire sessions, silently
+        // starving deep indexing. The lease must expire on its own.
+        //
+        // Tests run hosted in the real app, whose eagerly-created
+        // launcher asserts its own 30s lease at startup (the very bug
+        // this guards against, live) — clear it before measuring ours.
+        await IndexScheduler.shared.resume()
+        await IndexScheduler.shared.pause(leaseSeconds: 0.1)
+        var paused = await IndexScheduler.shared.isPausedForTesting
+        XCTAssertTrue(paused, "freshly asserted lease must pause")
+
+        try await Task.sleep(for: .milliseconds(300))
+        paused = await IndexScheduler.shared.isPausedForTesting
+        XCTAssertFalse(paused, "an unreleased pause must expire on its own")
+
+        // Re-assertion extends; explicit resume releases immediately.
+        await IndexScheduler.shared.pause(leaseSeconds: 60)
+        await IndexScheduler.shared.resume()
+        paused = await IndexScheduler.shared.isPausedForTesting
+        XCTAssertFalse(paused)
+    }
+
+    func testVectorStoreSearchIsModelVersionIsolated() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 60_001
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: chatId,
+                messages: [
+                    makeRecord(id: 1, chatId: chatId, text: "legacy vector message", date: Date()),
+                    makeRecord(id: 2, chatId: chatId, text: "contextual vector message", date: Date())
+                ],
+                preferredOldestMessageId: 1,
+                isSearchReady: true
+            )
+            try await VectorStore.shared.storeBatchThrowing([
+                VectorStore.EmbeddingRecord(
+                    messageId: 1, chatId: chatId,
+                    vector: [1, 0, 0], textPreview: "legacy",
+                    modelVersion: "model-a"
+                ),
+                VectorStore.EmbeddingRecord(
+                    messageId: 2, chatId: chatId,
+                    vector: [1, 0, 0], textPreview: "contextual",
+                    modelVersion: "model-b"
+                )
+            ])
+
+            // Identical vectors, different model versions: search must
+            // only ever see one space at a time.
+            let hitsA = await VectorStore.shared.search(
+                query: [1, 0, 0], topK: 10, modelVersion: "model-a"
+            )
+            XCTAssertEqual(hitsA.map(\.messageId), [1])
+
+            let hitsB = await VectorStore.shared.search(
+                query: [1, 0, 0], topK: 10, modelVersion: "model-b"
+            )
+            XCTAssertEqual(hitsB.map(\.messageId), [2])
+
+            let countA = await VectorStore.shared.vectorCount(modelVersion: "model-a")
+            let countMissing = await VectorStore.shared.vectorCount(modelVersion: "model-c")
+            XCTAssertEqual(countA, 1)
+            XCTAssertEqual(countMissing, 0)
+        }
+    }
+
+    func testMessagesMissingEmbeddingsIsVersionAware() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 60_002
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: chatId,
+                messages: [
+                    makeRecord(id: 11, chatId: chatId, text: "embedded by the old model only", date: Date())
+                ],
+                preferredOldestMessageId: 11,
+                isSearchReady: true
+            )
+            try await VectorStore.shared.storeBatchThrowing([
+                VectorStore.EmbeddingRecord(
+                    messageId: 11, chatId: chatId,
+                    vector: [1, 0, 0], textPreview: "old",
+                    modelVersion: "model-old"
+                )
+            ])
+
+            let missingForOld = await DatabaseManager.shared.messagesMissingEmbeddings(
+                limit: 10, modelVersion: "model-old"
+            )
+            XCTAssertFalse(
+                missingForOld.contains { $0.id == 11 },
+                "already embedded for this version"
+            )
+
+            let missingForNew = await DatabaseManager.shared.messagesMissingEmbeddings(
+                limit: 10, modelVersion: "model-new"
+            )
+            XCTAssertTrue(
+                missingForNew.contains { $0.id == 11 },
+                "an old-version row must count as missing for the new model, driving the re-embed backfill"
+            )
+        }
     }
 
     func testDeepLinkServerMessageIdConversion() {
@@ -3450,7 +3557,8 @@ final class PidgyCoreTests: XCTestCase {
                     messageId: older.id,
                     chatId: chatId,
                     vector: [0.1, 0.2, 0.3],
-                    textPreview: older.textContent ?? ""
+                    textPreview: older.textContent ?? "",
+                    modelVersion: EmbeddingService.legacyModelVersion
                 )
             ])
             await MessageCacheService.shared.invalidateAll()

@@ -15,15 +15,25 @@ actor VectorStore {
         let chatId: Int64
         let vector: [Double]
         let textPreview: String
+        /// Which model produced `vector`. Vectors from different models
+        /// live in incomparable spaces; search filters to one version.
+        let modelVersion: String
     }
 
-    func store(messageId: Int64, chatId: Int64, vector: [Double], textPreview: String) async {
+    func store(
+        messageId: Int64,
+        chatId: Int64,
+        vector: [Double],
+        textPreview: String,
+        modelVersion: String
+    ) async {
         await storeBatch([
             EmbeddingRecord(
                 messageId: messageId,
                 chatId: chatId,
                 vector: vector,
-                textPreview: textPreview
+                textPreview: textPreview,
+                modelVersion: modelVersion
             )
         ])
     }
@@ -45,24 +55,63 @@ actor VectorStore {
             for record in records {
                 try db.execute(
                     sql: """
-                        INSERT INTO embeddings (message_id, chat_id, vector, text_preview)
-                        VALUES (?, ?, ?, ?)
+                        INSERT INTO embeddings (message_id, chat_id, vector, text_preview, model_version)
+                        VALUES (?, ?, ?, ?, ?)
                         ON CONFLICT(message_id, chat_id) DO UPDATE SET
                             vector = excluded.vector,
-                            text_preview = excluded.text_preview
+                            text_preview = excluded.text_preview,
+                            model_version = excluded.model_version
                         """,
                     arguments: [
                         record.messageId,
                         record.chatId,
                         Self.encode(record.vector),
-                        record.textPreview
+                        record.textPreview,
+                        record.modelVersion
                     ]
                 )
             }
         }
     }
 
-    func search(query: [Double], topK: Int, chatIds: [Int64]? = nil) async -> [SearchResult] {
+    /// Embed the query with whichever model version is actually usable
+    /// for search and run the version-filtered scan. During a re-embed
+    /// transition both spaces exist side by side — search the one with
+    /// the LARGER coverage (ties favor the active model) so quality
+    /// never dips mid-backfill: legacy keeps serving until the new
+    /// model has embedded at least as much of the corpus.
+    func searchText(_ query: String, topK: Int, chatIds: [Int64]? = nil) async -> [SearchResult] {
+        let activeVersion = await EmbeddingService.shared.activeModelVersion
+        var version = activeVersion
+        if activeVersion != EmbeddingService.legacyModelVersion {
+            let activeCount = await vectorCount(modelVersion: activeVersion)
+            let legacyCount = await vectorCount(modelVersion: EmbeddingService.legacyModelVersion)
+            if activeCount < legacyCount {
+                version = EmbeddingService.legacyModelVersion
+            }
+        }
+        guard let queryVector = await EmbeddingService.shared.embed(text: query, modelVersion: version) else {
+            return []
+        }
+        return await search(query: queryVector, topK: topK, chatIds: chatIds, modelVersion: version)
+    }
+
+    func vectorCount(modelVersion: String) async -> Int {
+        (try? await DatabaseManager.shared.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM embeddings WHERE model_version = ?",
+                arguments: [modelVersion]
+            ) ?? 0
+        }) ?? 0
+    }
+
+    func search(
+        query: [Double],
+        topK: Int,
+        chatIds: [Int64]? = nil,
+        modelVersion: String
+    ) async -> [SearchResult] {
         guard !query.isEmpty, topK > 0 else { return [] }
         if let chatIds, chatIds.isEmpty { return [] }
 
@@ -71,6 +120,7 @@ actor VectorStore {
                 if let chatIds {
                     let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
                     var arguments = StatementArguments()
+                    arguments += [modelVersion]
                     for chatId in chatIds {
                         arguments += [chatId]
                     }
@@ -80,7 +130,8 @@ actor VectorStore {
                         sql: """
                             SELECT message_id, chat_id, vector
                             FROM embeddings
-                            WHERE chat_id IN (\(placeholders))
+                            WHERE model_version = ?
+                              AND chat_id IN (\(placeholders))
                             """,
                         arguments: arguments
                     ).compactMap { row in
@@ -98,7 +149,9 @@ actor VectorStore {
                     sql: """
                         SELECT message_id, chat_id, vector
                         FROM embeddings
-                        """
+                        WHERE model_version = ?
+                        """,
+                    arguments: [modelVersion]
                 ).compactMap { row in
                     guard let vectorData: Data = row["vector"] else { return nil }
                     return (

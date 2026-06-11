@@ -53,7 +53,21 @@ actor IndexScheduler {
 
     private var telegramService: TelegramService?
     private var processingTask: Task<Void, Never>?
-    private var isPaused = false
+    /// Pause is a LEASE, not a latch. Callers re-assert while genuinely
+    /// active (the launcher fires pause() on every keystroke/focus
+    /// change), and a forgotten resume self-heals: SwiftUI lifecycle
+    /// proved unreliable for the release side — an NSPanel hidden via
+    /// orderOut never fires .onDisappear, which left the scheduler
+    /// paused for entire sessions (search-ready chats frozen while the
+    /// launcher sat hidden; verified live 2026-06-11).
+    private var pausedUntil: Date?
+
+    static let pauseLeaseSeconds: TimeInterval = 30
+
+    private var isPausedNow: Bool {
+        guard let pausedUntil else { return false }
+        return pausedUntil > Date()
+    }
     private var prioritizedChatIds: [Int64] = []
     private var sessionStartedAt: Date?
     private var sessionIndexedMessages = 0
@@ -93,7 +107,7 @@ actor IndexScheduler {
         processingTask = nil
         telegramService = nil
         prioritizedChatIds.removeAll()
-        isPaused = false
+        pausedUntil = nil
         sessionStartedAt = nil
         sessionIndexedMessages = 0
         sessionCompletedChats = 0
@@ -112,19 +126,25 @@ actor IndexScheduler {
         )
     }
 
-    func pause() async {
-        isPaused = true
+    func pause(leaseSeconds: TimeInterval = IndexScheduler.pauseLeaseSeconds) async {
+        let candidate = Date().addingTimeInterval(leaseSeconds)
+        if pausedUntil.map({ candidate > $0 }) ?? true {
+            pausedUntil = candidate
+        }
         await MainActor.run {
             progress.isPaused = true
         }
     }
 
     func resume() async {
-        isPaused = false
+        pausedUntil = nil
         await MainActor.run {
             progress.isPaused = false
         }
     }
+
+    /// State probe for tests — the run loop isn't running there.
+    var isPausedForTesting: Bool { isPausedNow }
 
     func prioritize(chatId: Int64) async {
         prioritizedChatIds.removeAll { $0 == chatId }
@@ -141,7 +161,17 @@ actor IndexScheduler {
                 continue
             }
 
-            if isPaused {
+            // Embedding backfill runs at the top of EVERY pass — paused
+            // or busy. It's bounded (one batch), pure local CPU, touches
+            // neither TDLib nor the rate limiter, and costs one indexed
+            // query when nothing is missing. It used to wait for the
+            // pending queue to empty AND respect the launcher pause,
+            // which in practice starved it indefinitely (the pause can
+            // outlive the launcher panel — see the onAppear/onDisappear
+            // pause leak).
+            _ = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
+
+            if isPausedNow {
                 let pausedSnapshot = await snapshot(using: telegramService)
                 let readyChatIds = await DatabaseManager.shared.searchReadyChatIds(in: pausedSnapshot.chats.map(\.id))
                 activeWorkers = 0
@@ -164,7 +194,7 @@ actor IndexScheduler {
                     total: 0,
                     pendingChats: 0,
                     currentChat: nil,
-                    isPaused: isPaused
+                    isPaused: isPausedNow
                 )
                 try? await Task.sleep(for: .milliseconds(Int(AppConstants.Indexing.idlePollIntervalMilliseconds)))
                 continue
@@ -186,7 +216,7 @@ actor IndexScheduler {
                         total: orderedChats.count,
                         pendingChats: 0,
                         currentChat: nil,
-                        isPaused: isPaused
+                        isPaused: isPausedNow
                     )
                     continue
                 }
@@ -196,7 +226,7 @@ actor IndexScheduler {
                     total: orderedChats.count,
                     pendingChats: 0,
                     currentChat: nil,
-                    isPaused: isPaused
+                    isPaused: isPausedNow
                 )
                 try? await Task.sleep(for: .milliseconds(Int(AppConstants.Indexing.idlePollIntervalMilliseconds)))
                 continue
@@ -218,7 +248,7 @@ actor IndexScheduler {
                 total: orderedChats.count,
                 pendingChats: pendingChats.count,
                 currentChat: progressLabel,
-                isPaused: isPaused
+                isPaused: isPausedNow
             )
 
             let outcomes = await withTaskGroup(of: IndexOutcome.self) { group in
@@ -531,6 +561,7 @@ actor IndexScheduler {
 
         guard !eligibleMessages.isEmpty else { return }
 
+        let modelVersion = await EmbeddingService.shared.activeModelVersion
         let vectors = await EmbeddingService.shared.embedBatch(texts: eligibleMessages.map { $0.text })
         let records = zip(eligibleMessages, vectors).compactMap { entry -> VectorStore.EmbeddingRecord? in
             let (pair, vector) = entry
@@ -540,7 +571,8 @@ actor IndexScheduler {
                 messageId: pair.message.id,
                 chatId: pair.message.chatId,
                 vector: vector,
-                textPreview: preview
+                textPreview: preview,
+                modelVersion: modelVersion
             )
         }
 
@@ -549,7 +581,15 @@ actor IndexScheduler {
     }
 
     private func backfillExistingEmbeddings(limit: Int) async -> Int {
-        let messages = await DatabaseManager.shared.messagesMissingEmbeddings(limit: limit)
+        // "Missing" is version-aware: rows written by an older model
+        // count as missing, so an embedding-model upgrade re-embeds the
+        // corpus through this same path while old vectors keep serving
+        // search until they're replaced.
+        let activeVersion = await EmbeddingService.shared.activeModelVersion
+        let messages = await DatabaseManager.shared.messagesMissingEmbeddings(
+            limit: limit,
+            modelVersion: activeVersion
+        )
         guard !messages.isEmpty else { return 0 }
 
         let eligibleMessages = messages.compactMap { message -> (message: DatabaseManager.MessageRecord, text: String)? in
@@ -571,7 +611,8 @@ actor IndexScheduler {
                 messageId: pair.message.id,
                 chatId: pair.message.chatId,
                 vector: vector,
-                textPreview: preview
+                textPreview: preview,
+                modelVersion: activeVersion
             )
         }
 
@@ -596,7 +637,7 @@ actor IndexScheduler {
             total: snapshot.chats.count,
             pendingChats: max(snapshot.chats.count - readyChatIds.count, 0),
             currentChat: progressChat,
-            isPaused: isPaused
+            isPaused: isPausedNow
         )
     }
 
@@ -613,7 +654,7 @@ actor IndexScheduler {
             pendingChats: pendingChats,
             currentChat: currentChat,
             activeWorkers: activeWorkers,
-            isPaused: isPaused,
+            isPaused: isPausedNow,
             sessionStartedAt: sessionStartedAt,
             sessionIndexedMessages: sessionIndexedMessages,
             sessionCompletedChats: sessionCompletedChats,

@@ -1160,7 +1160,11 @@ actor DatabaseManager {
         }
     }
 
-    func messagesMissingEmbeddings(limit: Int) async -> [MessageRecord] {
+    /// Messages without an embedding row for the given model version —
+    /// a message embedded only by an OLDER model counts as missing, so
+    /// model upgrades naturally re-embed the corpus through the normal
+    /// backfill path.
+    func messagesMissingEmbeddings(limit: Int, modelVersion: String) async -> [MessageRecord] {
         guard limit > 0 else { return [] }
         guard let pool = await ensureDatabase() else { return [] }
 
@@ -1174,13 +1178,14 @@ actor DatabaseManager {
                         LEFT JOIN embeddings AS e
                           ON e.message_id = m.id
                          AND e.chat_id = m.chat_id
+                         AND e.model_version = ?
                         WHERE e.message_id IS NULL
                           AND m.text_content IS NOT NULL
                           AND length(trim(m.text_content)) >= ?
                         ORDER BY m.date DESC, m.id DESC
                         LIMIT ?
                         """,
-                    arguments: [AppConstants.Indexing.minEmbeddingTextLength, limit]
+                    arguments: [modelVersion, AppConstants.Indexing.minEmbeddingTextLength, limit]
                 )
 
                 return rows.map(Self.messageRecord(from:))
