@@ -561,6 +561,235 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(chips.map(\.count), [1, 2])
     }
 
+    func testTaskAutoExpiryPolicyRespectsWindowAndStatuses() {
+        let now = Date()
+        let staleOpen = DashboardTask.mock(
+            id: 1, title: "Stale open", status: .open,
+            topicId: nil, topicName: nil, chatId: 1,
+            personName: "A", ownerName: "Me",
+            latestSourceDate: now.addingTimeInterval(-31 * 86_400)
+        )
+        let freshOpen = DashboardTask.mock(
+            id: 2, title: "Fresh open", status: .open,
+            topicId: nil, topicName: nil, chatId: 2,
+            personName: "B", ownerName: "Me",
+            latestSourceDate: now.addingTimeInterval(-29 * 86_400)
+        )
+        let staleDone = DashboardTask.mock(
+            id: 3, title: "Stale done", status: .done,
+            topicId: nil, topicName: nil, chatId: 3,
+            personName: "C", ownerName: "Me",
+            latestSourceDate: now.addingTimeInterval(-90 * 86_400)
+        )
+        let staleSnoozed = DashboardTask.mock(
+            id: 4, title: "Stale snoozed", status: .snoozed,
+            topicId: nil, topicName: nil, chatId: 4,
+            personName: "D", ownerName: "Me",
+            latestSourceDate: now.addingTimeInterval(-90 * 86_400)
+        )
+        let tasks = [staleOpen, freshOpen, staleDone, staleSnoozed]
+
+        let due = TaskIndexCoordinator.tasksDueForExpiry(tasks, expireAfterDays: 30, now: now)
+        XCTAssertEqual(
+            due.map(\.id), [1],
+            "only OPEN tasks past the window expire — user-touched statuses are immune"
+        )
+
+        XCTAssertTrue(
+            TaskIndexCoordinator.tasksDueForExpiry(tasks, expireAfterDays: 0, now: now).isEmpty,
+            "0 = Never disables expiry entirely"
+        )
+        XCTAssertEqual(
+            TaskIndexCoordinator.tasksDueForExpiry(tasks, expireAfterDays: 14, now: now).map(\.id),
+            [1, 2],
+            "a tighter window catches the 29-day-old task too"
+        )
+
+        // Restore semantics: a manual touch resets the clock. A restored
+        // task with stale evidence must NOT re-expire on the next pass —
+        // that was the "restore button doesn't work" bug.
+        let restoredRecently = DashboardTask.mock(
+            id: 5, title: "Restored", status: .open,
+            topicId: nil, topicName: nil, chatId: 5,
+            personName: "E", ownerName: "Me",
+            latestSourceDate: now.addingTimeInterval(-90 * 86_400),
+            statusSetByUserAt: now.addingTimeInterval(-60)
+        )
+        let restoredLongAgo = DashboardTask.mock(
+            id: 6, title: "Restored long ago", status: .open,
+            topicId: nil, topicName: nil, chatId: 6,
+            personName: "F", ownerName: "Me",
+            latestSourceDate: now.addingTimeInterval(-90 * 86_400),
+            statusSetByUserAt: now.addingTimeInterval(-45 * 86_400)
+        )
+        XCTAssertEqual(
+            TaskIndexCoordinator.tasksDueForExpiry(
+                [restoredRecently, restoredLongAgo], expireAfterDays: 30, now: now
+            ).map(\.id),
+            [6],
+            "a fresh touch shields for a full window; an old touch does not"
+        )
+    }
+
+    func testDeepLinkServerMessageIdConversion() {
+        XCTAssertEqual(DeepLinkGenerator.serverMessageId(5 << 20), 5)
+        XCTAssertNil(
+            DeepLinkGenerator.serverMessageId((5 << 20) + 3),
+            "locally-generated TDLib ids must not be treated as server ids"
+        )
+        XCTAssertNil(DeepLinkGenerator.serverMessageId(0))
+    }
+
+    func testDeepLinkCandidatesCoverEveryChatTypeAndTarget() {
+        // DM — desktop: username resolve first, no mobile-only tg://user.
+        let dm = makeChat(
+            id: 42, title: "Alice", chatType: .privateChat(userId: 42),
+            unreadCount: 0, lastMessageDate: Date()
+        )
+        let dmDesktop = DeepLinkGenerator
+            .candidateChatURLs(chat: dm, username: "alice", target: .desktop)
+            .map(\.absoluteString)
+        XCTAssertEqual(dmDesktop.first, "tg://resolve?domain=alice")
+        XCTAssertTrue(dmDesktop.contains("tg://openmessage?user_id=42"))
+        XCTAssertFalse(
+            dmDesktop.contains { $0.hasPrefix("tg://user?id") },
+            "tg://user?id is mobile-only and silently no-ops on desktop"
+        )
+
+        // DM — web.
+        let dmWeb = DeepLinkGenerator
+            .candidateChatURLs(chat: dm, username: "alice", target: .web)
+            .map(\.absoluteString)
+        XCTAssertEqual(dmWeb.first, "https://web.telegram.org/k/#@alice")
+        XCTAssertTrue(dmWeb.contains("https://web.telegram.org/k/#42"))
+
+        // Supergroup — desktop must anchor on the latest message's
+        // SERVER id (TDLib id >> 20), never the deleted-by-now post=1.
+        let supergroupMessage = makeTGMessage(
+            id: 7 << 20, chatId: -1_001_234, text: "hi", date: Date()
+        )
+        let supergroup = TGChat(
+            id: -1_001_234, title: "Core",
+            chatType: .supergroup(supergroupId: 1_234, isChannel: false),
+            unreadCount: 0, lastMessage: supergroupMessage,
+            memberCount: nil, order: 1, isInMainList: true, smallPhotoFileId: nil
+        )
+        let sgDesktop = DeepLinkGenerator
+            .candidateChatURLs(chat: supergroup, target: .desktop)
+            .map(\.absoluteString)
+        XCTAssertTrue(sgDesktop.contains("tg://privatepost?channel=1234&post=7"))
+        XCTAssertTrue(sgDesktop.contains("https://t.me/c/1234/7"))
+        XCTAssertFalse(
+            sgDesktop.contains("tg://privatepost?channel=1234&post=1"),
+            "post=1 jumps to a near-always-deleted first message"
+        )
+
+        let sgWeb = DeepLinkGenerator
+            .candidateChatURLs(chat: supergroup, target: .web)
+            .map(\.absoluteString)
+        XCTAssertEqual(sgWeb.first, "https://web.telegram.org/k/#-1001234")
+
+        // Basic group — no working tg:// link exists on macOS (tdesktop
+        // accepts openmessage but silently refuses to navigate), so even
+        // desktop mode routes basic groups through Telegram Web.
+        let basicMessage = makeTGMessage(
+            id: 9 << 20, chatId: -987, text: "yo", date: Date()
+        )
+        let basicGroup = TGChat(
+            id: -987, title: "Old Crew",
+            chatType: .basicGroup(groupId: 987),
+            unreadCount: 0, lastMessage: basicMessage,
+            memberCount: nil, order: 1, isInMainList: true, smallPhotoFileId: nil
+        )
+        let bgDesktop = DeepLinkGenerator
+            .candidateChatURLs(chat: basicGroup, target: .desktop)
+            .map(\.absoluteString)
+        XCTAssertEqual(bgDesktop, ["https://web.telegram.org/k/#-987"])
+        XCTAssertFalse(
+            bgDesktop.contains { $0.hasPrefix("tg://") },
+            "a tg:// candidate would 'succeed' at the OS level and block the web fallback"
+        )
+
+        let bgWeb = DeepLinkGenerator
+            .candidateChatURLs(chat: basicGroup, target: .web)
+            .map(\.absoluteString)
+        XCTAssertEqual(bgWeb.first, "https://web.telegram.org/k/#-987")
+    }
+
+    func testStaleTaskAutoCloseAndUserReopenRoundTrip() async throws {
+        try await withTempDatabase { _ in
+            let now = Date()
+            let oldEvidenceDate = now.addingTimeInterval(-40 * 86_400)
+            func candidate(sourceDate: Date, messageId: Int64) -> DashboardTaskCandidate {
+                DashboardTaskCandidate(
+                    stableFingerprint: "expiry-test:wallet-task",
+                    title: "Send wallet address",
+                    summary: "Asked for the wallet address.",
+                    suggestedAction: "Send it",
+                    ownerName: "Me",
+                    personName: "Sophia",
+                    chatId: 77,
+                    chatTitle: "Sophia",
+                    topicName: nil,
+                    priority: .medium,
+                    status: .open,
+                    confidence: 0.9,
+                    createdAt: oldEvidenceDate,
+                    dueAt: nil,
+                    sourceMessages: [
+                        DashboardTaskSourceMessage(
+                            chatId: 77,
+                            messageId: messageId,
+                            senderName: "Sophia",
+                            text: "can you send the wallet address",
+                            date: sourceDate
+                        )
+                    ]
+                )
+            }
+
+            let inserted = await DatabaseManager.shared.upsertDashboardTasks(
+                [candidate(sourceDate: oldEvidenceDate, messageId: 900)]
+            )
+            let insertedTask = try XCTUnwrap(inserted.first)
+            let taskId = insertedTask.id
+            XCTAssertEqual(
+                TaskIndexCoordinator.tasksDueForExpiry([insertedTask], expireAfterDays: 30).map(\.id),
+                [taskId],
+                "a stale open task qualifies for auto-close"
+            )
+
+            // Auto-close marks Done WITHOUT a user-touch stamp.
+            await DatabaseManager.shared.updateDashboardTaskStatus(
+                taskId: taskId, status: .done, setByUser: false
+            )
+            var loaded = await DatabaseManager.shared.loadDashboardTasks()
+            var task = try XCTUnwrap(loaded.first { $0.id == taskId })
+            XCTAssertEqual(task.status, .done)
+            XCTAssertNil(task.statusSetByUserAt, "auto-close must not masquerade as a user touch")
+
+            // Re-extraction with the same stale evidence must not reopen
+            // an auto-closed task — existing status wins on upsert.
+            let reextracted = await DatabaseManager.shared.upsertDashboardTasks(
+                [candidate(sourceDate: oldEvidenceDate, messageId: 900)]
+            )
+            XCTAssertEqual(reextracted.first?.status, .done)
+
+            // User reopens from the Done filter: the touch stamp shields
+            // the still-stale task from the next auto-close pass —
+            // without it, the reopen was silently undone on reload.
+            await DatabaseManager.shared.updateDashboardTaskStatus(taskId: taskId, status: .open)
+            loaded = await DatabaseManager.shared.loadDashboardTasks()
+            task = try XCTUnwrap(loaded.first { $0.id == taskId })
+            XCTAssertEqual(task.status, .open)
+            XCTAssertNotNil(task.statusSetByUserAt)
+            XCTAssertTrue(
+                TaskIndexCoordinator.tasksDueForExpiry([task], expireAfterDays: 30).isEmpty,
+                "a user-reopened task must survive the next auto-close pass despite stale evidence"
+            )
+        }
+    }
+
     func testDashboardTaskAllFilterExcludesIgnoredArchiveRows() {
         let currentUser = TGUser(
             id: 99,
@@ -5841,7 +6070,9 @@ final class PidgyCoreTests: XCTestCase {
                 AppConstants.Preferences.dashboardTaskTriageContextVersionKey,
                 AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
                 AppConstants.Preferences.didCompleteOnboardingKey,
-                AppConstants.Preferences.showPigeonFlockKey
+                AppConstants.Preferences.showPigeonFlockKey,
+                AppConstants.Preferences.dashboardTaskAutoExpireDaysKey,
+                AppConstants.Preferences.chatOpenTargetKey
             ])
         )
 
@@ -9329,7 +9560,8 @@ private extension DashboardTask {
         ownerName: String = "Me",
         priority: DashboardTaskPriority = .medium,
         updatedAt: Date = Date(),
-        latestSourceDate: Date? = nil
+        latestSourceDate: Date? = nil,
+        statusSetByUserAt: Date? = nil
     ) -> DashboardTask {
         DashboardTask(
             id: id,
@@ -9350,7 +9582,8 @@ private extension DashboardTask {
             updatedAt: updatedAt,
             dueAt: nil,
             snoozedUntil: nil,
-            latestSourceDate: latestSourceDate
+            latestSourceDate: latestSourceDate,
+            statusSetByUserAt: statusSetByUserAt
         )
     }
 }

@@ -477,6 +477,20 @@ enum PidgyMigrations {
             try db.execute(sql: "DROP TABLE IF EXISTS ai_usage")
         }
 
+        migrator.registerMigration("v17_dashboard_tasks_status_set_by_user_at") { db in
+            // Stamp for user-initiated status changes (done / snooze /
+            // ignore / re-open). The auto-complete pass skips tasks
+            // whose stamp is newer than the cutoff — re-opening an
+            // auto-completed task resets its clock for a full quiet
+            // window instead of being instantly re-closed on the next
+            // load (the task's evidence is, by definition, still old).
+            // NULL = never touched by the user.
+            try db.execute(sql: """
+                ALTER TABLE dashboard_tasks
+                ADD COLUMN status_set_by_user_at REAL
+                """)
+        }
+
         return migrator
     }
 }

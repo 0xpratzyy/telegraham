@@ -1724,12 +1724,37 @@ actor DatabaseManager {
     func updateDashboardTaskStatus(
         taskId: Int64,
         status: DashboardTaskStatus,
-        snoozedUntil: Date? = nil
+        snoozedUntil: Date? = nil,
+        setByUser: Bool = true
     ) async {
         guard let pool = await ensureDatabase() else { return }
 
         do {
             try await pool.write { db in
+                // status_set_by_user_at is only stamped for genuine user
+                // actions — the auto-close pass passes setByUser: false
+                // and preserves whatever stamp exists, so "the user
+                // touched this" stays a trustworthy signal.
+                if setByUser {
+                    try db.execute(
+                        sql: """
+                            UPDATE dashboard_tasks
+                            SET status = ?,
+                                snoozed_until = ?,
+                                updated_at = ?,
+                                status_set_by_user_at = ?
+                            WHERE id = ?
+                            """,
+                        arguments: [
+                            status.rawValue,
+                            snoozedUntil?.timeIntervalSince1970,
+                            Date().timeIntervalSince1970,
+                            Date().timeIntervalSince1970,
+                            taskId
+                        ]
+                    )
+                    return
+                }
                 try db.execute(
                     sql: """
                         UPDATE dashboard_tasks
@@ -2294,6 +2319,7 @@ actor DatabaseManager {
             dt.updated_at,
             dt.due_at,
             dt.snoozed_until,
+            dt.status_set_by_user_at,
             COALESCE(
                 (
                     SELECT MAX(COALESCE(m.date, dts.date))
@@ -2391,6 +2417,7 @@ actor DatabaseManager {
         let dueAtSeconds: Double? = row["due_at"]
         let snoozedUntilSeconds: Double? = row["snoozed_until"]
         let latestSourceDateSeconds: Double? = row["latest_source_date"]
+        let statusSetByUserAtSeconds: Double? = row["status_set_by_user_at"]
         let priority = DashboardTaskPriority(rawValue: (row["priority"] as String).lowercased()) ?? .medium
         let status = DashboardTaskStatus(rawValue: (row["status"] as String).lowercased()) ?? .open
 
@@ -2413,7 +2440,8 @@ actor DatabaseManager {
             updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
             dueAt: dueAtSeconds.map(Date.init(timeIntervalSince1970:)),
             snoozedUntil: snoozedUntilSeconds.map(Date.init(timeIntervalSince1970:)),
-            latestSourceDate: latestSourceDateSeconds.map(Date.init(timeIntervalSince1970:))
+            latestSourceDate: latestSourceDateSeconds.map(Date.init(timeIntervalSince1970:)),
+            statusSetByUserAt: statusSetByUserAtSeconds.map(Date.init(timeIntervalSince1970:))
         )
     }
 

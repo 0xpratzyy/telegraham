@@ -227,7 +227,30 @@ final class TaskIndexCoordinator: ObservableObject {
         let includeBotsInAISearch = includeBotsInAISearch ?? self.includeBotsInAISearch
         let telegramService = telegramService ?? filteringTelegramService
         let loadedTopics = await DatabaseManager.shared.loadDashboardTopics()
-        let loadedTasks = await DatabaseManager.shared.loadDashboardTasks()
+        var loadedTasks = await DatabaseManager.shared.loadDashboardTasks()
+
+        // Stale-task reconciliation: open AI-extracted tasks whose chat
+        // produced no fresh evidence for the configured window quietly
+        // move to Done (the arch doc's "old open tasks linger forever"
+        // launch blocker). Keys off evidence timestamps — a code-level
+        // signal — never off task text. Only untouched .open tasks
+        // qualify; setByUser: false keeps the auto-close from looking
+        // like a user touch, and a user re-opening a task stamps it so
+        // it won't be auto-closed again for a full quiet window.
+        let dueForExpiry = Self.tasksDueForExpiry(
+            loadedTasks,
+            expireAfterDays: Self.autoExpireDays()
+        )
+        if !dueForExpiry.isEmpty {
+            for task in dueForExpiry {
+                await DatabaseManager.shared.updateDashboardTaskStatus(
+                    taskId: task.id,
+                    status: .done,
+                    setByUser: false
+                )
+            }
+            loadedTasks = await DatabaseManager.shared.loadDashboardTasks()
+        }
         let visibleTasks = await botFilteredTasks(
             loadedTasks,
             telegramService: telegramService,
@@ -604,6 +627,39 @@ final class TaskIndexCoordinator: ObservableObject {
             lastError = "Topic discovery failed: \(error.localizedDescription)"
             topics = stored
             return stored
+        }
+    }
+
+    /// Current auto-expire window from Preferences. 0 means never.
+    /// Unset means the 30-day default — `object(forKey:)` (not
+    /// `integer(forKey:)`) so "never set" and "user chose 0/Never"
+    /// are distinguishable.
+    nonisolated static func autoExpireDays() -> Int {
+        UserDefaults.standard.object(
+            forKey: AppConstants.Preferences.dashboardTaskAutoExpireDaysKey
+        ) as? Int ?? AppConstants.Preferences.dashboardTaskAutoExpireDaysDefault
+    }
+
+    /// Pure expiry policy, separated for tests: open tasks whose most
+    /// recent evidence (falling back to creation time when a task
+    /// somehow has no sourced message) is older than the window.
+    /// `expireAfterDays <= 0` disables expiry entirely.
+    nonisolated static func tasksDueForExpiry(
+        _ tasks: [DashboardTask],
+        expireAfterDays: Int,
+        now: Date = Date()
+    ) -> [DashboardTask] {
+        guard expireAfterDays > 0 else { return [] }
+        let cutoff = now.addingTimeInterval(-Double(expireAfterDays) * 86_400)
+        return tasks.filter { task in
+            guard task.status == .open else { return false }
+            guard (task.latestSourceDate ?? task.createdAt) < cutoff else { return false }
+            // A recent manual touch (e.g. restoring an expired task)
+            // resets the clock: without this, Restore was undone on the
+            // very next load pass because the task's evidence is, by
+            // definition, still older than the window.
+            if let touched = task.statusSetByUserAt, touched >= cutoff { return false }
+            return true
         }
     }
 
