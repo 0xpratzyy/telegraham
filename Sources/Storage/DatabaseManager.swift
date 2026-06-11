@@ -1160,6 +1160,149 @@ actor DatabaseManager {
         }
     }
 
+    /// Tokens appearing in at least `minDocShare` of all messages —
+    /// the corpus's own function words, in whatever languages the user
+    /// chats in. Computed from the FTS5 vocabulary (cheap, indexed).
+    /// The fts5vocab temp table is per-connection, so create + query
+    /// happen inside one read closure.
+    func corpusHighFrequencyTokens(minDocShare: Double) async -> Set<String> {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                try db.execute(sql: """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS temp.messages_fts_vocab
+                    USING fts5vocab(main, 'messages_fts', 'row')
+                    """)
+                let totalDocs = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM messages_fts") ?? 0
+                guard totalDocs > 0 else { return [] }
+                let minDocs = max(1, Int(Double(totalDocs) * minDocShare))
+                let terms = try String.fetchAll(
+                    db,
+                    sql: "SELECT term FROM temp.messages_fts_vocab WHERE doc >= ?",
+                    arguments: [minDocs]
+                )
+                return Set(terms)
+            }
+        } catch {
+            print("[DatabaseManager] Failed to compute corpus stopwords: \(error)")
+            return []
+        }
+    }
+
+    // MARK: - Conversation chunking
+
+    /// Ordered message slice for the chunk builder — oldest first,
+    /// strictly after `afterMessageId` (TDLib ids are monotonic within
+    /// a chat).
+    func messagesForChunking(
+        chatId: Int64,
+        afterMessageId: Int64,
+        limit: Int
+    ) async -> [ConversationChunker.Message] {
+        guard limit > 0 else { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, sender_name, text_content
+                        FROM messages
+                        WHERE chat_id = ? AND id > ?
+                        ORDER BY id ASC
+                        LIMIT ?
+                        """,
+                    arguments: [chatId, afterMessageId, limit]
+                ).map { row in
+                    ConversationChunker.Message(
+                        id: row["id"],
+                        senderName: row["sender_name"],
+                        text: row["text_content"]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load messages for chunking: \(error)")
+            return []
+        }
+    }
+
+    /// Chats with messages newer than their chunked-through watermark
+    /// for this model version, most recently active first.
+    func chatsNeedingChunking(modelVersion: String, limit: Int) async -> [Int64] {
+        guard limit > 0 else { return [] }
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                try Int64.fetchAll(
+                    db,
+                    sql: """
+                        SELECT m.chat_id
+                        FROM messages AS m
+                        LEFT JOIN embedding_chunk_state AS s
+                          ON s.chat_id = m.chat_id
+                         AND s.model_version = ?
+                        GROUP BY m.chat_id
+                        HAVING MAX(m.id) > MAX(COALESCE(s.chunked_through_message_id, 0))
+                        ORDER BY MAX(m.date) DESC
+                        LIMIT ?
+                        """,
+                    arguments: [modelVersion, limit]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to find chats needing chunking: \(error)")
+            return []
+        }
+    }
+
+    func chunkState(chatId: Int64, modelVersion: String) async -> (coveredThrough: Int64, chunkedThrough: Int64) {
+        guard let pool = await ensureDatabase() else { return (0, 0) }
+        do {
+            return try await pool.read { db in
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT covered_through_message_id, chunked_through_message_id
+                        FROM embedding_chunk_state
+                        WHERE chat_id = ? AND model_version = ?
+                        """,
+                    arguments: [chatId, modelVersion]
+                ) else { return (0, 0) }
+                return (row["covered_through_message_id"], row["chunked_through_message_id"])
+            }
+        } catch {
+            return (0, 0)
+        }
+    }
+
+    func setChunkState(
+        chatId: Int64,
+        modelVersion: String,
+        coveredThrough: Int64,
+        chunkedThrough: Int64
+    ) async {
+        guard let pool = await ensureDatabase() else { return }
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO embedding_chunk_state
+                            (chat_id, model_version, covered_through_message_id, chunked_through_message_id, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(chat_id, model_version) DO UPDATE SET
+                            covered_through_message_id = excluded.covered_through_message_id,
+                            chunked_through_message_id = excluded.chunked_through_message_id,
+                            updated_at = excluded.updated_at
+                        """,
+                    arguments: [chatId, modelVersion, coveredThrough, chunkedThrough, Date().timeIntervalSince1970]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to set chunk state: \(error)")
+        }
+    }
+
     /// Messages without an embedding row for the given model version —
     /// a message embedded only by an OLDER model counts as missing, so
     /// model upgrades naturally re-embed the corpus through the normal

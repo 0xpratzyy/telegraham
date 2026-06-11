@@ -509,6 +509,52 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v19_embedding_chunks") { db in
+            // Conversation-window chunks: sliding windows of consecutive
+            // messages embedded as one unit (sender names prefixed), so
+            // short messages inherit meaning from their neighbors.
+            // anchor_message_id is the newest message in the window —
+            // search results map to it so snippets/deep links keep
+            // working unchanged downstream. Chunk vectors share the
+            // model space of message vectors for the same model_version,
+            // which lets search union both tables.
+            try db.execute(sql: """
+                CREATE TABLE embedding_chunks (
+                    chat_id INTEGER NOT NULL,
+                    from_message_id INTEGER NOT NULL,
+                    to_message_id INTEGER NOT NULL,
+                    anchor_message_id INTEGER NOT NULL,
+                    model_version TEXT NOT NULL,
+                    vector BLOB NOT NULL,
+                    text_preview TEXT,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (chat_id, from_message_id, to_message_id, model_version)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_embedding_chunks_version_chat
+                ON embedding_chunks(model_version, chat_id)
+                """)
+
+            // Per-chat high-water marks (per model version):
+            //   covered_through — end of the last FULL window; rebuilds
+            //     of the partial tail start after this.
+            //   chunked_through — newest message that has been chunked
+            //     at all (incl. the partial tail); "needs work" =
+            //     MAX(messages.id) > chunked_through, so small chats
+            //     aren't rescanned every pass.
+            try db.execute(sql: """
+                CREATE TABLE embedding_chunk_state (
+                    chat_id INTEGER NOT NULL,
+                    model_version TEXT NOT NULL,
+                    covered_through_message_id INTEGER NOT NULL DEFAULT 0,
+                    chunked_through_message_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (chat_id, model_version)
+                )
+                """)
+        }
+
         return migrator
     }
 }

@@ -161,6 +161,26 @@ struct QuerySpec: Codable {
         scopeWasExplicit || replyConstraint != .none || timeRange != nil
     }
 
+    /// Copy with planner term hints attached — used when the planner's
+    /// confidence is too low to reroute the query family but its term
+    /// extraction is still better evidence than raw tokenization.
+    func attachingPlannerHints(_ hints: QueryPlannerHints?) -> QuerySpec {
+        guard let hints else { return self }
+        return QuerySpec(
+            rawQuery: rawQuery,
+            mode: mode,
+            family: family,
+            preferredEngine: preferredEngine,
+            scope: scope,
+            scopeWasExplicit: scopeWasExplicit,
+            replyConstraint: replyConstraint,
+            timeRange: timeRange,
+            parseConfidence: parseConfidence,
+            unsupportedFragments: unsupportedFragments,
+            plannerHints: hints
+        )
+    }
+
     var requiresExhaustiveChatReview: Bool {
         preferredEngine == .replyTriage
     }

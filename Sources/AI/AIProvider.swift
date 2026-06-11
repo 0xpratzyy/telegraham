@@ -197,13 +197,14 @@ enum QueryPlanningPrompt {
     }
 
     Rules:
-    - Use "summary" for recap, catch-up, "latest with", or "what did we discuss" prompts.
+    - Use "summary" for recap, catch-up, "latest with", or "what did we discuss" prompts — in ANY language or code-mix: "firstdollar ki latest discussions batao", "que paso con X", "X ka kya scene hai" are all summary prompts. Classify by MEANING, not by English keywords.
     - Use "reply_queue" for "on me", reply, follow-up, or "worth checking" prompts.
     - Use "exact_lookup" only for specific artifacts like wallet addresses, links, usernames, emails, or transaction hashes.
     - Use "topic_search" for general thematic search.
     - Use "relationship" only for CRM / relationship-state questions.
     - "people" should contain only actual people or handles the search should anchor on.
     - "topicTerms" should contain only concrete topic words. Exclude generic recap words like latest, recent, discuss, chats, summary.
+    - Queries arrive in ANY language, often romanized or code-mixed (e.g. Hinglish). Function words, imperatives, and fillers are NEVER topic terms regardless of language: "firstdollar ki latest discussions batao" has topicTerms ["firstdollar", "discussions"] — "ki" (of) and "batao" (tell me) are grammar, like Spanish "dime" or Russian "skazhi". Keep topic terms in the script the user typed.
     - Keep "scope" as "inherit" unless the user explicitly asks for DMs or groups.
     - Keep "timeRange" as "inherit" unless the user explicitly asks for a time window or strongly implies one.
     - If you are unsure, stay close to the deterministic guess and lower confidence.

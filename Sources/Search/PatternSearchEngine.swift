@@ -181,7 +181,7 @@ final class PatternSearchEngine {
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "." && $0 != "@" })
             .map(String.init)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && !stopWords.contains($0) && !recipientKeywords.contains($0) }
+            .filter { !$0.isEmpty && !stopWords.contains($0) && !recipientKeywords.contains($0) && !SearchStopWords.isFunctionWord($0) }
 
         var entityKinds: Set<PatternSearchResult.MatchKind> = []
         if normalized.contains("wallet") || normalized.contains("contract") || normalized.contains("address") {

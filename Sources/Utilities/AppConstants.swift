@@ -81,6 +81,11 @@ enum AppConstants {
 
         enum QueryPlanner {
             static let minimumPlannerConfidence = 0.72
+            /// A plan may also reroute when it's clearly MORE confident
+            /// than the deterministic guess it overrides — absolute
+            /// cliffs discarded correct plans that hedged (summary@0.62
+            /// beats topic_search@0.45 every time).
+            static let relativeConfidenceMargin = 0.1
             static let lowConfidenceThreshold = 0.60
         }
     }
@@ -151,6 +156,33 @@ enum AppConstants {
         static let minEmbeddingTextLength = 10
         static let embeddingPreviewCharacterLimit = 160
         static let embeddingBackfillBatchSize = 128
+
+        /// Conversation-window chunking. Single chat messages are often
+        /// too short to carry meaning alone ("sure, sending it
+        /// tomorrow"), so retrieval also embeds sliding windows of
+        /// consecutive messages with sender names prefixed. Window =
+        /// up to N messages (capped by characters, since the contextual
+        /// model has a token budget), advancing by N - overlap so
+        /// adjacent windows share context.
+        static let chunkWindowMessageCount = 8
+        static let chunkWindowOverlap = 2
+        static let chunkWindowMaxCharacters = 900
+        /// Windows with less combined text than this are noise (a run
+        /// of stickers/reactions) — skip embedding them.
+        static let chunkWindowMinContentCharacters = 24
+        /// How many chats get chunk-backfill attention per scheduler
+        /// pass, and how many messages are loaded per chat per pass.
+        static let chunkBackfillChatsPerPass = 3
+        static let chunkBackfillMessagesPerChat = 1_000
+
+        /// Corpus-derived stopwords: tokens in at least this share of
+        /// all messages are treated as function words in term
+        /// extraction, whatever language they're from. Calibrated
+        /// against the live corpus: 1% catches "hai"/"bhai" and every
+        /// English filler while leaving content words ("wallet" 0.7%)
+        /// untouched. Refreshed by the index scheduler periodically.
+        static let corpusStopWordMinDocShare = 0.01
+        static let corpusStopWordRefreshPasses = 200
     }
 
     enum RecentSync {

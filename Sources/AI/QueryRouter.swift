@@ -91,58 +91,25 @@ final class QueryRouter: ObservableObject {
         }
     }
 
-    private func shouldUseAIPlanner(query: String, baseSpec: QuerySpec) -> Bool {
+    /// The planner is the only language-universal layer — keyword
+    /// gating it meant the LLM never ran for non-English queries
+    /// ("grampus chat me kya ho rha" has no English cue phrases), so
+    /// grammar fragments did the matching. Invert the old design:
+    /// skip the planner ONLY where the deterministic parser is
+    /// provably sufficient — mechanical artifact lookups (wallet
+    /// addresses, URLs, handles) confidently recognized by pattern.
+    /// Every linguistic query gets the LLM, whatever the language.
+    func shouldUseAIPlanner(query: String, baseSpec: QuerySpec) -> Bool {
         let normalized = query
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-
         guard !normalized.isEmpty else { return false }
 
-        let summarySignals = [
-            "what did we discuss",
-            "what did i discuss",
-            "what did ",
-            "latest with",
-            "catch me up",
-            "recent context",
-            "my chats with",
-            "quick recap"
-        ]
-        let replySignals = [
-            "worth checking",
-            "worth reviewing"
-        ]
-
-        let hasSummarySignal = summarySignals.contains { normalized.contains($0) }
-        let hasContextCue =
-            normalized.contains("context")
-            || normalized.contains("recap")
-            || normalized.contains("latest")
-        let hasMultiPartyCue =
-            normalized.contains(" with ")
-            || normalized.contains(" and ")
-
-        let looksLikeSummaryAmbiguity =
-            hasSummarySignal
-            || (normalized.contains(" with ") && baseSpec.family == .summary)
-            || ((hasContextCue || normalized.contains("discuss")) && hasMultiPartyCue)
-            || (baseSpec.parseConfidence < AppConstants.AI.QueryPlanner.lowConfidenceThreshold && hasContextCue)
-        let looksLikeReplyAmbiguity = replySignals.contains { normalized.contains($0) }
-
-        if looksLikeReplyAmbiguity {
-            return true
+        if baseSpec.family == .exactLookup,
+           baseSpec.parseConfidence >= AppConstants.AI.QueryPlanner.lowConfidenceThreshold {
+            return false
         }
-
-        if looksLikeSummaryAmbiguity && baseSpec.family == .summary {
-            return true
-        }
-
-        if baseSpec.family == .topicSearch && (looksLikeSummaryAmbiguity || looksLikeReplyAmbiguity) {
-            return true
-        }
-
-        return baseSpec.parseConfidence < AppConstants.AI.QueryPlanner.lowConfidenceThreshold
-            && (looksLikeSummaryAmbiguity || looksLikeReplyAmbiguity)
+        return true
     }
 
     private func merge(
@@ -151,8 +118,20 @@ final class QueryRouter: ObservableObject {
         timezone: TimeZone,
         now: Date
     ) -> QuerySpec {
-        guard plan.confidence >= AppConstants.AI.QueryPlanner.minimumPlannerConfidence else {
-            return baseSpec
+        let hints = plannerHints(from: plan)
+
+        // Graduated trust, not an all-or-nothing cliff. Term extraction
+        // (people/topics) is additive evidence and ALWAYS flows — a
+        // hedging planner's {grampus} still beats raw grammar fragments.
+        // REROUTING the family is the risky part: allow it when the
+        // planner is absolutely confident, or clearly more confident
+        // than the deterministic guess it overrides. (Live failure: the
+        // plan said summary@0.62 with perfect terms; the old 0.72 cliff
+        // discarded all of it in favor of a 0.45 deterministic guess.)
+        let canReroute = plan.confidence >= AppConstants.AI.QueryPlanner.minimumPlannerConfidence
+            || plan.confidence >= baseSpec.parseConfidence + AppConstants.AI.QueryPlanner.relativeConfidenceMargin
+        guard canReroute else {
+            return baseSpec.attachingPlannerHints(hints)
         }
 
         let resolvedFamily: QueryFamily = {
@@ -181,7 +160,6 @@ final class QueryRouter: ObservableObject {
             }
         }()
 
-        let hints = plannerHints(from: plan)
         let resolvedTimeRange: TimeRangeConstraint? = {
             switch plannerTimeRangeResolution(
                 token: plan.timeRange,

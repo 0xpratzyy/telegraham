@@ -657,6 +657,276 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertFalse(paused)
     }
 
+    @MainActor
+    func testPlannerMergeUsesGraduatedTrustNotACliff() async {
+        func plan(family: String, confidence: Double, topics: [String]) -> QueryPlannerResultDTO {
+            QueryPlannerResultDTO(
+                family: family, scope: "inherit", timeRange: "inherit",
+                people: [], topicTerms: topics, confidence: confidence
+            )
+        }
+
+        // Live failure case: plan summary@0.62 with perfect terms vs
+        // deterministic topic_search@0.45 — the old absolute 0.72 cliff
+        // discarded ALL of it. The plan is clearly more confident than
+        // the guess it overrides, so it must reroute AND carry terms.
+        let hedgingRouter = QueryRouter(
+            aiProvider: StubAIProvider(
+                queryPlannerResult: plan(family: "summary", confidence: 0.62, topics: ["grampus"])
+            ),
+            queryInterpreter: QueryInterpreter()
+        )
+        let rerouted = await hedgingRouter.resolveQuerySpec(
+            query: "grampus chat me kya ho rha", activeFilter: .all,
+            timezone: TimeZone(secondsFromGMT: 0)!, now: Date(timeIntervalSince1970: 1_744_329_600)
+        )
+        XCTAssertEqual(rerouted.family, .summary)
+        XCTAssertEqual(rerouted.plannerHints?.topicTerms, ["grampus"])
+
+        // A plan that is NOT clearly better keeps deterministic routing,
+        // but its term extraction still flows — hints are additive
+        // evidence, never discarded.
+        let timidRouter = QueryRouter(
+            aiProvider: StubAIProvider(
+                queryPlannerResult: plan(family: "summary", confidence: 0.46, topics: ["grampus"])
+            ),
+            queryInterpreter: QueryInterpreter()
+        )
+        let kept = await timidRouter.resolveQuerySpec(
+            query: "grampus chat me kya ho rha", activeFilter: .all,
+            timezone: TimeZone(secondsFromGMT: 0)!, now: Date(timeIntervalSince1970: 1_744_329_600)
+        )
+        XCTAssertEqual(kept.family, .topicSearch, "0.46 vs deterministic 0.45 is not clearly better")
+        XCTAssertEqual(kept.plannerHints?.topicTerms, ["grampus"], "terms must survive even when routing does not")
+    }
+
+    @MainActor
+    func testPlannerGateIsLanguageUniversal() {
+        let router = QueryRouter(aiProvider: NoAIProvider())
+        func spec(family: QueryFamily, confidence: Double) -> QuerySpec {
+            QuerySpec(
+                rawQuery: "q", mode: .summarySearch, family: family,
+                preferredEngine: .summarize, scope: .all,
+                scopeWasExplicit: false, replyConstraint: .none,
+                timeRange: nil, parseConfidence: confidence,
+                unsupportedFragments: []
+            )
+        }
+
+        // Linguistic queries get the planner regardless of language —
+        // the old English-cue gate silently skipped the LLM for
+        // "grampus chat me kya ho rha" and grammar fragments matched.
+        XCTAssertTrue(router.shouldUseAIPlanner(
+            query: "grampus chat me kya ho rha",
+            baseSpec: spec(family: .topicSearch, confidence: 0.9)
+        ))
+        XCTAssertTrue(router.shouldUseAIPlanner(
+            query: "what did we discuss with akhil",
+            baseSpec: spec(family: .summary, confidence: 0.9)
+        ))
+
+        // Mechanical artifact lookups confidently parsed by pattern are
+        // the only planner skip.
+        XCTAssertFalse(router.shouldUseAIPlanner(
+            query: "0x8f3a wallet address",
+            baseSpec: spec(family: .exactLookup, confidence: 0.95)
+        ))
+        // ...but a LOW-confidence exact-lookup guess still asks the LLM.
+        XCTAssertTrue(router.shouldUseAIPlanner(
+            query: "wo address bhejo jo maine kal share kiya",
+            baseSpec: spec(family: .exactLookup, confidence: 0.3)
+        ))
+    }
+
+    func testGroupTriageCapsDoNotApplyToTopicSearch() {
+        // A freshly-joined community group: 200 members, 50 unread.
+        // Reply-queue triage must skip it (AI cost + "not directed at
+        // me"); topic search must SEE it — these caps leaking into
+        // search made every active community group invisible.
+        let bigGroup = makeChat(
+            id: 63_001, title: "Grampus Community",
+            chatType: .basicGroup(groupId: 63_001),
+            unreadCount: 50, lastMessageDate: Date(),
+            memberCount: 200
+        )
+
+        let triage = SearchChatEligibilityFilter.collectCandidateChats(
+            from: [bigGroup], scope: .all,
+            replyQueueQuery: true, applyGroupTriageCaps: true
+        )
+        XCTAssertTrue(triage.included.isEmpty)
+        XCTAssertTrue(triage.exclusions.contains { $0.reason == "group too large" })
+
+        let search = SearchChatEligibilityFilter.collectCandidateChats(
+            from: [bigGroup], scope: .all,
+            replyQueueQuery: false, applyGroupTriageCaps: false
+        )
+        XCTAssertEqual(search.included.map(\.id), [63_001])
+    }
+
+    func testSearchStopWordsIsCorpusDrivenWithNoHandList() {
+        // Design guard: function-word detection must carry NO
+        // hand-maintained vocabulary — the AI planner is the
+        // language-universal layer; this tier is mined from the
+        // user's own corpus and starts empty.
+        SearchStopWords.updateCorpusDerived([])
+        for word in ["batao", "ki", "the", "hai", "contract", "firstdollar"] {
+            XCTAssertFalse(SearchStopWords.isFunctionWord(word), word)
+        }
+
+        SearchStopWords.updateCorpusDerived(["hai", "the"])
+        XCTAssertTrue(SearchStopWords.isFunctionWord("hai"))
+        XCTAssertTrue(SearchStopWords.isFunctionWord("the"))
+        XCTAssertFalse(
+            SearchStopWords.isFunctionWord("contract"),
+            "content words below the frequency tier must stay extractable"
+        )
+        SearchStopWords.updateCorpusDerived([])
+    }
+
+    func testCorpusHighFrequencyTokensMinesFunctionWordsInAnyLanguage() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 62_001
+            var records: [DatabaseManager.MessageRecord] = []
+            for i in 1...100 {
+                let text: String
+                if i <= 60 {
+                    text = "yarr sunte ho item number \(i)"
+                } else if i <= 65 {
+                    text = "uniquecontentword appears here \(i)"
+                } else {
+                    text = "plain filler line item number \(i)"
+                }
+                records.append(makeRecord(id: Int64(i), chatId: chatId, text: text, date: Date()))
+            }
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: chatId,
+                messages: records,
+                preferredOldestMessageId: 1,
+                isSearchReady: true
+            )
+
+            let frequent = await DatabaseManager.shared.corpusHighFrequencyTokens(minDocShare: 0.3)
+            XCTAssertTrue(frequent.contains("yarr"), "60% document share must qualify, whatever the language")
+            XCTAssertFalse(frequent.contains("uniquecontentword"), "a 5% content word must stay extractable")
+        }
+    }
+
+    func testConversationChunkerBuildsOverlappingWindows() {
+        let messages: [ConversationChunker.Message] = (1...12).map { i in
+            ConversationChunker.Message(
+                id: Int64(i),
+                senderName: i % 2 == 0 ? "Alice" : "Bob",
+                text: "message number \(i) with some content"
+            )
+        }
+        let chunks = ConversationChunker.chunks(
+            chatId: 7,
+            messages: messages,
+            windowSize: 4,
+            overlap: 1,
+            maxChars: 10_000,
+            minContentChars: 10
+        )
+
+        XCTAssertEqual(chunks.count, 4)
+        XCTAssertEqual(chunks[0].fromMessageId, 1)
+        XCTAssertEqual(chunks[0].toMessageId, 4)
+        XCTAssertEqual(chunks[0].anchorMessageId, 4)
+        // Overlap: window 2 starts at the last message of window 1.
+        XCTAssertEqual(chunks[1].fromMessageId, 4)
+        XCTAssertEqual(chunks[1].toMessageId, 7)
+        // Sender names are prefixed into the embedded text.
+        XCTAssertTrue(chunks[0].text.contains("Bob: message number 1"))
+        XCTAssertTrue(chunks[0].text.contains("Alice: message number 4"))
+        // Tail window is partial.
+        XCTAssertEqual(chunks[3].fromMessageId, 10)
+        XCTAssertEqual(chunks[3].toMessageId, 12)
+
+        // Full-coverage run: watermark stops BEFORE the tail window so
+        // it gets rebuilt as the conversation grows.
+        let covered = ConversationChunker.coveredThrough(
+            chunks: chunks, messages: messages, windowSize: 4, overlap: 1
+        )
+        XCTAssertEqual(covered, 10)
+    }
+
+    func testConversationChunkerSkipsEmptiesAndNoise() {
+        let messages: [ConversationChunker.Message] = [
+            .init(id: 1, senderName: "A", text: "real content that matters here"),
+            .init(id: 2, senderName: "B", text: nil),
+            .init(id: 3, senderName: "C", text: "   "),
+            .init(id: 4, senderName: "D", text: "more real content right here")
+        ]
+        let chunks = ConversationChunker.chunks(
+            chatId: 1, messages: messages,
+            windowSize: 4, overlap: 1, maxChars: 1_000, minContentChars: 10
+        )
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks[0].fromMessageId, 1)
+        XCTAssertEqual(chunks[0].toMessageId, 4)
+        XCTAssertFalse(chunks[0].text.contains("B:"), "empty messages contribute no lines")
+
+        let noise = ConversationChunker.chunks(
+            chatId: 1,
+            messages: [.init(id: 9, senderName: "A", text: "ok")],
+            windowSize: 4, overlap: 1, maxChars: 1_000, minContentChars: 24
+        )
+        XCTAssertTrue(noise.isEmpty, "sub-minimum windows are noise, not chunks")
+    }
+
+    func testChunkSearchUnionDedupesAndFindsShortMessagesViaWindow() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 61_001
+            await DatabaseManager.shared.upsertIndexedMessages(
+                chatId: chatId,
+                messages: (18...23).map { i in
+                    makeRecord(id: Int64(i), chatId: chatId, text: "chunk window member \(i)", date: Date())
+                },
+                preferredOldestMessageId: 18,
+                isSearchReady: true
+            )
+            // Message 21 is too short to have its own meaningful vector,
+            // but anchors a window chunk. Message 21 ALSO has a weak
+            // message-level vector — dedupe must keep the chunk's score.
+            try await VectorStore.shared.storeBatchThrowing([
+                VectorStore.EmbeddingRecord(
+                    messageId: 21, chatId: chatId,
+                    vector: [0, 1, 0], textPreview: "ok",
+                    modelVersion: "model-x"
+                )
+            ])
+            await VectorStore.shared.storeChunks(
+                [VectorStore.ChunkRecord(
+                    chatId: chatId, fromMessageId: 18, toMessageId: 21,
+                    anchorMessageId: 21, vector: [1, 0, 0],
+                    textPreview: "window", modelVersion: "model-x"
+                )],
+                chatId: chatId, modelVersion: "model-x", replacingFromMessageId: 0
+            )
+
+            let hits = await VectorStore.shared.search(
+                query: [1, 0, 0], topK: 10, modelVersion: "model-x"
+            )
+            XCTAssertEqual(hits.count, 1, "message + chunk anchor dedupe to one result")
+            XCTAssertEqual(hits.first?.messageId, 21)
+            XCTAssertEqual(hits.first?.score ?? 0, 1.0, accuracy: 0.0001, "best score wins the dedupe")
+
+            // Tail replacement: re-chunking from message 20 replaces
+            // chunks starting at/after 20, keeps earlier ones.
+            await VectorStore.shared.storeChunks(
+                [VectorStore.ChunkRecord(
+                    chatId: chatId, fromMessageId: 20, toMessageId: 23,
+                    anchorMessageId: 23, vector: [1, 0, 0],
+                    textPreview: "rebuilt tail", modelVersion: "model-x"
+                )],
+                chatId: chatId, modelVersion: "model-x", replacingFromMessageId: 20
+            )
+            let count = await VectorStore.shared.chunkCount(modelVersion: "model-x")
+            XCTAssertEqual(count, 2, "from=18 survives, from>=20 region rebuilt")
+        }
+    }
+
     func testVectorStoreSearchIsModelVersionIsolated() async throws {
         try await withTempDatabase { _ in
             let chatId: Int64 = 60_001
