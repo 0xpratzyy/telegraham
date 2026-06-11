@@ -1007,6 +1007,7 @@ final class SummaryEngine {
             .filter { token in
                 !token.isEmpty
                     && !summaryStopWords.contains(token)
+                    && !SearchStopWords.isFunctionWord(token)
                     && token.count >= 3
             })) as? [String] ?? []
         let plannedPeople = querySpec.plannerHints?.people ?? []
@@ -1110,6 +1111,7 @@ final class SummaryEngine {
                 .filter {
                     !$0.isEmpty
                         && !summaryStopWords.contains($0)
+                        && !SearchStopWords.isFunctionWord($0)
                         && $0.count >= 3
                 }
             if !extracted.isEmpty {

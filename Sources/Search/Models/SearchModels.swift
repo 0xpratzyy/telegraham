@@ -133,6 +133,7 @@ struct SearchChatEligibilityFilter {
         from chats: [TGChat],
         scope: QueryScope,
         replyQueueQuery: Bool,
+        applyGroupTriageCaps: Bool = true,
         now: Date = Date()
     ) -> Result {
         var included: [TGChat] = []
@@ -169,7 +170,14 @@ struct SearchChatEligibilityFilter {
                 continue
             }
 
-            if chat.chatType.isGroup {
+            // Group size/unread caps are TRIAGE sanity limits ("is this
+            // group plausibly directed at me?" / "should we spend AI on
+            // it?"), not search limits. Applying them to topic search
+            // made every active community group invisible — a freshly-
+            // joined 200-member group with unread backlog is exactly
+            // where topic search needs to look. Callers opt out for
+            // search ranking; triage surfaces keep the caps.
+            if applyGroupTriageCaps, chat.chatType.isGroup {
                 if let count = chat.memberCount, count > AppConstants.FollowUp.maxGroupMembers {
                     exclusions.append(Exclusion(reason: "group too large", chatTitle: chat.title))
                     continue

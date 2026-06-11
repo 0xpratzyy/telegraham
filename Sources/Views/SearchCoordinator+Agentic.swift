@@ -741,15 +741,26 @@ extension SearchCoordinator {
         }
 
         let normalizedQuery = query.lowercased()
+        // The AI planner's structured terms are authoritative when it
+        // ran: it understands the query in ANY language ("firstdollar
+        // ki latest discussions batao" -> {firstdollar, discussions}),
+        // which no local tokenizer can. Raw-string tokenization is the
+        // no-AI fallback only, with the corpus-derived function-word
+        // tier as its language-agnostic guard.
         let stopWords: Set<String> = [
             "who", "what", "when", "where", "why", "how", "have", "has", "had",
             "with", "that", "this", "from", "your", "you", "for", "the", "and",
             "are", "was", "were", "can", "could", "would", "should", "about"
         ]
-        let tokens = normalizedQuery
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
-            .filter { $0.count >= 3 && !stopWords.contains($0) }
+        let plannerTerms = ((querySpec.plannerHints?.topicTerms ?? []) + (querySpec.plannerHints?.people ?? []))
+            .map { $0.lowercased() }
+            .filter { $0.count >= 3 }
+        let tokens = plannerTerms.isEmpty
+            ? normalizedQuery
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+                .filter { $0.count >= 3 && !stopWords.contains($0) && !SearchStopWords.isFunctionWord($0) }
+            : plannerTerms
 
         let corpus = (
             [chat.title.lowercased(), chat.lastMessage?.displayText.lowercased() ?? ""]
@@ -863,7 +874,10 @@ extension SearchCoordinator {
             to: SearchChatEligibilityFilter.collectCandidateChats(
                 from: aiSearchSourceChats,
                 scope: scope,
-                replyQueueQuery: replyQueueQuery
+                replyQueueQuery: replyQueueQuery,
+                // Topic/agentic ranking must see big community groups;
+                // reply-flavored queries keep the triage caps.
+                applyGroupTriageCaps: replyQueueQuery
             ),
             includeBots: includeBotsInAISearch,
             isBot: { await telegramService.isBotChat($0) }
@@ -926,11 +940,17 @@ extension SearchCoordinator {
             "are", "was", "were", "can", "could", "would", "should", "about",
             "only", "last", "week", "month", "reply", "replied", "responded"
         ]
-        let queryTokens = query
-            .lowercased()
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
-            .filter { $0.count >= 3 && !stopWords.contains($0) }
+        // Planner terms first — see chatExclusionReasonForAgenticQuery.
+        let plannerTerms = ((querySpec.plannerHints?.topicTerms ?? []) + (querySpec.plannerHints?.people ?? []))
+            .map { $0.lowercased() }
+            .filter { $0.count >= 3 }
+        let queryTokens = plannerTerms.isEmpty
+            ? query
+                .lowercased()
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+                .filter { $0.count >= 3 && !stopWords.contains($0) && !SearchStopWords.isFunctionWord($0) }
+            : plannerTerms
 
         return candidates.compactMap { candidate in
             guard chatMatchesScope(candidate.chat, scope: querySpec.scope) else { return nil }

@@ -69,6 +69,7 @@ actor IndexScheduler {
         return pausedUntil > Date()
     }
     private var prioritizedChatIds: [Int64] = []
+    private var loopPassCount = 0
     private var sessionStartedAt: Date?
     private var sessionIndexedMessages = 0
     private var sessionCompletedChats = 0
@@ -170,6 +171,20 @@ actor IndexScheduler {
             // outlive the launcher panel — see the onAppear/onDisappear
             // pause leak).
             _ = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
+            _ = await backfillConversationChunks()
+
+            // Periodically refresh the corpus-derived stopword tier
+            // (language-agnostic function words mined from the user's
+            // own FTS vocabulary).
+            if loopPassCount % AppConstants.Indexing.corpusStopWordRefreshPasses == 0 {
+                let tokens = await DatabaseManager.shared.corpusHighFrequencyTokens(
+                    minDocShare: AppConstants.Indexing.corpusStopWordMinDocShare
+                )
+                if !tokens.isEmpty {
+                    SearchStopWords.updateCorpusDerived(tokens)
+                }
+            }
+            loopPassCount += 1
 
             if isPausedNow {
                 let pausedSnapshot = await snapshot(using: telegramService)
@@ -619,6 +634,92 @@ actor IndexScheduler {
         guard !records.isEmpty else { return 0 }
         await VectorStore.shared.storeBatch(records)
         return records.count
+    }
+
+    /// Build and embed conversation-window chunks for a few chats per
+    /// pass. Like the message backfill this is pause-immune local work;
+    /// per-chat watermarks make it incremental and idempotent — the
+    /// partial tail window is rebuilt (and its stale rows replaced)
+    /// as conversations grow.
+    private func backfillConversationChunks() async -> Int {
+        let modelVersion = await EmbeddingService.shared.activeModelVersion
+        // Chunks exist to feed the contextual model; the legacy
+        // sentence model stays message-level only.
+        guard modelVersion != EmbeddingService.legacyModelVersion else { return 0 }
+
+        let chatIds = await DatabaseManager.shared.chatsNeedingChunking(
+            modelVersion: modelVersion,
+            limit: AppConstants.Indexing.chunkBackfillChatsPerPass
+        )
+        guard !chatIds.isEmpty else { return 0 }
+
+        var embeddedChunks = 0
+        for chatId in chatIds {
+            let state = await DatabaseManager.shared.chunkState(chatId: chatId, modelVersion: modelVersion)
+            let messages = await DatabaseManager.shared.messagesForChunking(
+                chatId: chatId,
+                afterMessageId: state.coveredThrough,
+                limit: AppConstants.Indexing.chunkBackfillMessagesPerChat
+            )
+            guard let newestId = messages.map(\.id).max() else { continue }
+
+            let chunks = ConversationChunker.chunks(chatId: chatId, messages: messages)
+            guard !chunks.isEmpty else {
+                // Nothing embeddable in this slice (stickers, media) —
+                // advance the watermark so the chat isn't rescanned
+                // every pass.
+                await DatabaseManager.shared.setChunkState(
+                    chatId: chatId,
+                    modelVersion: modelVersion,
+                    coveredThrough: max(state.coveredThrough, newestId),
+                    chunkedThrough: max(state.chunkedThrough, newestId)
+                )
+                continue
+            }
+
+            var records: [VectorStore.ChunkRecord] = []
+            records.reserveCapacity(chunks.count)
+            for chunk in chunks {
+                guard let vector = await EmbeddingService.shared.embed(
+                    text: chunk.text,
+                    modelVersion: modelVersion
+                ) else { continue }
+                records.append(VectorStore.ChunkRecord(
+                    chatId: chunk.chatId,
+                    fromMessageId: chunk.fromMessageId,
+                    toMessageId: chunk.toMessageId,
+                    anchorMessageId: chunk.anchorMessageId,
+                    vector: vector,
+                    textPreview: String(chunk.text.prefix(AppConstants.Indexing.embeddingPreviewCharacterLimit)),
+                    modelVersion: modelVersion
+                ))
+            }
+            guard !records.isEmpty else { continue }
+
+            await VectorStore.shared.storeChunks(
+                records,
+                chatId: chatId,
+                modelVersion: modelVersion,
+                replacingFromMessageId: state.coveredThrough + 1
+            )
+            embeddedChunks += records.count
+
+            let covered = ConversationChunker.coveredThrough(chunks: chunks, messages: messages)
+                ?? state.coveredThrough
+            await DatabaseManager.shared.setChunkState(
+                chatId: chatId,
+                modelVersion: modelVersion,
+                coveredThrough: max(state.coveredThrough, covered),
+                chunkedThrough: max(state.chunkedThrough, chunks.last?.toMessageId ?? newestId)
+            )
+        }
+
+        if embeddedChunks > 0 {
+            lastBackfillCount = embeddedChunks
+            lastIndexedAt = Date()
+            lastIndexedChat = "Chunk backfill"
+        }
+        return embeddedChunks
     }
 
     private func refreshProgress(currentChat: String? = nil) async {

@@ -1078,10 +1078,18 @@ struct LauncherView: View {
                                 subtitle: "All caught up!"
                             )
                         } else if !searchText.isEmpty {
-                            EmptyStateView(
-                                icon: "magnifyingglass",
-                                title: "No results for \"\(searchText)\""
-                            )
+                            // While the AI is still ranking, "no local
+                            // title matches" is NOT "no results" — show
+                            // a loading state instead of flashing an
+                            // empty one that the AI list then replaces.
+                            if isAISearching {
+                                aiLoadingStateView
+                            } else {
+                                EmptyStateView(
+                                    icon: "magnifyingglass",
+                                    title: "No results for \"\(searchText)\""
+                                )
+                            }
                         } else {
                             EmptyStateView(
                                 icon: "tray",
