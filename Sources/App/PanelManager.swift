@@ -49,6 +49,16 @@ final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
+    override func orderOut(_ sender: Any?) {
+        super.orderOut(sender)
+        // The hosted LauncherView's .onDisappear does NOT fire for an
+        // ordered-out panel, so its paired IndexScheduler.resume()
+        // never runs from SwiftUI. Release the pause at the actual
+        // visibility boundary instead. (The pause lease would expire on
+        // its own within 30s — this just resumes indexing immediately.)
+        Task { await IndexScheduler.shared.resume() }
+    }
+
     override func resignKey() {
         super.resignKey()
         orderOut(nil)

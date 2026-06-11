@@ -491,6 +491,24 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v18_embeddings_model_version") { db in
+            // Embedding vectors are only comparable within one model's
+            // vector space. Stamp every row with its model version so
+            // search can filter to a single space, and so swapping the
+            // embedding model becomes "re-embed in the background while
+            // old vectors keep serving" instead of a flag day. Existing
+            // rows were all written by the original NLEmbedding sentence
+            // model.
+            try db.execute(sql: """
+                ALTER TABLE embeddings
+                ADD COLUMN model_version TEXT NOT NULL DEFAULT 'apple-sentence-v1'
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_embeddings_version_chat
+                ON embeddings(model_version, chat_id)
+                """)
+        }
+
         return migrator
     }
 }

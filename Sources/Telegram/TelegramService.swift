@@ -362,9 +362,10 @@ class TelegramService: ObservableObject {
     }
 
     func localVectorSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
-        guard let queryVector = await EmbeddingService.shared.embed(text: query) else { return [] }
-
-        let searchResults = await VectorStore.shared.search(query: queryVector, topK: limit, chatIds: chatIds)
+        // VectorStore owns the query-embedding decision: the query must
+        // be embedded by the SAME model version as the vectors being
+        // searched, which can differ from the active model mid-backfill.
+        let searchResults = await VectorStore.shared.searchText(query, topK: limit, chatIds: chatIds)
         guard !searchResults.isEmpty else { return [] }
 
         let records = await DatabaseManager.shared.loadMessages(
