@@ -75,3 +75,4 @@ yc-coding-agent-session-*.md
 
 # wrangler local state (account cache, dev logs)
 .wrangler/
+SourcePccages/

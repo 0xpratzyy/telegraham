@@ -18,6 +18,9 @@ enum KeychainManager {
         case aiModelClaude = "com.pidgy.aiModel.claude"
         case aiApiKey = "com.pidgy.aiApiKey"
         case aiModel = "com.pidgy.aiModel"
+        // Dodo license-key subscription (CleanShot-style activation).
+        case dodoLicenseKey = "com.pidgy.dodoLicenseKey"
+        case dodoLicenseInstanceID = "com.pidgy.dodoLicenseInstanceID"
     }
 
     enum KeychainError: Error, LocalizedError {

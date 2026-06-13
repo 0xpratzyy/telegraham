@@ -39,6 +39,9 @@ struct DashboardPreferencesPage: View {
     @State private var isResetting = false
     @StateObject private var archivedChatsStore = ArchivedChatsStore.shared
     @ObservedObject private var entitlements = EntitlementStore.shared
+    @State private var licenseKeyInput = ""
+    @State private var isActivatingLicense = false
+    @State private var licenseError: String?
     /// Resolved chats for the archived-chats list, keyed by chat id.
     /// Stores the full TGChat (not just the title) so each row can
     /// render the chat's avatar + DM/group shape. Populated on
@@ -708,6 +711,52 @@ struct DashboardPreferencesPage: View {
                     }
                 }
             }
+
+            licenseRow
+        }
+    }
+
+    @ViewBuilder
+    private var licenseRow: some View {
+        if case .active = entitlements.status, entitlements.hasLicenseKey {
+            PrefField(
+                label: "License",
+                hint: "This device is activated. Deactivate to free the slot for another Mac."
+            ) {
+                PrefGhostButton(title: "Deactivate", systemImage: "minus.circle") {
+                    Task { await entitlements.removeLicense() }
+                }
+            }
+        } else {
+            PrefField(
+                label: "Have a license key?",
+                hint: licenseError ?? "Paste the key Dodo emailed after you subscribed."
+            ) {
+                HStack(spacing: 8) {
+                    PrefMinInput(text: $licenseKeyInput, placeholder: "PIDGY-XXXX-…", isSecure: false, monospaced: true)
+                        .frame(width: 200)
+                    PrefGhostButton(title: isActivatingLicense ? "…" : "Activate", systemImage: "key") {
+                        activateLicense()
+                    }
+                }
+            }
+        }
+    }
+
+    private func activateLicense() {
+        let key = licenseKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !isActivatingLicense else { return }
+        isActivatingLicense = true
+        licenseError = nil
+        let deviceName = Host.current().localizedName ?? "Mac"
+        Task { @MainActor in
+            do {
+                try await entitlements.activateLicense(key, deviceName: deviceName)
+                licenseKeyInput = ""
+            } catch {
+                licenseError = (error as? LocalizedError)?.errorDescription ?? "Couldn't activate that key."
+            }
+            isActivatingLicense = false
         }
     }
 

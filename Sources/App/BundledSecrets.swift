@@ -51,6 +51,27 @@ enum BundledSecrets {
         aiProxyURL != nil && (aiProxyToken?.isEmpty == false)
     }
 
+    // MARK: - Dodo Payments (license-key subscriptions)
+
+    /// Base URL for Dodo's PUBLIC license endpoints (activate / validate
+    /// / deactivate — no API key needed). Test:
+    /// https://test.dodopayments.com · Live: https://live.dodopayments.com
+    static let dodoBaseURL: URL = {
+        guard let raw = stringValue(forKey: "PidgyBundledDodoBaseURL"),
+              let url = URL(string: raw), url.scheme == "https" else {
+            return URL(string: "https://test.dodopayments.com")!
+        }
+        return url
+    }()
+
+    /// Hosted-checkout URL per plan (from the Dodo dashboard product
+    /// page). Non-secret. Empty until the products are created.
+    static func dodoCheckoutURL(for plan: PidgyPlan) -> URL? {
+        let key = plan == .byok ? "PidgyBundledDodoCheckoutBYOK" : "PidgyBundledDodoCheckoutBundled"
+        guard let raw = stringValue(forKey: key), let url = URL(string: raw) else { return nil }
+        return url
+    }
+
     /// Sentry DSN baked in for crash + error telemetry
     /// (`PIDGY_SENTRY_DSN`). Returns nil when blank — `PidgyTelemetry.start`
     /// then skips Sentry init entirely so source builds never make

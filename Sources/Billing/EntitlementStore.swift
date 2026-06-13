@@ -6,7 +6,7 @@ import Combine
 /// paid side is refreshed from the injected `PaymentService`.
 @MainActor
 final class EntitlementStore: ObservableObject {
-    static let shared = EntitlementStore()
+    static let shared = EntitlementStore(payments: DodoLicenseService())
 
     @Published private(set) var status: EntitlementStatus = .none
 
@@ -64,6 +64,34 @@ final class EntitlementStore: ObservableObject {
 
     func checkoutURL(for plan: PidgyPlan) -> URL? {
         payments.checkoutURL(for: plan)
+    }
+
+    /// True when a license key is stored for this device.
+    var hasLicenseKey: Bool {
+        (try? KeychainManager.retrieve(for: .dodoLicenseKey)).flatMap { $0 }?.isEmpty == false
+    }
+
+    /// Activate a license key on this device, persist it, and refresh
+    /// entitlement. Throws on activation failure (bad key / device limit).
+    func activateLicense(_ licenseKey: String, deviceName: String) async throws {
+        let trimmed = licenseKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let instanceID = try await payments.activate(licenseKey: trimmed, deviceName: deviceName)
+        try? KeychainManager.save(trimmed, for: .dodoLicenseKey)
+        try? KeychainManager.save(instanceID, for: .dodoLicenseInstanceID)
+        await refreshFromBackend()
+    }
+
+    /// Release this device's activation slot and forget the key.
+    func removeLicense() async {
+        if let key = (try? KeychainManager.retrieve(for: .dodoLicenseKey)).flatMap({ $0 }),
+           let instance = (try? KeychainManager.retrieve(for: .dodoLicenseInstanceID)).flatMap({ $0 }) {
+            await payments.deactivate(licenseKey: key, instanceID: instance)
+        }
+        try? KeychainManager.delete(for: .dodoLicenseKey)
+        try? KeychainManager.delete(for: .dodoLicenseInstanceID)
+        var updated = subscription
+        updated.activeUntil = nil
+        subscription = updated
     }
 
     /// Reset-all-data hook: wipe billing state with everything else.

@@ -98,12 +98,20 @@ protocol PaymentService: Sendable {
     /// Verify the current subscription with the backend. Returns the
     /// paid-through date, or nil if there's no active subscription.
     func refreshEntitlement() async -> Date?
+    /// Activate a license key for this device; returns the provider's
+    /// instance id (persisted so the device can be deactivated later).
+    func activate(licenseKey: String, deviceName: String) async throws -> String
+    /// Release a device's activation slot.
+    func deactivate(licenseKey: String, instanceID: String) async
 }
 
 /// Placeholder until Dodo + the entitlement backend are live (issue
 /// #41). Charges nothing and verifies nothing — the app runs on the
 /// local trial clock and the BYOK path, which need no server.
 struct UnconfiguredPaymentService: PaymentService {
+    struct NotConfigured: Error {}
     func checkoutURL(for plan: PidgyPlan) -> URL? { nil }
     func refreshEntitlement() async -> Date? { nil }
+    func activate(licenseKey: String, deviceName: String) async throws -> String { throw NotConfigured() }
+    func deactivate(licenseKey: String, instanceID: String) async {}
 }
