@@ -90,7 +90,7 @@ actor VectorStore {
                 version = EmbeddingService.legacyModelVersion
             }
         }
-        guard let queryVector = await EmbeddingService.shared.embed(text: query, modelVersion: version) else {
+        guard let queryVector = await EmbeddingService.shared.embed(text: query, modelVersion: version, isQuery: true) else {
             return []
         }
         return await search(query: queryVector, topK: topK, chatIds: chatIds, modelVersion: version)
@@ -108,16 +108,11 @@ actor VectorStore {
         let modelVersion: String
     }
 
-    /// Replace the chunk tail for a chat: stale partial-tail chunks
-    /// (from `replacingFromMessageId` onward) are deleted before the
-    /// rebuilt set is inserted, so growing conversations don't leave
-    /// orphaned overlapping windows behind.
-    func storeChunks(
-        _ records: [ChunkRecord],
-        chatId: Int64,
-        modelVersion: String,
-        replacingFromMessageId: Int64
-    ) async {
+    /// Delete the stale chunk tail (from `fromMessageId` onward) before
+    /// a rebuild, so growing conversations don't leave orphaned
+    /// overlapping windows behind. Separate from the insert so rebuilds
+    /// can commit in small sub-batches.
+    func purgeChunkTail(chatId: Int64, modelVersion: String, fromMessageId: Int64) async {
         do {
             try await DatabaseManager.shared.write { db in
                 try db.execute(
@@ -125,8 +120,18 @@ actor VectorStore {
                         DELETE FROM embedding_chunks
                         WHERE chat_id = ? AND model_version = ? AND from_message_id >= ?
                         """,
-                    arguments: [chatId, modelVersion, replacingFromMessageId]
+                    arguments: [chatId, modelVersion, fromMessageId]
                 )
+            }
+        } catch {
+            print("[VectorStore] Failed to purge chunk tail: \(error)")
+        }
+    }
+
+    func storeChunks(_ records: [ChunkRecord]) async {
+        guard !records.isEmpty else { return }
+        do {
+            try await DatabaseManager.shared.write { db in
                 for record in records {
                     try db.execute(
                         sql: """
@@ -163,6 +168,55 @@ actor VectorStore {
         }) ?? 0
     }
 
+    /// Cached corpus mean vector per model version (the dominant
+    /// common direction). Subtracting it from every vector before
+    /// cosine is the standard fix for embedding anisotropy: contextual
+    /// vectors sit in a narrow ~0.7-cosine cone, so raw cosine barely
+    /// ranks (top-8 score spread observed at 0.02). Centering removes
+    /// the shared component and lets the residuals discriminate.
+    private var meanByVersion: [String: [Double]] = [:]
+
+    private func corpusMean(modelVersion: String) async -> [Double]? {
+        if let cached = meanByVersion[modelVersion] { return cached }
+        let blobs: [Data] = (try? await DatabaseManager.shared.read { db in
+            try Data.fetchAll(
+                db,
+                sql: """
+                    SELECT vector FROM embeddings WHERE model_version = ?
+                    UNION ALL
+                    SELECT vector FROM embedding_chunks WHERE model_version = ?
+                    """,
+                arguments: [modelVersion, modelVersion]
+            )
+        }) ?? []
+        guard !blobs.isEmpty else { return nil }
+        var sum: [Double] = []
+        var n = 0
+        for blob in blobs {
+            guard let v = Self.decode(blob) else { continue }
+            if sum.isEmpty { sum = [Double](repeating: 0, count: v.count) }
+            guard v.count == sum.count else { continue }
+            for i in v.indices { sum[i] += v[i] }
+            n += 1
+        }
+        guard n > 0 else { return nil }
+        let mean = sum.map { $0 / Double(n) }
+        meanByVersion[modelVersion] = mean
+        return mean
+    }
+
+    /// Invalidate cached means (after a re-embed / model swap).
+    func invalidateCorpusMeans() {
+        meanByVersion.removeAll()
+    }
+
+    private static func subtract(_ a: [Double], _ b: [Double]) -> [Double] {
+        guard a.count == b.count else { return a }
+        var out = a
+        for i in a.indices { out[i] -= b[i] }
+        return out
+    }
+
     func vectorCount(modelVersion: String) async -> Int {
         (try? await DatabaseManager.shared.read { db in
             try Int.fetchOne(
@@ -181,6 +235,13 @@ actor VectorStore {
     ) async -> [SearchResult] {
         guard !query.isEmpty, topK > 0 else { return [] }
         if let chatIds, chatIds.isEmpty { return [] }
+
+        // Mean-center ONLY anisotropic models (NLContextualEmbedding).
+        // e5 is L2-normalized and trained for raw cosine — centering a
+        // good model is at best a no-op and can hurt, so skip it.
+        let needsCentering = modelVersion == "apple-contextual-latin-v1"
+        let mean = needsCentering ? await corpusMean(modelVersion: modelVersion) : nil
+        let centeredQuery = mean.map { Self.subtract(query, $0) } ?? query
 
         do {
             // Message vectors and conversation-chunk vectors share the
@@ -223,7 +284,8 @@ actor VectorStore {
 
             let scoredResults = rows.compactMap { row -> SearchResult? in
                 guard let candidateVector = Self.decode(row.vectorData) else { return nil }
-                let score = Self.cosineSimilarity(lhs: query, rhs: candidateVector)
+                let centered = mean.map { Self.subtract(candidateVector, $0) } ?? candidateVector
+                let score = Self.cosineSimilarity(lhs: centeredQuery, rhs: centered)
                 return SearchResult(
                     messageId: row.messageId,
                     chatId: row.chatId,
