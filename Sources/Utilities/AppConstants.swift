@@ -385,5 +385,8 @@ enum AppConstants {
         /// "web" (web.telegram.org). Unset = auto-detect from whether a
         /// tg:// handler is installed. See ChatOpenTarget.
         static let chatOpenTargetKey = "pidgyChatOpenTarget"
+
+        /// Persisted subscription/trial state (Billing/Subscription).
+        static let subscriptionStateKey = "pidgySubscriptionState"
     }
 }

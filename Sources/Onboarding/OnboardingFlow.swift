@@ -110,7 +110,7 @@ final class OnboardingWindowController {
 // MARK: - Root flow view
 
 private enum OnboardingStep: Int, CaseIterable {
-    case welcome, tour, connect, qr, phone, code, password, done
+    case welcome, tour, connect, qr, phone, code, password, plan, byokKey, done
 
     /// Position used for the top progress strip. Phone / code / password
     /// share the QR slot since they're alternative paths through the same
@@ -122,11 +122,12 @@ private enum OnboardingStep: Int, CaseIterable {
         case .tour: return 1
         case .connect: return 2
         case .qr, .phone, .code, .password: return 3
-        case .done: return 4
+        case .plan, .byokKey: return 4
+        case .done: return 5
         }
     }
 
-    static var totalProgressSlots: Int { 4 }
+    static var totalProgressSlots: Int { 5 }
 }
 
 struct OnboardingFlow: View {
@@ -219,6 +220,18 @@ struct OnboardingFlow: View {
                                 isSubmitting: isSubmitting,
                                 onBack: { advance(to: .code) },
                                 onSubmit: { Task { await submitPassword() } }
+                            )
+                        case .plan:
+                            PlanStep(onChoosePlan: { plan in
+                                EntitlementStore.shared.startTrial(plan: plan)
+                                // BYOK needs a key before AI works; bundled
+                                // is ready immediately via the proxy.
+                                advance(to: plan == .byok ? .byokKey : .done)
+                            })
+                        case .byokKey:
+                            ByokKeyStep(
+                                aiService: aiService,
+                                onContinue: { advance(to: .done) }
                             )
                         case .done:
                             DoneStep(onFinish: completeOnboarding)
@@ -376,7 +389,11 @@ struct OnboardingFlow: View {
                 advance(to: .password)
             }
         case .ready:
-            advance(to: .done)
+            // Auth done → choose a plan (starts the free trial) → done.
+            // Don't bounce back to plan if we're already past it.
+            if step != .done {
+                advance(to: .plan)
+            }
         default:
             break
         }
@@ -1412,6 +1429,234 @@ private struct BracketShape: Shape {
 }
 
 // MARK: - Done step
+
+private struct PlanStep: View {
+    let onChoosePlan: (PidgyPlan) -> Void
+
+    @State private var selected: PidgyPlan = .bundled
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Pick your plan")
+                .font(.custom("Newsreader", size: 36).weight(.medium))
+                .tracking(-0.8)
+                .foregroundStyle(Color.Pidgy.fg1)
+
+            Text("Both start with a \(Subscription.trialDays)-day free trial. No charge today — cancel anytime before it ends.")
+                .font(.system(size: 14))
+                .foregroundStyle(Color.Pidgy.fg3)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .padding(.top, 12)
+                .frame(maxWidth: 460)
+
+            HStack(alignment: .top, spacing: 14) {
+                planCard(
+                    .bundled,
+                    blurb: "We run the AI — nothing to set up. Reply suggestions, summaries, and semantic search work out of the box.",
+                    bullets: ["Zero setup", "Managed AI via our non-logging proxy", "Best for getting started"]
+                )
+                planCard(
+                    .byok,
+                    blurb: "Bring your own OpenAI or Claude key. It goes straight to the provider — never through Pidgy. Maximum privacy.",
+                    bullets: ["Your key, your bill", "Nothing transits our servers", "For the privacy-max user"]
+                )
+            }
+            .padding(.top, 28)
+            .frame(maxWidth: 720)
+
+            OnboardingPrimaryButton(
+                title: "Start \(Subscription.trialDays)-day free trial",
+                trailingChevron: true,
+                action: { onChoosePlan(selected) }
+            )
+            .padding(.top, 28)
+
+            Text("You can switch plans or add your key anytime in Preferences.")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.Pidgy.fg4)
+                .padding(.top, 14)
+        }
+        .frame(maxWidth: 720)
+    }
+
+    @ViewBuilder
+    private func planCard(_ plan: PidgyPlan, blurb: String, bullets: [String]) -> some View {
+        let isSelected = selected == plan
+        Button {
+            selected = plan
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text(plan.title)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.Pidgy.fg1)
+                    Spacer(minLength: 0)
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 16))
+                        .foregroundStyle(isSelected ? Color.Pidgy.accentFg : Color.Pidgy.border2)
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text("$\(plan.monthlyPriceUSD)")
+                        .font(.custom("Newsreader", size: 30).weight(.medium))
+                        .foregroundStyle(Color.Pidgy.fg1)
+                    Text("/mo")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                }
+                Text(blurb)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Color.Pidgy.fg3)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(bullets, id: \.self) { bullet in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(Color.Pidgy.accentFg)
+                                .padding(.top, 2)
+                            Text(bullet)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color.Pidgy.fg2)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isSelected ? Color.Pidgy.bg3 : Color.Pidgy.bg2)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(
+                                isSelected ? Color.Pidgy.accentFg.opacity(0.7) : Color.Pidgy.border2,
+                                lineWidth: isSelected ? 1.5 : 1
+                            )
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .animation(PidgyMotion.easeOut, value: isSelected)
+    }
+}
+
+private struct ByokKeyStep: View {
+    @ObservedObject var aiService: AIService
+    let onContinue: () -> Void
+
+    @State private var provider: AIProviderConfig.ProviderType = .openai
+    @State private var key: String = ""
+    @State private var isVerifying = false
+    @State private var errorMessage: String?
+
+    private var trimmedKey: String {
+        key.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Add your AI key")
+                .font(.custom("Newsreader", size: 36).weight(.medium))
+                .tracking(-0.8)
+                .foregroundStyle(Color.Pidgy.fg1)
+
+            Text("Your key goes straight to the provider — never through Pidgy. We just verify it works.")
+                .font(.system(size: 14))
+                .foregroundStyle(Color.Pidgy.fg3)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .padding(.top, 12)
+                .frame(maxWidth: 440)
+
+            HStack(spacing: 8) {
+                ForEach([AIProviderConfig.ProviderType.openai, .claude], id: \.self) { option in
+                    Button {
+                        provider = option
+                        errorMessage = nil
+                    } label: {
+                        Text(option.rawValue)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(provider == option ? Color.Pidgy.fg1 : Color.Pidgy.fg3)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 7)
+                            .background(
+                                Capsule()
+                                    .fill(provider == option ? Color.Pidgy.bg4 : Color.clear)
+                                    .overlay(Capsule().stroke(
+                                        provider == option ? Color.Pidgy.accentFg.opacity(0.6) : Color.Pidgy.border2
+                                    ))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.top, 22)
+
+            SecureField(provider == .openai ? "sk-…" : "sk-ant-…", text: $key)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(Color.Pidgy.fg1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .frame(maxWidth: 440)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.Pidgy.bg1)
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.Pidgy.border2))
+                )
+                .padding(.top, 14)
+                .onChange(of: key) { errorMessage = nil }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.Pidgy.danger)
+                    .padding(.top, 8)
+            }
+
+            OnboardingPrimaryButton(
+                title: isVerifying ? "Verifying…" : "Verify & continue",
+                trailingChevron: !isVerifying,
+                isDisabled: trimmedKey.isEmpty || isVerifying,
+                action: verify
+            )
+            .padding(.top, 22)
+
+            Button("Skip — I'll add it later in Preferences") { onContinue() }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(Color.Pidgy.fg4)
+                .padding(.top, 14)
+        }
+        .frame(maxWidth: 520)
+    }
+
+    private func verify() {
+        let candidate = trimmedKey
+        guard !candidate.isEmpty else { return }
+        isVerifying = true
+        errorMessage = nil
+        // BYO key goes direct to the provider (no proxy endpoint).
+        aiService.configure(type: provider, apiKey: candidate)
+        Task { @MainActor in
+            do {
+                let ok = try await aiService.testConnection()
+                isVerifying = false
+                if ok {
+                    onContinue()
+                } else {
+                    errorMessage = "Couldn't verify that key. Double-check and try again."
+                }
+            } catch {
+                isVerifying = false
+                errorMessage = "Couldn't verify that key. Double-check and try again."
+            }
+        }
+    }
+}
 
 private struct DoneStep: View {
     let onFinish: () -> Void
