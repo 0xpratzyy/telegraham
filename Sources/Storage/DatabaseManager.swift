@@ -1325,7 +1325,6 @@ actor DatabaseManager {
                         WHERE e.message_id IS NULL
                           AND m.text_content IS NOT NULL
                           AND length(trim(m.text_content)) >= ?
-                        ORDER BY m.date DESC, m.id DESC
                         LIMIT ?
                         """,
                     arguments: [modelVersion, AppConstants.Indexing.minEmbeddingTextLength, limit]

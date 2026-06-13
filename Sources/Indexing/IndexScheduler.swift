@@ -53,6 +53,11 @@ actor IndexScheduler {
 
     private var telegramService: TelegramService?
     private var processingTask: Task<Void, Never>?
+    /// Embedding + chunk backfills run on their OWN loop. They were
+    /// once-per-indexing-pass, but a pass is dominated by rate-limited
+    /// TDLib history fetches (minutes for big chats) — local CPU work
+    /// was being throttled by network pacing it doesn't share.
+    private var embeddingTask: Task<Void, Never>?
     /// Pause is a LEASE, not a latch. Callers re-assert while genuinely
     /// active (the launcher fires pause() on every keystroke/focus
     /// change), and a forgotten resume self-heals: SwiftUI lifecycle
@@ -69,7 +74,6 @@ actor IndexScheduler {
         return pausedUntil > Date()
     }
     private var prioritizedChatIds: [Int64] = []
-    private var loopPassCount = 0
     private var sessionStartedAt: Date?
     private var sessionIndexedMessages = 0
     private var sessionCompletedChats = 0
@@ -99,6 +103,9 @@ actor IndexScheduler {
             await self.runLoop()
         }
         processingTask = task
+        embeddingTask = Task {
+            await self.embeddingLoop()
+        }
         await refreshProgress()
     }
 
@@ -106,6 +113,8 @@ actor IndexScheduler {
         let task = processingTask
         task?.cancel()
         processingTask = nil
+        embeddingTask?.cancel()
+        embeddingTask = nil
         telegramService = nil
         prioritizedChatIds.removeAll()
         pausedUntil = nil
@@ -161,30 +170,6 @@ actor IndexScheduler {
                 try? await Task.sleep(for: .milliseconds(Int(AppConstants.Indexing.idlePollIntervalMilliseconds)))
                 continue
             }
-
-            // Embedding backfill runs at the top of EVERY pass — paused
-            // or busy. It's bounded (one batch), pure local CPU, touches
-            // neither TDLib nor the rate limiter, and costs one indexed
-            // query when nothing is missing. It used to wait for the
-            // pending queue to empty AND respect the launcher pause,
-            // which in practice starved it indefinitely (the pause can
-            // outlive the launcher panel — see the onAppear/onDisappear
-            // pause leak).
-            _ = await backfillExistingEmbeddings(limit: AppConstants.Indexing.embeddingBackfillBatchSize)
-            _ = await backfillConversationChunks()
-
-            // Periodically refresh the corpus-derived stopword tier
-            // (language-agnostic function words mined from the user's
-            // own FTS vocabulary).
-            if loopPassCount % AppConstants.Indexing.corpusStopWordRefreshPasses == 0 {
-                let tokens = await DatabaseManager.shared.corpusHighFrequencyTokens(
-                    minDocShare: AppConstants.Indexing.corpusStopWordMinDocShare
-                )
-                if !tokens.isEmpty {
-                    SearchStopWords.updateCorpusDerived(tokens)
-                }
-            }
-            loopPassCount += 1
 
             if isPausedNow {
                 let pausedSnapshot = await snapshot(using: telegramService)
@@ -617,23 +602,66 @@ actor IndexScheduler {
 
         guard !eligibleMessages.isEmpty else { return 0 }
 
-        let vectors = await EmbeddingService.shared.embedBatch(texts: eligibleMessages.map { $0.text })
-        let records = zip(eligibleMessages, vectors).compactMap { entry -> VectorStore.EmbeddingRecord? in
-            let (pair, vector) = entry
-            guard let vector else { return nil }
-            let preview = String(pair.text.prefix(AppConstants.Indexing.embeddingPreviewCharacterLimit))
-            return VectorStore.EmbeddingRecord(
-                messageId: pair.message.id,
-                chatId: pair.message.chatId,
-                vector: vector,
-                textPreview: preview,
-                modelVersion: activeVersion
-            )
+        // Commit in small sub-batches: contextual embedding is slow on
+        // long texts, and a single 128-message commit meant minutes of
+        // CPU with zero durable progress (and all of it lost on quit).
+        var stored = 0
+        for slice in stride(from: 0, to: eligibleMessages.count, by: 16) {
+            if Task.isCancelled { break }
+            let sub = Array(eligibleMessages[slice..<min(slice + 16, eligibleMessages.count)])
+            let vectors = await EmbeddingService.shared.embedBatch(texts: sub.map { $0.text })
+            let records = zip(sub, vectors).compactMap { entry -> VectorStore.EmbeddingRecord? in
+                let (pair, vector) = entry
+                guard let vector else { return nil }
+                let preview = String(pair.text.prefix(AppConstants.Indexing.embeddingPreviewCharacterLimit))
+                return VectorStore.EmbeddingRecord(
+                    messageId: pair.message.id,
+                    chatId: pair.message.chatId,
+                    vector: vector,
+                    textPreview: preview,
+                    modelVersion: activeVersion
+                )
+            }
+            await VectorStore.shared.storeBatch(records)
+            stored += records.count
         }
+        return stored
+    }
 
-        guard !records.isEmpty else { return 0 }
-        await VectorStore.shared.storeBatch(records)
-        return records.count
+    /// Dedicated local-work loop: message re-embeds, conversation
+    /// chunks, and the corpus stopword refresh. Independent of the
+    /// chat-indexing loop (network-paced) and immune to the launcher
+    /// pause — bounded batches of pure on-device CPU.
+    private func embeddingLoop() async {
+        var pass = 0
+        while !Task.isCancelled {
+            if pass % AppConstants.Indexing.corpusStopWordRefreshPasses == 0 {
+                let tokens = await DatabaseManager.shared.corpusHighFrequencyTokens(
+                    minDocShare: AppConstants.Indexing.corpusStopWordMinDocShare
+                )
+                if !tokens.isEmpty {
+                    SearchStopWords.updateCorpusDerived(tokens)
+                }
+            }
+            pass += 1
+
+            // Message re-embeds first (cheap discovery query, fast
+            // embeds); the chunk pass runs only when messages are
+            // drained — its discovery is a GROUP BY over all messages
+            // and shouldn't be paid every iteration. Profiling showed
+            // the loop spending ~95% of its time in these discovery
+            // queries, not in embedding.
+            let embedded = await backfillExistingEmbeddings(limit: 512)
+            var chunked = 0
+            if embedded == 0 {
+                chunked = await backfillConversationChunks()
+            }
+
+            // Brief breather between batches while there's work (keeps
+            // the fans honest); longer idle poll once caught up.
+            let didWork = embedded > 0 || chunked > 0
+            try? await Task.sleep(for: .milliseconds(didWork ? 250 : 5_000))
+        }
     }
 
     /// Build and embed conversation-window chunks for a few chats per
@@ -677,14 +705,24 @@ actor IndexScheduler {
                 continue
             }
 
-            var records: [VectorStore.ChunkRecord] = []
-            records.reserveCapacity(chunks.count)
+            // Purge the stale tail once, then commit embedded chunks in
+            // small sub-batches — chunk texts are long (up to 900 chars)
+            // and the contextual model is slow on them; whole-slice
+            // commits meant minutes of invisible, non-durable work.
+            await VectorStore.shared.purgeChunkTail(
+                chatId: chatId,
+                modelVersion: modelVersion,
+                fromMessageId: state.coveredThrough + 1
+            )
+            var pendingRecords: [VectorStore.ChunkRecord] = []
+            var storedAny = false
             for chunk in chunks {
+                if Task.isCancelled { break }
                 guard let vector = await EmbeddingService.shared.embed(
                     text: chunk.text,
                     modelVersion: modelVersion
                 ) else { continue }
-                records.append(VectorStore.ChunkRecord(
+                pendingRecords.append(VectorStore.ChunkRecord(
                     chatId: chunk.chatId,
                     fromMessageId: chunk.fromMessageId,
                     toMessageId: chunk.toMessageId,
@@ -693,16 +731,17 @@ actor IndexScheduler {
                     textPreview: String(chunk.text.prefix(AppConstants.Indexing.embeddingPreviewCharacterLimit)),
                     modelVersion: modelVersion
                 ))
+                if pendingRecords.count >= 16 {
+                    await VectorStore.shared.storeChunks(pendingRecords)
+                    embeddedChunks += pendingRecords.count
+                    storedAny = true
+                    pendingRecords.removeAll(keepingCapacity: true)
+                }
             }
-            guard !records.isEmpty else { continue }
-
-            await VectorStore.shared.storeChunks(
-                records,
-                chatId: chatId,
-                modelVersion: modelVersion,
-                replacingFromMessageId: state.coveredThrough + 1
-            )
-            embeddedChunks += records.count
+            await VectorStore.shared.storeChunks(pendingRecords)
+            embeddedChunks += pendingRecords.count
+            storedAny = storedAny || !pendingRecords.isEmpty
+            guard storedAny else { continue }
 
             let covered = ConversationChunker.coveredThrough(chunks: chunks, messages: messages)
                 ?? state.coveredThrough

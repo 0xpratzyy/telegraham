@@ -25,6 +25,14 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
+  # On-device multilingual sentence embeddings (intfloat/multilingual-
+  # e5-small, XLM-RoBERTa). Pure-Swift on Apple's MLTensor — no MLX, no
+  # Python. Model weights download once from Hugging Face on first use
+  # (weights only, no user data leaves the machine — same shape as
+  # Apple's NLContextualEmbedding asset fetch).
+  SwiftEmbeddings:
+    url: https://github.com/jkrukowski/swift-embeddings
+    from: "0.1.0"
 
 # Explicit shared scheme so `xcodebuild -scheme Pidgy test` behaves the
 # same everywhere (CI, pre-push hook, fresh clones) instead of relying
@@ -55,6 +63,8 @@ targets:
         product: Sentry
       - package: Sparkle
         product: Sparkle
+      - package: SwiftEmbeddings
+        product: Embeddings
     configFiles:
       Debug: Config/BetaSecrets.xcconfig
       Release: Config/BetaSecrets.xcconfig

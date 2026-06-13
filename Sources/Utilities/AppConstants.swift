@@ -173,7 +173,7 @@ enum AppConstants {
         /// How many chats get chunk-backfill attention per scheduler
         /// pass, and how many messages are loaded per chat per pass.
         static let chunkBackfillChatsPerPass = 3
-        static let chunkBackfillMessagesPerChat = 1_000
+        static let chunkBackfillMessagesPerChat = 300
 
         /// Corpus-derived stopwords: tokens in at least this share of
         /// all messages are treated as function words in term

@@ -896,14 +896,13 @@ final class PidgyCoreTests: XCTestCase {
                     modelVersion: "model-x"
                 )
             ])
-            await VectorStore.shared.storeChunks(
-                [VectorStore.ChunkRecord(
+            await VectorStore.shared.storeChunks([
+                VectorStore.ChunkRecord(
                     chatId: chatId, fromMessageId: 18, toMessageId: 21,
                     anchorMessageId: 21, vector: [1, 0, 0],
                     textPreview: "window", modelVersion: "model-x"
-                )],
-                chatId: chatId, modelVersion: "model-x", replacingFromMessageId: 0
-            )
+                )
+            ])
 
             let hits = await VectorStore.shared.search(
                 query: [1, 0, 0], topK: 10, modelVersion: "model-x"
@@ -914,14 +913,16 @@ final class PidgyCoreTests: XCTestCase {
 
             // Tail replacement: re-chunking from message 20 replaces
             // chunks starting at/after 20, keeps earlier ones.
-            await VectorStore.shared.storeChunks(
-                [VectorStore.ChunkRecord(
+            await VectorStore.shared.purgeChunkTail(
+                chatId: chatId, modelVersion: "model-x", fromMessageId: 20
+            )
+            await VectorStore.shared.storeChunks([
+                VectorStore.ChunkRecord(
                     chatId: chatId, fromMessageId: 20, toMessageId: 23,
                     anchorMessageId: 23, vector: [1, 0, 0],
                     textPreview: "rebuilt tail", modelVersion: "model-x"
-                )],
-                chatId: chatId, modelVersion: "model-x", replacingFromMessageId: 20
-            )
+                )
+            ])
             let count = await VectorStore.shared.chunkCount(modelVersion: "model-x")
             XCTAssertEqual(count, 2, "from=18 survives, from>=20 region rebuilt")
         }
