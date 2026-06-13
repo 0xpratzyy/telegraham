@@ -6411,7 +6411,9 @@ final class PidgyCoreTests: XCTestCase {
 
         XCTAssertEqual(store.selectedPage, .preferences)
         XCTAssertEqual(PreferencesRouting.authoritativePage, .preferences)
-        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.pricing))
+        // Pricing was merged into the AI page (plan + provider + usage).
+        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.ai))
+        XCTAssertFalse(DashboardPreferencePage.allCases.contains(where: { $0.rawValue == "Pricing" }))
         XCTAssertTrue(DashboardPreferencePage.allCases.contains(.diagnostics))
     }
 
@@ -6451,7 +6453,8 @@ final class PidgyCoreTests: XCTestCase {
                 AppConstants.Preferences.didCompleteOnboardingKey,
                 AppConstants.Preferences.showPigeonFlockKey,
                 AppConstants.Preferences.dashboardTaskAutoExpireDaysKey,
-                AppConstants.Preferences.chatOpenTargetKey
+                AppConstants.Preferences.chatOpenTargetKey,
+                AppConstants.Preferences.subscriptionStateKey
             ])
         )
 

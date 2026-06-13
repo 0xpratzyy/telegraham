@@ -38,6 +38,7 @@ struct DashboardPreferencesPage: View {
     @State private var showDeleteConfirmation = false
     @State private var isResetting = false
     @StateObject private var archivedChatsStore = ArchivedChatsStore.shared
+    @ObservedObject private var entitlements = EntitlementStore.shared
     /// Resolved chats for the archived-chats list, keyed by chat id.
     /// Stores the full TGChat (not just the title) so each row can
     /// render the chat's avatar + DM/group shape. Populated on
@@ -169,9 +170,9 @@ struct DashboardPreferencesPage: View {
     /// like account, reset, about.
     private var showsRefreshControl: Bool {
         switch selectedPage {
-        case .pricing, .indexing, .diagnostics:
+        case .ai, .indexing, .diagnostics:
             return true
-        case .account, .ai, .preferences, .reset, .about:
+        case .account, .preferences, .reset, .about:
             return false
         }
     }
@@ -223,8 +224,6 @@ struct DashboardPreferencesPage: View {
                 systemImage: "slider.horizontal.3",
                 tint: PidgyDashboardTheme.blue
             )
-        case .pricing:
-            return preferenceStatusItems[2]
         case .indexing:
             return preferenceStatusItems[3]
         case .diagnostics:
@@ -296,8 +295,6 @@ struct DashboardPreferencesPage: View {
             aiPage
         case .preferences:
             preferencesPage
-        case .pricing:
-            pricingPage
         case .indexing:
             indexingPage
         case .diagnostics:
@@ -388,10 +385,37 @@ struct DashboardPreferencesPage: View {
 
     private var aiPage: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PrefSection(topPadding: 0) {
+            planSection
+            // The provider/key block only matters on BYOK; on the
+            // managed (Pidgy AI) plan there's nothing to configure.
+            if entitlements.selectedPlan == .byok {
+                aiProviderSection
+            } else {
+                managedAINote
+            }
+            usageSection
+        }
+    }
+
+    private var managedAINote: some View {
+        PrefSection {
+            PrefSectionHead(
+                title: "AI provider",
+                subtitle: "How AI features are powered"
+            )
+            PrefField(
+                label: "Managed by Pidgy",
+                hint: "On the Pidgy AI plan we run the model for you — nothing to set up. Switch to Bring your own key under Your plan to use your own provider."
+            )
+        }
+    }
+
+    private var aiProviderSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection {
                 PrefSectionHead(
                     title: "Provider",
-                    subtitle: "Used for reply queue, tasks, summaries, and semantic search"
+                    subtitle: "Your key, used for reply queue, tasks, summaries, and semantic search"
                 ) {
                     Picker("", selection: $selectedAIProvider) {
                         ForEach(AIProviderConfig.ProviderType.allCases, id: \.self) { provider in
@@ -619,10 +643,78 @@ struct DashboardPreferencesPage: View {
         }
     }
 
-    private var pricingPage: some View {
+    private var planStatusLine: (title: String, detail: String) {
+        switch entitlements.status {
+        case .none:
+            return ("No plan yet", "Pick a plan to start your free trial.")
+        case let .trial(daysLeft, plan):
+            let unit = daysLeft == 1 ? "day" : "days"
+            return ("Free trial · \(plan.title)", "\(daysLeft) \(unit) left, then $\(plan.monthlyPriceUSD)/mo.")
+        case let .active(plan):
+            return ("\(plan.title) · active", "$\(plan.monthlyPriceUSD)/mo subscription.")
+        case let .expired(plan):
+            return ("Trial ended", "Subscribe to \(plan.title) ($\(plan.monthlyPriceUSD)/mo) to keep AI features.")
+        }
+    }
+
+    private var planSection: some View {
+        PrefSection(topPadding: 0) {
+            PrefSectionHead(
+                title: "Your plan",
+                subtitle: "Subscription, trial, and how AI is powered"
+            )
+
+            PrefField(label: planStatusLine.title, hint: planStatusLine.detail) {
+                if let plan = entitlements.selectedPlan,
+                   let url = entitlements.checkoutURL(for: plan) {
+                    PrefGhostButton(title: "Manage", systemImage: "creditcard") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } else {
+                    Text("Payments coming soon")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.Pidgy.fg4)
+                }
+            }
+
+            // Plan switch — for trial users this just changes which plan
+            // the trial (and eventual subscription) is for; the clock is
+            // preserved. A live paid switch will route through the
+            // payment provider once wired.
+            PrefField(
+                label: "Plan",
+                hint: "Pidgy AI runs the model for you; Bring your own key keeps everything off our servers."
+            ) {
+                HStack(spacing: 8) {
+                    ForEach(PidgyPlan.allCases) { plan in
+                        let isCurrent = entitlements.selectedPlan == plan
+                        Button {
+                            entitlements.startTrial(plan: plan)
+                        } label: {
+                            Text("\(plan.title) · $\(plan.monthlyPriceUSD)")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(isCurrent ? Color.Pidgy.fg1 : Color.Pidgy.fg3)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    Capsule()
+                                        .fill(isCurrent ? Color.Pidgy.bg4 : Color.clear)
+                                        .overlay(Capsule().stroke(
+                                            isCurrent ? Color.Pidgy.accentFg.opacity(0.6) : Color.Pidgy.border2
+                                        ))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private var usageSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             // ── Cost overview ── 3-column grid: 30d cost (sparkline) / tokens / lifetime (donut)
-            PrefSection(topPadding: 0) {
+            PrefSection(topPadding: 24) {
                 PrefSectionHead(
                     title: "Cost overview",
                     subtitle: "Last 30 days · estimated USD from provider-reported usage"
@@ -1503,11 +1595,10 @@ struct DashboardPreferencesPage: View {
             onRefreshDashboard()
         case .ai:
             loadAIConfig()
+            Task { await refreshUsageOverview() }
         case .preferences:
             // Toggles are pure @AppStorage — nothing to fetch.
             break
-        case .pricing:
-            Task { await refreshUsageOverview() }
         case .indexing:
             onRefreshUsage()
         case .diagnostics:
@@ -1525,7 +1616,7 @@ struct DashboardPreferencesPage: View {
     @MainActor
     private func refreshDataIfNeeded(for page: DashboardPreferencePage) async {
         switch page {
-        case .pricing:
+        case .ai:
             await refreshUsageOverview()
         case .diagnostics:
             await refreshDiagnostics()
@@ -1581,7 +1672,7 @@ struct DashboardPreferencesPage: View {
 
     private var isCurrentPageRefreshing: Bool {
         switch selectedPage {
-        case .pricing:
+        case .ai:
             return isLoadingUsage
         case .diagnostics:
             return isLoadingDiagnostics || isLoadingRoutingDebug
