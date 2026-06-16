@@ -741,15 +741,24 @@ actor IndexScheduler {
             await VectorStore.shared.storeChunks(pendingRecords)
             embeddedChunks += pendingRecords.count
             storedAny = storedAny || !pendingRecords.isEmpty
-            guard storedAny else { continue }
 
-            let covered = ConversationChunker.coveredThrough(chunks: chunks, messages: messages)
-                ?? state.coveredThrough
+            // Always advance the re-selection mark to the newest message
+            // we examined — even when the trailing window was too short /
+            // media-only to emit a chunk. Otherwise `chatsNeedingChunking`
+            // (keyed off chunked_through) re-selects this chat every pass
+            // for a tail it can never chunk, re-running the embedding
+            // model on the same windows forever. coveredThrough still lags
+            // (so the growing tail is rebuilt) but only refires when a
+            // genuinely newer message lands. If nothing stored this pass,
+            // hold coveredThrough so the tail is retried on next activity.
+            let covered = storedAny
+                ? (ConversationChunker.coveredThrough(chunks: chunks, messages: messages) ?? state.coveredThrough)
+                : state.coveredThrough
             await DatabaseManager.shared.setChunkState(
                 chatId: chatId,
                 modelVersion: modelVersion,
                 coveredThrough: max(state.coveredThrough, covered),
-                chunkedThrough: max(state.chunkedThrough, chunks.last?.toMessageId ?? newestId)
+                chunkedThrough: ConversationChunker.scannedThrough(messages: messages, prior: state.chunkedThrough)
             )
         }
 
