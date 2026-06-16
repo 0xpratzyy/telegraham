@@ -494,12 +494,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         controller.show()
     }
 
-    /// Whether a Telegram auth-state change should bounce the UI back to the
-    /// login screen. Pure so the gating is unit-testable: fire only when an
-    /// authenticated session (we'd seen `.ready`) transitions to logging-out
-    /// / closed, and never while the app is quitting (telegramService.stop()
-    /// closes the session during termination — we must not pop a window then)
-    /// or during first-run auth (no prior `.ready`).
     /// Full logout. Confirms (destructive — wipes all local data), then:
     /// log out server-side so Telegram unlinks this device, wait briefly for
     /// TDLib to process it, wipe every local trace via the proven reset path,
@@ -552,14 +546,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     /// Spawns a fresh instance (after a 1s delay so this one is gone) and
-    /// exits immediately. Bulletproof — no graceful-shutdown awaits to wedge.
+    /// terminates immediately with `_exit`. We must NOT use `exit()` here:
+    /// it runs atexit handlers / C++ static destructors on this thread while
+    /// the e5 embedding loop is still doing Metal/CoreML inference on another
+    /// thread — that teardown race segfaults in MPSGraph. `_exit` kills the
+    /// whole process at the kernel level atomically (all threads at once), so
+    /// nothing can touch half-torn-down state. The data dir is already wiped,
+    /// so there's nothing buffered worth flushing.
     private func relaunchAfterLogout() -> Never {
         let path = Bundle.main.bundlePath
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
         task.arguments = ["-c", "sleep 1; open \"\(path)\""]
         try? task.run()
-        exit(0)
+        _exit(0)
     }
 
     /// Small floating spinner shown while logout wipes data + relaunches, so
