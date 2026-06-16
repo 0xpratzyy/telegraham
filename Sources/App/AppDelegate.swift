@@ -76,6 +76,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var updaterController: SPUStandardUpdaterController?
     private var dashboardWindow: NSWindow?
     private var onboardingController: OnboardingWindowController?
+    private var logoutProgressWindow: NSWindow?
     private var graphBuildTask: Task<Void, Never>?
     /// Retains the inner detached graph-build loop separately from the
     /// outer `graphBuildTask` orchestrator. Without this handle,
@@ -523,26 +524,79 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         logoutInProgress = true
-        defer { logoutInProgress = false }
+        showLogoutProgress()
 
-        // 1. Ask Telegram to unlink this device. Bounded — never hang logout.
-        try? await telegramService.logOut()
-        let deadline = Date().addingTimeInterval(4)
-        while Date() < deadline,
-              telegramService.authState != .closed,
-              telegramService.authState != .loggingOut {
-            try? await Task.sleep(nanoseconds: 150_000_000)
+        // 1. Best-effort server-side unlink. Fire-and-forget: a slow or wedged
+        //    TDLib must NEVER hang logout (that's the bug we're fixing). The
+        //    bounded pause only gives the request time to reach Telegram
+        //    before we tear the process down.
+        Task { try? await telegramService.logOut() }
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+
+        // 2. Wipe everything directly — NO coordinator / TDLib `stop()` awaits.
+        //    Those block on a wedged TDLib roundtrip, which is what left logout
+        //    hung for 30s+. We relaunch into a fresh process next, so open file
+        //    handles don't matter.
+        if let dir = PreferencesResetPlan.defaultPidgyDataDirectory() {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        for key in PreferencesResetPlan.credentialKeysToDelete {
+            try? KeychainManager.delete(for: key)
+        }
+        for key in PreferencesResetPlan.userDefaultsKeysToDelete {
+            UserDefaults.standard.removeObject(forKey: key)
         }
 
-        // 2. Wipe all local data (also stops TDLib + closes the DB). Same path
-        //    as "Reset all data" — audited, no client re-init.
-        await PreferencesResetService().deleteAllLocalData(
-            telegramService: telegramService,
-            aiService: aiService
-        )
+        // 3. Relaunch into a clean process → welcome screen. exit() can't hang.
+        relaunchAfterLogout()
+    }
 
-        // 3. Back to the welcome screen (closes the dashboard, shows onboarding).
-        NotificationCenter.default.post(name: .pidgyReplayOnboarding, object: nil)
+    /// Spawns a fresh instance (after a 1s delay so this one is gone) and
+    /// exits immediately. Bulletproof — no graceful-shutdown awaits to wedge.
+    private func relaunchAfterLogout() -> Never {
+        let path = Bundle.main.bundlePath
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 1; open \"\(path)\""]
+        try? task.run()
+        exit(0)
+    }
+
+    /// Small floating spinner shown while logout wipes data + relaunches, so
+    /// the few seconds aren't a frozen-looking window.
+    private func showLogoutProgress() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 128),
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.level = .floating
+        panel.appearance = NSAppearance(named: .darkAqua)
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.startAnimation(nil)
+        let label = NSTextField(labelWithString: "Signing out & clearing data…")
+        label.alignment = .center
+        let stack = NSStackView(views: [spinner, label])
+        stack.orientation = .vertical
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = panel.contentView!
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: content.centerYAnchor)
+        ])
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        logoutProgressWindow = panel
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
