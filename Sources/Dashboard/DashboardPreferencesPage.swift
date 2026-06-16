@@ -325,7 +325,7 @@ struct DashboardPreferencesPage: View {
                         hint: user.displayName,
                         right: {
                             PrefGhostButton(title: "Log out", systemImage: "rectangle.portrait.and.arrow.right", tone: .danger) {
-                                Task { try? await telegramService.logOut() }
+                                NotificationCenter.default.post(name: .pidgyLogOut, object: nil)
                             }
                         }
                     )

@@ -66,7 +66,7 @@ struct DashboardView: View {
                     onOpenPreferences: { navigation.selectedPage = .preferences },
                     onRefresh: refreshDashboard,
                     onLogOut: {
-                        Task { try? await telegramService.logOut() }
+                        NotificationCenter.default.post(name: .pidgyLogOut, object: nil)
                     },
                     onSendFeedback: { isShowingFeedbackSheet = true }
                 )

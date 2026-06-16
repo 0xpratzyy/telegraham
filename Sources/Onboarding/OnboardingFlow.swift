@@ -32,37 +32,24 @@ extension Foundation.Notification.Name {
     /// user is mid-flow). AppDelegate observes and either reopens the
     /// window if it was closed, or brings the existing one to focus.
     static let pidgyShowOnboardingWindow = Foundation.Notification.Name("pidgyShowOnboardingWindow")
+
+    /// Posted by the "Log out" buttons. AppDelegate observes and runs the
+    /// full logout (confirm → unlink device → wipe local data → welcome).
+    static let pidgyLogOut = Foundation.Notification.Name("pidgyLogOut")
 }
 
 // MARK: - Onboarding window controller
 
 @MainActor
-/// How the onboarding window opens:
-/// - `.firstRun`: the full setup flow (welcome → … → done).
-/// - `.reauth`: re-login only. Used after "Log out" or a closed session —
-///   jumps straight to the Telegram login, keeps API credentials, and on
-///   success closes back to the dashboard instead of re-running setup.
-enum OnboardingMode {
-    case firstRun
-    case reauth
-}
-
 final class OnboardingWindowController {
     private weak var telegramService: TelegramService?
     private weak var aiService: AIService?
     private var window: NSWindow?
     private let onComplete: () -> Void
-    private let mode: OnboardingMode
 
-    init(
-        telegramService: TelegramService,
-        aiService: AIService,
-        mode: OnboardingMode = .firstRun,
-        onComplete: @escaping () -> Void
-    ) {
+    init(telegramService: TelegramService, aiService: AIService, onComplete: @escaping () -> Void) {
         self.telegramService = telegramService
         self.aiService = aiService
-        self.mode = mode
         self.onComplete = onComplete
     }
 
@@ -77,7 +64,6 @@ final class OnboardingWindowController {
         let view = OnboardingFlow(
             telegramService: telegramService,
             aiService: aiService,
-            mode: mode,
             // markCompleted differentiates "user reached Done" (set the
             // flag, never bother them again) from "user dismissed midway"
             // (don't set the flag — the modal pops up again next launch
@@ -153,7 +139,6 @@ struct OnboardingFlow: View {
     @ObservedObject var aiService: AIService
     /// Closes the onboarding window. Pass `true` only when the user has
     /// actually finished setup (auth ready + tapped Open Pidgy on Done).
-    var mode: OnboardingMode = .firstRun
     let onClose: (_ markCompleted: Bool) -> Void
 
     @State private var step: OnboardingStep = .welcome
@@ -280,12 +265,6 @@ struct OnboardingFlow: View {
             // fire because the value didn't change from the first reading,
             // and we'd otherwise leave them stuck on Welcome / Connect.
             handleAuthStateChange(telegramService.authState)
-            // Re-auth (post-logout): the session is closed and there's no
-            // welcome/tour to show — kick off the Telegram login straight
-            // away so the user lands on the QR/phone screen.
-            if mode == .reauth && telegramService.authState != .ready {
-                Task { await beginTelegramAuth() }
-            }
         }
     }
 
@@ -414,12 +393,6 @@ struct OnboardingFlow: View {
                 advance(to: .password)
             }
         case .ready:
-            // Re-login (post-logout) finished — close straight back to the
-            // dashboard without re-running plan selection / setup.
-            if mode == .reauth {
-                onClose(true)
-                return
-            }
             // Auth done → choose a plan (starts the free trial) → done.
             // Don't bounce back to plan if we're already past it.
             if step != .done {

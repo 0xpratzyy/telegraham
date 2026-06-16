@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import OSLog
 import Sparkle
 import SwiftUI
@@ -91,15 +90,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var preferencesOpenObserver: NSObjectProtocol?
     private var replayOnboardingObserver: NSObjectProtocol?
     private var showOnboardingObserver: NSObjectProtocol?
-    private var authStateObserver: AnyCancellable?
-    /// True once a Telegram session has gone fully `.ready`. Gates the
-    /// "session closed → back to the login screen" reset so it never fires
-    /// during first-run auth or app launch.
-    private var hadAuthenticatedSession = false
+    private var logOutObserver: NSObjectProtocol?
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
     private var terminationCleanupCompleted = false
+    private var logoutInProgress = false
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
         category: "Startup"
@@ -225,25 +221,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
-        // Return to the Telegram login screen whenever an authenticated
-        // session ends — the user tapping "Log out", or Telegram closing
-        // the session from another device. Nothing in the dashboard reacted
-        // to authState dropping to closed before, so logout appeared to do
-        // nothing at all.
-        authStateObserver = telegramService.$authState
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                guard let self else { return }
-                if state == .ready { self.hadAuthenticatedSession = true }
-                if Self.shouldReturnToLoginScreen(
-                    on: state,
-                    hadAuthenticatedSession: self.hadAuthenticatedSession,
-                    isTerminating: self.terminationCleanupStarted
-                ) {
-                    self.hadAuthenticatedSession = false
-                    self.returnToLoginScreen()
-                }
-            }
+        // "Log out" routes here so there's a single, safe logout path. We
+        // deliberately do NOT re-initialize TDLib in-process during logout —
+        // recreating the client while the old one is still closing the
+        // logout makes TDLib LOG(FATAL)/abort on its receive loop. Instead we
+        // log out server-side, wipe all local data via the proven reset path,
+        // and drop the user back to the welcome screen (where they reconnect
+        // manually — TDLib is created fresh only then).
+        logOutObserver = NotificationCenter.default.addObserver(
+            forName: .pidgyLogOut,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.performLogout() }
+        }
 
         menuBarManager = MenuBarManager(
             onTogglePanel: { [weak self] in self?.panelManager?.toggle() },
@@ -411,6 +402,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if let showOnboardingObserver {
             NotificationCenter.default.removeObserver(showOnboardingObserver)
         }
+        if let logOutObserver {
+            NotificationCenter.default.removeObserver(logOutObserver)
+        }
     }
 
     /// Inserts a "Check for Updates…" item into Pidgy's app menu
@@ -505,32 +499,50 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// / closed, and never while the app is quitting (telegramService.stop()
     /// closes the session during termination — we must not pop a window then)
     /// or during first-run auth (no prior `.ready`).
-    nonisolated static func shouldReturnToLoginScreen(
-        on newState: AuthState,
-        hadAuthenticatedSession: Bool,
-        isTerminating: Bool
-    ) -> Bool {
-        guard hadAuthenticatedSession, !isTerminating else { return false }
-        switch newState {
-        case .loggingOut, .closed: return true
-        default: return false
-        }
-    }
+    /// Full logout. Confirms (destructive — wipes all local data), then:
+    /// log out server-side so Telegram unlinks this device, wait briefly for
+    /// TDLib to process it, wipe every local trace via the proven reset path,
+    /// and drop back to the welcome screen. Crucially this never recreates the
+    /// TDLib client while the old one is closing (that's what crashed before);
+    /// the client is built fresh only when the user reconnects in onboarding.
+    @MainActor
+    func performLogout() async {
+        if logoutInProgress { return }
 
-    /// Logout / session-closed handler: drop the dashboard and present the
-    /// Telegram login (re-auth) screen, keeping API credentials so the user
-    /// can sign right back in. Reaching `.ready` again closes it and reopens
-    /// the dashboard (see OnboardingMode.reauth).
-    private func returnToLoginScreen() {
-        dashboardWindow?.orderOut(nil)
-        let controller = OnboardingWindowController(
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Log out of Pidgy?"
+        alert.informativeText = """
+            This unlinks this device from Telegram and removes ALL local Pidgy \
+            data on this Mac — indexed messages, tasks, the people graph, and \
+            your saved credentials. You'll return to the welcome screen and can \
+            sign in again (Pidgy will re-index from scratch).
+            """
+        alert.addButton(withTitle: "Log Out")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        logoutInProgress = true
+        defer { logoutInProgress = false }
+
+        // 1. Ask Telegram to unlink this device. Bounded — never hang logout.
+        try? await telegramService.logOut()
+        let deadline = Date().addingTimeInterval(4)
+        while Date() < deadline,
+              telegramService.authState != .closed,
+              telegramService.authState != .loggingOut {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+
+        // 2. Wipe all local data (also stops TDLib + closes the DB). Same path
+        //    as "Reset all data" — audited, no client re-init.
+        await PreferencesResetService().deleteAllLocalData(
             telegramService: telegramService,
-            aiService: aiService,
-            mode: .reauth,
-            onComplete: { [weak self] in self?.openDashboard() }
+            aiService: aiService
         )
-        onboardingController = controller
-        controller.show()
+
+        // 3. Back to the welcome screen (closes the dashboard, shows onboarding).
+        NotificationCenter.default.post(name: .pidgyReplayOnboarding, object: nil)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
