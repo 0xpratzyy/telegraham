@@ -110,4 +110,19 @@ enum ConversationChunker {
         guard chunks.count >= 2 else { return nil }
         return chunks[chunks.count - 2].toMessageId
     }
+
+    /// The re-selection high-water mark to persist after a chunk pass:
+    /// the newest message id actually EXAMINED, including a trailing
+    /// sticker / media / sub-`minContentChars` fragment that never forms
+    /// a chunk. `chatsNeedingChunking` keys off this mark, so it must
+    /// reach the chat's newest message once scanned. Keying re-selection
+    /// off the last chunk's id instead (which lags whenever the newest
+    /// messages are reactions, "ok", or media — i.e. almost always in a
+    /// chat app) left the chat re-selected on every pass for a tail it
+    /// can never chunk, pinning the embedding model at 100% CPU/GPU.
+    /// `coveredThrough` still lags so the growing tail window is rebuilt
+    /// — but only when a genuinely newer message arrives.
+    static func scannedThrough(messages: [Message], prior: Int64) -> Int64 {
+        max(prior, messages.map(\.id).max() ?? prior)
+    }
 }
