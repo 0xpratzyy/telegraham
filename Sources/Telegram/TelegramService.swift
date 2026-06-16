@@ -878,15 +878,7 @@ class TelegramService: ObservableObject {
 
         let lastMsg = chat.lastMessage.map { mapMessage($0) }
         let order = extractOrder(from: chat.positions)
-        // Default to true: we only load chatListMain, so newly received chats
-        // are assumed to be in the main list. Only updateChatPosition(order=0) or
-        // updateChatRemovedFromList will set this to false.
-        let isInMain = chat.positions.isEmpty
-            ? true
-            : chat.positions.contains(where: {
-                if case .chatListMain = $0.list { return $0.order.rawValue > 0 }
-                return false
-            })
+        let isInMain = Self.isInMainList(positions: chat.positions)
 
         return TGChat(
             id: chat.id,
@@ -1115,6 +1107,21 @@ class TelegramService: ObservableObject {
             if case .chatListMain = $0.list { return true }
             return false
         })?.order.rawValue ?? 0
+    }
+
+    /// True only when the chat has a real `chatListMain` position (order > 0).
+    /// A chat with NO positions — one the user LEFT or that was removed from
+    /// every list — is NOT in the main list, and neither is an Archive-only or
+    /// folder-only chat. This previously defaulted empty positions to `true`,
+    /// which kept left/archived chats in `visibleChats` and surfaced them in
+    /// the reply queue as "a group I don't even have" (still receiving messages
+    /// → still generating reply tasks). Archived chats correctly fall here too:
+    /// they carry a `chatListArchive` position, never `chatListMain`.
+    nonisolated static func isInMainList(positions: [ChatPosition]) -> Bool {
+        positions.contains {
+            if case .chatListMain = $0.list { return $0.order.rawValue > 0 }
+            return false
+        }
     }
 
     private func sortChats() {
