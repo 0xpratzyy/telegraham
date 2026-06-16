@@ -144,6 +144,7 @@ xcodebuild \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED" \
+  -clonedSourcePackagesDirPath SourcePackages \
   ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
   build \
   | xcbeautify --quiet 2>/dev/null \
@@ -153,6 +154,7 @@ xcodebuild \
        -configuration Release \
        -destination 'generic/platform=macOS' \
        -derivedDataPath "$DERIVED" \
+       -clonedSourcePackagesDirPath SourcePackages \
        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
        build
 

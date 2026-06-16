@@ -117,6 +117,7 @@ while read local_ref local_sha remote_ref remote_sha; do
       -configuration Debug \
       -destination 'platform=macOS' \
       -derivedDataPath "$preflight_dd" \
+      -clonedSourcePackagesDirPath SourcePackages \
       build >> "$build_log" 2>&1; then
     echo "" >&2
     echo "ERROR: Debug build failed:" >&2
