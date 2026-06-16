@@ -123,6 +123,20 @@ actor E5EmbeddingProvider: EmbeddingProvider {
     private var bundle: XLMRoberta.ModelBundle?
     private var loadFailed = false
 
+    /// Where the e5 weights download to: ~/Library/Application Support/
+    /// Pidgy/models. Passed explicitly to `loadModelBundle` so the Hugging
+    /// Face Hub doesn't fall back to its ~/Documents/huggingface default —
+    /// that default triggers a macOS "access your Documents folder" prompt
+    /// and, if the user declines, the model can't load and search silently
+    /// drops to the legacy embeddings. Pure (no I/O) so it's testable; the
+    /// directory is created in `prepare()`.
+    static var modelsDirectoryURL: URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent(AppConstants.Storage.appSupportFolderName, isDirectory: true)
+            .appendingPathComponent(AppConstants.Storage.modelsDirectoryName, isDirectory: true)
+    }
+
     private var encodeOptions: EncodeOptions {
         EncodeOptions(maxLength: 512, postProcess: .meanPool(normalize: true))
     }
@@ -131,7 +145,9 @@ actor E5EmbeddingProvider: EmbeddingProvider {
         if bundle != nil { return true }
         if loadFailed { return false }
         do {
-            bundle = try await XLMRoberta.loadModelBundle(from: Self.modelId)
+            let downloadBase = Self.modelsDirectoryURL
+            try? FileManager.default.createDirectory(at: downloadBase, withIntermediateDirectories: true)
+            bundle = try await XLMRoberta.loadModelBundle(from: Self.modelId, downloadBase: downloadBase)
             return true
         } catch {
             loadFailed = true

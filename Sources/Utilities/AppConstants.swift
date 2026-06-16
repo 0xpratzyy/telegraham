@@ -115,6 +115,11 @@ enum AppConstants {
         static let databaseFileName = "pidgy.db"
         static let messageCacheDirectoryName = "message_cache"
         static let pipelineCacheDirectoryName = "pipeline_cache"
+        /// On-device model weights (e.g. the e5 embedding model) download
+        /// here, under Application Support — NOT the Hugging Face Hub's
+        /// ~/Documents/huggingface default, which triggers a macOS
+        /// "access your Documents folder" prompt.
+        static let modelsDirectoryName = "models"
     }
 
     enum Graph {
