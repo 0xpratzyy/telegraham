@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import OSLog
 import Sparkle
 import SwiftUI
@@ -90,6 +91,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var preferencesOpenObserver: NSObjectProtocol?
     private var replayOnboardingObserver: NSObjectProtocol?
     private var showOnboardingObserver: NSObjectProtocol?
+    private var authStateObserver: AnyCancellable?
+    /// True once a Telegram session has gone fully `.ready`. Gates the
+    /// "session closed → back to the login screen" reset so it never fires
+    /// during first-run auth or app launch.
+    private var hadAuthenticatedSession = false
     private let launchPresentationMode = AppLaunchPresentationMode.resolve()
     private let opensDashboardOnLaunch = AppDashboardLaunchPolicy.opensDashboardOnLaunch()
     private var terminationCleanupStarted = false
@@ -218,6 +224,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 self?.presentOnboardingIfNeeded(force: true)
             }
         }
+
+        // Return to the Telegram login screen whenever an authenticated
+        // session ends — the user tapping "Log out", or Telegram closing
+        // the session from another device. Nothing in the dashboard reacted
+        // to authState dropping to closed before, so logout appeared to do
+        // nothing at all.
+        authStateObserver = telegramService.$authState
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard let self else { return }
+                if state == .ready { self.hadAuthenticatedSession = true }
+                if Self.shouldReturnToLoginScreen(
+                    on: state,
+                    hadAuthenticatedSession: self.hadAuthenticatedSession,
+                    isTerminating: self.terminationCleanupStarted
+                ) {
+                    self.hadAuthenticatedSession = false
+                    self.returnToLoginScreen()
+                }
+            }
 
         menuBarManager = MenuBarManager(
             onTogglePanel: { [weak self] in self?.panelManager?.toggle() },
@@ -473,6 +499,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         controller.show()
     }
 
+    /// Whether a Telegram auth-state change should bounce the UI back to the
+    /// login screen. Pure so the gating is unit-testable: fire only when an
+    /// authenticated session (we'd seen `.ready`) transitions to logging-out
+    /// / closed, and never while the app is quitting (telegramService.stop()
+    /// closes the session during termination — we must not pop a window then)
+    /// or during first-run auth (no prior `.ready`).
+    nonisolated static func shouldReturnToLoginScreen(
+        on newState: AuthState,
+        hadAuthenticatedSession: Bool,
+        isTerminating: Bool
+    ) -> Bool {
+        guard hadAuthenticatedSession, !isTerminating else { return false }
+        switch newState {
+        case .loggingOut, .closed: return true
+        default: return false
+        }
+    }
+
+    /// Logout / session-closed handler: drop the dashboard and present the
+    /// Telegram login (re-auth) screen, keeping API credentials so the user
+    /// can sign right back in. Reaching `.ready` again closes it and reopens
+    /// the dashboard (see OnboardingMode.reauth).
+    private func returnToLoginScreen() {
+        dashboardWindow?.orderOut(nil)
+        let controller = OnboardingWindowController(
+            telegramService: telegramService,
+            aiService: aiService,
+            mode: .reauth,
+            onComplete: { [weak self] in self?.openDashboard() }
+        )
+        onboardingController = controller
+        controller.show()
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         Task {
             await RecentSyncCoordinator.shared.recoverNow()
@@ -517,13 +577,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildLoopTask?.cancel()
         TaskIndexCoordinator.shared.stop()
         telegramService.stop()
+
+        // Reply exactly once — whichever fires first, the async stops or
+        // the watchdog below.
+        let finish = { [weak self] in
+            guard let self, !self.terminationCleanupCompleted else { return }
+            self.terminationCleanupCompleted = true
+            onComplete?()
+        }
+
+        // Cleanup is best-effort and MUST NOT wedge quit. A hung TDLib stop
+        // or a DB close blocked on in-flight index writes used to leave the
+        // app stuck "quitting" forever (applicationShouldTerminate returned
+        // .terminateLater and the reply never came). Reply after a short
+        // grace period regardless, so the app always quits.
+        if onComplete != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: finish)
+        }
+
         Task { @MainActor in
             await RecentSyncCoordinator.shared.stop()
             await MajorChatCoverageCoordinator.shared.stop()
             await IndexScheduler.shared.stop()
             await DatabaseManager.shared.close()
-            terminationCleanupCompleted = true
-            onComplete?()
+            finish()
         }
     }
 
