@@ -49,6 +49,7 @@ actor AIUsageStore {
             record.meteredRequestCount += 1
             record.inputTokens += max(0, usage.inputTokens)
             record.outputTokens += max(0, usage.outputTokens)
+            record.cachedInputTokens = (record.cachedInputTokens ?? 0) + max(0, usage.cachedInputTokens)
         }
 
         recordsByID[id] = record
@@ -185,6 +186,7 @@ actor AIUsageStore {
         if let pricing = AIUsagePricingCatalog.pricing(for: record.provider, model: record.model) {
             metrics.estimatedCostUSD += pricing.estimatedCostUSD(
                 inputTokens: record.inputTokens,
+                cachedInputTokens: record.cachedInputTokens ?? 0,
                 outputTokens: record.outputTokens
             )
         } else {

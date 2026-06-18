@@ -405,19 +405,13 @@ final class OpenAIProvider: AIProvider {
             )
         }
 
-        // OpenAI's gpt-5 family automatically caches prompt prefixes
-        // ≥1024 tokens at a 50% discount; the cached amount is reported
-        // in this `usage.prompt_tokens_details.cached_tokens` field.
-        // Surface it via extraTags so the local trace log can confirm
-        // caching is active for the hot pipelineTriage prompt (7.6KB
-        // system, ~80% of our LLM volume).
-        let cachedTokens: Int? = (json["usage"] as? [String: Any])
-            .flatMap { $0["prompt_tokens_details"] as? [String: Any] }
-            .flatMap { $0["cached_tokens"] as? Int }
-
+        // gpt-* families cache prompt prefixes (≥1024 tokens) at a 50%
+        // discount; parseUsage folds that into usage.cachedInputTokens. Surface
+        // it on the trace so we can confirm caching is live for the hot
+        // pipelineTriage prompt (~80% of LLM volume).
         var extraTags: [String: String] = [:]
-        if let cachedTokens {
-            extraTags["cached_tokens"] = String(cachedTokens)
+        if let cached = usage?.cachedInputTokens, cached > 0 {
+            extraTags["cached_tokens"] = String(cached)
         }
 
         LocalAITraceRecorder.shared.record(
@@ -436,14 +430,11 @@ final class OpenAIProvider: AIProvider {
                 .pricing(for: .openAI, model: model)
                 .flatMap { p in
                     guard let usage else { return nil }
-                    // Discount cached input tokens at 50% (gpt-5 family
-                    // pricing) so the trace cost number reflects what we
-                    // actually pay, not the catalog list price.
-                    let cached = cachedTokens ?? 0
-                    let uncachedIn = max(0, usage.inputTokens - cached)
-                    let inCost = (Double(uncachedIn) + Double(cached) * 0.5) / 1_000_000 * p.inputUSDPerMillionTokens
-                    let outCost = Double(usage.outputTokens) / 1_000_000 * p.outputUSDPerMillionTokens
-                    return inCost + outCost
+                    return p.estimatedCostUSD(
+                        inputTokens: usage.inputTokens,
+                        cachedInputTokens: usage.cachedInputTokens,
+                        outputTokens: usage.outputTokens
+                    )
                 },
             chatId: chatId,
             extraTags: extraTags
@@ -767,9 +758,17 @@ final class OpenAIProvider: AIProvider {
 
         let inputTokens = intValue(usage["prompt_tokens"]) ?? 0
         let outputTokens = intValue(usage["completion_tokens"]) ?? 0
+        // OpenAI's prompt_tokens INCLUDES the cached prefix — pull the cached
+        // portion so the meter bills it at the 50% cached rate, not list price.
+        let cachedInputTokens = (usage["prompt_tokens_details"] as? [String: Any])
+            .flatMap { intValue($0["cached_tokens"]) } ?? 0
 
         guard inputTokens > 0 || outputTokens > 0 else { return nil }
-        return AIProviderUsage(inputTokens: inputTokens, outputTokens: outputTokens)
+        return AIProviderUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cachedInputTokens: cachedInputTokens
+        )
     }
 
     private func persistLatestAgenticResponse(response: String) {

@@ -49,8 +49,12 @@ enum AIUsageProvider: String, Codable, CaseIterable {
 }
 
 struct AIProviderUsage {
+    /// TOTAL input tokens, including any cached / cache-read portion.
     let inputTokens: Int
     let outputTokens: Int
+    /// The cached (OpenAI) / cache-read (Anthropic) portion of `inputTokens`,
+    /// billed at a discount. Providers normalize so this is always ⊆ input.
+    var cachedInputTokens: Int = 0
 }
 
 struct AIUsageMetrics: Codable, Equatable {
@@ -80,6 +84,9 @@ struct DailyAIUsageRecord: Codable, Hashable {
     var meteredRequestCount: Int
     var inputTokens: Int
     var outputTokens: Int
+    /// Cached/cache-read input tokens (subset of `inputTokens`). Optional so
+    /// older persisted records (which lack the field) still decode.
+    var cachedInputTokens: Int? = nil
 
     var id: String {
         "\(dayStart.timeIntervalSince1970)|\(provider.rawValue)|\(model)|\(requestKind.rawValue)"
@@ -126,10 +133,20 @@ struct AIModelPricing {
     let family: String
     let inputUSDPerMillionTokens: Double
     let outputUSDPerMillionTokens: Double
+    /// Fraction of the input price charged for cached / cache-read input
+    /// tokens. OpenAI bills cached prompt prefixes at 50%; Anthropic cache
+    /// reads are ~10% of input. 1.0 means the model has no caching discount.
+    var cachedInputMultiplier: Double = 1.0
 
-    func estimatedCostUSD(inputTokens: Int, outputTokens: Int) -> Double {
-        (Double(inputTokens) / 1_000_000 * inputUSDPerMillionTokens) +
-        (Double(outputTokens) / 1_000_000 * outputUSDPerMillionTokens)
+    /// `inputTokens` is TOTAL input (cached + uncached); `cachedInputTokens` is
+    /// the cached portion, billed at `cachedInputMultiplier` of the input rate.
+    /// Passing 0 cached reproduces full list pricing.
+    func estimatedCostUSD(inputTokens: Int, cachedInputTokens: Int = 0, outputTokens: Int) -> Double {
+        let cached = min(max(0, cachedInputTokens), max(0, inputTokens))
+        let uncached = max(0, inputTokens - cached)
+        let inputCost = (Double(uncached) + Double(cached) * cachedInputMultiplier) / 1_000_000 * inputUSDPerMillionTokens
+        let outputCost = Double(outputTokens) / 1_000_000 * outputUSDPerMillionTokens
+        return inputCost + outputCost
     }
 }
 
@@ -142,25 +159,29 @@ enum AIUsagePricingCatalog {
             return AIModelPricing(
                 family: family,
                 inputUSDPerMillionTokens: 0.15,
-                outputUSDPerMillionTokens: 0.60
+                outputUSDPerMillionTokens: 0.60,
+                cachedInputMultiplier: 0.5
             )
         case (.openAI, "gpt-5-mini"):
             return AIModelPricing(
                 family: family,
                 inputUSDPerMillionTokens: 0.25,
-                outputUSDPerMillionTokens: 2.00
+                outputUSDPerMillionTokens: 2.00,
+                cachedInputMultiplier: 0.5
             )
         case (.openAI, "gpt-5"):
             return AIModelPricing(
                 family: family,
                 inputUSDPerMillionTokens: 1.25,
-                outputUSDPerMillionTokens: 10.00
+                outputUSDPerMillionTokens: 10.00,
+                cachedInputMultiplier: 0.5
             )
         case (.claude, "claude-sonnet-4"):
             return AIModelPricing(
                 family: family,
                 inputUSDPerMillionTokens: 3.00,
-                outputUSDPerMillionTokens: 15.00
+                outputUSDPerMillionTokens: 15.00,
+                cachedInputMultiplier: 0.1
             )
         default:
             return nil

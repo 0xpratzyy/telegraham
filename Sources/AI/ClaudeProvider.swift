@@ -353,9 +353,11 @@ final class ClaudeProvider: AIProvider {
                 .pricing(for: .claude, model: model)
                 .flatMap { p in
                     guard let usage else { return nil }
-                    let inCost = Double(usage.inputTokens) / 1_000_000 * p.inputUSDPerMillionTokens
-                    let outCost = Double(usage.outputTokens) / 1_000_000 * p.outputUSDPerMillionTokens
-                    return inCost + outCost
+                    return p.estimatedCostUSD(
+                        inputTokens: usage.inputTokens,
+                        cachedInputTokens: usage.cachedInputTokens,
+                        outputTokens: usage.outputTokens
+                    )
                 },
             chatId: chatId
         )
@@ -366,11 +368,23 @@ final class ClaudeProvider: AIProvider {
     private func parseUsage(from rawUsage: Any?) -> AIProviderUsage? {
         guard let usage = rawUsage as? [String: Any] else { return nil }
 
-        let inputTokens = intValue(usage["input_tokens"]) ?? 0
+        // Anthropic's input_tokens EXCLUDES cache reads (unlike OpenAI). Add
+        // cache_read back so inputTokens is the TOTAL input, with the cached
+        // portion billed at the 10% cache-read rate. (cache_creation/writes
+        // are billed slightly above input; folded in at full rate here — only
+        // non-zero if cache_control is set on requests, which we don't today.)
+        let uncachedInput = intValue(usage["input_tokens"]) ?? 0
+        let cacheRead = intValue(usage["cache_read_input_tokens"]) ?? 0
+        let cacheWrite = intValue(usage["cache_creation_input_tokens"]) ?? 0
+        let inputTokens = uncachedInput + cacheRead + cacheWrite
         let outputTokens = intValue(usage["output_tokens"]) ?? 0
 
         guard inputTokens > 0 || outputTokens > 0 else { return nil }
-        return AIProviderUsage(inputTokens: inputTokens, outputTokens: outputTokens)
+        return AIProviderUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cachedInputTokens: cacheRead
+        )
     }
 
     private func intValue(_ rawValue: Any?) -> Int? {
