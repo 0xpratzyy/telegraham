@@ -109,16 +109,16 @@ final class OpenAIProvider: AIProvider {
         persistLatestAgenticResponse(response: response)
         do {
             let parsed = try AgenticSearchResultParser.parse(response)
+            // Keep only decisions for known candidate ids, deduped. We dropped
+            // the integer-`enum` id constraint from the schema (Gemini rejects
+            // it), so the model can occasionally echo a stray or duplicate id —
+            // drop those rows and proceed with the valid subset instead of
+            // failing the whole batch (a candidate with no decision is simply
+            // not surfaced this pass). Genuine JSON parse failures still throw
+            // via the catch below.
             let expectedIds = Set(candidates.map(\.chatId))
-            let returnedIds = Set(parsed.map(\.chatId))
-            guard parsed.count == candidates.count, returnedIds == expectedIds else {
-                let error = AIError.parsingError(
-                    "agentic response cardinality mismatch: expected \(candidates.count) candidates but got \(parsed.count)"
-                )
-                persistAgenticParseFailure(response: response, error: error)
-                throw error
-            }
-            return parsed
+            var seenIds = Set<Int64>()
+            return parsed.filter { expectedIds.contains($0.chatId) && seenIds.insert($0.chatId).inserted }
         } catch {
             persistAgenticParseFailure(response: response, error: error)
             throw AIError.parsingError("agentic JSON parse failure; raw payload saved to debug")
@@ -145,14 +145,13 @@ final class OpenAIProvider: AIProvider {
         }
 
         let parsed = try ReplyQueueTriageResultParser.parse(response)
+        // Tolerate model id drift (the integer-`enum` id constraint is gone for
+        // Gemini compatibility): keep decisions for known candidate ids,
+        // deduped, and proceed with the valid subset rather than failing the
+        // batch. A candidate with no decision is simply not surfaced this pass.
         let expectedIds = Set(candidates.map(\.chatId))
-        let returnedIds = Set(parsed.map(\.chatId))
-        guard parsed.count == candidates.count, returnedIds == expectedIds else {
-            throw AIError.parsingError(
-                "reply queue response cardinality mismatch: expected \(candidates.count) candidates but got \(parsed.count)"
-            )
-        }
-        return parsed
+        var seenIds = Set<Int64>()
+        return parsed.filter { expectedIds.contains($0.chatId) && seenIds.insert($0.chatId).inserted }
     }
 
     func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
@@ -247,14 +246,14 @@ final class OpenAIProvider: AIProvider {
         }
 
         let parsed = try DashboardTaskTriageParser.parse(response)
+        // Tolerate model id drift (the integer-`enum` id constraint is gone for
+        // Gemini compatibility): keep decisions for known candidate ids,
+        // deduped, and proceed with the valid subset rather than failing the
+        // batch. A candidate with no decision keeps its existing tasks
+        // untouched this pass and is re-triaged on its next change.
         let expectedIds = Set(candidates.map(\.chatId))
-        let returnedIds = Set(parsed.map(\.chatId))
-        guard parsed.count == candidates.count, returnedIds == expectedIds else {
-            throw AIError.parsingError(
-                "dashboard task triage response cardinality mismatch: expected \(candidates.count) candidates but got \(parsed.count)"
-            )
-        }
-        return parsed
+        var seenIds = Set<Int64>()
+        return parsed.filter { expectedIds.contains($0.chatId) && seenIds.insert($0.chatId).inserted }
     }
 
     func testConnection() async throws -> Bool {
@@ -312,38 +311,64 @@ final class OpenAIProvider: AIProvider {
         // "low": minimal saves little there (~25%) and reasoning does real
         // cross-candidate work. NB: gpt-5.1+ renamed "minimal" → "none", so
         // this value must change if we move off gpt-5.0.
-        if model.hasPrefix("gpt-5") {
+        // Gemini 3 / 2.5 are also thinking models on the OpenAI-compat path and
+        // take the same reasoning_effort (valid: minimal|low|medium|high — NOT
+        // "none", which 400s). Default thinking is the bulk of Gemini latency
+        // AND cost — measured ~360 reasoning tokens on a trivial triage, billed
+        // at the output rate — so cap it the same way we do for gpt-5: minimal
+        // on the hot triage path, low elsewhere.
+        if model.hasPrefix("gpt-5") || model.contains("gemini") {
             body["reasoning_effort"] = requestKind == .pipelineTriage ? "minimal" : "low"
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            // Skip tracing cancellations — they're benign Swift Task aborts
-            // (a newer refresh superseded this one). Tracing them clutters
-            // the local trace log with red errors that are not real failures.
-            if !(error is CancellationError) && (error as NSError).code != NSURLErrorCancelled {
-                LocalAITraceRecorder.shared.record(
-                    provider: "openai",
-                    model: model,
-                    runName: requestKind?.rawValue ?? "openai_chat",
-                    systemPrompt: systemPrompt,
-                    userMessage: userMessage,
-                    startedAt: startedAt,
-                    completedAt: Date(),
-                    response: nil,
-                    error: "transport: \(error.localizedDescription)",
-                    inputTokens: nil,
-                    outputTokens: nil,
-                    costUSD: nil,
-                    chatId: chatId
-                )
-                PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "transport")
+        var data: Data
+        var response: URLResponse
+        var rateLimitAttempt = 0
+        while true {
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch {
+                // Skip tracing cancellations — they're benign Swift Task aborts
+                // (a newer refresh superseded this one). Tracing them clutters
+                // the local trace log with red errors that are not real failures.
+                if !(error is CancellationError) && (error as NSError).code != NSURLErrorCancelled {
+                    LocalAITraceRecorder.shared.record(
+                        provider: "openai",
+                        model: model,
+                        runName: requestKind?.rawValue ?? "openai_chat",
+                        systemPrompt: systemPrompt,
+                        userMessage: userMessage,
+                        startedAt: startedAt,
+                        completedAt: Date(),
+                        response: nil,
+                        error: "transport: \(error.localizedDescription)",
+                        inputTokens: nil,
+                        outputTokens: nil,
+                        costUSD: nil,
+                        chatId: chatId
+                    )
+                    PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "transport")
+                }
+                throw error
             }
-            throw error
+
+            // Shared-quota providers (Vertex/Gemini, OpenAI) return 429 — and
+            // sometimes 503 — when the per-minute pool is saturated, which is
+            // common during a reindex burst. Back off and retry a few times so
+            // the call recovers instead of failing into a generic fallback.
+            // Honor Retry-After when the server sends it.
+            if let http = response as? HTTPURLResponse,
+               http.statusCode == 429 || http.statusCode == 503,
+               rateLimitAttempt < Self.maxRateLimitRetries {
+                rateLimitAttempt += 1
+                let delay = Self.rateLimitBackoffSeconds(attempt: rateLimitAttempt, response: http)
+                // `try` (not `try?`) so a superseding refresh cancelling this
+                // task aborts the backoff promptly instead of sleeping it out.
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                continue
+            }
+            break
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -372,6 +397,13 @@ final class OpenAIProvider: AIProvider {
                 chatId: chatId
             )
             PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "http_\(httpResponse.statusCode)")
+            // 429/503 reach here only after the in-loop backoff above exhausted
+            // its retries. Surface a distinct rate-limit error so RetryHelper
+            // treats it as terminal and does not re-retry on top of that backoff.
+            if httpResponse.statusCode == 429 || httpResponse.statusCode == 503 {
+                let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+                throw AIError.rateLimited(retryAfter: retryAfter)
+            }
             throw AIError.httpError(httpResponse.statusCode, errorBody)
         }
 
@@ -467,7 +499,6 @@ final class OpenAIProvider: AIProvider {
     }
 
     private func agenticSearchResponseFormat(candidates: [AgenticCandidateDTO]) -> [String: Any] {
-        let candidateIds: [Any] = candidates.map { NSNumber(value: $0.chatId) }
         let schema: [String: Any] = [
             "type": "object",
             "properties": [
@@ -478,10 +509,12 @@ final class OpenAIProvider: AIProvider {
                     "items": [
                         "type": "object",
                         "properties": [
-                            "chatId": [
-                                "type": "integer",
-                                "enum": candidateIds
-                            ],
+                            // NB: no integer `enum` here — Gemini's structured
+                            // output rejects enum on non-string types (400
+                            // INVALID_ARGUMENT). The candidate ids are listed in
+                            // the prompt and callers match decisions by id, so
+                            // the hard constraint isn't required.
+                            "chatId": ["type": "integer"],
                             "score": ["type": "integer", "minimum": 0, "maximum": 100],
                             "warmth": ["type": "string", "enum": ["hot", "warm", "cold"]],
                             "replyability": ["type": "string", "enum": ["reply_now", "waiting_on_them", "unclear"]],
@@ -566,7 +599,6 @@ final class OpenAIProvider: AIProvider {
     }
 
     private func replyQueueTriageResponseFormat(candidates: [ReplyQueueCandidateDTO]) -> [String: Any] {
-        let candidateIds: [Any] = candidates.map { NSNumber(value: $0.chatId) }
         let schema: [String: Any] = [
             "type": "object",
             "properties": [
@@ -577,10 +609,12 @@ final class OpenAIProvider: AIProvider {
                     "items": [
                         "type": "object",
                         "properties": [
-                            "chatId": [
-                                "type": "integer",
-                                "enum": candidateIds
-                            ],
+                            // NB: no integer `enum` here — Gemini's structured
+                            // output rejects enum on non-string types (400
+                            // INVALID_ARGUMENT). The candidate ids are listed in
+                            // the prompt and callers match decisions by id, so
+                            // the hard constraint isn't required.
+                            "chatId": ["type": "integer"],
                             "classification": [
                                 "type": "string",
                                 "enum": ["on_me", "worth_checking", "on_them", "quiet", "need_more"]
@@ -625,7 +659,6 @@ final class OpenAIProvider: AIProvider {
     }
 
     private func dashboardTaskTriageResponseFormat(candidates: [DashboardTaskTriageCandidateDTO]) -> [String: Any] {
-        let candidateIds: [Any] = candidates.map { NSNumber(value: $0.chatId) }
         let schema: [String: Any] = [
             "type": "object",
             "properties": [
@@ -636,10 +669,12 @@ final class OpenAIProvider: AIProvider {
                     "items": [
                         "type": "object",
                         "properties": [
-                            "chatId": [
-                                "type": "integer",
-                                "enum": candidateIds
-                            ],
+                            // NB: no integer `enum` here — Gemini's structured
+                            // output rejects enum on non-string types (400
+                            // INVALID_ARGUMENT). The candidate ids are listed in
+                            // the prompt and callers match decisions by id, so
+                            // the hard constraint isn't required.
+                            "chatId": ["type": "integer"],
                             "route": [
                                 "type": "string",
                                 "enum": ["effort_task", "reply_queue", "completed_task", "ignore"]
@@ -753,11 +788,42 @@ final class OpenAIProvider: AIProvider {
         ]
     }
 
+    /// How many times a 429/503 is retried before giving up to the caller.
+    private static let maxRateLimitRetries = 4
+
+    /// Backoff before retrying a rate-limited request: honor Retry-After if the
+    /// server sends it, else exponential (~1s, 2s, 4s, 8s) with light jitter,
+    /// capped at 30s so a single chat never stalls indexing for too long.
+    private static func rateLimitBackoffSeconds(attempt: Int, response: HTTPURLResponse) -> Double {
+        if let header = response.value(forHTTPHeaderField: "Retry-After"),
+           let seconds = Double(header) {
+            return min(max(seconds, 0.5), 30)
+        }
+        let exponential = pow(2.0, Double(attempt - 1))
+        return min(exponential + Double.random(in: 0...0.5), 30)
+    }
+
     private func parseUsage(from rawUsage: Any?) -> AIProviderUsage? {
         guard let usage = rawUsage as? [String: Any] else { return nil }
 
-        let inputTokens = intValue(usage["prompt_tokens"]) ?? 0
-        let outputTokens = intValue(usage["completion_tokens"]) ?? 0
+        let promptTokens = intValue(usage["prompt_tokens"])
+        let completionTokens = intValue(usage["completion_tokens"]) ?? 0
+        let totalTokens = intValue(usage["total_tokens"])
+        let inputTokens = promptTokens ?? 0
+        // Billed output = everything that isn't input. Providers disagree on
+        // where reasoning tokens land: OpenAI folds them INTO completion_tokens,
+        // but Gemini's OpenAI-compat layer reports reasoning_tokens SEPARATELY
+        // (total = prompt + completion + reasoning), so completion_tokens alone
+        // undercounts Gemini badly. `total - prompt` is correct for both — but
+        // ONLY when both fields are actually present; a missing prompt_tokens
+        // would otherwise make us bill the whole total as output. Fall back to
+        // completion_tokens otherwise.
+        let outputTokens: Int
+        if let promptTokens, let totalTokens, totalTokens > promptTokens {
+            outputTokens = totalTokens - promptTokens
+        } else {
+            outputTokens = completionTokens
+        }
         // OpenAI's prompt_tokens INCLUDES the cached prefix — pull the cached
         // portion so the meter bills it at the 50% cached rate, not list price.
         let cachedInputTokens = (usage["prompt_tokens_details"] as? [String: Any])

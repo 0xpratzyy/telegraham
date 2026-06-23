@@ -183,6 +183,39 @@ enum AIUsagePricingCatalog {
                 outputUSDPerMillionTokens: 15.00,
                 cachedInputMultiplier: 0.1
             )
+        case (.openAI, "gemini-3-flash"):
+            // Managed plan runs Gemini 3 Flash through the proxy's Vertex path,
+            // so it's recorded under the .openAI provider (the app speaks the
+            // OpenAI-compatible API). Vertex list price (verified 2026-06):
+            // $0.50/1M in, $3.00/1M out. cachedInputMultiplier left at 1.0 — we
+            // don't yet trust Gemini's cache-token reporting, so bill full rate
+            // (conservative for $300 burn tracking) until confirmed.
+            return AIModelPricing(
+                family: family,
+                inputUSDPerMillionTokens: 0.50,
+                outputUSDPerMillionTokens: 3.00
+            )
+        case (.openAI, "gemini-3.1-flash-lite"):
+            // Current managed model. Vertex list price (2026-06).
+            return AIModelPricing(
+                family: family,
+                inputUSDPerMillionTokens: 0.25,
+                outputUSDPerMillionTokens: 1.50
+            )
+        case (.openAI, "gemini-3.5-flash"):
+            // GA, top-quality fallback — roughly gpt-5 pricing.
+            return AIModelPricing(
+                family: family,
+                inputUSDPerMillionTokens: 1.50,
+                outputUSDPerMillionTokens: 9.00
+            )
+        case (.openAI, "gemini-2.5-flash"):
+            // GA, regional, cheapest reliable fallback.
+            return AIModelPricing(
+                family: family,
+                inputUSDPerMillionTokens: 0.30,
+                outputUSDPerMillionTokens: 2.50
+            )
         default:
             return nil
         }
@@ -197,6 +230,13 @@ enum AIUsagePricingCatalog {
 
         switch provider {
         case .openAI:
+            // Managed plan: Gemini via the OpenAI-compat proxy path is recorded
+            // under .openAI with a `google/gemini-*` model id. Check the more
+            // specific variants first (3.1-flash-lite before 3-flash, etc).
+            if normalized.contains("gemini-3.1-flash-lite") { return "gemini-3.1-flash-lite" }
+            if normalized.contains("gemini-3.5-flash") { return "gemini-3.5-flash" }
+            if normalized.contains("gemini-3-flash") { return "gemini-3-flash" }
+            if normalized.contains("gemini-2.5-flash") { return "gemini-2.5-flash" }
             if normalized == "gpt-4o-mini" {
                 return "gpt-4o-mini"
             }

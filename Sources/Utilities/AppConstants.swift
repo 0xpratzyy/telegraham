@@ -33,6 +33,11 @@ enum AppConstants {
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
         static let defaultOpenAIModel = "gpt-5"
+        /// Managed (Pidgy AI) plan model + proxy path — Gemini 3.1 Flash-Lite
+        /// via the proxy's Vertex path. To switch to gpt-5, flip to "gpt-5" +
+        /// "/v1/chat/completions" (proxy + Vertex auth already wired).
+        static let managedModel = "google/gemini-3.1-flash-lite"
+        static let managedProxyPath = "/v1/vertex/chat/completions"
         static let maxResponseTokens = 4096
         static let maxTokenBudgetChars = 16000
         static let requestTimeoutSeconds: TimeInterval = 90
@@ -344,6 +349,8 @@ enum AppConstants {
 
     enum Dashboard {
         static let maxTopicCount = 6
+        // Bump on any change to the task-triage prompt/schema — forces a
+        // one-time full rescan of all main-list chats.
         static let taskTriageContextVersion = 9
         static let taskTriageChatLimit = 48
         static let taskTriageBatchSize = 12
