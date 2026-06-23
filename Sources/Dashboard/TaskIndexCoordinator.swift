@@ -56,6 +56,13 @@ final class TaskIndexCoordinator: ObservableObject {
     /// the burst settles, so a busy chat doesn't drive 50 triages per minute.
     private var debouncedRefreshTask: Task<Void, Never>?
     private var messagesUpdatedObserver: NSObjectProtocol?
+    /// Combine subscription to the chat list. Tasks used to refresh only on
+    /// new-message bursts + the 8-min tick — so chats streaming into the main
+    /// list (a position update, NOT a message) wouldn't trigger a scan until
+    /// the next tick. That left the Tasks page empty right after load while the
+    /// reply queue (which reacts to `visibleChats`) filled in. Reacting to the
+    /// chat list here makes Tasks incremental too, like the reply queue.
+    private var chatListCancellable: AnyCancellable?
     private var firstNotifyAtForCurrentBurst: Date?
     private static let debouncedRefreshDelay: Duration = .seconds(20)
     /// If notifications keep resetting the debounce, force a refresh anyway
@@ -97,6 +104,23 @@ final class TaskIndexCoordinator: ObservableObject {
                 }
             }
         }
+
+        // React to the chat list itself, not just message bursts: when chats
+        // stream into the main list, fire the (debounced) refresh so Tasks
+        // fills incrementally as the list loads — same reactivity the reply
+        // queue gets for free from observing `visibleChats` in the view.
+        if chatListCancellable == nil {
+            chatListCancellable = telegramService.$chats
+                .map { $0.filter(\.isInMainList).count }
+                .removeDuplicates()
+                .dropFirst()
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.scheduleDebouncedRefresh()
+                    }
+                }
+        }
+
         if refreshLoopTask != nil {
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -831,9 +855,17 @@ final class TaskIndexCoordinator: ObservableObject {
         aiService: AIService,
         myUserId: Int64
     ) async throws -> [Int64: DashboardTaskTriageResultDTO] {
+        let logger = Logger(
+            subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
+            category: "TaskIndex"
+        )
         var triageByChatId: [Int64: DashboardTaskTriageResultDTO] = [:]
+        var batchCount = 0
+        var failureCount = 0
+        var lastBatchError: Error?
 
         for batch in pending.chunked(into: AppConstants.Dashboard.taskTriageBatchSize) {
+            batchCount += 1
             let candidates = batch.map {
                 DashboardTaskTriageCandidate(
                     chat: $0.chat,
@@ -842,13 +874,31 @@ final class TaskIndexCoordinator: ObservableObject {
                     openTaskEvidenceByTaskId: $0.openTaskEvidenceByTaskId
                 )
             }
-            let decisions = try await aiService.triageDashboardTaskCandidates(
-                candidates,
-                myUserId: myUserId
-            )
-            for decision in decisions {
-                triageByChatId[decision.chatId] = decision
+            // Catch per batch: one failing batch must not abort the whole
+            // refresh. Aborting used to skip markTriageContextVersionScanned(),
+            // leaving forceRescan stuck on — so every chat-list change re-fired
+            // a full rescan, retrying the same failure and burning spend.
+            do {
+                let decisions = try await aiService.triageDashboardTaskCandidates(
+                    candidates,
+                    myUserId: myUserId
+                )
+                for decision in decisions {
+                    triageByChatId[decision.chatId] = decision
+                }
+            } catch {
+                failureCount += 1
+                lastBatchError = error
+                logger.error("triage batch failed (\(failureCount, privacy: .public)/\(batchCount, privacy: .public)): \(error.localizedDescription, privacy: .public)")
             }
+        }
+
+        // Only a TOTAL failure (e.g. provider down / daily cap) propagates, so
+        // the caller leaves the context-version cursor unadvanced and retries
+        // on the next refresh. Partial success returns normally: the missed
+        // chats keep their state and get re-triaged incrementally on change.
+        if batchCount > 0, failureCount == batchCount, let lastBatchError {
+            throw lastBatchError
         }
 
         return triageByChatId

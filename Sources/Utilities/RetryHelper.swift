@@ -22,15 +22,23 @@ enum RetryHelper {
             } catch {
                 lastError = error
 
+                // A cancelled task (superseded refresh) must abort immediately —
+                // never burn retries + backoff sleeps on work no one awaits.
+                if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+                    throw error
+                }
+
                 // Don't retry non-transient errors
                 if let aiError = error as? AIError {
                     switch aiError {
                     case .noAPIKey, .providerNotConfigured, .parsingError:
                         throw error
+                    case .rateLimited:
+                        throw error // Provider already exhausted its rate-limit backoff
                     case .httpError(let code, _) where code == 401 || code == 403:
                         throw error // Auth errors are not retryable
                     default:
-                        break // Retryable (network errors, 429, 500, 502, 503)
+                        break // Retryable (network errors, 500, 502)
                     }
                 }
 

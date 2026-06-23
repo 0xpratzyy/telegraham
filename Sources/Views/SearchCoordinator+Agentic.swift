@@ -900,6 +900,8 @@ extension SearchCoordinator {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let suffix = compactBody.isEmpty ? "" : " \(String(compactBody.prefix(140)))"
                 raw = "HTTP \(code)\(suffix)"
+            case .rateLimited(let retryAfter):
+                raw = "rate limited" + (retryAfter.map { " (retry after \(Int($0))s)" } ?? "")
             case .parsingError(let detail):
                 raw = "parse error \(String(detail.prefix(140)))"
             case .networkError(let err):

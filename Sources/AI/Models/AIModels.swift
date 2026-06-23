@@ -303,6 +303,11 @@ enum AIError: LocalizedError {
     case noAPIKey
     case invalidResponse
     case httpError(Int, String)
+    /// Rate limited (429/503) after the provider's in-call backoff already
+    /// exhausted its retries. Distinct from `.httpError` so the outer
+    /// `RetryHelper` treats it as terminal and does NOT retry on top of that
+    /// backoff (which previously stacked to ~45s of blocked time).
+    case rateLimited(retryAfter: TimeInterval?)
     case networkError(Error)
     case parsingError(String)
     case providerNotConfigured
@@ -312,6 +317,8 @@ enum AIError: LocalizedError {
         case .noAPIKey: return "No API key configured"
         case .invalidResponse: return "Invalid response from AI provider"
         case .httpError(let code, let msg): return "HTTP \(code): \(msg)"
+        case .rateLimited(let retryAfter):
+            return retryAfter.map { "Rate limited (retry after \(Int($0))s)" } ?? "Rate limited"
         case .networkError(let err): return "Network error: \(err.localizedDescription)"
         case .parsingError(let detail): return "Failed to parse AI response: \(detail)"
         case .providerNotConfigured: return "AI provider not configured"
