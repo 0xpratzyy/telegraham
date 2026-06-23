@@ -47,6 +47,11 @@ struct DashboardPreferencesPage: View {
     /// render the chat's avatar + DM/group shape. Populated on
     /// appear / when the set changes.
     @State private var archivedChats: [Int64: TGChat] = [:]
+    // Voice profile (context layer) — editable in the Preferences page.
+    @State private var voiceProfileText = ""
+    @State private var voiceProfileLoaded = false
+    @State private var isRegeneratingVoice = false
+    @State private var voiceStatus: DashboardPreferenceStatus?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -533,7 +538,7 @@ struct DashboardPreferencesPage: View {
                 )
             }
 
-            PrefSection(bottomBorder: !archivedChatsStore.ids.isEmpty) {
+            PrefSection {
                 PrefSectionHead(title: "Privacy", subtitle: "Keep the AI surface explicit")
                 PrefField(
                     label: "Include bot chats",
@@ -571,10 +576,115 @@ struct DashboardPreferencesPage: View {
                 .padding(.top, 14)
             }
 
+            voiceSection
+
             // Archived chats live at the very bottom — it's a
             // management list the user only visits occasionally, not
             // a daily setting.
             archivedChatsSection
+        }
+    }
+
+    /// "Your voice" — the context layer's writing-style profile. Pidgy
+    /// builds it from the user's own sent messages and injects it into
+    /// reply drafts so suggestions sound like them. Shown here so the
+    /// user can read exactly what's stored (style only, no private
+    /// content), hand-edit it, regenerate it, or open the underlying
+    /// markdown file.
+    @ViewBuilder
+    private var voiceSection: some View {
+        PrefSection(bottomBorder: !archivedChatsStore.ids.isEmpty) {
+            PrefSectionHead(
+                title: "Your voice",
+                subtitle: "Drafts are written in your style. Built from your sent messages — edit freely."
+            ) {
+                PrefPill(
+                    text: voiceProfileText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Not built" : "Active",
+                    tone: voiceProfileText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .mono : .green
+                )
+            }
+
+            TextEditor(text: $voiceProfileText)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Color.Pidgy.fg2)
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 160, maxHeight: 320)
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.Pidgy.bg2)
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.Pidgy.border1))
+                )
+                .overlay(alignment: .topLeading) {
+                    if voiceProfileText.isEmpty {
+                        Text(aiService.isConfigured
+                             ? "Not built yet — send a few messages, then hit Regenerate."
+                             : "Configure an AI provider to build your voice profile.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.Pidgy.fg4)
+                            .padding(.horizontal, 17)
+                            .padding(.vertical, 20)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+            Text("Style only — tone, length, and language. No private message content is stored here.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Color.Pidgy.fg3)
+                .padding(.top, 8)
+
+            HStack(spacing: 10) {
+                if isRegeneratingVoice {
+                    ProgressView().controlSize(.small)
+                }
+                if let voiceStatus {
+                    DashboardPreferenceInlineStatus(status: voiceStatus)
+                }
+                Spacer()
+                PrefGhostButton(title: "Reveal file", systemImage: "folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([VoiceProfileService.shared.profileFileURL])
+                }
+                PrefGhostButton(title: isRegeneratingVoice ? "Regenerating…" : "Regenerate", systemImage: "sparkles") {
+                    regenerateVoiceProfile()
+                }
+                .disabled(isRegeneratingVoice || !aiService.isConfigured)
+                PrefGhostButton(title: "Save", systemImage: "checkmark") {
+                    saveVoiceProfile()
+                }
+                .disabled(isRegeneratingVoice)
+            }
+            .padding(.top, 14)
+        }
+        .task { await loadVoiceProfileIfNeeded() }
+    }
+
+    private func loadVoiceProfileIfNeeded() async {
+        guard !voiceProfileLoaded else { return }
+        voiceProfileText = await VoiceProfileService.shared.currentProfile() ?? ""
+        voiceProfileLoaded = true
+    }
+
+    private func saveVoiceProfile() {
+        let text = voiceProfileText
+        voiceStatus = nil
+        Task {
+            await VoiceProfileService.shared.saveProfile(text)
+            voiceStatus = .success("Saved")
+        }
+    }
+
+    private func regenerateVoiceProfile() {
+        guard !isRegeneratingVoice, aiService.isConfigured else { return }
+        isRegeneratingVoice = true
+        voiceStatus = nil
+        let service = aiService
+        Task {
+            await VoiceProfileService.shared.generate(aiService: service)
+            voiceProfileText = await VoiceProfileService.shared.currentProfile() ?? voiceProfileText
+            isRegeneratingVoice = false
+            voiceStatus = voiceProfileText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? .error("Not enough sent messages yet")
+                : .success("Updated")
         }
     }
 

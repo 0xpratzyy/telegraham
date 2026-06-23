@@ -217,6 +217,9 @@ final class AIService: ObservableObject {
     func suggestReplies(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> [String] {
         let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
         guard !snippets.isEmpty else { return [] }
+        // Context layer: draft in the user's own voice when we have a profile.
+        let voiceBlock = (await VoiceProfileService.shared.currentProfile())
+            .map { "\n\nMatch THIS user's writing voice (style only — don't copy past content):\n\($0)" } ?? ""
         let prompt = """
         You are helping a user (marked [ME] in the transcript) draft \
         a reply to the latest message in this chat. Read the recent \
@@ -224,7 +227,7 @@ final class AIService: ObservableObject {
         user could send. Each option must be ONE LINE, at most 18 \
         words, plain text only (no markdown, no quotes, no numbering, \
         no leading dash). Output the 3 options separated by newlines, \
-        nothing else.
+        nothing else.\(voiceBlock)
         """
         let response = try await provider.summarize(messages: snippets, prompt: prompt)
         let lines = response
@@ -379,6 +382,26 @@ final class AIService: ObservableObject {
             personName: personName,
             messages: snippets
         )
+    }
+
+    /// Build the user's own voice profile from a sample of their outgoing
+    /// messages. Reuses the generic `summarize` path with a style-only prompt;
+    /// returns "" (or "Not enough messages yet.") when the sample is too thin.
+    func extractVoiceProfile(outgoingMessages: [DatabaseManager.MessageRecord]) async throws -> String {
+        let snippets: [MessageSnippet] = outgoingMessages.compactMap { record in
+            guard let text = record.textContent,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return MessageSnippet(
+                messageId: record.id,
+                senderFirstName: "[ME]",
+                text: text,
+                relativeTimestamp: "",
+                chatId: record.chatId,
+                chatName: ""
+            )
+        }
+        guard snippets.count >= 15 else { return "" }
+        return try await provider.summarize(messages: snippets, prompt: VoiceProfilePrompt.systemPrompt)
     }
 
     func triageDashboardTaskCandidates(
@@ -559,24 +582,41 @@ final class AIService: ObservableObject {
     }
 
     private func applyBundledOpenAIKeyIfAvailable() {
-        let model = normalizedModel(type: .openai, model: AppConstants.AI.defaultOpenAIModel)
         // Prefer the AI proxy when the build bundles one (issue #26): the
-        // gate token stands in for the key and the raw OpenAI key no longer
+        // gate token stands in for the key and the raw provider key no longer
         // needs to ship. `persist: false` for the same reason as the bundled
         // key — rotating the token in a follow-up build must take effect.
+        //
+        // Managed plan runs on Gemini 3 Flash via the proxy's Vertex path. We
+        // derive that path from whatever proxy host is bundled (the release
+        // pipeline injects the base URL), so no secret change is needed to
+        // switch OpenAI→Gemini — just this routing + `managedModel`.
         if let proxyURL = BundledSecrets.aiProxyURL,
            let proxyToken = BundledSecrets.aiProxyToken {
+            let managedURL = managedProxyEndpoint(from: proxyURL)
             configure(
                 type: .openai,
                 apiKey: proxyToken,
-                model: model,
+                model: AppConstants.AI.managedModel,
                 persist: false,
-                openAIEndpointURL: proxyURL
+                openAIEndpointURL: managedURL
             )
             return
         }
+        let model = normalizedModel(type: .openai, model: AppConstants.AI.defaultOpenAIModel)
         guard let bundled = BundledSecrets.openAIApiKey else { return }
         configure(type: .openai, apiKey: bundled, model: model, persist: false)
+    }
+
+    /// Rewrite the bundled proxy URL onto the managed Vertex path while
+    /// keeping its scheme/host/port. Falls back to the original URL if it
+    /// can't be decomposed.
+    private func managedProxyEndpoint(from proxyURL: URL) -> URL {
+        guard var components = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false) else {
+            return proxyURL
+        }
+        components.path = AppConstants.AI.managedProxyPath
+        return components.url ?? proxyURL
     }
 
     private func saveConfiguration(type: AIProviderConfig.ProviderType, apiKey: String, model: String) {

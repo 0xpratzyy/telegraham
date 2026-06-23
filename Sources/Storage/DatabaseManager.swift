@@ -2198,6 +2198,50 @@ actor DatabaseManager {
         }
     }
 
+    /// Count of the user's own outgoing text messages — the sample size for
+    /// the voice profile, and the staleness signal for re-generating it.
+    func outgoingMessageCount() async -> Int {
+        guard let pool = await ensureDatabase() else { return 0 }
+        do {
+            return try await pool.read { db in
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM messages WHERE is_outgoing = 1 AND text_content IS NOT NULL AND length(trim(text_content)) >= 2",
+                    arguments: []
+                ) ?? 0
+            }
+        } catch {
+            return 0
+        }
+    }
+
+    /// The user's own most-recent outgoing text messages across all chats —
+    /// source material for the voice profile (how they write).
+    func loadRecentOutgoingMessages(limit: Int = 120) async -> [MessageRecord] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        FROM messages
+                        WHERE is_outgoing = 1
+                          AND text_content IS NOT NULL
+                          AND length(trim(text_content)) >= 2
+                        ORDER BY date DESC, id DESC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+                return rows.map { Self.messageRecord(from: $0) }
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load outgoing messages: \(error)")
+            return []
+        }
+    }
+
     /// Recent messages where this user appears as the sender, across all
     /// chats. Used as the source material for profile extraction.
     func loadRecentMessages(fromSender userId: Int64, limit: Int = 50) async -> [MessageRecord] {

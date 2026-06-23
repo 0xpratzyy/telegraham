@@ -353,6 +353,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             await IndexScheduler.shared.start(using: telegramService)
             guard !Task.isCancelled else { return }
 
+            // Build/refresh the user's voice profile (context layer) in the
+            // background once messages are indexed — cheap, and only fires when
+            // it's missing or has gone stale.
+            Task { [aiService] in
+                await VoiceProfileService.shared.refreshIfNeeded(aiService: aiService)
+            }
+
             // Task extraction used to be the LAST thing in the chain — gated
             // behind the full graph build, which on a fresh install can take
             // many minutes. Move it here so the Tasks page populates roughly
