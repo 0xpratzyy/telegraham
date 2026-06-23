@@ -76,6 +76,7 @@ enum PidgyTelemetry {
     /// extras don't include message bodies / PII (scrubEvent is a
     /// safety net, not a free pass).
     static func capture(error: Error, extras: [String: Any] = [:]) {
+        mirrorLocally(level: "error", message: "error: \(type(of: error))", extras: extras)
         guard SentrySDK.isEnabled else {
             logger.error("Suppressed capture (Sentry not enabled): \(String(describing: error), privacy: .public)")
             return
@@ -91,6 +92,7 @@ enum PidgyTelemetry {
     /// chat"). Use this for behavior-level instrumentation — anything
     /// you'd want to know about even though nothing technically threw.
     static func capture(message: String, level: SentryLevel = .info, extras: [String: Any] = [:]) {
+        mirrorLocally(level: levelLabel(level), message: message, extras: extras)
         guard SentrySDK.isEnabled else {
             logger.log(level: level.toOSLog(), "\(message, privacy: .public)")
             return
@@ -134,21 +136,78 @@ enum PidgyTelemetry {
         )
     }
 
+    // MARK: - TDLib / operational shapes
+
+    /// Content-free signal that a TDLib request failed. Sends ONLY the
+    /// method name, numeric code, and a CLASSIFIED error label
+    /// (FLOOD_WAIT_312, CHANNEL_PRIVATE, …). The raw TDLib message is run
+    /// through `classifyTDLibError` first, so a descriptive string that
+    /// could embed a chat title / username never leaves the device.
+    /// Throttled per (method, errorClass) so a sync storm isn't 500 events.
+    static func captureTDLibError(method: String, code: Int, errorClass: String) {
+        guard shouldSendThrottled(key: "tdlib|\(method)|\(errorClass)", now: Date(), interval: aiFailureThrottleInterval) else { return }
+        capture(
+            message: "tdlib_error: \(method) [\(errorClass)]",
+            level: .warning,
+            extras: [
+                "method": method,
+                "code": code,
+                "error_class": errorClass
+            ]
+        )
+    }
+
+    /// Reduce a raw TDLib error message to a safe label. TDLib errors are
+    /// short SCREAMING_SNAKE codes; we keep only the leading code token and
+    /// return "OTHER" for anything that doesn't match that shape — so a
+    /// descriptive message (which could contain a chat title or username)
+    /// is never shipped verbatim.
+    static func classifyTDLibError(_ message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = trimmed.range(of: "^[A-Z][A-Z0-9_]{3,}", options: .regularExpression) else {
+            return "OTHER"
+        }
+        var code = String(trimmed[range])
+        // Strip a trailing _<n> so FLOOD_WAIT_312 / FLOOD_WAIT_45 group as one
+        // issue in Sentry and the throttle key is stable. (The backoff seconds
+        // are still recorded separately via RateLimiter.recordFloodWait.)
+        if let suffix = code.range(of: "_[0-9]+$", options: .regularExpression) {
+            code.removeSubrange(suffix)
+        }
+        return code
+    }
+
+    /// Content-free operational milestone (chat list loaded, coverage
+    /// progress, …). `fields` is typed `[String: Int]` ON PURPOSE: a caller
+    /// can only pass numbers, so message text / names cannot leak through
+    /// this path by construction.
+    static func captureEvent(_ event: String, category: String, fields: [String: Int] = [:], level: SentryLevel = .info) {
+        var extras: [String: Any] = ["category": category]
+        for (key, value) in fields { extras[key] = value }
+        capture(message: "\(category): \(event)", level: level, extras: extras)
+    }
+
     static let aiFailureThrottleInterval: TimeInterval = 300
 
-    private static let aiFailureThrottleLock = NSLock()
-    nonisolated(unsafe) private static var lastAIFailureSendByKey: [String: Date] = [:]
+    private static let throttledSendLock = NSLock()
+    nonisolated(unsafe) private static var lastThrottledSendByKey: [String: Date] = [:]
+
+    /// Generic per-key throttle: a provider outage or a repeated TDLib
+    /// error emits the same shape hundreds of times; one event per window
+    /// is all the signal we need.
+    static func shouldSendThrottled(key: String, now: Date, interval: TimeInterval) -> Bool {
+        throttledSendLock.lock()
+        defer { throttledSendLock.unlock() }
+        if let last = lastThrottledSendByKey[key], now.timeIntervalSince(last) < interval {
+            return false
+        }
+        lastThrottledSendByKey[key] = now
+        return true
+    }
 
     /// Internal (not private) so tests can pin the throttle behavior.
     static func shouldSendAIFailure(key: String, now: Date) -> Bool {
-        aiFailureThrottleLock.lock()
-        defer { aiFailureThrottleLock.unlock() }
-        if let last = lastAIFailureSendByKey[key],
-           now.timeIntervalSince(last) < aiFailureThrottleInterval {
-            return false
-        }
-        lastAIFailureSendByKey[key] = now
-        return true
+        shouldSendThrottled(key: key, now: now, interval: aiFailureThrottleInterval)
     }
 
     /// Drop a breadcrumb. Threaded through scrubBreadcrumb so message
@@ -203,6 +262,71 @@ enum PidgyTelemetry {
         // async + silent on success, so otherwise it's invisible
         // from the client side.
         logger.info("Feedback submitted to Sentry. kind=\(kind, privacy: .public) chars=\(message.count) view=\(extras["view"] ?? "?", privacy: .public)")
+    }
+
+    // MARK: - Local mirror
+
+    /// Mirror every captured signal to a local, content-free JSONL file at
+    /// `~/Library/Application Support/Pidgy/logs/telemetry.jsonl`. Same
+    /// metadata that goes to Sentry, but inspectable on-device (and during
+    /// a debug session) without the dashboard — and works even on builds
+    /// with no Sentry DSN. The typed capture APIs never carry content, so
+    /// this stays metadata-only. Rotates at ~5 MB.
+    private static let localLogQueue = DispatchQueue(label: "com.pidgy.telemetry.local")
+    // Reused across calls — ISO8601DateFormatter is costly to construct and is
+    // thread-safe for formatting on modern Foundation.
+    private static let localLogTimestampFormatter = ISO8601DateFormatter()
+
+    private static func localLogURL() -> URL? {
+        guard let base = try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true) else { return nil }
+        let dir = base.appendingPathComponent("Pidgy/logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("telemetry.jsonl")
+    }
+
+    static func mirrorLocally(level: String, message: String, extras: [String: Any]) {
+        guard let url = localLogURL() else { return }
+        let stamp = localLogTimestampFormatter.string(from: Date())
+        localLogQueue.async {
+            if let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? UInt64,
+               size > 5_000_000 {
+                let rotated = url.deletingLastPathComponent().appendingPathComponent("telemetry.1.jsonl")
+                try? FileManager.default.removeItem(at: rotated)
+                try? FileManager.default.moveItem(at: url, to: rotated)
+            }
+            var obj: [String: Any] = ["ts": stamp, "level": level, "msg": message]
+            // Defense-in-depth: the typed capture APIs are metadata-only by
+            // design, but scrub the same PII-shaped keys we strip before Sentry
+            // so a future caller can never land chat content in the on-disk
+            // mirror either (this path doesn't go through scrubEvent).
+            for (key, value) in extras {
+                obj[key] = piiKeysToRedact.contains(key) ? "<redacted>" : value
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: obj),
+                  var line = String(data: data, encoding: .utf8) else { return }
+            line += "\n"
+            if FileManager.default.fileExists(atPath: url.path),
+               let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                handle.seekToEndOfFile()
+                if let payload = line.data(using: .utf8) { handle.write(payload) }
+            } else {
+                try? line.write(to: url, atomically: true, encoding: .utf8)
+            }
+        }
+    }
+
+    private static func levelLabel(_ level: SentryLevel) -> String {
+        switch level {
+        case .debug: return "debug"
+        case .info: return "info"
+        case .warning: return "warn"
+        case .error: return "error"
+        case .fatal: return "fatal"
+        default: return "info"
+        }
     }
 
     // MARK: - Scrubbing

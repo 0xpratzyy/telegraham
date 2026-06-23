@@ -1210,6 +1210,20 @@ class TelegramService: ObservableObject {
                 return value
             } catch let error as TDLibKit.Error {
                 await rateLimiter.releaseCall(method: method)
+                // Telemetry for TDLib errors (not just FLOOD_WAIT, which was the
+                // only one we ever surfaced). Content-free: method + numeric code
+                // + a classified label — the raw message never leaves the device.
+                // This is how a sync stall (e.g. the repeated-reset FLOOD_WAIT
+                // throttling) becomes visible. Exclude loadChats' 404, which is
+                // the normal end-of-main-list signal (see isMainChatListExhausted),
+                // not a failure — capturing it floods telemetry on every paginate.
+                if !(method == "loadChats" && error.code == 404) {
+                    PidgyTelemetry.captureTDLibError(
+                        method: method,
+                        code: Int(error.code),
+                        errorClass: PidgyTelemetry.classifyTDLibError(error.message)
+                    )
+                }
                 guard attempt < 3, let floodWaitSeconds = floodWaitSeconds(from: error) else {
                     throw error
                 }
