@@ -627,12 +627,14 @@ class TelegramService: ObservableObject {
                 let newOrder = msgUpdate.positions.isEmpty
                     ? chats[index].order
                     : extractOrder(from: msgUpdate.positions)
+                // Use the canonical helper, NOT an inline `.chatListMain` check:
+                // a left/removed chat keeps a chatListMain position at order 0,
+                // so trusting mere presence here resurrects it into visibleChats
+                // (and the reply queue) on its next message. isInMainList gates
+                // on order > 0, matching updateChatPosition / mapChat.
                 let inMainList = msgUpdate.positions.isEmpty
                     ? chats[index].isInMainList
-                    : msgUpdate.positions.contains(where: {
-                        if case .chatListMain = $0.list { return true }
-                        return false
-                    })
+                    : Self.isInMainList(positions: msgUpdate.positions)
                 let updated = TGChat(
                     id: chats[index].id,
                     title: chats[index].title,
