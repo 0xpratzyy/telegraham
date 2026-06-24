@@ -555,6 +555,27 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v20_embedding_skips") { db in
+            // Examined-but-unembeddable markers. A message whose body strips to
+            // empty (e.g. URL-only) yields no vector, so it stayed in the
+            // "missing embeddings" set forever — the backfill re-selected it
+            // every pass, spinning and starving genuinely-unembedded messages
+            // behind it once the LIMIT window filled. A skip marker lets the
+            // discovery query exclude it. FK CASCADE clears the marker if the
+            // message is deleted; a content edit clears it explicitly so
+            // re-embedding is re-attempted on the new text.
+            try db.execute(sql: """
+                CREATE TABLE embedding_skips (
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    model_version TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (chat_id, message_id, model_version),
+                    FOREIGN KEY (message_id, chat_id) REFERENCES messages(id, chat_id) ON DELETE CASCADE
+                )
+                """)
+        }
+
         return migrator
     }
 }

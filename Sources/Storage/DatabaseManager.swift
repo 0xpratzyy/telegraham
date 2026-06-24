@@ -417,6 +417,10 @@ actor DatabaseManager {
                 )
                 if contentChanged {
                     try Self.deleteEmbeddings(in: db, chatId: chatId, messageIds: [messageId])
+                    // Old text must not linger in chunks or suppress re-embedding
+                    // of the new text.
+                    try Self.invalidateChunks(in: db, chatId: chatId, messageIds: [messageId])
+                    try Self.deleteEmbeddingSkips(in: db, chatId: chatId, messageIds: [messageId])
                 }
             }
         } catch {
@@ -441,6 +445,10 @@ actor DatabaseManager {
                 let existingState = try Self.syncStateRecord(in: db, chatId: chatId)
                 let existingRecentSyncState = try Self.recentSyncStateRecord(in: db, chatId: chatId)
                 try Self.deleteEmbeddings(in: db, chatId: chatId, messageIds: messageIds)
+                // Purge overlapping conversation chunks too (their text_preview
+                // still holds the deleted text); embedding_skips clear via the
+                // FK cascade when the message rows go.
+                try Self.invalidateChunks(in: db, chatId: chatId, messageIds: messageIds)
                 try db.execute(
                     sql: "DELETE FROM messages WHERE chat_id = ? AND id IN (\(placeholders))",
                     arguments: deleteArguments
@@ -471,6 +479,14 @@ actor DatabaseManager {
             try await pool.write { db in
                 try db.execute(
                     sql: "DELETE FROM embeddings WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
+                try db.execute(
+                    sql: "DELETE FROM embedding_chunks WHERE chat_id = ?",
+                    arguments: [chatId]
+                )
+                try db.execute(
+                    sql: "DELETE FROM embedding_chunk_state WHERE chat_id = ?",
                     arguments: [chatId]
                 )
                 try db.execute(
@@ -898,6 +914,9 @@ actor DatabaseManager {
         do {
             try await pool.write { db in
                 try db.execute(sql: "DELETE FROM embeddings")
+                try db.execute(sql: "DELETE FROM embedding_chunks")
+                try db.execute(sql: "DELETE FROM embedding_chunk_state")
+                try db.execute(sql: "DELETE FROM embedding_skips")
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM sync_state WHERE chat_id >= 0")
                 try db.execute(sql: "DELETE FROM recent_sync_state WHERE chat_id >= 0")
@@ -915,6 +934,9 @@ actor DatabaseManager {
         do {
             try await pool.write { db in
                 try db.execute(sql: "DELETE FROM embeddings")
+                try db.execute(sql: "DELETE FROM embedding_chunks")
+                try db.execute(sql: "DELETE FROM embedding_chunk_state")
+                try db.execute(sql: "DELETE FROM embedding_skips")
                 try db.execute(sql: "DELETE FROM messages")
                 try db.execute(sql: "DELETE FROM pipeline_cache")
                 try db.execute(sql: "DELETE FROM sync_state")
@@ -1325,9 +1347,15 @@ actor DatabaseManager {
                         WHERE e.message_id IS NULL
                           AND m.text_content IS NOT NULL
                           AND length(trim(m.text_content)) >= ?
+                          AND NOT EXISTS (
+                              SELECT 1 FROM embedding_skips s
+                              WHERE s.message_id = m.id
+                                AND s.chat_id = m.chat_id
+                                AND s.model_version = ?
+                          )
                         LIMIT ?
                         """,
-                    arguments: [modelVersion, AppConstants.Indexing.minEmbeddingTextLength, limit]
+                    arguments: [modelVersion, AppConstants.Indexing.minEmbeddingTextLength, modelVersion, limit]
                 )
 
                 return rows.map(Self.messageRecord(from:))
@@ -1335,6 +1363,33 @@ actor DatabaseManager {
         } catch {
             print("[DatabaseManager] Failed to load messages missing embeddings: \(error)")
             return []
+        }
+    }
+
+    /// Record messages the embedder couldn't vectorize (e.g. URL-only bodies
+    /// that strip to empty) so `messagesMissingEmbeddings` stops re-selecting
+    /// them every backfill pass. Cleared on message delete (FK cascade) or on
+    /// a content edit (see updateMessageContent / insertMessages).
+    func markEmbeddingSkipped(_ messages: [(id: Int64, chatId: Int64)], modelVersion: String) async {
+        guard !messages.isEmpty else { return }
+        guard let pool = await ensureDatabase() else { return }
+
+        do {
+            let now = Date().timeIntervalSince1970
+            try await pool.write { db in
+                for message in messages {
+                    try db.execute(
+                        sql: """
+                            INSERT OR IGNORE INTO embedding_skips
+                                (chat_id, message_id, model_version, created_at)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                        arguments: [message.chatId, message.id, modelVersion, now]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] Failed to mark embedding skips: \(error)")
         }
     }
 
@@ -2705,6 +2760,8 @@ actor DatabaseManager {
             )
             if contentChanged {
                 try deleteEmbeddings(in: db, chatId: record.chatId, messageIds: [record.id])
+                try invalidateChunks(in: db, chatId: record.chatId, messageIds: [record.id])
+                try deleteEmbeddingSkips(in: db, chatId: record.chatId, messageIds: [record.id])
             }
         }
     }
@@ -2749,6 +2806,73 @@ actor DatabaseManager {
         try db.execute(
             sql: "DELETE FROM embeddings WHERE chat_id = ? AND message_id IN (\(placeholders))",
             arguments: arguments
+        )
+    }
+
+    private static func deleteEmbeddingSkips(
+        in db: Database,
+        chatId: Int64,
+        messageIds: [Int64]
+    ) throws {
+        guard !messageIds.isEmpty else { return }
+
+        let placeholders = Array(repeating: "?", count: messageIds.count).joined(separator: ", ")
+        var arguments = StatementArguments()
+        arguments += [chatId]
+        for messageId in messageIds {
+            arguments += [messageId]
+        }
+
+        try db.execute(
+            sql: "DELETE FROM embedding_skips WHERE chat_id = ? AND message_id IN (\(placeholders))",
+            arguments: arguments
+        )
+    }
+
+    /// Drop conversation chunks whose window overlaps any of the given messages
+    /// — their `text_preview` still holds the now-deleted/edited text and would
+    /// keep surfacing in search — then rewind the chunk watermark so the span is
+    /// rebuilt from current message data (otherwise it's skipped as already
+    /// chunked). Call on message delete or content edit.
+    private static func invalidateChunks(
+        in db: Database,
+        chatId: Int64,
+        messageIds: [Int64]
+    ) throws {
+        guard let minId = messageIds.min(), let maxId = messageIds.max() else { return }
+
+        // A chunk [from, to] overlaps the touched range iff from <= maxId and
+        // to >= minId. Find the earliest start among overlapping chunks so we
+        // rewind far enough to cover the whole purged span, not just from the
+        // first touched message.
+        guard let earliestFrom = try Int64.fetchOne(
+            db,
+            sql: """
+                SELECT MIN(from_message_id) FROM embedding_chunks
+                WHERE chat_id = ? AND from_message_id <= ? AND to_message_id >= ?
+                """,
+            arguments: [chatId, maxId, minId]
+        ) else { return } // no overlapping chunks (NULL MIN → fetchOne nil)
+
+        try db.execute(
+            sql: """
+                DELETE FROM embedding_chunks
+                WHERE chat_id = ? AND from_message_id <= ? AND to_message_id >= ?
+                """,
+            arguments: [chatId, maxId, minId]
+        )
+
+        // Only ever lowers the watermark (SQLite scalar MIN), so re-chunking
+        // covers the purged window without disturbing later progress.
+        let rewindTo = earliestFrom - 1
+        try db.execute(
+            sql: """
+                UPDATE embedding_chunk_state
+                SET covered_through_message_id = MIN(covered_through_message_id, ?),
+                    chunked_through_message_id = MIN(chunked_through_message_id, ?)
+                WHERE chat_id = ?
+                """,
+            arguments: [rewindTo, rewindTo, chatId]
         )
     }
 

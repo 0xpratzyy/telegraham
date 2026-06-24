@@ -592,37 +592,52 @@ actor IndexScheduler {
         )
         guard !messages.isEmpty else { return 0 }
 
-        let eligibleMessages = messages.compactMap { message -> (message: DatabaseManager.MessageRecord, text: String)? in
+        // Map to (message, trimmed text). Don't re-apply a length gate here:
+        // the discovery query already enforced the minimum, and SQLite's
+        // char-count can disagree with Swift's grapheme count on unicode.
+        // Anything the embedder still can't vectorize is marked skipped below.
+        let candidates = messages.compactMap { message -> (message: DatabaseManager.MessageRecord, text: String)? in
             guard let text = message.textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  text.count >= AppConstants.Indexing.minEmbeddingTextLength else {
+                  !text.isEmpty else {
                 return nil
             }
             return (message, text)
         }
 
-        guard !eligibleMessages.isEmpty else { return 0 }
+        guard !candidates.isEmpty else { return 0 }
 
         // Commit in small sub-batches: contextual embedding is slow on
         // long texts, and a single 128-message commit meant minutes of
         // CPU with zero durable progress (and all of it lost on quit).
         var stored = 0
-        for slice in stride(from: 0, to: eligibleMessages.count, by: 16) {
+        for slice in stride(from: 0, to: candidates.count, by: 16) {
             if Task.isCancelled { break }
-            let sub = Array(eligibleMessages[slice..<min(slice + 16, eligibleMessages.count)])
+            let sub = Array(candidates[slice..<min(slice + 16, candidates.count)])
             let vectors = await EmbeddingService.shared.embedBatch(texts: sub.map { $0.text })
-            let records = zip(sub, vectors).compactMap { entry -> VectorStore.EmbeddingRecord? in
-                let (pair, vector) = entry
-                guard let vector else { return nil }
+            var records: [VectorStore.EmbeddingRecord] = []
+            var unembeddable: [(id: Int64, chatId: Int64)] = []
+            for (pair, vector) in zip(sub, vectors) {
+                guard let vector else {
+                    // No vector (e.g. a URL-only body that strips to empty).
+                    // Mark it skipped so the discovery query stops returning it
+                    // every pass — otherwise these pile up at the front of the
+                    // scan and starve real messages behind them.
+                    unembeddable.append((id: pair.message.id, chatId: pair.message.chatId))
+                    continue
+                }
                 let preview = String(pair.text.prefix(AppConstants.Indexing.embeddingPreviewCharacterLimit))
-                return VectorStore.EmbeddingRecord(
+                records.append(VectorStore.EmbeddingRecord(
                     messageId: pair.message.id,
                     chatId: pair.message.chatId,
                     vector: vector,
                     textPreview: preview,
                     modelVersion: activeVersion
-                )
+                ))
             }
             await VectorStore.shared.storeBatch(records)
+            if !unembeddable.isEmpty {
+                await DatabaseManager.shared.markEmbeddingSkipped(unembeddable, modelVersion: activeVersion)
+            }
             stored += records.count
         }
         return stored
