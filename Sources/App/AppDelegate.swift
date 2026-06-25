@@ -112,6 +112,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // is bundled — source builds make zero network calls.
         PidgyTelemetry.start()
 
+        // Grandfather this install if it's running a pre-paywall build, so
+        // existing testers keep AI for free once enforcement is switched on.
+        // No-op once BillingGate.enforce flips true (new installs must subscribe).
+        BillingGate.grandfatherPreCutoverInstall()
+
         // Sparkle auto-updater. `startingUpdater: true` kicks off an
         // immediate background appcast check; the periodic cadence
         // then follows `SUScheduledCheckInterval` from Info.plist.
@@ -549,7 +554,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
 
         // 3. Relaunch into a clean process → welcome screen. exit() can't hang.
-        relaunchAfterLogout()
+        relaunchIntoFreshProcess()
     }
 
     /// Spawns a fresh instance (after a 1s delay so this one is gone) and
@@ -559,8 +564,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// thread — that teardown race segfaults in MPSGraph. `_exit` kills the
     /// whole process at the kernel level atomically (all threads at once), so
     /// nothing can touch half-torn-down state. The data dir is already wiped,
-    /// so there's nothing buffered worth flushing.
-    private func relaunchAfterLogout() -> Never {
+    /// so there's nothing buffered worth flushing. Used by both logout and
+    /// reset-all-data: anything that wipes the data dir and needs TDLib to
+    /// come back up in a clean authorization state.
+    func relaunchIntoFreshProcess() -> Never {
         let path = Bundle.main.bundlePath
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")

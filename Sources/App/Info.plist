@@ -26,6 +26,14 @@
 	<string>$(PIDGY_AI_PROXY_TOKEN)</string>
 	<key>PidgyBundledAIProxyURL</key>
 	<string>$(PIDGY_AI_PROXY_URL)</string>
+	<key>PidgyBundledDodoBaseURL</key>
+	<string>$(PIDGY_DODO_BASE_URL)</string>
+	<key>PidgyBundledDodoCheckoutBYOK</key>
+	<string>$(PIDGY_DODO_CHECKOUT_BYOK)</string>
+	<key>PidgyBundledDodoCheckoutBundled</key>
+	<string>$(PIDGY_DODO_CHECKOUT_BUNDLED)</string>
+	<key>PidgyBundledDodoPortalURL</key>
+	<string>$(PIDGY_DODO_PORTAL_URL)</string>
 	<key>PidgyBundledOpenAIApiKey</key>
 	<string>$(PIDGY_BUNDLED_OPENAI_API_KEY)</string>
 	<key>PidgyBundledSentryDsn</key>

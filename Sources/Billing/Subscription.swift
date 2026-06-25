@@ -10,10 +10,13 @@ enum PidgyPlan: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
-    var monthlyPriceUSD: Int {
+    /// Display price (USD / month) shown in the paywall + preferences. The
+    /// amount actually charged is configured per-product in Dodo; this is
+    /// display-only, hence a String so it can carry the `.99`.
+    var monthlyPriceUSD: String {
         switch self {
-        case .byok: return 10
-        case .bundled: return 20
+        case .byok: return "7.99"
+        case .bundled: return "14.99"
         }
     }
 
@@ -87,6 +90,28 @@ struct Subscription: Codable, Equatable, Sendable {
     }
 }
 
+/// Outcome of a paid-entitlement refresh. Critically distinguishes
+/// "explicitly no longer valid" (revoke now) from "couldn't reach the
+/// backend" (keep the cached entitlement, so an offline launch or a
+/// transient network failure never locks out a paying user).
+enum EntitlementRefresh: Sendable, Equatable {
+    /// Verified current; paid through this date (incl. offline grace).
+    case active(until: Date)
+    /// Backend says the key is no longer valid (cancelled / refunded) — revoke.
+    case lapsed
+    /// Couldn't determine (offline / 5xx / no key) — leave current state alone.
+    case unknown
+}
+
+/// Result of activating a license key on this device. `instanceID` is Dodo's
+/// activation id (persisted so we can deactivate later); `productID` is the
+/// Dodo product the key belongs to — the only place the tier (BYOK vs Managed)
+/// is exposed, since `/validate` returns just `{ valid }`.
+struct ActivationResult: Sendable {
+    let instanceID: String
+    let productID: String?
+}
+
 /// Hands off to the payment provider (Dodo Payments, merchant-of-record)
 /// and reports back whether a subscription is verified. Hosted-checkout
 /// model: open `checkoutURL` in the browser, the MoR webhook provisions
@@ -95,12 +120,13 @@ protocol PaymentService: Sendable {
     /// Hosted checkout URL for a plan, or nil when payments aren't wired
     /// yet (the app then stays in trial/BYOK-only mode).
     func checkoutURL(for plan: PidgyPlan) -> URL?
-    /// Verify the current subscription with the backend. Returns the
-    /// paid-through date, or nil if there's no active subscription.
-    func refreshEntitlement() async -> Date?
-    /// Activate a license key for this device; returns the provider's
-    /// instance id (persisted so the device can be deactivated later).
-    func activate(licenseKey: String, deviceName: String) async throws -> String
+    /// Verify the current subscription with the backend. See `EntitlementRefresh`
+    /// — `.unknown` (not a falsy date) means "couldn't check", so the caller
+    /// preserves the cached entitlement instead of locking the user out.
+    func refreshEntitlement() async -> EntitlementRefresh
+    /// Activate a license key for this device; returns the activation instance
+    /// id + the product the key belongs to (so the caller can resolve the tier).
+    func activate(licenseKey: String, deviceName: String) async throws -> ActivationResult
     /// Release a device's activation slot.
     func deactivate(licenseKey: String, instanceID: String) async
 }
@@ -111,7 +137,7 @@ protocol PaymentService: Sendable {
 struct UnconfiguredPaymentService: PaymentService {
     struct NotConfigured: Error {}
     func checkoutURL(for plan: PidgyPlan) -> URL? { nil }
-    func refreshEntitlement() async -> Date? { nil }
-    func activate(licenseKey: String, deviceName: String) async throws -> String { throw NotConfigured() }
+    func refreshEntitlement() async -> EntitlementRefresh { .unknown }
+    func activate(licenseKey: String, deviceName: String) async throws -> ActivationResult { throw NotConfigured() }
     func deactivate(licenseKey: String, instanceID: String) async {}
 }

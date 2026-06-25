@@ -21,8 +21,10 @@ struct DashboardPreferencesPage: View {
     @State private var apiHash = ""
     @State private var telegramStatus: DashboardPreferenceStatus?
     @State private var selectedAIProvider: AIProviderConfig.ProviderType = .none
+    @State private var selectedBYOKProvider: BYOKProvider = .openAI
     @State private var aiApiKey = ""
     @State private var aiModel = ""
+    @State private var aiBaseURL = ""
     @State private var aiStatus: DashboardPreferenceStatus?
     @State private var isTestingConnection = false
     @State private var testConnectionStatus: DashboardPreferenceStatus?
@@ -103,8 +105,9 @@ struct DashboardPreferencesPage: View {
         .task(id: selectedPage) {
             await refreshDataIfNeeded(for: selectedPage)
         }
-        .onChange(of: selectedAIProvider) { oldValue, newValue in
+        .onChange(of: selectedBYOKProvider) { oldValue, newValue in
             guard oldValue != newValue else { return }
+            selectedAIProvider = newValue.providerType
             loadAIFields(for: newValue)
             aiStatus = nil
             testConnectionStatus = nil
@@ -393,13 +396,20 @@ struct DashboardPreferencesPage: View {
 
     private var aiPage: some View {
         VStack(alignment: .leading, spacing: 0) {
-            planSection
-            // The provider/key block only matters on BYOK; on the
-            // managed (Pidgy AI) plan there's nothing to configure.
-            if entitlements.selectedPlan == .byok {
-                aiProviderSection
+            if BillingGate.showBillingUI {
+                planSection
+                // The provider/key block only matters on BYOK; on the
+                // managed (Pidgy AI) plan there's nothing to configure.
+                if entitlements.selectedPlan == .byok {
+                    aiProviderSection
+                } else {
+                    managedAINote
+                }
             } else {
-                managedAINote
+                // Pre-cutover: no plan/billing UI yet. AI runs on the bundled
+                // key/proxy by default, and anyone who wants their own key still
+                // configures it right here — exactly the 1.0.14 behaviour.
+                aiProviderSection
             }
             usageSection
         }
@@ -425,22 +435,25 @@ struct DashboardPreferencesPage: View {
                     title: "Provider",
                     subtitle: "Your key, used for reply queue, tasks, summaries, and semantic search"
                 ) {
-                    Picker("", selection: $selectedAIProvider) {
-                        ForEach(AIProviderConfig.ProviderType.allCases, id: \.self) { provider in
-                            Text(provider.rawValue).tag(provider)
+                    Picker("", selection: $selectedBYOKProvider) {
+                        ForEach(BYOKProvider.allCases) { provider in
+                            Text(provider.displayName).tag(provider)
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 140)
+                    .frame(width: 220)
                 }
 
-                if selectedAIProvider != .none {
-                    PrefField(label: "API key", hint: "Stored in Keychain or the debug credential store") {
-                        PrefMinInput(text: $aiApiKey, placeholder: "\(selectedAIProvider.rawValue) API key", isSecure: true, monospaced: true)
+                PrefField(label: "API key", hint: "Stored in Keychain — goes straight to \(selectedBYOKProvider.displayName), never through Pidgy") {
+                    PrefMinInput(text: $aiApiKey, placeholder: "\(selectedBYOKProvider.displayName) API key", isSecure: true, monospaced: true)
+                }
+                if selectedBYOKProvider.requiresCustomBaseURL {
+                    PrefField(label: "Base URL", hint: "OpenAI-compatible chat-completions endpoint") {
+                        PrefMinInput(text: $aiBaseURL, placeholder: "https://host/v1/chat/completions", monospaced: true)
                     }
-                    PrefField(label: "Model", hint: "Default: \(selectedAIProvider.defaultModel)") {
-                        PrefMinInput(text: $aiModel, placeholder: selectedAIProvider.defaultModel, monospaced: true)
-                    }
+                }
+                PrefField(label: "Model", hint: selectedBYOKProvider.defaultModel.isEmpty ? "Enter the model id" : "Default: \(selectedBYOKProvider.defaultModel)") {
+                    PrefMinInput(text: $aiModel, placeholder: selectedBYOKProvider.defaultModel.isEmpty ? "model id" : selectedBYOKProvider.defaultModel, monospaced: true)
                 }
 
                 PrefField(
@@ -471,7 +484,7 @@ struct DashboardPreferencesPage: View {
                             PrefGhostButton(title: "Test", systemImage: "bolt") {
                                 Task { await testConnection() }
                             }
-                            .disabled(isTestingConnection || selectedAIProvider == .none)
+                            .disabled(isTestingConnection || aiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
                 )
@@ -778,51 +791,87 @@ struct DashboardPreferencesPage: View {
             )
 
             PrefField(label: planStatusLine.title, hint: planStatusLine.detail) {
-                if let plan = entitlements.selectedPlan,
-                   let url = entitlements.checkoutURL(for: plan) {
-                    PrefGhostButton(title: "Manage", systemImage: "creditcard") {
-                        NSWorkspace.shared.open(url)
-                    }
-                } else {
-                    Text("Payments coming soon")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.Pidgy.fg4)
-                }
+                planActionButton
             }
 
-            // Plan switch — for trial users this just changes which plan
-            // the trial (and eventual subscription) is for; the clock is
-            // preserved. A live paid switch will route through the
-            // payment provider once wired.
+            // Plan (BYOK vs Pidgy AI) is determined by the subscription — NOT a
+            // local toggle, which would desync from what Dodo actually bills.
+            // Shown read-only here; changing it goes through Manage subscription.
             PrefField(
                 label: "Plan",
-                hint: "Pidgy AI runs the model for you; Bring your own key keeps everything off our servers."
+                hint: planChangeHint
             ) {
-                HStack(spacing: 8) {
-                    ForEach(PidgyPlan.allCases) { plan in
-                        let isCurrent = entitlements.selectedPlan == plan
-                        Button {
-                            entitlements.startTrial(plan: plan)
-                        } label: {
-                            Text("\(plan.title) · $\(plan.monthlyPriceUSD)")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(isCurrent ? Color.Pidgy.fg1 : Color.Pidgy.fg3)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(
-                                    Capsule()
-                                        .fill(isCurrent ? Color.Pidgy.bg4 : Color.clear)
-                                        .overlay(Capsule().stroke(
-                                            isCurrent ? Color.Pidgy.accentFg.opacity(0.6) : Color.Pidgy.border2
-                                        ))
-                                )
+                if let plan = entitlements.selectedPlan {
+                    Text("\(plan.title) · $\(plan.monthlyPriceUSD)/mo")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.Pidgy.fg2)
+                } else {
+                    // First-time pick for an existing user who never chose one.
+                    // Not a toggle: it disappears once a plan is set, and after
+                    // that, switching only happens through Manage subscription.
+                    HStack(spacing: 8) {
+                        ForEach(PidgyPlan.allCases) { plan in
+                            Button {
+                                entitlements.startTrial(plan: plan)
+                            } label: {
+                                Text("\(plan.title) · $\(plan.monthlyPriceUSD)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(Color.Pidgy.fg2)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Capsule().stroke(Color.Pidgy.border2))
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
 
             licenseRow
+        }
+    }
+
+    private var planChangeHint: String {
+        switch entitlements.status {
+        case .none:
+            return "Choose a plan to start your free trial."
+        case .active:
+            return "\(entitlements.selectedPlan?.tagline ?? ""). To switch, use Manage subscription above."
+        default:
+            return entitlements.selectedPlan?.tagline ?? "Chosen when you set up Pidgy."
+        }
+    }
+
+    /// One contextual billing action — never a plan toggle. Trial/expired →
+    /// subscribe via Dodo checkout; active → manage (upgrade/downgrade/cancel)
+    /// via the Dodo customer portal.
+    @ViewBuilder
+    private var planActionButton: some View {
+        switch entitlements.status {
+        case .active:
+            if let url = entitlements.manageSubscriptionURL {
+                PrefGhostButton(title: "Manage subscription", systemImage: "creditcard") {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                Text("Manage from your Dodo email")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.Pidgy.fg4)
+            }
+        case .trial, .expired:
+            if let plan = entitlements.selectedPlan, let url = entitlements.checkoutURL(for: plan) {
+                PrefGhostButton(title: "Subscribe", systemImage: "creditcard") {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                Text("Payments coming soon")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.Pidgy.fg4)
+            }
+        case .none:
+            Text("Choose a plan during setup")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.Pidgy.fg4)
         }
     }
 
@@ -1660,40 +1709,65 @@ struct DashboardPreferencesPage: View {
 
     private func loadAIConfig() {
         selectedAIProvider = aiService.providerType
-        loadAIFields(for: selectedAIProvider)
+        let persisted = aiService.persistedConfiguration(for: aiService.providerType)
+        // Re-select the preset row from the persisted (type, base URL).
+        selectedBYOKProvider = BYOKProvider.infer(
+            providerType: aiService.providerType,
+            baseURL: persisted?.baseURL
+        )
+        loadAIFields(for: selectedBYOKProvider)
     }
 
-    private func loadAIFields(for provider: AIProviderConfig.ProviderType) {
-        guard provider != .none else {
-            aiApiKey = ""
-            aiModel = ""
-            return
-        }
-
-        if let persisted = aiService.persistedConfiguration(for: provider) {
+    private func loadAIFields(for preset: BYOKProvider) {
+        if let persisted = aiService.persistedConfiguration(for: preset.providerType) {
             aiApiKey = persisted.apiKey
-            aiModel = persisted.model == provider.defaultModel ? "" : persisted.model
+            // Leave the model field blank when it's just the default (the
+            // placeholder shows it); only surface an explicitly-chosen model.
+            aiModel = persisted.model == preset.defaultModel ? "" : persisted.model
+            aiBaseURL = preset.requiresCustomBaseURL ? (persisted.baseURL?.absoluteString ?? "") : ""
         } else {
             aiApiKey = ""
             aiModel = ""
+            aiBaseURL = ""
         }
     }
 
     private func saveAIConfig() {
+        let preset = selectedBYOKProvider
         let trimmedKey = aiApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedModel = aiModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBaseURL = aiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if selectedAIProvider != .none && trimmedKey.isEmpty {
+        guard !trimmedKey.isEmpty else {
             setAIStatus(.error("API key required"))
             return
         }
 
+        // Resolve the OpenAI-compatible endpoint: custom → user field (must be
+        // an https URL); a named preset → its built-in base URL; Anthropic →
+        // nil (the native client owns its endpoint).
+        var endpoint: URL?
+        if preset.providerType == .openai {
+            if preset.requiresCustomBaseURL {
+                guard let url = URL(string: trimmedBaseURL), url.scheme?.hasPrefix("http") == true else {
+                    setAIStatus(.error("Enter a valid base URL (https://…/chat/completions)"))
+                    return
+                }
+                endpoint = url
+            } else {
+                endpoint = preset.defaultBaseURL
+            }
+        }
+
         aiApiKey = trimmedKey
         aiModel = trimmedModel
+        aiBaseURL = trimmedBaseURL
+        selectedAIProvider = preset.providerType
         aiService.configure(
-            type: selectedAIProvider,
-            apiKey: selectedAIProvider == .none ? "" : trimmedKey,
-            model: trimmedModel.isEmpty ? nil : trimmedModel
+            type: preset.providerType,
+            apiKey: trimmedKey,
+            model: trimmedModel.isEmpty ? preset.defaultModel : trimmedModel,
+            openAIEndpointURL: endpoint
         )
         setAIStatus(.success("Saved"))
     }
@@ -1704,8 +1778,8 @@ struct DashboardPreferencesPage: View {
         defer { isTestingConnection = false }
 
         saveAIConfig()
-        guard selectedAIProvider != .none else {
-            testConnectionStatus = .error("No provider")
+        guard aiService.isConfigured else {
+            testConnectionStatus = .error("Save a valid key first")
             return
         }
 
@@ -1732,7 +1806,9 @@ struct DashboardPreferencesPage: View {
         apiHash = ""
         aiApiKey = ""
         aiModel = ""
+        aiBaseURL = ""
         selectedAIProvider = .none
+        selectedBYOKProvider = .openAI
         includeBotsInAISearch = false
         showPigeonFlock = true
         usageOverview = .empty
@@ -1740,10 +1816,16 @@ struct DashboardPreferencesPage: View {
         routingSnapshots = []
         setTelegramStatus(.success("Reset complete"))
 
-        // Send the user back to the welcome screen — exactly like a fresh
-        // install. AppDelegate listens for this and (re)opens the onboarding
-        // window after closing the dashboard.
-        NotificationCenter.default.post(name: .pidgyReplayOnboarding, object: nil)
+        // Data is wiped (including the onboarding-complete flag) — relaunch into
+        // a fresh process, exactly like logout. We must NOT re-onboard in-process:
+        // deleteAllLocalData() already called TelegramService.stop(), so TDLib is
+        // closed, and re-driving auth on a closed/stale client makes TDLib reject
+        // setAuthenticationPhoneNumber as "unexpected". A clean process brings
+        // TDLib up in authorizationStateWaitPhoneNumber, and the cleared flag
+        // drops the user straight onto the welcome screen — a true fresh install.
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.relaunchIntoFreshProcess()
+        }
     }
 
     @MainActor

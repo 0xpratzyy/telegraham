@@ -56,15 +56,34 @@ final class EntitlementStore: ObservableObject {
     /// fold it in. Safe to call on launch and after returning from
     /// checkout.
     func refreshFromBackend() async {
-        guard let activeUntil = await payments.refreshEntitlement() else { return }
-        if let plan = subscription.selectedPlan {
-            markActive(plan: plan, until: activeUntil)
+        switch await payments.refreshEntitlement() {
+        case .active(let until):
+            if let plan = subscription.selectedPlan {
+                markActive(plan: plan, until: until)
+            }
+        case .lapsed:
+            // Backend says the subscription ended — drop the paid entitlement so
+            // status falls back to trial/expired. Network failures return
+            // .unknown (below), NOT .lapsed, so this only fires on a real
+            // cancellation / refund, never on an offline launch.
+            if subscription.activeUntil != nil {
+                var updated = subscription
+                updated.activeUntil = nil
+                subscription = updated
+            }
+        case .unknown:
+            break  // offline / transient — keep the cached entitlement (grace window)
         }
     }
 
     func checkoutURL(for plan: PidgyPlan) -> URL? {
         payments.checkoutURL(for: plan)
     }
+
+    /// Dodo customer-portal link for managing the live subscription —
+    /// upgrade/downgrade/cancel/update card. This is the ONLY way to switch
+    /// plans; the app never toggles the plan locally. nil until configured.
+    var manageSubscriptionURL: URL? { BundledSecrets.dodoPortalURL }
 
     /// True when a license key is stored for this device.
     var hasLicenseKey: Bool {
@@ -75,9 +94,26 @@ final class EntitlementStore: ObservableObject {
     /// entitlement. Throws on activation failure (bad key / device limit).
     func activateLicense(_ licenseKey: String, deviceName: String) async throws {
         let trimmed = licenseKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let instanceID = try await payments.activate(licenseKey: trimmed, deviceName: deviceName)
-        try? KeychainManager.save(trimmed, for: .dodoLicenseKey)
-        try? KeychainManager.save(instanceID, for: .dodoLicenseInstanceID)
+        let result = try await payments.activate(licenseKey: trimmed, deviceName: deviceName)
+        do {
+            try KeychainManager.save(trimmed, for: .dodoLicenseKey)
+            try KeychainManager.save(result.instanceID, for: .dodoLicenseInstanceID)
+        } catch {
+            // The slot is now consumed on Dodo but we couldn't persist the key —
+            // release it and surface the error so the user can retry, rather than
+            // silently locking out a device that can never deactivate.
+            await payments.deactivate(licenseKey: trimmed, instanceID: result.instanceID)
+            throw error
+        }
+        // The activate response carries the product → set the tier so the
+        // entitlement reflects what they actually bought, even if no plan was
+        // pre-selected (e.g. after a reset that cleared selectedPlan).
+        if let productID = result.productID,
+           let plan = BundledSecrets.planForDodoProduct(id: productID) {
+            var updated = subscription
+            updated.selectedPlan = plan
+            subscription = updated
+        }
         await refreshFromBackend()
     }
 

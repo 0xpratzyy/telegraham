@@ -396,7 +396,9 @@ struct OnboardingFlow: View {
             // Auth done → choose a plan (starts the free trial) → done.
             // Don't bounce back to plan if we're already past it.
             if step != .done {
-                advance(to: .plan)
+                // Pre-cutover the plan step is hidden (BillingGate.showBillingUI),
+                // so auth-ready goes straight to Done — the bundled AI just works.
+                advance(to: BillingGate.showBillingUI ? .plan : .done)
             }
         default:
             break
@@ -727,7 +729,7 @@ private struct TourArt: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(hex: 0x1A1B1F))
+                .fill(Color(hex: 0x161616))
             switch kind {
             case .inbox: TourArtInbox()
             case .search: TourArtSearch()
@@ -739,233 +741,140 @@ private struct TourArt: View {
 }
 
 private struct TourArtInbox: View {
+    private let rows: [(icon: String, title: String, sub: String)] = [
+        ("arrow.uturn.left", "Reply needed", "Direct message · 3h"),
+        ("checkmark.square", "Task", "Due today"),
+        ("at", "Mention", "Group chat · 1h")
+    ]
+
     var body: some View {
-        GeometryReader { geo in
-            let rows: [(label: String, sub: String, opacity: Double)] = [
-                ("Reply needed", "Rahul · 3h", 0.85),
-                ("Task", "Pay rent · today", 0.67),
-                ("Mention", "@you in FBI Loop", 0.49)
-            ]
-            let scale = geo.size.width / 360.0
-            ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
-                let y = (22 + CGFloat(i) * 38) * scale
-                ZStack(alignment: .leading) {
+        VStack(spacing: 7) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle().fill(Color.white.opacity(0.06))
+                        Image(systemName: row.icon)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.72))
+                    }
+                    .frame(width: 24, height: 24)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(row.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color(hex: 0xF0F0F0))
+                        Text(row.sub)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Color.white.opacity(0.45))
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color(hex: 0x15161A))
+                        .fill(Color.white.opacity(0.03))
                         .overlay(
                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                .stroke(Color.white.opacity(0.06), lineWidth: 1)
                         )
-                        .frame(width: 220 * scale, height: 30 * scale)
-
-                    HStack(spacing: 8 * scale) {
-                        Capsule()
-                            .fill(Color.white.opacity(row.opacity))
-                            .frame(width: 2.5 * scale, height: 16 * scale)
-                            .padding(.leading, 8 * scale)
-                        Circle()
-                            .fill(Color.white.opacity(0.10))
-                            .frame(width: 10 * scale, height: 10 * scale)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(row.label)
-                                .font(.system(size: 9 * scale, weight: .semibold))
-                                .foregroundStyle(Color(hex: 0xE8E9EC))
-                            Text(row.sub)
-                                .font(.system(size: 8 * scale))
-                                .foregroundStyle(Color.white.opacity(0.45))
-                        }
-                        Spacer()
-                        Circle()
-                            .fill(Color.white.opacity(0.7 - Double(i) * 0.18))
-                            .frame(width: 4 * scale, height: 4 * scale)
-                            .padding(.trailing, 12 * scale)
-                    }
-                    .frame(width: 220 * scale, height: 30 * scale)
-                }
-                .position(x: 230 * scale, y: y + 15 * scale)
+                )
             }
         }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
     }
 }
 
 private struct TourArtSearch: View {
-    var body: some View {
-        GeometryReader { geo in
-            let scale = geo.size.width / 360.0
-            VStack(alignment: .leading, spacing: 8 * scale) {
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color(hex: 0x15161A))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                        )
-                    HStack(spacing: 8 * scale) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 11 * scale, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.6))
-                        Text("where did Sahil send the wireframes")
-                            .font(.system(size: 11 * scale, weight: .medium))
-                            .foregroundStyle(Color(hex: 0xE8E9EC))
-                            .lineLimit(1)
-                        Spacer()
-                    }
-                    .padding(.leading, 16 * scale)
-                }
-                .frame(width: 312 * scale, height: 40 * scale)
+    private let results: [(icon: String, title: String, sub: String)] = [
+        ("doc.text", "Shared file", "report-q3.pdf · last week"),
+        ("text.bubble", "Group chat", "sent it over · Mon")
+    ]
 
-                ForEach(0..<2) { i in
-                    let r: (who: String, hl: String, when: String) = i == 0
-                        ? ("Sahil", "wireframes_v3.fig", "yesterday")
-                        : ("You", "check the new wires", "Mon")
-                    HStack(spacing: 10 * scale) {
-                        Circle()
-                            .fill(Color.white.opacity(i == 0 ? 0.22 : 0.14))
-                            .frame(width: 16 * scale, height: 16 * scale)
-                            .overlay(
-                                Text(String(r.who.prefix(1)))
-                                    .font(.system(size: 8 * scale, weight: .semibold))
-                                    .foregroundStyle(.white)
-                            )
-                        VStack(alignment: .leading, spacing: 2 * scale) {
-                            Text("\(r.who) · Design Loop")
-                                .font(.system(size: 9.5 * scale, weight: .medium))
-                                .foregroundStyle(Color(hex: 0xE8E9EC))
-                            HStack(spacing: 4 * scale) {
-                                Text(r.hl)
-                                    .font(.system(size: 8.5 * scale, weight: .medium))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 4 * scale)
-                                    .padding(.vertical, 1 * scale)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                            .fill(Color.white.opacity(0.10))
-                                    )
-                                Text("· \(r.when)")
-                                    .font(.system(size: 8 * scale))
-                                    .foregroundStyle(Color.white.opacity(0.4))
-                            }
-                        }
-                        Spacer()
-                    }
-                    .frame(width: 312 * scale, height: 32 * scale)
-                    .padding(.leading, 8 * scale)
-                    .background(
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                Text("where's the file from last week?")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(hex: 0xF0F0F0))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.white.opacity(0.04))
+                    .overlay(
                         RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(Color.white.opacity(0.03))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                            )
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
                     )
+            )
+
+            ForEach(Array(results.enumerated()), id: \.offset) { _, r in
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle().fill(Color.white.opacity(0.06))
+                        Image(systemName: r.icon)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.7))
+                    }
+                    .frame(width: 22, height: 22)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(r.title)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(Color(hex: 0xF0F0F0))
+                        Text(r.sub)
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.white.opacity(0.45))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
             }
-            .padding(.leading, 24 * scale)
-            .padding(.top, 20 * scale)
         }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
     }
 }
 
 private struct TourArtLocal: View {
     var body: some View {
-        GeometryReader { geo in
-            let scale = geo.size.width / 360.0
-            ZStack {
-                ForEach([78.0, 56.0, 36.0], id: \.self) { r in
-                    Circle()
-                        .stroke(
-                            Color.white.opacity(0.10),
-                            style: StrokeStyle(lineWidth: 1, dash: r == 78 ? [3, 4] : [])
-                        )
-                        .frame(width: r * 2 * scale, height: r * 2 * scale)
+        HStack(spacing: 26) {
+            VStack(spacing: 9) {
+                Image(systemName: "icloud.slash")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(Color.white.opacity(0.38))
+                Text("No cloud")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Color.white.opacity(0.4))
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(width: 1, height: 46)
+
+            VStack(spacing: 9) {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: "laptopcomputer")
+                        .font(.system(size: 34, weight: .light))
+                        .foregroundStyle(Color.white.opacity(0.82))
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color(hex: 0xF0F0F0))
+                        .padding(4)
+                        .background(Circle().fill(Color(hex: 0x161616)))
+                        .offset(x: 5, y: 3)
                 }
-
-                // Crossed-out cloud server (left)
-                ZStack {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .stroke(Color.white.opacity(0.45), lineWidth: 1.2)
-                        .frame(width: 36 * scale, height: 22 * scale)
-                    HStack(spacing: 4 * scale) {
-                        Circle().fill(Color.white.opacity(0.45)).frame(width: 3 * scale, height: 3 * scale)
-                        Circle().fill(Color.white.opacity(0.45)).frame(width: 3 * scale, height: 3 * scale)
-                        Spacer()
-                    }
-                    .frame(width: 36 * scale, height: 22 * scale)
-                    .padding(.leading, 8 * scale)
-                    Path { p in
-                        p.move(to: CGPoint(x: -4 * scale, y: -4 * scale))
-                        p.addLine(to: CGPoint(x: 40 * scale, y: 26 * scale))
-                    }
-                    .stroke(Color.white.opacity(0.7), lineWidth: 1.6 * scale)
-                    .frame(width: 36 * scale, height: 22 * scale)
-                }
-                .opacity(0.55)
-                .position(x: 92 * scale, y: 70 * scale)
-
-                Text("no cloud")
-                    .font(.system(size: 8.5 * scale))
-                    .foregroundStyle(Color.white.opacity(0.5))
-                    .position(x: 92 * scale, y: 102 * scale)
-
-                // Mac (right)
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.white.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(Color.white.opacity(0.22), lineWidth: 1)
-                        )
-                        .frame(width: 44 * scale, height: 50 * scale)
-
-                    VStack(alignment: .leading, spacing: 3 * scale) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Color.white.opacity(0.7))
-                            .frame(width: 14 * scale, height: 3 * scale)
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Color.white.opacity(0.2))
-                            .frame(width: 22 * scale, height: 2 * scale)
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Color.white.opacity(0.2))
-                            .frame(width: 18 * scale, height: 2 * scale)
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Color.white.opacity(0.2))
-                            .frame(width: 20 * scale, height: 2 * scale)
-                    }
-                    .frame(width: 32 * scale, height: 28 * scale, alignment: .topLeading)
-                    .padding(6 * scale)
-                    .background(
-                        RoundedRectangle(cornerRadius: 2, style: .continuous)
-                            .fill(Color(hex: 0x0E0F12))
-                            .frame(width: 32 * scale, height: 28 * scale)
-                    )
-                    .offset(y: -8 * scale)
-
-                    Circle()
-                        .fill(Color.white.opacity(0.3))
-                        .frame(width: 3.2 * scale, height: 3.2 * scale)
-                        .offset(y: 18 * scale)
-                }
-                .position(x: 270 * scale, y: 80 * scale)
-
-                Text("your Mac")
-                    .font(.system(size: 8.5 * scale))
-                    .foregroundStyle(Color.white.opacity(0.5))
-                    .position(x: 270 * scale, y: 122 * scale)
-
-                // Dashed connector
-                Path { p in
-                    p.move(to: CGPoint(x: 214 * scale, y: 80 * scale))
-                    p.addQuadCurve(
-                        to: CGPoint(x: 246 * scale, y: 76 * scale),
-                        control: CGPoint(x: 234 * scale, y: 80 * scale)
-                    )
-                }
-                .stroke(
-                    Color.white.opacity(0.4),
-                    style: StrokeStyle(lineWidth: 1.2, dash: [2, 3])
-                )
+                Text("On your Mac")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Color.white.opacity(0.6))
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -1476,7 +1385,7 @@ private struct PlanStep: View {
             )
             .padding(.top, 28)
 
-            Text("You can switch plans or add your key anytime in Preferences.")
+            Text("You can update your AI key anytime in Preferences. Plan changes go through Manage subscription.")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.Pidgy.fg4)
                 .padding(.top, 14)

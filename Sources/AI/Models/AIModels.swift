@@ -281,6 +281,9 @@ struct AIProviderConfig {
     let providerType: ProviderType
     let apiKey: String
     let model: String
+    /// BYOK custom OpenAI-compatible endpoint (Gemini/xAI/Groq/OpenRouter/
+    /// custom). nil → the provider's default (api.openai.com for `.openai`).
+    var baseURL: URL? = nil
 
     enum ProviderType: String, CaseIterable, Sendable {
         case claude = "Claude"

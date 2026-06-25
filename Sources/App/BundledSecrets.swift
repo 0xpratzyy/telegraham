@@ -72,6 +72,25 @@ enum BundledSecrets {
         return url
     }
 
+    /// Dodo customer-portal link (manage / upgrade / downgrade / cancel).
+    /// Non-secret. Empty until you paste your portal URL from Dodo.
+    static var dodoPortalURL: URL? {
+        guard let raw = stringValue(forKey: "PidgyBundledDodoPortalURL"),
+              let url = URL(string: raw) else { return nil }
+        return url
+    }
+
+    /// Resolve a Dodo product id (from the activate response) → plan. The ids
+    /// are embedded in the per-plan checkout URLs (`…/buy/{product_id}`), so we
+    /// derive the mapping from those — no extra config, and it stays correct
+    /// across test/live since both flow from the same checkout URLs.
+    static func planForDodoProduct(id: String) -> PidgyPlan? {
+        guard !id.isEmpty else { return nil }
+        return PidgyPlan.allCases.first {
+            dodoCheckoutURL(for: $0)?.absoluteString.contains(id) == true
+        }
+    }
+
     /// Sentry DSN baked in for crash + error telemetry
     /// (`PIDGY_SENTRY_DSN`). Returns nil when blank — `PidgyTelemetry.start`
     /// then skips Sentry init entirely so source builds never make

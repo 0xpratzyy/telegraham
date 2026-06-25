@@ -56,6 +56,22 @@ export default {
       return json(401, { error: "invalid_token" });
     }
 
+    // --- Per-user license gate (managed/Vertex path only) ---
+    // Ships DORMANT behind ENFORCE_LICENSE so deploying it changes nothing
+    // until the cutover. When a license is presented we validate it against
+    // Dodo's PUBLIC validate endpoint (no API key) and reject a lapsed/refunded
+    // one — this is what stops a cancelled subscriber from continuing to spend
+    // our managed AI budget. A request with NO license still passes the
+    // shared-token gate above (trial + grandfathered users); tighten to require
+    // a license once those cohorts are migrated. Fails OPEN on a Dodo outage so
+    // a validate blip never locks out paying users (mirrors the client).
+    if (isVertex && env.ENFORCE_LICENSE === "1") {
+      const license = request.headers.get("X-Pidgy-License");
+      if (license && !(await dodoLicenseValid(env, license))) {
+        return json(402, { error: "license_invalid_or_lapsed" });
+      }
+    }
+
     // --- Daily request-count cap (counters only; never content) ---
     // Belt: this cap. Suspenders: the hard spend limits on the upstream
     // accounts (OpenAI dashboard cap; GCP budget alert on the Vertex project).
@@ -124,6 +140,32 @@ export default {
 // a cold isolate mints once. No persistence — the token never touches KV.
 let cachedToken = null; // { token: string, exp: number(epoch secs) }
 let inflightToken = null; // Promise<string> while a mint is in progress
+
+// --- Dodo license validation (PUBLIC endpoint, no API key) -----------------
+// false ONLY on an explicit invalid (4xx / valid:false). Fails OPEN on a
+// network error or 5xx so a Dodo outage never locks out a paying user — the
+// same network-vs-invalid distinction the client makes.
+async function dodoLicenseValid(env, licenseKey) {
+  const base = env.DODO_BASE_URL || "https://test.dodopayments.com";
+  let resp;
+  try {
+    resp = await fetch(`${base}/licenses/validate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ license_key: licenseKey }),
+    });
+  } catch (_) {
+    return true; // couldn't reach Dodo → fail open
+  }
+  if (resp.status >= 500) return true; // server blip → fail open
+  if (!resp.ok) return false; // 4xx → genuinely invalid
+  try {
+    const data = await resp.json();
+    return data.valid === true;
+  } catch (_) {
+    return true; // unparseable → fail open
+  }
+}
 
 async function getVertexToken(sa) {
   const now = Math.floor(Date.now() / 1000);

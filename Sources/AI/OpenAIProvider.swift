@@ -3,6 +3,10 @@ import Foundation
 final class OpenAIProvider: AIProvider {
     private let apiKey: String
     private let model: String
+    /// Sent as `X-Pidgy-License` on every request when set. Only the managed
+    /// (proxy) path passes one — the Worker gates managed AI on an active
+    /// subscription. BYO-key requests go direct to the provider and omit it.
+    private let licenseKey: String?
     /// Where requests are sent. Defaults to OpenAI directly; the zero-setup
     /// flow overrides this with the AI proxy Worker URL (issue #26), in
     /// which case `apiKey` is the revocable proxy gate token rather than a
@@ -19,11 +23,13 @@ final class OpenAIProvider: AIProvider {
     init(
         apiKey: String,
         model: String = AppConstants.AI.defaultOpenAIModel,
-        endpointURL: URL = AppConstants.AI.openAIBaseURL
+        endpointURL: URL = AppConstants.AI.openAIBaseURL,
+        licenseKey: String? = nil
     ) {
         self.apiKey = apiKey
         self.model = model
         self.endpointURL = endpointURL
+        self.licenseKey = licenseKey
     }
 
     // MARK: - AIProvider
@@ -284,6 +290,9 @@ final class OpenAIProvider: AIProvider {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if let licenseKey, !licenseKey.isEmpty {
+            request.setValue(licenseKey, forHTTPHeaderField: "X-Pidgy-License")
+        }
 
         var body: [String: Any] = [
             "model": model,

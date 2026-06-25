@@ -79,6 +79,10 @@ targets:
         PidgyBundledOpenAIApiKey: $(PIDGY_BUNDLED_OPENAI_API_KEY)
         PidgyBundledAIProxyURL: $(PIDGY_AI_PROXY_URL)
         PidgyBundledAIProxyToken: $(PIDGY_AI_PROXY_TOKEN)
+        PidgyBundledDodoBaseURL: $(PIDGY_DODO_BASE_URL)
+        PidgyBundledDodoCheckoutBYOK: $(PIDGY_DODO_CHECKOUT_BYOK)
+        PidgyBundledDodoCheckoutBundled: $(PIDGY_DODO_CHECKOUT_BUNDLED)
+        PidgyBundledDodoPortalURL: $(PIDGY_DODO_PORTAL_URL)
         PidgyBundledSentryDsn: $(PIDGY_SENTRY_DSN)
         PidgyBuildCommitSHA: $(PIDGY_BUILD_COMMIT_SHA)
         # Sparkle auto-updater wiring.

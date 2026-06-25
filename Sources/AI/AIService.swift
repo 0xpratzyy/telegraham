@@ -72,7 +72,11 @@ final class AIService: ObservableObject {
         // `apiKey` is then the proxy gate token. Only the zero-setup
         // bootstrap passes this — BYO keys always go direct to OpenAI
         // (their key, their bill, no transit through our infra).
-        openAIEndpointURL: URL? = nil
+        openAIEndpointURL: URL? = nil,
+        // Sent as X-Pidgy-License on the managed (proxy) path so the Worker can
+        // gate managed AI on an active subscription. Only the managed bootstrap
+        // passes one; BYO-key configs leave it nil.
+        licenseKey: String? = nil
     ) {
         let requestedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedModel = normalizedModel(
@@ -87,7 +91,8 @@ final class AIService: ObservableObject {
             provider = OpenAIProvider(
                 apiKey: apiKey,
                 model: resolvedModel,
-                endpointURL: openAIEndpointURL ?? AppConstants.AI.openAIBaseURL
+                endpointURL: openAIEndpointURL ?? AppConstants.AI.openAIBaseURL,
+                licenseKey: licenseKey
             )
         case .none:
             provider = NoAIProvider()
@@ -104,14 +109,34 @@ final class AIService: ObservableObject {
         // rotating the key in a follow-up build actually takes effect, and
         // "Reset all local data" doesn't leave a stale key behind.
         if persist {
-            saveConfiguration(type: type, apiKey: apiKey, model: resolvedModel)
+            saveConfiguration(
+                type: type,
+                apiKey: apiKey,
+                model: resolvedModel,
+                baseURL: type == .openai ? openAIEndpointURL : nil
+            )
         }
     }
 
     // MARK: - High-Level AI Operations
 
     /// Semantic search: find chats relevant to a query by analyzing messages.
+    /// Paid-feature gate. Dormant while `BillingGate.enforce` is false (the
+    /// current beta) — `aiAllowed` is then always true, so this never throws.
+    /// Once enforce flips on at the paywall cutover, every LLM-backed feature
+    /// requires an active trial/subscription (or the founding-tester
+    /// grandfather). Centralised so the paywall can't leak through one entry
+    /// point that forgot to check; the Worker license gate is the server-side
+    /// backstop. NOTE for cutover: if AI search should stay free, drop the
+    /// guard from semanticSearch/agenticSearch/rerankSearchResults only.
+    private func requireAIEntitlement() throws {
+        guard BillingGate.aiAllowed(EntitlementStore.shared.status) else {
+            throw AIError.providerNotConfigured
+        }
+    }
+
     func semanticSearch(query: String, messages: [TGMessage]) async throws -> [SemanticSearchResult] {
+        try requireAIEntitlement()
         let snippets = MessageSnippet.fromMessages(messages)
         guard !snippets.isEmpty else { return [] }
         let dtos = try await provider.semanticSearch(query: query, messages: snippets)
@@ -133,6 +158,7 @@ final class AIService: ObservableObject {
         candidates: [AgenticSearchCandidate],
         myUserId: Int64
     ) async throws -> [AgenticSearchResult] {
+        try requireAIEntitlement()
         guard !candidates.isEmpty else { return [] }
 
         let maxMessages = AppConstants.AI.AgenticSearch.maxMessagesPerChat
@@ -196,6 +222,7 @@ final class AIService: ObservableObject {
         query: String,
         candidates: [(chatId: Int64, chatTitle: String, bestMessage: String)]
     ) async throws -> [Int64] {
+        try requireAIEntitlement()
         guard !candidates.isEmpty else { return [] }
         return try await provider.rerankResults(
             query: query,
@@ -215,6 +242,7 @@ final class AIService: ObservableObject {
     /// point with a focused prompt rather than introducing a new
     /// AIProvider method — same call shape, just parsed differently.
     func suggestReplies(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> [String] {
+        try requireAIEntitlement()
         let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
         guard !snippets.isEmpty else { return [] }
         // Context layer: draft in the user's own voice when we have a profile.
@@ -242,6 +270,7 @@ final class AIService: ObservableObject {
     /// the last week or so. Used by the reply-queue detail pane's
     /// "Catch me up" action on QUIET items.
     func catchUpSummary(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> String {
+        try requireAIEntitlement()
         let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
         guard !snippets.isEmpty else { return "" }
         let prompt = """
@@ -256,6 +285,7 @@ final class AIService: ObservableObject {
     /// Generate a follow-up suggestion for a conversation. Marks the user's own messages with [ME].
     /// Returns (isRelevant, suggestedAction). AI decides if the chat is BD-relevant.
     func followUpSuggestion(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> (Bool, String) {
+        try requireAIEntitlement()
         let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
         guard !snippets.isEmpty else { return (true, "") }
         return try await provider.generateFollowUpSuggestion(chatTitle: chatTitle, messages: snippets)
@@ -264,6 +294,7 @@ final class AIService: ObservableObject {
     /// AI-powered pipeline triage. Marks [ME] messages and sends to AI.
     /// Supports decision + one-step "need_more" requests.
     func categorizePipelineChat(chat: TGChat, messages: [TGMessage], myUserId: Int64, myUser: TGUser?) async throws -> PipelineTriageResult {
+        try requireAIEntitlement()
         let snippets = conversationSnippets(messages: messages, chatTitle: chat.title, myUserId: myUserId)
         guard !snippets.isEmpty else {
             return PipelineTriageResult(
@@ -324,6 +355,7 @@ final class AIService: ObservableObject {
     }
 
     func discoverDashboardTopics(messages: [TGMessage]) async throws -> [DashboardTopicDTO] {
+        try requireAIEntitlement()
         let snippets = MessageSnippet.fromMessages(messages)
         guard !snippets.isEmpty else { return [] }
         return try await provider.discoverDashboardTopics(messages: snippets)
@@ -335,6 +367,7 @@ final class AIService: ObservableObject {
         topics: [DashboardTopic],
         myUserId: Int64
     ) async throws -> [DashboardTaskCandidate] {
+        try requireAIEntitlement()
         let snippets = conversationSnippets(messages: messages, chatTitle: chat.title, myUserId: myUserId)
         guard !snippets.isEmpty else { return [] }
         let extracted = try await provider.extractDashboardTasks(
@@ -355,6 +388,7 @@ final class AIService: ObservableObject {
         myUserId: Int64,
         chatTitleResolver: (Int64) -> String
     ) async throws -> String {
+        try requireAIEntitlement()
         let snippets: [MessageSnippet] = messages
             .sorted { $0.date > $1.date }
             .compactMap { msg in
@@ -388,6 +422,7 @@ final class AIService: ObservableObject {
     /// messages. Reuses the generic `summarize` path with a style-only prompt;
     /// returns "" (or "Not enough messages yet.") when the sample is too thin.
     func extractVoiceProfile(outgoingMessages: [DatabaseManager.MessageRecord]) async throws -> String {
+        try requireAIEntitlement()
         let snippets: [MessageSnippet] = outgoingMessages.compactMap { record in
             guard let text = record.textContent,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -408,6 +443,7 @@ final class AIService: ObservableObject {
         _ candidates: [DashboardTaskTriageCandidate],
         myUserId: Int64
     ) async throws -> [DashboardTaskTriageResultDTO] {
+        try requireAIEntitlement()
         let candidateDTOs = candidates.compactMap { candidate -> DashboardTaskTriageCandidateDTO? in
             let snippets = conversationSnippets(
                 messages: candidate.messages,
@@ -533,7 +569,14 @@ final class AIService: ObservableObject {
             model: storedModel.isEmpty ? type.defaultModel : storedModel
         )
 
-        return AIProviderConfig(providerType: type, apiKey: apiKey, model: model)
+        var baseURL: URL?
+        if type == .openai {
+            let storedURL = (((try? KeychainManager.retrieve(for: .aiBaseURLOpenAI)) ?? nil) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !storedURL.isEmpty { baseURL = URL(string: storedURL) }
+        }
+
+        return AIProviderConfig(providerType: type, apiKey: apiKey, model: model, baseURL: baseURL)
     }
 
     // MARK: - Persistence
@@ -557,7 +600,12 @@ final class AIService: ObservableObject {
         }
 
         if let persisted = persistedConfiguration(for: type) {
-            configure(type: type, apiKey: persisted.apiKey, model: persisted.model)
+            configure(
+                type: type,
+                apiKey: persisted.apiKey,
+                model: persisted.model,
+                openAIEndpointURL: persisted.baseURL
+            )
             return
         }
 
@@ -599,7 +647,11 @@ final class AIService: ObservableObject {
                 apiKey: proxyToken,
                 model: AppConstants.AI.managedModel,
                 persist: false,
-                openAIEndpointURL: managedURL
+                openAIEndpointURL: managedURL,
+                // Forward the activated license so the Worker can gate managed
+                // AI per-user once ENFORCE_LICENSE is on. Re-read each launch
+                // (mirrors the bundled-token bootstrap); nil until activated.
+                licenseKey: (try? KeychainManager.retrieve(for: .dodoLicenseKey)) ?? nil
             )
             return
         }
@@ -619,7 +671,7 @@ final class AIService: ObservableObject {
         return components.url ?? proxyURL
     }
 
-    private func saveConfiguration(type: AIProviderConfig.ProviderType, apiKey: String, model: String) {
+    private func saveConfiguration(type: AIProviderConfig.ProviderType, apiKey: String, model: String, baseURL: URL?) {
         try? KeychainManager.save(type.rawValue, for: .aiProviderType)
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -639,6 +691,17 @@ final class AIService: ObservableObject {
                 try? KeychainManager.save(trimmedModel, for: modelKey)
             } else {
                 try? KeychainManager.delete(for: modelKey)
+            }
+        }
+
+        // BYOK custom base URL. Persist only a non-default endpoint; the
+        // default api.openai.com path stores nothing (so OpenAI BYOK + the
+        // bundled proxy both resolve to the built-in default on load).
+        if type == .openai {
+            if let baseURL, baseURL != AppConstants.AI.openAIBaseURL {
+                try? KeychainManager.save(baseURL.absoluteString, for: .aiBaseURLOpenAI)
+            } else {
+                try? KeychainManager.delete(for: .aiBaseURLOpenAI)
             }
         }
     }

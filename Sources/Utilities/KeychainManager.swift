@@ -16,6 +16,9 @@ enum KeychainManager {
         case aiApiKeyClaude = "com.pidgy.aiApiKey.claude"
         case aiModelOpenAI = "com.pidgy.aiModel.openai"
         case aiModelClaude = "com.pidgy.aiModel.claude"
+        // BYOK custom base URL for the OpenAI-compatible client (Gemini, xAI,
+        // Groq, OpenRouter, custom). Empty/absent → api.openai.com.
+        case aiBaseURLOpenAI = "com.pidgy.aiBaseURL.openai"
         case aiApiKey = "com.pidgy.aiApiKey"
         case aiModel = "com.pidgy.aiModel"
         // Dodo license-key subscription (CleanShot-style activation).
