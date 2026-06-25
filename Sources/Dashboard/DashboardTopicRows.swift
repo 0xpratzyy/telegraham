@@ -395,7 +395,7 @@ struct DashboardTopicChatRow: View {
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
         .frame(height: PidgyDashboardTheme.topicRowHeight)
-        .contentShape(Rectangle())
+        .pidgyRow()
     }
 }
 
@@ -447,7 +447,7 @@ struct DashboardTopicSemanticResultRow: View {
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
         .frame(height: PidgyDashboardTheme.topicRowHeight)
-        .contentShape(Rectangle())
+        .pidgyRow()
     }
 }
 

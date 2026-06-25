@@ -42,11 +42,7 @@ struct DashboardTaskRow: View {
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
         .frame(height: PidgyDashboardTheme.compactRowHeight)
-        .background(
-            RoundedRectangle(cornerRadius: PidgyDashboardTheme.selectedRowCornerRadius, style: .continuous)
-                .fill(isSelected ? Color.Pidgy.bg4 : Color.clear)
-        )
-        .contentShape(Rectangle())
+        .pidgyRow(isSelected: isSelected)
     }
 
     private var chat: TGChat? {
@@ -111,11 +107,7 @@ struct DashboardPersonRow: View {
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
         .frame(height: PidgyDashboardTheme.compactRowHeight)
-        .background(
-            RoundedRectangle(cornerRadius: PidgyDashboardTheme.selectedRowCornerRadius, style: .continuous)
-                .fill(isSelected ? Color.Pidgy.bg4 : Color.clear)
-        )
-        .contentShape(Rectangle())
+        .pidgyRow(isSelected: isSelected)
     }
 
     private var privateChat: TGChat? {

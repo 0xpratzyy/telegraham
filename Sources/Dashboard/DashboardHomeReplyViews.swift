@@ -327,7 +327,7 @@ struct DashboardReplyQueuePage: View {
                     .stroke(PidgyDashboardTheme.rule, lineWidth: 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pidgyPress)
         .help(sortNewestFirst ? "Sorted newest first — click to flip" : "Sorted oldest first — click to flip")
     }
 
@@ -418,6 +418,9 @@ struct DashboardReplyDetail: View {
 
     @State private var conversationContext: [DatabaseManager.MessageRecord] = []
     @State private var isLoadingContext = false
+    /// Drives the inline spinner on "Open in chat" while the Telegram deep
+    /// link resolves (a TDLib lookup that isn't instant on a cache miss).
+    @ObservedObject private var chatOpenState = ChatOpenState.shared
     /// Sender display names resolved on-demand for group messages
     /// whose cached `senderName` was nil. Keyed by sender user id.
     /// Populated by `resolveMissingSenderNames`.
@@ -528,15 +531,24 @@ struct DashboardReplyDetail: View {
             // top-bar refresh is the one source of truth for the user.
             HStack(spacing: 8) {
                 Button {
-                    if let item { onOpenChat(item.chat) }
+                    if let item, chatOpenState.openingChatId == nil { onOpenChat(item.chat) }
                 } label: {
-                    Label("Open in chat", systemImage: "paperplane")
+                    Group {
+                        if let item, chatOpenState.openingChatId == item.chat.id {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Open in chat", systemImage: "paperplane")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 36)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pidgyPress)
                 .foregroundStyle(PidgyDashboardTheme.primary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 36)
-                .background(DashboardCapsuleBackground())
+                .pidgyCapsuleBackground()
+                .disabled(item.map { chatOpenState.openingChatId == $0.chat.id } ?? false)
 
                 if let item {
                     Button {
@@ -548,7 +560,7 @@ struct DashboardReplyDetail: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .background(DashboardCapsuleBackground())
+                    .pidgyCapsuleBackground()
                     .help("Wrong category or suggestion? Flag this triage — you'll review what's shared before sending.")
                 }
             }
@@ -593,7 +605,7 @@ struct DashboardReplyDetail: View {
                         Label("Regenerate", systemImage: "arrow.clockwise")
                             .font(PidgyDashboardTheme.captionMediumFont)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pidgyPress)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
                     .padding(.top, 2)
                 } else if isGeneratingReplies && suggestedRepliesForChatId == item.chat.id {
@@ -612,7 +624,7 @@ struct DashboardReplyDetail: View {
                             .font(PidgyDashboardTheme.captionMediumFont)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                            .background(DashboardCapsuleBackground())
+                            .pidgyCapsuleBackground()
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(PidgyDashboardTheme.primary)
@@ -725,7 +737,7 @@ struct DashboardReplyDetail: View {
                             .font(PidgyDashboardTheme.captionMediumFont)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                            .background(DashboardCapsuleBackground())
+                            .pidgyCapsuleBackground()
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(PidgyDashboardTheme.primary)
@@ -952,7 +964,7 @@ struct DashboardFeedRow: View {
         }
         .padding(.horizontal, 8)
         .frame(height: PidgyDashboardTheme.rowHeight)
-        .contentShape(Rectangle())
+        .pidgyRow()
     }
 
     private var contextLine: String {
@@ -1019,11 +1031,7 @@ struct DashboardAttentionRow: View {
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
         .frame(height: 58)
-        .background(
-            RoundedRectangle(cornerRadius: PidgyDashboardTheme.selectedRowCornerRadius, style: .continuous)
-                .fill(isSelected ? Color.Pidgy.bg4 : Color.clear)
-        )
-        .contentShape(Rectangle())
+        .pidgyRow(isSelected: isSelected)
     }
 
     private var personName: String {

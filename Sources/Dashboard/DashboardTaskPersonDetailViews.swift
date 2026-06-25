@@ -135,7 +135,7 @@ struct DashboardTaskDetail: View {
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .background(DashboardCapsuleBackground())
+                    .pidgyCapsuleBackground()
                     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                     Button {
@@ -149,7 +149,7 @@ struct DashboardTaskDetail: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .background(DashboardCapsuleBackground())
+                    .pidgyCapsuleBackground()
                     .help("Not a task, wrong owner, or a duplicate? Flag it — you'll review what's shared before sending.")
                 }
             }
@@ -428,7 +428,7 @@ struct DashboardPersonDetail: View {
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
                 .frame(height: 36)
-                .background(DashboardCapsuleBackground())
+                .pidgyCapsuleBackground()
             }
         }
         .foregroundStyle(PidgyDashboardTheme.primary)

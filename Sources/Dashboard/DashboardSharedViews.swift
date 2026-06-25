@@ -633,13 +633,71 @@ struct DashboardSmallEmptyText: View {
 }
 
 struct DashboardCapsuleBackground: View {
+    /// Driven by the host control's hover state via `.pidgyCapsuleBackground()`.
+    /// `.onHover` does NOT fire on a view used as a `.background`, so hover has
+    /// to be tracked on the foreground control and passed in here.
+    var isHovering: Bool = false
+
     var body: some View {
         RoundedRectangle(cornerRadius: 10, style: .continuous)
             .fill(PidgyDashboardTheme.raised)
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(PidgyDashboardTheme.rule)
+                    .fill(Color.white.opacity(isHovering ? 0.06 : 0))
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isHovering ? Color.Pidgy.border3 : PidgyDashboardTheme.rule)
+            )
+    }
+}
+
+/// Hover-aware capsule chrome. Binds `.onHover` to the CONTENT (a foreground
+/// view, where it actually fires — unlike a `.background` view) and feeds the
+/// state into the capsule. The reliable replacement for
+/// `.background(DashboardCapsuleBackground())`.
+struct PidgyCapsuleHover: ViewModifier {
+    @State private var isHovering = false
+    func body(content: Content) -> some View {
+        content
+            .background(DashboardCapsuleBackground(isHovering: isHovering))
+            .pointerStyle(.link)
+            .onHover { isHovering = $0 }
+            .animation(PidgyMotion.hover, value: isHovering)
+    }
+}
+
+extension View {
+    /// Drop-in hover-aware replacement for `.background(DashboardCapsuleBackground())`.
+    func pidgyCapsuleBackground() -> some View { modifier(PidgyCapsuleHover()) }
+}
+
+/// The standard list-row treatment in ONE token: selected fill + hover
+/// highlight + pointing-hand cursor, at the shared row corner radius. Baked
+/// into every row component (DashboardTaskRow, DashboardFeedRow, DashboardPersonRow,
+/// DashboardAttentionRow, …) so hover + selection are automatic and identical
+/// everywhere the row is used — no per-screen wiring, nothing to forget.
+struct PidgyRowStyle: ViewModifier {
+    var isSelected: Bool = false
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: PidgyDashboardTheme.selectedRowCornerRadius, style: .continuous)
+                    .fill(isSelected ? Color.Pidgy.bg4 : (isHovering ? Color.white.opacity(0.05) : Color.clear))
+            )
+            .contentShape(Rectangle())
+            .pointerStyle(.link)
+            .onHover { isHovering = $0 }
+            .animation(PidgyMotion.hover, value: isHovering)
+    }
+}
+
+extension View {
+    /// Selected fill + hover highlight + pointing-hand cursor — the one row token.
+    func pidgyRow(isSelected: Bool = false) -> some View {
+        modifier(PidgyRowStyle(isSelected: isSelected))
     }
 }
 
@@ -827,6 +885,7 @@ struct DashboardSegmentedReplyFilter: View {
             )
         }
         .buttonStyle(.plain)
+        .pidgyHoverRow(cornerRadius: 8)
     }
 }
 
@@ -865,6 +924,7 @@ struct DashboardStatusSegments: View {
             )
         }
         .buttonStyle(.plain)
+        .pidgyHoverRow(cornerRadius: 7)
     }
 }
 
@@ -904,6 +964,7 @@ struct DashboardPeopleTabs: View {
             .frame(height: 32)
         }
         .buttonStyle(.plain)
+        .pidgyHoverRow(cornerRadius: 8)
     }
 }
 

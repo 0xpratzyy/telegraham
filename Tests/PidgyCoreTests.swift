@@ -1041,6 +1041,20 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(dmWeb.first, "https://web.telegram.org/k/#@alice")
         XCTAssertTrue(dmWeb.contains("https://web.telegram.org/k/#42"))
 
+        // DM — desktop with NO @username and NO known phone: the only tg://
+        // options (openmessage?user_id / ?chat_id) are accepted-but-don't-
+        // navigate on tdesktop, so they'd "succeed" and block the web fallback,
+        // leaving the user on the wrong conversation. A hint-less DM must route
+        // to Telegram Web (which navigates by user id) and emit no tg:// link.
+        let dmNoHintsDesktop = DeepLinkGenerator
+            .candidateChatURLs(chat: dm, target: .desktop)
+            .map(\.absoluteString)
+        XCTAssertEqual(dmNoHintsDesktop, ["https://web.telegram.org/k/#42"])
+        XCTAssertFalse(
+            dmNoHintsDesktop.contains { $0.hasPrefix("tg://") },
+            "a hint-less DM must not emit a tg:// openmessage candidate that 'succeeds' but never navigates"
+        )
+
         // Supergroup — desktop must anchor on the latest message's
         // SERVER id (TDLib id >> 20), never the deleted-by-now post=1.
         let supergroupMessage = makeTGMessage(

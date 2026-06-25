@@ -1,4 +1,17 @@
 import AppKit
+import Combine
+
+/// Shared "a chat is being opened right now" flag so the tapped "Open in chat"
+/// control can show a spinner while we resolve the Telegram deep link — a TDLib
+/// username/phone lookup (`getDeepLinkHints`) that isn't instant on a cache miss.
+/// Set + cleared by the openChat paths in DashboardView / LauncherView; observed
+/// by the buttons. Only one open runs at a time, so a single id is enough.
+@MainActor
+final class ChatOpenState: ObservableObject {
+    static let shared = ChatOpenState()
+    @Published var openingChatId: Int64?
+    private init() {}
+}
 
 /// Where "Open in chat" sends the user. Configurable in Preferences and
 /// asked once on the onboarding Done screen; until the user chooses, the
@@ -87,8 +100,24 @@ enum DeepLinkGenerator {
                 if let phone = sanitizePhone(phoneNumber), !phone.isEmpty {
                     candidates.append("tg://resolve?phone=\(phone)")
                 }
-                candidates.append("tg://openmessage?user_id=\(userId)")
-                candidates.append("tg://openmessage?chat_id=\(chat.id)")
+                if candidates.isEmpty {
+                    // No @username and no known phone → the only remaining tg://
+                    // options are openmessage?user_id / ?chat_id, which Telegram
+                    // Desktop ACCEPTS (so NSWorkspace.open reports success) but
+                    // silently refuses to navigate — the same dead behavior as
+                    // basic groups, verified live on com.tdesktop.Telegram. Emitting
+                    // them would "succeed" and block the web fallback, leaving the
+                    // user on whatever Telegram already showed ("opens the app but
+                    // not the conversation"). Web K navigates by user id, so a
+                    // hint-less DM goes straight there.
+                    candidates.append("https://web.telegram.org/k/#\(userId)")
+                } else {
+                    // resolve?domain / resolve?phone above navigate in-app; keep
+                    // openmessage only as a rarely-reached last-ditch (it's never
+                    // hit when a resolve link is accepted first).
+                    candidates.append("tg://openmessage?user_id=\(userId)")
+                    candidates.append("tg://openmessage?chat_id=\(chat.id)")
+                }
 
             case .basicGroup:
                 // Basic (legacy, non-super) groups have NO working tg://

@@ -662,6 +662,8 @@ struct DashboardView: View {
 
     private func openChat(_ chat: TGChat) {
         Task { @MainActor in
+            ChatOpenState.shared.openingChatId = chat.id
+            defer { ChatOpenState.shared.openingChatId = nil }
             Task {
                 await IndexScheduler.shared.prioritize(chatId: chat.id)
                 await RecentSyncCoordinator.shared.prioritize(chatId: chat.id)
@@ -803,7 +805,7 @@ struct DashboardTopBar: View {
                 }
                 .frame(height: 30)
                 .padding(.horizontal, 12)
-                .background(DashboardCapsuleBackground())
+                .pidgyCapsuleBackground()
                 .opacity(isRefreshing ? 0.6 : 1)
             }
             .buttonStyle(.plain)
@@ -858,6 +860,8 @@ struct DashboardSidebar: View {
     let onLogOut: () -> Void
     let onSendFeedback: () -> Void
 
+    @State private var showAccountMenu = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             sidebarHeader
@@ -896,6 +900,14 @@ struct DashboardSidebar: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
+            .background {
+                // ⌘⇧F still opens feedback now that the account menu is a popover
+                // (the shortcut used to live on the old Menu's feedback item).
+                Button("", action: onSendFeedback)
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+                    .opacity(0)
+                    .accessibilityHidden(true)
+            }
         }
         .frame(width: 240)
         .frame(maxHeight: .infinity)
@@ -960,6 +972,7 @@ struct DashboardSidebar: View {
             .animation(PidgyMotion.easeOutFast, value: selection)
         }
         .buttonStyle(.plain)
+        .pidgyHoverRow(cornerRadius: 8)
     }
 
     private var sidebarTopicsSection: some View {
@@ -976,7 +989,7 @@ struct DashboardSidebar: View {
                         .frame(width: 20, height: 20)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pidgyPress)
                 .foregroundStyle(PidgyDashboardTheme.secondary)
                 .help("Add topic")
             }
@@ -995,6 +1008,7 @@ struct DashboardSidebar: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .pidgyHoverRow(cornerRadius: 8)
             } else {
                 VStack(spacing: 1) {
                     ForEach(mainTopicItems) { item in
@@ -1034,6 +1048,7 @@ struct DashboardSidebar: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .pidgyHoverRow(cornerRadius: 8)
                     }
                 }
             }
@@ -1064,52 +1079,81 @@ struct DashboardSidebar: View {
         .buttonStyle(.plain)
     }
 
+    // A real Button (not Menu) so the whole row is full-width, highlights on
+    // hover, and shows the pointing-hand cursor — SwiftUI's borderless Menu
+    // can't do any of that. Click opens the account actions as a popover.
     private var accountMenu: some View {
-        Menu {
-            Button(action: onOpenPreferences) {
-                Label("Settings", systemImage: "gearshape")
-            }
-            Button(action: onRefresh) {
-                Label("Refresh dashboard", systemImage: "arrow.clockwise")
-            }
-            Divider()
-            Button(action: onSendFeedback) {
-                Label("Send feedback…", systemImage: "paperplane")
-            }
-            .keyboardShortcut("f", modifiers: [.command, .shift])
-            if canLogOut {
-                Divider()
-                Button(role: .destructive, action: onLogOut) {
-                    Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
-                }
-            }
+        Button {
+            showAccountMenu = true
         } label: {
-            HStack(spacing: 17) {
+            HStack(spacing: 10) {
                 DashboardTelegramUserAvatar(
                     user: accountUser,
                     fallbackTitle: accountName,
                     size: UserPhotoManager.accountMenuThumbnailSide
                 )
 
-                HStack(spacing: 4) {
-                    Text(accountTitle)
-                        .font(PidgyDashboardTheme.detailBodyFont.weight(.regular))
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                        .lineLimit(1)
+                Text(accountTitle)
+                    .font(PidgyDashboardTheme.detailBodyFont.weight(.regular))
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    .lineLimit(1)
 
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(PidgyDashboardTheme.tertiary)
-                }
+                Spacer(minLength: 8)
 
-                Spacer(minLength: 0)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
             }
+            .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 36)
+            .frame(height: 40)
             .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
         .buttonStyle(.plain)
+        .pidgyHoverRow(cornerRadius: 8)
+        .popover(isPresented: $showAccountMenu, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 1) {
+                accountMenuRow("Settings", systemImage: "gearshape", action: onOpenPreferences)
+                accountMenuRow("Refresh dashboard", systemImage: "arrow.clockwise", action: onRefresh)
+                Divider().padding(.vertical, 5)
+                accountMenuRow("Send feedback…", systemImage: "paperplane", action: onSendFeedback)
+                if canLogOut {
+                    Divider().padding(.vertical, 5)
+                    accountMenuRow("Log out", systemImage: "rectangle.portrait.and.arrow.right", isDestructive: true, action: onLogOut)
+                }
+            }
+            .padding(6)
+            .frame(width: 232)
+        }
+    }
+
+    @ViewBuilder
+    private func accountMenuRow(
+        _ title: String,
+        systemImage: String,
+        isDestructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            showAccountMenu = false
+            action()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12))
+                    .frame(width: 16)
+                Text(title)
+                    .font(PidgyDashboardTheme.detailBodyFont.weight(.regular))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(isDestructive ? Color.Pidgy.danger : PidgyDashboardTheme.primary)
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pidgyHoverRow(cornerRadius: 6)
     }
 
     private var accountTitle: String {
@@ -1202,7 +1246,7 @@ struct DashboardAddTopicSheet: View {
                 .foregroundStyle(PidgyDashboardTheme.primary)
                 .padding(.horizontal, 14)
                 .frame(height: 42)
-                .background(DashboardCapsuleBackground())
+                .pidgyCapsuleBackground()
                 .onSubmit(save)
 
             if !suggestions.isEmpty {
@@ -1236,7 +1280,7 @@ struct DashboardAddTopicSheet: View {
                         .font(PidgyDashboardTheme.metadataMediumFont)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .frame(width: 78, height: 34)
-                        .background(DashboardCapsuleBackground())
+                        .pidgyCapsuleBackground()
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
@@ -1291,7 +1335,7 @@ struct DashboardTopicSuggestionChip: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 32)
-        .background(DashboardCapsuleBackground())
+        .pidgyCapsuleBackground()
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }

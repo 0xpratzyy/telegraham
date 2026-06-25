@@ -173,6 +173,62 @@ enum PidgyMotion {
 
     static let easeOut = Animation.timingCurve(0.2, 0.8, 0.2, 1, duration: durBase)
     static let easeOutFast = Animation.timingCurve(0.2, 0.8, 0.2, 1, duration: durFast)
+
+    /// Gentle curve for hover / color feedback (seen often → keep it quiet).
+    static let hover = Animation.easeOut(duration: 0.14)
+}
+
+// MARK: - Interaction
+
+/// Subtle press feedback for any pressable control: a 0.97 scale-down on press
+/// that snaps back fast. A pressed control should feel like the UI heard the
+/// click. Composable — it doesn't touch the button's own background or hover,
+/// so it layers on top of existing chrome (capsule backgrounds, ghost borders).
+struct PidgyPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .pointerStyle(.link)
+            .animation(PidgyMotion.easeOutFast, value: configuration.isPressed)
+    }
+}
+
+extension ButtonStyle where Self == PidgyPressStyle {
+    /// `.buttonStyle(.pidgyPress)` — subtle press-scale + pointing-hand cursor.
+    static var pidgyPress: PidgyPressStyle { PidgyPressStyle() }
+}
+
+// MARK: - Interaction modifiers
+
+extension View {
+    /// The pointing-hand (link) cursor on hover — the baseline "this is
+    /// clickable" cue for any tappable element that isn't a styled button
+    /// (custom `.onTapGesture` targets, clickable rows/cards/chips).
+    func pidgyClickable() -> some View {
+        pointerStyle(.link)
+    }
+
+    /// List-row hover: a faint fill highlight + pointing-hand cursor, no
+    /// press-scale (rows highlight, they don't bounce). `cornerRadius` should
+    /// match the row's own clip shape so the highlight lines up.
+    func pidgyHoverRow(cornerRadius: CGFloat = PidgyRadius.md) -> some View {
+        modifier(PidgyRowHover(cornerRadius: cornerRadius))
+    }
+}
+
+struct PidgyRowHover: ViewModifier {
+    let cornerRadius: CGFloat
+    @State private var isHovering = false
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(isHovering ? 0.04 : 0))
+            )
+            .pointerStyle(.link)
+            .onHover { isHovering = $0 }
+            .animation(PidgyMotion.hover, value: isHovering)
+    }
 }
 
 // MARK: - Helpers

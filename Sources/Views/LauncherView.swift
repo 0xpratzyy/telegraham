@@ -1694,6 +1694,8 @@ struct LauncherView: View {
 
     private func openChat(_ chat: TGChat) {
         Task { @MainActor in
+            ChatOpenState.shared.openingChatId = chat.id
+            defer { ChatOpenState.shared.openingChatId = nil }
             Task {
                 await IndexScheduler.shared.prioritize(chatId: chat.id)
                 await RecentSyncCoordinator.shared.prioritize(chatId: chat.id)

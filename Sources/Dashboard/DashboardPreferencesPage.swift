@@ -2475,6 +2475,7 @@ private struct DashboardPreferencePressStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .offset(y: configuration.isPressed ? 1 : 0)
+            .pointerStyle(.link)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
@@ -2494,7 +2495,7 @@ private struct DashboardPreferenceButton: View {
             .foregroundStyle(PidgyDashboardTheme.primary)
             .padding(.horizontal, 12)
             .frame(height: 30)
-            .background(DashboardCapsuleBackground())
+            .pidgyCapsuleBackground()
         }
         .buttonStyle(DashboardPreferencePressStyle())
     }
@@ -3113,9 +3114,9 @@ private struct PrefGhostButton: View {
                     )
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pidgyPress)
         .onHover { isHovering = $0 }
-        .animation(PidgyMotion.easeOutFast, value: isHovering)
+        .animation(PidgyMotion.hover, value: isHovering)
     }
 }
 
