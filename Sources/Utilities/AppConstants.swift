@@ -99,8 +99,8 @@ enum AppConstants {
         static let replyThresholdSeconds: TimeInterval = 0          // immediate
         static let followUpThresholdSeconds: TimeInterval = 86400   // 24h
         static let staleThresholdSeconds: TimeInterval = 259200     // 3 days
-        static let maxPipelineAgeSeconds: TimeInterval = 1209600    // 14 days
-        static let maxGroupMembers = 50       // largest group we still route through AI
+        static let maxPipelineAgeSeconds: TimeInterval = 2592000    // 30 days (was 14d; widened with cheaper Gemini triage)
+        static let maxGroupMembers = 100      // largest group we still route through AI (was 50; bumped with cheaper Gemini triage)
         static let maxGroupUnread = 10        // skip groups with > this many unread (community signal)
         static let maxAISuggestions = 15
         static let messagesPerChat = 10       // first pass window
@@ -154,15 +154,14 @@ enum AppConstants {
         static let pausedPollIntervalMilliseconds: UInt64 = 350
         static let maxPrioritizedChats = 32
         static let maxConcurrentChatWorkers = 2
-        // Raised from 20 → 50 so the indexing pipeline scope matches
-        // the reply-queue AI's `FollowUp.maxGroupMembers = 50`. Before
-        // this, supergroups in the 21–50 member range (real team /
-        // project chats) were filtered out at the indexing gate, which
-        // kept People + Tasks blind to ~60–80 active chats on a
-        // typical Telegram account. 50 stays well under the
-        // "community group" threshold (≥100 members) where messages
-        // mostly aren't addressed to you.
-        static let maxIndexedGroupMembers = 50
+        // Raised 20 → 50 → 100, kept in lockstep with the reply-queue AI's
+        // `FollowUp.maxGroupMembers`. 100 pulls in larger team / project
+        // supergroups now that the Gemini triage cost (~⅓ of the old model)
+        // gives the budget headroom. 100 is the upper edge before "community
+        // group" territory where messages mostly aren't addressed to you —
+        // the `FollowUp.maxGroupUnread` gate (kept at 10) filters the
+        // genuinely noisy ones from there.
+        static let maxIndexedGroupMembers = 100
         static let minEmbeddingTextLength = 10
         static let embeddingPreviewCharacterLimit = 160
         static let embeddingBackfillBatchSize = 128
