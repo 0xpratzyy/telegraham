@@ -352,9 +352,33 @@ enum PidgyTelemetry {
             }
             event.extra = extra
         }
+        // Last-line breadcrumb scrub. CRITICAL: copy, never mutate in place.
+        // beforeSend runs on Sentry's send threads and Breadcrumb objects are
+        // SHARED across events; mutating crumb.data here while another concurrent
+        // send serializes the same breadcrumb is a data race that crashes in
+        // _SwiftDeferredNSDictionary deinit / sentry_sanitize under a burst of
+        // captures. So for any crumb carrying PII we emit a FRESH redacted
+        // Breadcrumb and leave the shared original untouched. (beforeBreadcrumb
+        // also scrubs at add-time; this is the belt-and-suspenders before send.)
         if let breadcrumbs = event.breadcrumbs {
-            for crumb in breadcrumbs { scrubBreadcrumb(crumb) }
+            event.breadcrumbs = breadcrumbs.map { crumb in
+                guard let data = crumb.data,
+                      data.keys.contains(where: { piiKeysToRedact.contains($0) }) else {
+                    return crumb
+                }
+                var scrubbed = data
+                for key in scrubbed.keys where piiKeysToRedact.contains(key) {
+                    scrubbed[key] = "<redacted>"
+                }
+                let copy = Breadcrumb(level: crumb.level, category: crumb.category)
+                copy.type = crumb.type
+                copy.message = crumb.message
+                copy.timestamp = crumb.timestamp
+                copy.data = scrubbed
+                return copy
+            }
         }
+
         // Defense in depth — never let user data into Sentry's "user"
         // field, which is otherwise auto-populated with the device id.
         event.user = nil
