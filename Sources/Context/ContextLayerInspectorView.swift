@@ -140,7 +140,7 @@ struct ContextLayerInspectorView: View {
                 .foregroundStyle(item.onMe ? Color.Pidgy.warning : Color.Pidgy.accent)
                 .frame(width: 64, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.object).font(.callout)
+                Text(item.action).font(.callout)
                 Text("\(item.person) · \(item.chatTitle)").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()

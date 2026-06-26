@@ -646,6 +646,14 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v24_fact_action") { db in
+            // A human-readable, model-written to-do phrasing per fact
+            // ("Pay the Hetzner invoice", "Reply to Dinesh about the deck") so
+            // tasks/reply read naturally instead of a code-stitched template.
+            // `object_text` stays the stable identity key; `action` is display.
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN action TEXT NOT NULL DEFAULT ''")
+        }
+
         return migrator
     }
 }

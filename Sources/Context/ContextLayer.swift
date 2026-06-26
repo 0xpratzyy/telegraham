@@ -53,6 +53,7 @@ struct Fact: Identifiable, Equatable, Sendable {
     var subjectPersonId: Int64?   // canonical Telegram user id, when resolved
     var predicate: FactPredicate
     var objectText: String
+    var action: String            // model-written natural to-do phrasing (display)
     var objectEntity: String?
     var confidence: Double
     var validFrom: Date
@@ -74,6 +75,7 @@ struct FactDraft: Equatable, Sendable {
     var subjectPersonId: Int64? = nil   // set by the entity resolver post-extraction
     var predicate: FactPredicate
     var objectText: String
+    var action: String = ""             // model-written natural to-do phrasing
     var objectEntity: String?
     var confidence: Double
     var validFrom: Date

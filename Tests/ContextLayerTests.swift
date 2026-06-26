@@ -37,6 +37,7 @@ final class ContextLayerTests: XCTestCase {
             subjectPersonId: nil,
             predicate: predicate,
             objectText: "o",
+            action: "",
             objectEntity: nil,
             confidence: 0.9,
             validFrom: Date(timeIntervalSince1970: 0),

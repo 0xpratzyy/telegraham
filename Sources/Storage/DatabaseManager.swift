@@ -2195,21 +2195,22 @@ actor DatabaseManager {
                     try db.execute(
                         sql: """
                             INSERT INTO facts
-                                (subject_entity, subject_person_id, predicate, object_text, object_entity,
+                                (subject_entity, subject_person_id, predicate, object_text, action, object_entity,
                                  confidence, valid_from, invalid_at, source_chat_id,
                                  source_message_id, source_text, sender_name, fingerprint,
                                  created_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(fingerprint) WHERE invalid_at IS NULL DO UPDATE SET
                                 subject_entity = excluded.subject_entity,
                                 subject_person_id = excluded.subject_person_id,
+                                action = excluded.action,
                                 source_message_id = excluded.source_message_id,
                                 source_text = excluded.source_text,
                                 confidence = MAX(facts.confidence, excluded.confidence),
                                 updated_at = excluded.updated_at
                             """,
                         arguments: [
-                            d.subjectEntity, d.subjectPersonId, d.predicate.rawValue, d.objectText, d.objectEntity,
+                            d.subjectEntity, d.subjectPersonId, d.predicate.rawValue, d.objectText, d.action, d.objectEntity,
                             d.confidence, d.validFrom.timeIntervalSince1970, d.sourceChatId,
                             d.sourceMessageId, d.sourceText, d.senderName, d.fingerprint,
                             now, now
@@ -2386,6 +2387,7 @@ actor DatabaseManager {
             subjectPersonId: row["subject_person_id"],
             predicate: predicate,
             objectText: row["object_text"],
+            action: row["action"],
             objectEntity: row["object_entity"],
             confidence: row["confidence"],
             validFrom: Date(timeIntervalSince1970: row["valid_from"]),

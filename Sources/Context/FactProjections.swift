@@ -20,6 +20,7 @@ struct FactReplyItem: Identifiable, Sendable {
     let person: String
     let onMe: Bool           // true = the user owes a reply; false = waiting on them
     let object: String
+    let action: String       // natural phrasing for display
     let evidence: String
     let date: Date
 }
@@ -32,17 +33,19 @@ enum FactProjection {
             .filter { $0.isOpen && $0.predicate.isOpenLoop }
             .map { f in
                 let chatTitle = chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)"
+                // Prefer the model's natural phrasing; fall back to a readable
+                // template only when an older fact has no action yet.
                 let title: String
-                let action: String
+                let suggested: String
                 let owner: String
                 switch f.predicate {
                 case .iOwe:
-                    title = "Owe \(f.subjectEntity): \(f.objectText)"
-                    action = "Reply to \(f.subjectEntity)"
+                    title = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
+                    suggested = "Reply to \(f.subjectEntity)"
                     owner = "Me"
                 default: // .owesMe
-                    title = "\(f.subjectEntity) owes: \(f.objectText)"
-                    action = "Nudge \(f.subjectEntity)"
+                    title = f.action.isEmpty ? "Waiting on \(f.subjectEntity) for \(f.objectText)" : f.action
+                    suggested = "Nudge \(f.subjectEntity)"
                     owner = f.subjectEntity
                 }
                 let priority: DashboardTaskPriority = f.confidence >= 0.8 ? .high : (f.confidence >= 0.5 ? .medium : .low)
@@ -51,7 +54,7 @@ enum FactProjection {
                     stableFingerprint: f.fingerprint,
                     title: title,
                     summary: f.sourceText.isEmpty ? title : f.sourceText,
-                    suggestedAction: action,
+                    suggestedAction: suggested,
                     ownerName: owner,
                     personName: f.subjectEntity,
                     chatId: f.sourceChatId,
@@ -84,6 +87,7 @@ enum FactProjection {
                     person: f.subjectEntity,
                     onMe: f.predicate == .iOwe,
                     object: f.objectText,
+                    action: f.action.isEmpty ? f.objectText : f.action,
                     evidence: f.sourceText,
                     date: f.validFrom
                 )

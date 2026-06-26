@@ -17,16 +17,18 @@ struct FactDTO: Codable {
     let subject: String
     let predicate: String
     let object: String
+    let action: String?
     let confidence: Double?
     let evidence: String?
 
-    enum CodingKeys: String, CodingKey { case subject, predicate, object, confidence, evidence }
+    enum CodingKeys: String, CodingKey { case subject, predicate, object, action, confidence, evidence }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         subject = (try? c.decode(String.self, forKey: .subject)) ?? ""
         predicate = (try? c.decode(String.self, forKey: .predicate)) ?? ""
         object = (try? c.decode(String.self, forKey: .object)) ?? ""
+        action = try? c.decodeIfPresent(String.self, forKey: .action)
         confidence = try? c.decodeIfPresent(Double.self, forKey: .confidence)
         evidence = try? c.decodeIfPresent(String.self, forKey: .evidence)
     }
@@ -76,6 +78,7 @@ enum FactExtractionPrompt {
           "subject": "the OTHER person's name (or \\"me\\" only for writes_in voice facts)",
           "predicate": "i_owe" | "owes_me" | "works_at" | "prefers" | "writes_in" | "fact",
           "object": "a SHORT stable noun phrase (e.g. \\"the pitch deck\\", \\"Acme\\", \\"voice notes\\")",
+          "action": "a natural one-line to-do, how YOU'd write it for yourself (e.g. \\"Pay the Hetzner invoice\\", \\"Send Piyush the 2FA fix\\", \\"Chase Dinesh for the deck\\"). Open loops only; \\"\\" for durable facts.",
           "confidence": 0.0,
           "evidence": "the exact message text it came from"
         }
@@ -94,6 +97,7 @@ enum FactExtractionPrompt {
     - object must be a short noun phrase, never a sentence, so the SAME loop re-extracts identically across runs.
     - If a NEW message closes a tracked OPEN LOOP, put that loop's NUMBER in resolvedLoops and do NOT re-emit it as a fact.
     - Prefer a few high-confidence facts over many guesses. Empty arrays are perfectly fine.
+    - "action" must read like a to-do you wrote yourself (imperative, natural, specific) — NEVER a template like "Owe X: Y". Keep "object" as the short stable noun phrase; "action" is the human phrasing.
     - Output ONLY the JSON object.
     """
 
@@ -155,6 +159,7 @@ enum FactExtractionParser {
                 subjectEntity: subject,
                 predicate: predicate,
                 objectText: object,
+                action: (f.action ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
                 objectEntity: nil,
                 confidence: min(1, max(0, f.confidence ?? 0.7)),
                 validFrom: validFrom,
