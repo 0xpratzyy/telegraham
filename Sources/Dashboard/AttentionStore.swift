@@ -108,6 +108,58 @@ final class AttentionStore: ObservableObject {
             )
             return
         }
+
+        // Context layer (#48): the reply queue is a VIEW over open-loop facts.
+        // A chat's freshest open loop sets its lane (i_owe → ON ME, owes_me →
+        // ON THEM) with the model's natural phrasing as the suggested action;
+        // candidate chats with no open loop are QUIET. No AI call — pure
+        // projection of facts the FactExtractionCoordinator already maintains.
+        if ContextLayer.enabled {
+            isExecuting = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    self.lastFollowUpsRefreshAt = Date()
+                    self.isExecuting = false
+                    self.runQueuedRefreshIfNeeded()
+                }
+                let candidates = self.collectPipelineCandidates(
+                    telegramService: telegramService,
+                    includeBots: includeBots
+                )
+                let openFacts = await DatabaseManager.shared.loadOpenFacts()
+                var loopByChat: [Int64: Fact] = [:]
+                for f in openFacts {
+                    if let existing = loopByChat[f.sourceChatId], existing.validFrom >= f.validFrom { continue }
+                    loopByChat[f.sourceChatId] = f
+                }
+                var items: [FollowUpItem] = []
+                for chat in candidates {
+                    guard let lastMessage = chat.lastMessage else { continue }
+                    let category: FollowUpItem.Category
+                    let action: String?
+                    if let loop = loopByChat[chat.id] {
+                        category = loop.predicate == .iOwe ? .onMe : .onThem
+                        action = loop.action.isEmpty ? nil : loop.action
+                    } else {
+                        category = .quiet
+                        action = nil
+                    }
+                    items.append(FollowUpItem(
+                        chat: chat,
+                        category: category,
+                        lastMessage: lastMessage,
+                        timeSinceLastActivity: Date().timeIntervalSince(lastMessage.date),
+                        suggestedAction: action
+                    ))
+                }
+                self.allFollowUpItems = items
+                self.sortPipelineItems()
+                self.republishFiltered()
+            }
+            return
+        }
+
         isExecuting = true
 
         let candidates = collectPipelineCandidates(
@@ -296,6 +348,13 @@ final class AttentionStore: ObservableObject {
         aiService: AIService,
         includeBots: Bool
     ) {
+        // Context layer (#48): the reply queue is a view over facts, so the
+        // background AI re-categorization must NOT run. Leaving it on ran the
+        // old pipeline alongside fact extraction — double the AI load, double
+        // the failure reports, and that concurrency is what tripped the shared
+        // telemetry-scrub crash. loadFollowUps rebuilds the queue from facts.
+        if ContextLayer.enabled { return }
+
         // Gate on allFollowUpItems (everything tracked), not the
         // excluded-filtered projection: if the user excludes every
         // visible item, the projection is empty but new chats must

@@ -15,10 +15,20 @@ struct DashboardHomePage: View {
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
 
     private var feedItems: [DashboardFeedItem] {
-        let taskItems = tasks
-            .filter(\.isActionableNow)
-            .map(DashboardFeedItem.task)
-        let replyItems = followUpItems.map(DashboardFeedItem.reply)
+        let actionableTasks = tasks.filter(\.isActionableNow)
+        let taskItems = actionableTasks.map(DashboardFeedItem.task)
+        var replies = followUpItems
+        if ContextLayer.enabled {
+            // Tasks + reply are both views over the same open-loop facts, so a
+            // loop would otherwise appear twice on this blended feed. Keep the
+            // task and drop the reply duplicate (on_me/on_them = a loop the chat
+            // already has a task for); quiet chats have no loop, so they stay.
+            let chatsWithTasks = Set(actionableTasks.map(\.chatId))
+            replies = followUpItems.filter { item in
+                item.category == .quiet || !chatsWithTasks.contains(item.chat.id)
+            }
+        }
+        let replyItems = replies.map(DashboardFeedItem.reply)
         return (taskItems + replyItems)
             .sorted {
                 if $0.section.rank != $1.section.rank {
