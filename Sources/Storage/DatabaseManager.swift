@@ -2379,6 +2379,30 @@ actor DatabaseManager {
         }
     }
 
+    /// Live facts about a specific person (by resolved Telegram id) — for the
+    /// People page. Open loops first, then durable facts, newest-first.
+    func loadFactsForPerson(personId: Int64, limit: Int = 50) async -> [Fact] {
+        guard personId != 0, let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM facts
+                        WHERE subject_person_id = ? AND invalid_at IS NULL
+                        ORDER BY (predicate IN ('i_owe','owes_me')) DESC, valid_from DESC
+                        LIMIT ?
+                        """,
+                    arguments: [personId, limit]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadFactsForPerson failed: \(error)")
+            return []
+        }
+    }
+
     func factExtractionCursor(chatId: Int64) async -> Int64 {
         guard let pool = await ensureDatabase() else { return 0 }
         do {

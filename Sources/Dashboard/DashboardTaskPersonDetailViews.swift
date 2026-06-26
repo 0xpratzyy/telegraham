@@ -329,6 +329,7 @@ struct DashboardPersonDetail: View {
 
     @State private var recentMessages: [DashboardPersonRecentMessage] = []
     @State private var isLoadingRecentMessages = false
+    @State private var personFacts: [Fact] = []   // context-layer (#48)
 
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
@@ -373,6 +374,12 @@ struct DashboardPersonDetail: View {
                         summary: personSummary,
                         isLoading: isLoadingRecentMessages
                     )
+                }
+
+                // Context layer (#48): durable facts about this person, from the
+                // one fact store. (Open loops are already in the columns below.)
+                if ContextLayer.enabled, !durableFacts.isEmpty {
+                    DashboardPersonFactsSection(facts: durableFacts)
                 }
 
                 HStack(alignment: .top, spacing: 0) {
@@ -435,7 +442,20 @@ struct DashboardPersonDetail: View {
         .task(id: contact?.entityId) {
             await loadRecentMessages(for: contact)
             await loadAIProfile(for: contact)
+            await loadPersonFacts(for: contact)
         }
+    }
+
+    private func loadPersonFacts(for contact: RelationGraph.Node?) async {
+        guard ContextLayer.enabled, let contact, contact.entityId != 0 else {
+            personFacts = []
+            return
+        }
+        personFacts = await DatabaseManager.shared.loadFactsForPerson(personId: contact.entityId)
+    }
+
+    private var durableFacts: [Fact] {
+        personFacts.filter { !$0.predicate.isOpenLoop }
     }
 
     private func loadAIProfile(for contact: RelationGraph.Node?) async {
@@ -631,6 +651,39 @@ struct DashboardPersonSummarySection: View {
                     }
                 }
             }
+        }
+    }
+}
+
+struct DashboardPersonFactsSection: View {
+    let facts: [Fact]
+
+    var body: some View {
+        DashboardDetailSection(title: "What we know") {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(facts) { fact in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(Self.verb(fact.predicate))
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .frame(width: 64, alignment: .leading)
+                        Text(fact.objectText)
+                            .font(PidgyDashboardTheme.metadataMediumFont)
+                            .foregroundStyle(PidgyDashboardTheme.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func verb(_ p: FactPredicate) -> String {
+        switch p {
+        case .worksAt: return "works at"
+        case .prefers: return "prefers"
+        case .writesIn: return "writes in"
+        default: return "note"
         }
     }
 }
