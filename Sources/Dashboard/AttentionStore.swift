@@ -93,6 +93,10 @@ final class AttentionStore: ObservableObject {
         postOnMeBadge()
     }
 
+    // Last published fact-reply signature (content hash) — guards against
+    // redundant republishes that flicker the list on startup.
+    private var lastFactReplySignature = ""
+
     func loadFollowUps(
         telegramService: TelegramService,
         aiService: AIService,
@@ -153,6 +157,17 @@ final class AttentionStore: ObservableObject {
                         suggestedAction: action
                     ))
                 }
+                // Skip redundant rebuilds: TDLib streams the chat list on
+                // startup, firing this repeatedly. Re-publishing identical
+                // content (with fresh FollowUpItem UUIDs) makes the whole list
+                // re-render = flicker. Only republish when the loop set or a
+                // chat's latest message actually changed.
+                let signature = items
+                    .map { "\($0.chat.id)|\($0.category.rawValue)|\($0.lastMessage.id)|\($0.suggestedAction ?? "")" }
+                    .sorted()
+                    .joined(separator: ";")
+                guard signature != self.lastFactReplySignature else { return }
+                self.lastFactReplySignature = signature
                 self.allFollowUpItems = items
                 self.sortPipelineItems()
                 self.republishFiltered()

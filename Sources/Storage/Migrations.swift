@@ -654,6 +654,13 @@ enum PidgyMigrations {
             try db.execute(sql: "ALTER TABLE facts ADD COLUMN action TEXT NOT NULL DEFAULT ''")
         }
 
+        migrator.registerMigration("v25_fact_chat_title") { db in
+            // Store the chat's display title on the fact so projections don't
+            // depend on the live chat list being fully streamed in — that
+            // dependency showed "Chat <id>" and caused title flicker on startup.
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN source_chat_title TEXT NOT NULL DEFAULT ''")
+        }
+
         return migrator
     }
 }

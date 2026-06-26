@@ -59,6 +59,7 @@ struct Fact: Identifiable, Equatable, Sendable {
     var validFrom: Date
     var invalidAt: Date?          // nil = still valid (bi-temporal)
     var sourceChatId: Int64
+    var sourceChatTitle: String = ""   // chat display title captured at extraction
     var sourceMessageId: Int64
     var sourceText: String
     var senderName: String
@@ -80,6 +81,7 @@ struct FactDraft: Equatable, Sendable {
     var confidence: Double
     var validFrom: Date
     var sourceChatId: Int64
+    var sourceChatTitle: String = ""
     var sourceMessageId: Int64
     var sourceText: String
     var senderName: String

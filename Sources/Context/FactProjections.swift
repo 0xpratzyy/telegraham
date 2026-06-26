@@ -32,7 +32,9 @@ enum FactProjection {
         facts
             .filter { $0.isOpen && $0.predicate.isOpenLoop }
             .map { f in
-                let chatTitle = chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)"
+                let chatTitle = !f.sourceChatTitle.isEmpty
+                    ? f.sourceChatTitle
+                    : (chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)")
                 // Prefer the model's natural phrasing; fall back to a readable
                 // template only when an older fact has no action yet.
                 let title: String
@@ -83,7 +85,9 @@ enum FactProjection {
                 FactReplyItem(
                     id: f.id,
                     chatId: f.sourceChatId,
-                    chatTitle: chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)",
+                    chatTitle: !f.sourceChatTitle.isEmpty
+                        ? f.sourceChatTitle
+                        : (chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)"),
                     person: f.subjectEntity,
                     onMe: f.predicate == .iOwe,
                     object: f.objectText,

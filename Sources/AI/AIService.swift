@@ -405,13 +405,18 @@ final class AIService: ObservableObject {
         let response = try await provider.summarize(messages: snippets, prompt: systemPrompt)
         // The newest message in the batch carries the batch's provenance + validity.
         let newest = newMessages.max(by: { $0.date < $1.date })
-        return try FactExtractionParser.parse(
+        var result = try FactExtractionParser.parse(
             response,
             chatId: chat.id,
             openLoops: openLoops,
             sourceMessageId: newest?.id ?? 0,
             validFrom: newest?.date ?? Date()
         )
+        // Capture the chat title on each fact so projections don't depend on the
+        // live chat list being fully loaded (which showed "Chat <id>").
+        let chatTitle = chat.title
+        result.drafts = result.drafts.map { var d = $0; d.sourceChatTitle = chatTitle; return d }
+        return result
     }
 
     /// Extract a compiled-truth profile for a single person. Messages
