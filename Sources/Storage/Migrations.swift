@@ -661,6 +661,45 @@ enum PidgyMigrations {
             try db.execute(sql: "ALTER TABLE facts ADD COLUMN source_chat_title TEXT NOT NULL DEFAULT ''")
         }
 
+        migrator.registerMigration("v26_facts_fts") { db in
+            // Full-text index over the fact store so search can surface facts
+            // ("what do I owe Akhil", "works at Saperly") alongside raw messages.
+            // External-content FTS5 over `facts`, kept in sync by triggers — the
+            // same pattern as messages_fts.
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE facts_fts USING fts5(
+                    subject_entity, object_text, action, source_text, source_chat_title,
+                    content=facts,
+                    content_rowid=id
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER facts_ai AFTER INSERT ON facts BEGIN
+                    INSERT INTO facts_fts(rowid, subject_entity, object_text, action, source_text, source_chat_title)
+                    VALUES (new.id, new.subject_entity, new.object_text, new.action, new.source_text, new.source_chat_title);
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER facts_ad AFTER DELETE ON facts BEGIN
+                    INSERT INTO facts_fts(facts_fts, rowid, subject_entity, object_text, action, source_text, source_chat_title)
+                    VALUES ('delete', old.id, old.subject_entity, old.object_text, old.action, old.source_text, old.source_chat_title);
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER facts_au AFTER UPDATE ON facts BEGIN
+                    INSERT INTO facts_fts(facts_fts, rowid, subject_entity, object_text, action, source_text, source_chat_title)
+                    VALUES ('delete', old.id, old.subject_entity, old.object_text, old.action, old.source_text, old.source_chat_title);
+                    INSERT INTO facts_fts(rowid, subject_entity, object_text, action, source_text, source_chat_title)
+                    VALUES (new.id, new.subject_entity, new.object_text, new.action, new.source_text, new.source_chat_title);
+                END
+                """)
+            // Backfill any facts that already exist.
+            try db.execute(sql: """
+                INSERT INTO facts_fts(rowid, subject_entity, object_text, action, source_text, source_chat_title)
+                SELECT id, subject_entity, object_text, action, source_text, source_chat_title FROM facts
+                """)
+        }
+
         return migrator
     }
 }

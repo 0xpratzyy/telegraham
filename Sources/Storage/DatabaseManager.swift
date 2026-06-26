@@ -2346,6 +2346,39 @@ actor DatabaseManager {
         }
     }
 
+    /// Full-text search over LIVE facts (open loops + durable facts), BM25-ranked.
+    /// Powers the "Facts" section in search — "what do I owe Akhil", "Saperly".
+    func searchFacts(query: String, limit: Int = 20) async -> [Fact] {
+        guard let pool = await ensureDatabase() else { return [] }
+        // Tokenize to terms, drop FTS5 operators, OR the quoted terms so partial
+        // queries still match (recall over precision, per the search guidance).
+        let terms = query
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { $0.count >= 2 }
+        guard !terms.isEmpty else { return [] }
+        let match = terms.map { "\"\($0)\"" }.joined(separator: " OR ")
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT f.* FROM facts_fts
+                        JOIN facts f ON f.id = facts_fts.rowid
+                        WHERE facts_fts MATCH ? AND f.invalid_at IS NULL
+                        ORDER BY bm25(facts_fts), f.valid_from DESC
+                        LIMIT ?
+                        """,
+                    arguments: [match, limit]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] searchFacts failed: \(error)")
+            return []
+        }
+    }
+
     func factExtractionCursor(chatId: Int64) async -> Int64 {
         guard let pool = await ensureDatabase() else { return 0 }
         do {
