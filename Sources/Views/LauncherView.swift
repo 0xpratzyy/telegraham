@@ -996,6 +996,13 @@ struct LauncherView: View {
                     .padding(.bottom, 6)
             }
 
+            // Context layer (#48): facts pinned ABOVE the results, in both the
+            // local and AI-ranked modes, so they don't vanish when AI ranking
+            // lands (the "flash two screens" bug).
+            if ContextLayer.enabled, !searchText.isEmpty, !factHits.isEmpty {
+                factsSection
+            }
+
             if isAISearching {
                 VStack(spacing: 0) {
                     if !aiResults.isEmpty {
@@ -1069,10 +1076,6 @@ struct LauncherView: View {
                             Spacer()
                         }
                         .padding(.horizontal, 12).padding(.vertical, 4)
-                    }
-
-                    if ContextLayer.enabled, !searchText.isEmpty, !factHits.isEmpty {
-                        factsSection
                     }
 
                     if !searchText.isEmpty {
