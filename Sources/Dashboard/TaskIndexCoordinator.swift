@@ -251,6 +251,45 @@ final class TaskIndexCoordinator: ObservableObject {
         let includeBotsInAISearch = includeBotsInAISearch ?? self.includeBotsInAISearch
         let telegramService = telegramService ?? filteringTelegramService
         let loadedTopics = await DatabaseManager.shared.loadDashboardTopics()
+
+        // Context layer (#48): tasks are a VIEW over open-loop facts, not the
+        // separately-extracted dashboard_tasks table. Project the live facts
+        // (bot-filtered the same way) and synthesize evidence from each fact's
+        // own source snippet so the existing Tasks UI works unchanged.
+        if ContextLayer.enabled {
+            let chatTitles: [Int64: String]
+            if let telegramService {
+                chatTitles = Dictionary(
+                    telegramService.visibleChats.map { ($0.id, $0.title) },
+                    uniquingKeysWith: { a, _ in a }
+                )
+            } else {
+                chatTitles = [:]
+            }
+            let openFacts = await DatabaseManager.shared.loadOpenFacts()
+            let factTasks = FactProjection.tasks(from: openFacts, chatTitles: chatTitles)
+            let visibleTasks = await botFilteredTasks(
+                factTasks,
+                telegramService: telegramService,
+                includeBotsInAISearch: includeBotsInAISearch
+            )
+            let visibleIds = Set(visibleTasks.map(\.id))
+            var evidence: [Int64: [DashboardTaskSourceMessage]] = [:]
+            for f in openFacts where visibleIds.contains(f.id) && !f.sourceText.isEmpty {
+                evidence[f.id] = [DashboardTaskSourceMessage(
+                    chatId: f.sourceChatId,
+                    messageId: f.sourceMessageId,
+                    senderName: f.senderName,
+                    text: f.sourceText,
+                    date: f.validFrom
+                )]
+            }
+            topics = loadedTopics
+            tasks = visibleTasks
+            evidenceByTaskId = evidence
+            return
+        }
+
         var loadedTasks = await DatabaseManager.shared.loadDashboardTasks()
 
         // Stale-task reconciliation: open AI-extracted tasks whose chat
@@ -370,6 +409,14 @@ final class TaskIndexCoordinator: ObservableObject {
             telegramService: telegramService,
             includeBotsInAISearch: includeBotsInAISearch
         )
+
+        // Context layer (#48): tasks are maintained by FactExtractionCoordinator
+        // (which crawls facts incrementally). loadFromStore already projected
+        // them, so skip the old AI task extraction entirely — no double-work.
+        if ContextLayer.enabled {
+            lastRefreshAt = Date()
+            return
+        }
 
         guard aiService.isConfigured else {
             lastError = "Connect an AI provider to extract tasks from Telegram."
@@ -567,6 +614,16 @@ final class TaskIndexCoordinator: ObservableObject {
         status: DashboardTaskStatus,
         snoozedUntil: Date? = nil
     ) async {
+        // Context layer (#48): a fact-derived task closes by INVALIDATING its
+        // underlying fact (done/ignored). Snooze isn't modeled on facts yet, so
+        // it's a no-op here for now (the loop stays open).
+        if ContextLayer.enabled {
+            if status == .done || status == .ignored {
+                await DatabaseManager.shared.invalidateFacts(fingerprints: [task.stableFingerprint])
+            }
+            await loadFromStore()
+            return
+        }
         await DatabaseManager.shared.updateDashboardTaskStatus(
             taskId: task.id,
             status: status,
