@@ -380,6 +380,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 includeBotsInAISearch: includeBotsInAISearch
             )
 
+            // Context layer (#48): maintain the fact store incrementally. No-op
+            // unless ContextLayer.enabled; starts its own loop and returns.
+            FactExtractionCoordinator.shared.start(
+                telegramService: telegramService,
+                aiService: aiService
+            )
+
             // GraphBuilder.buildIfNeeded actually awaits the full graph
             // build to complete (writes nodes incrementally as it goes).
             // Run it as a detached loop so it doesn't block any of the

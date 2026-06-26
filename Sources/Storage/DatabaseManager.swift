@@ -272,6 +272,34 @@ actor DatabaseManager {
         }
     }
 
+    /// Messages with id > afterMessageId AND date >= since, OLDEST first — the
+    /// forward crawl the fact extractor walks across passes (cursor =
+    /// extracted_through_message_id). id ASC keeps the transcript chronological
+    /// and the cursor monotonic, so on cold start it starts at the oldest
+    /// message inside the window and walks forward to now.
+    func loadMessagesForward(chatId: Int64, afterMessageId: Int64, since: Date, limit: Int) async -> [MessageRecord] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        FROM messages
+                        WHERE chat_id = ? AND id > ? AND date >= ?
+                        ORDER BY id ASC
+                        LIMIT ?
+                        """,
+                    arguments: [chatId, afterMessageId, since.timeIntervalSince1970, limit]
+                )
+                return rows.map(Self.messageRecord(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadMessagesForward failed for chat \(chatId): \(error)")
+            return []
+        }
+    }
+
     func loadMessages(
         chatId: Int64,
         startDate: Date?,
@@ -2150,6 +2178,226 @@ actor DatabaseManager {
         } catch {
             print("[DatabaseManager] Failed to update dashboard sync state for chat \(chatId): \(error)")
         }
+    }
+
+    // MARK: - Context layer (facts) — #48
+
+    /// Upsert facts. A LIVE fact is unique on `fingerprint` (partial index where
+    /// invalid_at IS NULL): re-seeing the same loop refreshes its evidence; if
+    /// only an INVALIDATED copy exists, a fresh live row is inserted (the loop
+    /// re-opened). Fire-and-forget from the extraction pass.
+    func upsertFacts(_ drafts: [FactDraft]) async {
+        guard !drafts.isEmpty, let pool = await ensureDatabase() else { return }
+        let now = Date().timeIntervalSince1970
+        do {
+            try await pool.write { db in
+                for d in drafts {
+                    try db.execute(
+                        sql: """
+                            INSERT INTO facts
+                                (subject_entity, subject_person_id, predicate, object_text, object_entity,
+                                 confidence, valid_from, invalid_at, source_chat_id,
+                                 source_message_id, source_text, sender_name, fingerprint,
+                                 created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(fingerprint) WHERE invalid_at IS NULL DO UPDATE SET
+                                subject_entity = excluded.subject_entity,
+                                subject_person_id = excluded.subject_person_id,
+                                source_message_id = excluded.source_message_id,
+                                source_text = excluded.source_text,
+                                confidence = MAX(facts.confidence, excluded.confidence),
+                                updated_at = excluded.updated_at
+                            """,
+                        arguments: [
+                            d.subjectEntity, d.subjectPersonId, d.predicate.rawValue, d.objectText, d.objectEntity,
+                            d.confidence, d.validFrom.timeIntervalSince1970, d.sourceChatId,
+                            d.sourceMessageId, d.sourceText, d.senderName, d.fingerprint,
+                            now, now
+                        ]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] upsertFacts failed: \(error)")
+        }
+    }
+
+    /// Close open loops by fingerprint (bi-temporal: stamp invalid_at, keep the row).
+    func invalidateFacts(fingerprints: [String], at date: Date = Date()) async {
+        guard !fingerprints.isEmpty, let pool = await ensureDatabase() else { return }
+        let ts = date.timeIntervalSince1970
+        do {
+            try await pool.write { db in
+                for fp in fingerprints {
+                    try db.execute(
+                        sql: "UPDATE facts SET invalid_at = ?, updated_at = ? WHERE fingerprint = ? AND invalid_at IS NULL",
+                        arguments: [ts, ts, fp]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] invalidateFacts failed: \(error)")
+        }
+    }
+
+    /// Live facts with the given predicates (default: the open-loop ones that
+    /// power tasks + reply queue), newest first. Predicate values are a fixed
+    /// enum vocabulary, so they're inlined safely (no user input).
+    func loadOpenFacts(predicates: [FactPredicate] = FactPredicate.openLoops, limit: Int = 500) async -> [Fact] {
+        guard let pool = await ensureDatabase() else { return [] }
+        let inList = predicates.map { "'\($0.rawValue)'" }.joined(separator: ", ")
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM facts
+                        WHERE invalid_at IS NULL AND predicate IN (\(inList))
+                        ORDER BY valid_from DESC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadOpenFacts failed: \(error)")
+            return []
+        }
+    }
+
+    /// Open facts for one chat — passed to extraction as the current state so the
+    /// model can resolve (close) loops a later message already answered.
+    func loadOpenFacts(chatId: Int64) async -> [Fact] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM facts WHERE source_chat_id = ? AND invalid_at IS NULL ORDER BY valid_from DESC",
+                    arguments: [chatId]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadOpenFacts(chatId:) failed: \(error)")
+            return []
+        }
+    }
+
+    /// All facts (live + invalidated), newest-touched first — for the inspector.
+    func loadRecentFacts(limit: Int = 400) async -> [Fact] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM facts ORDER BY updated_at DESC LIMIT ?",
+                    arguments: [limit]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadRecentFacts failed: \(error)")
+            return []
+        }
+    }
+
+    /// Counts for the inspector header: (total, open loops, resolved, chats touched).
+    func factStoreStats() async -> (total: Int, openLoops: Int, resolved: Int, chats: Int) {
+        guard let pool = await ensureDatabase() else { return (0, 0, 0, 0) }
+        do {
+            return try await pool.read { db in
+                let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facts") ?? 0
+                let open = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facts WHERE invalid_at IS NULL AND predicate IN ('i_owe','owes_me')") ?? 0
+                let resolved = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facts WHERE invalid_at IS NOT NULL") ?? 0
+                let chats = try Int.fetchOne(db, sql: "SELECT COUNT(DISTINCT source_chat_id) FROM facts") ?? 0
+                return (total, open, resolved, chats)
+            }
+        } catch {
+            return (0, 0, 0, 0)
+        }
+    }
+
+    /// Global name → id directory source: every (sender id, name) ever seen in
+    /// any chat, with frequency, for the context layer's entity resolver.
+    func loadContactDirectory() async -> [(id: Int64, name: String, count: Int)] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT sender_user_id AS id, sender_name AS name, COUNT(*) AS c
+                        FROM messages
+                        WHERE sender_user_id IS NOT NULL AND sender_name IS NOT NULL AND sender_name <> ''
+                        GROUP BY sender_user_id, sender_name
+                        """
+                )
+                return rows.map { row in
+                    (id: row["id"] as Int64, name: row["name"] as String, count: row["c"] as Int)
+                }
+            }
+        } catch {
+            print("[DatabaseManager] loadContactDirectory failed: \(error)")
+            return []
+        }
+    }
+
+    func factExtractionCursor(chatId: Int64) async -> Int64 {
+        guard let pool = await ensureDatabase() else { return 0 }
+        do {
+            return try await pool.read { db in
+                try Int64.fetchOne(
+                    db,
+                    sql: "SELECT extracted_through_message_id FROM fact_extraction_state WHERE chat_id = ?",
+                    arguments: [chatId]
+                ) ?? 0
+            }
+        } catch { return 0 }
+    }
+
+    func updateFactExtractionCursor(chatId: Int64, throughMessageId: Int64, at date: Date = Date()) async {
+        guard let pool = await ensureDatabase() else { return }
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO fact_extraction_state (chat_id, extracted_through_message_id, last_extracted_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            extracted_through_message_id = MAX(fact_extraction_state.extracted_through_message_id, excluded.extracted_through_message_id),
+                            last_extracted_at = excluded.last_extracted_at
+                        """,
+                    arguments: [chatId, throughMessageId, date.timeIntervalSince1970]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] updateFactExtractionCursor failed: \(error)")
+        }
+    }
+
+    static func fact(from row: Row) -> Fact? {
+        guard let predicate = FactPredicate(rawValue: row["predicate"]) else { return nil }
+        let invalidAt: Double? = row["invalid_at"]
+        return Fact(
+            id: row["id"],
+            subjectEntity: row["subject_entity"],
+            subjectPersonId: row["subject_person_id"],
+            predicate: predicate,
+            objectText: row["object_text"],
+            objectEntity: row["object_entity"],
+            confidence: row["confidence"],
+            validFrom: Date(timeIntervalSince1970: row["valid_from"]),
+            invalidAt: invalidAt.map(Date.init(timeIntervalSince1970:)),
+            sourceChatId: row["source_chat_id"],
+            sourceMessageId: row["source_message_id"],
+            sourceText: row["source_text"],
+            senderName: row["sender_name"],
+            fingerprint: row["fingerprint"],
+            createdAt: Date(timeIntervalSince1970: row["created_at"]),
+            updatedAt: Date(timeIntervalSince1970: row["updated_at"])
+        )
     }
 
 

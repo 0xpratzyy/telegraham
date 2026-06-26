@@ -576,6 +576,76 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v21_context_layer_facts") { db in
+            // Context layer (#48): one queryable, time-aware fact store that tasks
+            // + reply queue become VIEWS over, instead of re-extracting from raw
+            // windows each pass. A fact is a triplet with provenance + a bi-temporal
+            // validity window — we INVALIDATE old facts (set invalid_at) rather than
+            // overwrite, so history stays answerable and tasks close cleanly.
+            try db.execute(sql: """
+                CREATE TABLE facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_entity TEXT NOT NULL,
+                    predicate TEXT NOT NULL,
+                    object_text TEXT NOT NULL,
+                    object_entity TEXT,
+                    confidence REAL NOT NULL DEFAULT 0.7,
+                    valid_from REAL NOT NULL,
+                    invalid_at REAL,
+                    source_chat_id INTEGER NOT NULL,
+                    source_message_id INTEGER NOT NULL DEFAULT 0,
+                    source_text TEXT NOT NULL DEFAULT '',
+                    sender_name TEXT NOT NULL DEFAULT '',
+                    fingerprint TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+            // Open-loop lookups (tasks / reply queue): predicate + still-valid + chat.
+            try db.execute(sql: """
+                CREATE INDEX idx_facts_open ON facts(predicate, invalid_at, source_chat_id)
+                """)
+            try db.execute(sql: """
+                CREATE INDEX idx_facts_chat ON facts(source_chat_id, invalid_at)
+                """)
+            // One LIVE fact per (subject|predicate|object); invalidated copies
+            // coexist (that's the bi-temporal history). Partial unique index.
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_facts_live_fingerprint
+                ON facts(fingerprint) WHERE invalid_at IS NULL
+                """)
+            // Per-chat extraction high-water mark — extract each message once.
+            try db.execute(sql: """
+                CREATE TABLE fact_extraction_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    extracted_through_message_id INTEGER NOT NULL DEFAULT 0,
+                    last_extracted_at REAL NOT NULL DEFAULT 0,
+                    schema_version INTEGER NOT NULL DEFAULT 1
+                )
+                """)
+        }
+
+        migrator.registerMigration("v22_fact_subject_person") { db in
+            // Entity resolution: link a fact's subject to a canonical Telegram
+            // user id (the same id the People graph keys on), so name variants
+            // ("Piyush" / "Piyush Avantis") collapse to one person and facts
+            // join the People surface. NULL when the subject couldn't be
+            // resolved (a bare name, or "me") — the fingerprint then falls back
+            // to the normalized name.
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN subject_person_id INTEGER")
+            try db.execute(sql: "CREATE INDEX idx_facts_person ON facts(subject_person_id, invalid_at)")
+        }
+
+        migrator.registerMigration("v23_messages_sender_name_index") { db in
+            // Covers the context layer's contact-directory query
+            // (GROUP BY sender_user_id, sender_name over all messages) so it
+            // stays an index scan rather than a full scan as messages grow.
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_messages_sender_name
+                ON messages(sender_user_id, sender_name)
+                """)
+        }
+
         return migrator
     }
 }

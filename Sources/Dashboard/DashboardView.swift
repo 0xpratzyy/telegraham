@@ -27,6 +27,7 @@ struct DashboardView: View {
     @State private var selectedTopicId: Int64?
     @State private var isAddingTopic = false
     @State private var isShowingFeedbackSheet = false
+    @State private var isShowingContextInspector = false
     @State private var feedbackPrefillText: String?
     /// Launcher "Flag answer" hand-off. Observed (not notification-
     /// driven) so presentation can't race the window lifecycle: the
@@ -145,6 +146,12 @@ struct DashboardView: View {
             .preferredColorScheme(.dark)
             .presentationBackground(Color.Pidgy.bg2)
         }
+        // Context layer (#48) inspector (⌘⇧J): sheet + hidden hotkey pulled into
+        // one modifier so the body stays type-checkable.
+        .modifier(ContextInspectorPresenter(
+            isPresented: $isShowingContextInspector,
+            telegramService: telegramService
+        ))
         // Launcher "Flag answer" hand-off. onChange covers prefills
         // parked while this view is alive; onAppear covers the cold
         // path where the prefill was parked before the window existed.

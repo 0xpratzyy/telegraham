@@ -378,6 +378,42 @@ final class AIService: ObservableObject {
         return extracted.map { $0.resolvingSourceMetadata(from: messages, myUserId: myUserId) }
     }
 
+    /// Context layer (#48): extract facts from a chat's NEW messages, folding in
+    /// its current open loops so the model can also CLOSE the ones the new
+    /// messages answered. Runs through the generic `summarize` escape hatch
+    /// (instructions + open loops in the system prompt, transcript as the
+    /// rendered messages) so no per-provider structured-output plumbing is
+    /// needed. Returns drafts to upsert + fingerprints to invalidate.
+    func extractFacts(
+        chat: TGChat,
+        newMessages: [TGMessage],
+        openLoops: [Fact],
+        myUserId: Int64,
+        myUser: TGUser?
+    ) async throws -> FactExtractionResult {
+        try requireAIEntitlement()
+        let snippets = conversationSnippets(messages: newMessages, chatTitle: chat.title, myUserId: myUserId)
+        guard !snippets.isEmpty else {
+            return FactExtractionResult(drafts: [], resolvedFingerprints: [])
+        }
+        let systemPrompt = FactExtractionPrompt.systemPrompt + FactExtractionPrompt.contextBlock(
+            myName: myUser?.firstName ?? "Me",
+            chatTitle: chat.title,
+            chatType: chat.chatType.displayName,
+            openLoops: openLoops
+        )
+        let response = try await provider.summarize(messages: snippets, prompt: systemPrompt)
+        // The newest message in the batch carries the batch's provenance + validity.
+        let newest = newMessages.max(by: { $0.date < $1.date })
+        return try FactExtractionParser.parse(
+            response,
+            chatId: chat.id,
+            openLoops: openLoops,
+            sourceMessageId: newest?.id ?? 0,
+            validFrom: newest?.date ?? Date()
+        )
+    }
+
     /// Extract a compiled-truth profile for a single person. Messages
     /// can span multiple chats — chat title is per-message rather than
     /// per-call. Caller is responsible for caching; this just runs the
