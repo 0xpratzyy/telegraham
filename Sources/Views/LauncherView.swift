@@ -32,6 +32,7 @@ struct LauncherView: View {
 
     // Search & filter
     @State private var searchText = ""
+    @State private var factHits: [Fact] = []   // context-layer (#48) fact search results
     @FocusState private var isSearchFocused: Bool
 
     // Filter tags
@@ -316,6 +317,15 @@ struct LauncherView: View {
                 }
             }
             triggerSearch()
+            // Context layer (#48): surface matching facts alongside chat results.
+            if ContextLayer.enabled {
+                let q = trimmedQuery
+                Task { @MainActor in
+                    factHits = q.count >= 2
+                        ? await DatabaseManager.shared.searchFacts(query: q, limit: 6)
+                        : []
+                }
+            }
         }
         .onChange(of: isSearchFocused) { _, focused in
             Task {
@@ -1061,6 +1071,10 @@ struct LauncherView: View {
                         .padding(.horizontal, 12).padding(.vertical, 4)
                     }
 
+                    if ContextLayer.enabled, !searchText.isEmpty, !factHits.isEmpty {
+                        factsSection
+                    }
+
                     if !searchText.isEmpty {
                         Text("\(displayedChats.count) result\(displayedChats.count == 1 ? "" : "s")")
                             .font(Font.Pidgy.monoSm)
@@ -1084,7 +1098,7 @@ struct LauncherView: View {
                             // empty one that the AI list then replaces.
                             if isAISearching {
                                 aiLoadingStateView
-                            } else {
+                            } else if factHits.isEmpty {
                                 EmptyStateView(
                                     icon: "magnifyingglass",
                                     title: "No results for \"\(searchText)\""
@@ -1238,6 +1252,64 @@ struct LauncherView: View {
             return chatTitle
         }
         return trimmedPreferred.isEmpty ? "Chat \(chatId)" : trimmedPreferred
+    }
+
+    // Context layer (#48): a "Facts" section above chat results. Tapping a fact
+    // opens its chat. Pure read of the fact store — no AI, flag-gated.
+    @ViewBuilder
+    private var factsSection: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("FACTS")
+                .font(Font.Pidgy.monoSm)
+                .foregroundStyle(Color.Pidgy.fg3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
+            ForEach(factHits) { fact in
+                Button {
+                    openChatById(fact.sourceChatId, preferredChat: nil)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(factLaneLabel(fact))
+                            .font(Font.Pidgy.monoSm)
+                            .foregroundStyle(factLaneColor(fact))
+                            .frame(width: 56, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(fact.action.isEmpty ? fact.objectText : fact.action)
+                                .font(Font.Pidgy.bodySm)
+                                .foregroundStyle(Color.Pidgy.fg2)
+                                .lineLimit(1)
+                            Text("\(fact.subjectEntity) · \(fact.sourceChatTitle)")
+                                .font(Font.Pidgy.monoSm)
+                                .foregroundStyle(Color.Pidgy.fg3)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.pidgyPress)
+            }
+        }
+    }
+
+    private func factLaneLabel(_ f: Fact) -> String {
+        switch f.predicate {
+        case .iOwe: return "ON ME"
+        case .owesMe: return "ON THEM"
+        default: return "FACT"
+        }
+    }
+
+    private func factLaneColor(_ f: Fact) -> Color {
+        switch f.predicate {
+        case .iOwe: return Color.Pidgy.warning
+        case .owesMe: return Color.Pidgy.accent
+        default: return Color.Pidgy.fg3
+        }
     }
 
     private func openChatById(_ chatId: Int64, preferredChat: TGChat?) {
