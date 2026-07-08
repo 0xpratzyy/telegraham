@@ -687,6 +687,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             await MajorChatCoverageCoordinator.shared.stop()
             await IndexScheduler.shared.stop()
             await DatabaseManager.shared.close()
+            // TDLib closes asynchronously (stop() above only sent the close
+            // request). Replying while td is mid-WAL-checkpoint let exit() race
+            // its scheduler teardown → SIGABRT at quit. Bounded: the 3s
+            // watchdog above still guarantees the app always quits.
+            await TDLibClientWrapper.waitUntilClosed(timeout: 2)
             finish()
         }
     }
