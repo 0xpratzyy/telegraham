@@ -387,12 +387,14 @@ final class AIService: ObservableObject {
     func extractFacts(
         chat: TGChat,
         newMessages: [TGMessage],
+        contextMessages: [TGMessage] = [],
         openLoops: [Fact],
         myUserId: Int64,
         myUser: TGUser?
     ) async throws -> FactExtractionResult {
         try requireAIEntitlement()
         let snippets = conversationSnippets(messages: newMessages, chatTitle: chat.title, myUserId: myUserId)
+        let contextSnippets = conversationSnippets(messages: contextMessages, chatTitle: chat.title, myUserId: myUserId)
         guard !snippets.isEmpty else {
             return FactExtractionResult(drafts: [], resolvedFingerprints: [])
         }
@@ -408,7 +410,9 @@ final class AIService: ObservableObject {
         ) + PromptSafety.untrustedContentClause
         // Numbered transcript so the model cites each loop's source by [N] (exact
         // provenance), via the answer() escape hatch instead of summarize's render.
-        let transcript = FactExtractionPrompt.numberedTranscript(snippets: snippets)
+        // Already-processed context rides along unnumbered so a tiny window
+        // (one terse ping) isn't judged blind.
+        let transcript = FactExtractionPrompt.numberedTranscript(snippets: snippets, context: contextSnippets)
         let response = try await provider.answer(systemPrompt: systemPrompt, userMessage: transcript)
         // validFrom fallback for a snippet with no date — parse() prefers each
         // fact's CITED message date.

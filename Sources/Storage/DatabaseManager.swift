@@ -328,6 +328,32 @@ actor DatabaseManager {
         }
     }
 
+    /// The last `limit` already-processed messages at/before the extraction
+    /// cursor — fed to extraction as read-only CONTEXT so a tiny new window
+    /// (one terse ping) isn't judged blind. Returned chronologically.
+    func loadMessagesBefore(chatId: Int64, throughMessageId: Int64, limit: Int) async -> [MessageRecord] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        FROM messages
+                        WHERE chat_id = ? AND id <= ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                    arguments: [chatId, throughMessageId, limit]
+                )
+                return rows.map(Self.messageRecord(from:)).reversed()
+            }
+        } catch {
+            print("[DatabaseManager] loadMessagesBefore failed for chat \(chatId): \(error)")
+            return []
+        }
+    }
+
     func loadMessages(
         chatId: Int64,
         startDate: Date?,

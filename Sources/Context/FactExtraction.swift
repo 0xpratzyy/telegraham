@@ -162,6 +162,7 @@ enum FactExtractionPrompt {
       * an ask that @-mentions or names a DIFFERENT person — that is THAT person's job.
       When in doubt in a group, emit NOTHING. subject = the person [ME] owes it to.
     - owes_me = someone still needs to get back to the user.        subject = that person.
+    - WHO ACTS decides the direction — never who benefits. A message where the SENDER commits to do something ("Will check with Deeksha", "creating this", "I'll send it tomorrow") is THEIR commitment → owes_me (subject = sender), NEVER i_owe. i_owe requires [ME] to be the actor: either the message asks [ME] to do it, or [ME] committed in [ME]'s own message ("I'll…", "lemme see", "will do"). A joint "we should / we will have to…" with no explicit owner is NOT [ME]'s task — skip it unless [ME] explicitly takes it (and if the OTHER person takes it, it's owes_me).
     - works_at / prefers / fact = durable background facts about a person (subject = that person). Emit sparingly.
     - writes_in = a fact about how the USER writes (subject = "me"). Emit rarely.
 
@@ -174,7 +175,7 @@ enum FactExtractionPrompt {
     - NEVER INVENT what is owed — the object must come from the message itself. If the message doesn't say WHAT is owed, do NOT emit a loop: a bare "give access", "access plz", "send it", "do the needful", "let's do it" with no stated object is too vague to be a task — skip it. (Never turn "give access" into "access to the resource", or a reaction to a shared link into a task.)
     - CLOSING LOOPS: an OPEN LOOP closes only when a NEW message from [ME] actually ADDRESSES that specific loop — answers that exact question, sends that exact thing, gives that exact update. Put its number in resolvedLoops and do NOT re-emit it. A [ME] message about something else does NOT close it — match the reply to the loop; never close on unrelated chatter.
     - NEVER RE-EMIT AN OPEN LOOP: the "facts" array is ONLY for loops that ORIGINATE in the NEW numbered messages below. The OPEN LOOPS list is context so you can CLOSE loops (resolvedLoops) — it is NOT a to-do list to copy back into "facts". If a loop is already in OPEN LOOPS and these new messages neither close it nor add a genuinely new ask, output NOTHING for it: do not re-list it, and never re-anchor an old loop onto one of these unrelated messages. Only a NEW request/commitment first appearing in these numbered messages becomes a new fact.
-    - CHASED LOOPS: when a NEW message from the OTHER person follows up on / nudges an OPEN LOOP without closing it ("any update?", "wen free tonight?", asking the same thing again), do NOT re-emit the loop — report it in "chasedLoops": {"loop": its OPEN LOOPS number, "sourceMsg": the follow-up message's transcript [N]}. This bumps the existing item to the latest ping instead of duplicating it. In a DM, a bare availability or nudge ping with no new content ("free tonight?", "around?", "bhai?", "any update") almost always chases that person's MOST RECENT open loop — connect it and report the chase rather than ignoring the ping.
+    - CHASED LOOPS: when a NEW message from the OTHER person follows up on / nudges something [ME] owes THEM (an "you owe" OPEN LOOP) without closing it — "any update?", "wen free tonight?", asking the same thing again — do NOT re-emit the loop; report it in "chasedLoops": {"loop": its OPEN LOOPS number, "sourceMsg": the follow-up message's transcript [N]}. This bumps the existing item to the latest ping instead of duplicating it. Only report a chase when the connection to a SPECIFIC loop is clear from the conversation (in a DM, a bare "free tonight?"/"around?" ping usually chases the latest thing [ME] owes them); if it is genuinely ambiguous WHICH loop is being chased, report nothing. A chase never targets a loop where THEY owe [ME].
     - Prefer a few high-confidence facts over many guesses. Empty arrays are perfectly fine.
     - "action" must read like a to-do you wrote yourself (imperative, natural, specific) — NEVER a template like "Owe X: Y". Keep "object" as the short stable noun phrase; "action" is the human phrasing.
     - For every i_owe loop, set "kind": "reply" when a quick message closes it, "action" when it needs work or time before you can respond. This is what separates the user's Reply queue (quick replies) from their Tasks (take work). owes_me and durable facts: omit "kind".
@@ -188,10 +189,27 @@ enum FactExtractionPrompt {
     /// fence is untrusted sender data — an inbound message that embeds fake
     /// "[7] [ME]: …" lines must not be able to forge numbering, the user's
     /// voice, or a loop closure.
-    static func numberedTranscript(snippets: [MessageSnippet]) -> String {
-        snippets.enumerated()
+    ///
+    /// `context` = the last few ALREADY-PROCESSED messages, unnumbered and
+    /// clearly labeled: a tiny new window (one terse "wen free tonight" ping)
+    /// judged blind made the model invent connections and re-emit old loops
+    /// anchored on the ping. Context restores the thread without being
+    /// extractable.
+    static func numberedTranscript(snippets: [MessageSnippet], context: [MessageSnippet] = []) -> String {
+        let numbered = snippets.enumerated()
             .map { i, s in "[\(i + 1)] \(s.senderFirstName): \(PromptSafety.fence(s.text))" }
             .joined(separator: "\n")
+        guard !context.isEmpty else { return numbered }
+        let contextLines = context
+            .map { s in "(context) \(s.senderFirstName): \(PromptSafety.fence(s.text))" }
+            .joined(separator: "\n")
+        return """
+        ALREADY-PROCESSED CONTEXT — for understanding the thread only. NEVER extract facts from, cite, or anchor anything on these lines; they have no [N]:
+        \(contextLines)
+
+        NEW MESSAGES (the only extractable ones):
+        \(numbered)
+        """
     }
 
     /// Context appended to the system prompt.
@@ -206,9 +224,13 @@ enum FactExtractionPrompt {
         if openLoops.isEmpty {
             loopList = "none"
         } else {
+            // Ask dates make "the most recent thing you owe them" computable —
+            // chase/close targeting was guesswork without them.
+            let fmt = DateFormatter()
+            fmt.dateFormat = "MMM d"
             loopList = openLoops.enumerated().map { i, f in
                 let dir = f.predicate == .iOwe ? "you owe \(f.subjectEntity)" : "\(f.subjectEntity) owes you"
-                return "\(i + 1). [\(dir)] → \(f.objectText)"
+                return "\(i + 1). [\(dir)] → \(f.objectText) (asked \(fmt.string(from: f.validFrom)))"
             }.joined(separator: "\n")
         }
         // The username is what group @-mentions actually address — without it
@@ -334,7 +356,12 @@ enum FactExtractionParser {
             guard let loopN = chase.loop, openLoops.indices.contains(loopN - 1),
                   let msgN = chase.sourceMsg, msgN >= 1, msgN <= messages.count else { return nil }
             let loop = openLoops[loopN - 1]
-            guard loop.predicate.isOpenLoop, !resolvedSet.contains(loop.fingerprint) else { return nil }
+            // Direction is structural: the OTHER person's ping can only chase
+            // what THEY are waiting on — an i_owe loop. An owes_me loop (what
+            // they owe the user) is chased by [ME], and [ME]'s messages are
+            // already excluded — so an inbound chase citing owes_me is always a
+            // mis-cite (one bumped a Jun-9 owes_me onto "wen free tonight").
+            guard loop.predicate == .iOwe, !resolvedSet.contains(loop.fingerprint) else { return nil }
             let snip = messages[msgN - 1]
             guard snip.senderFirstName != "[ME]" else { return nil }
             return ChasedLoopUpdate(

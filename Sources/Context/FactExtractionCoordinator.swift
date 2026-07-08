@@ -185,6 +185,13 @@ final class FactExtractionCoordinator: ObservableObject {
 
                 // Records are id ASC (chronological); extractFacts re-sorts by date too.
                 let tgMessages = records.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
+                // Trailing context: the last few ALREADY-processed messages, so a
+                // tiny window (one terse ping after a long thread) isn't judged
+                // blind — that produced invented connections and re-emissions.
+                let contextRecords = cursor > 0
+                    ? await DatabaseManager.shared.loadMessagesBefore(chatId: chat.id, throughMessageId: cursor, limit: 8)
+                    : []
+                let contextMessages = contextRecords.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
                 let openLoops = await DatabaseManager.shared
                     .loadOpenFacts(chatId: chat.id)
                     .filter { $0.predicate.isOpenLoop }
@@ -193,6 +200,7 @@ final class FactExtractionCoordinator: ObservableObject {
                     let result = try await aiService.extractFacts(
                         chat: chat,
                         newMessages: tgMessages,
+                        contextMessages: contextMessages,
                         openLoops: openLoops,
                         myUserId: myUserId,
                         myUser: myUser

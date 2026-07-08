@@ -333,6 +333,19 @@ final class ContextLayerTests: XCTestCase {
         XCTAssertEqual(result.resolvedFingerprints, ["fp-B"])
     }
 
+    /// Direction is structural: an inbound ping can only chase what THEY are
+    /// waiting on (i_owe) — a mis-cited owes_me loop must be rejected (one
+    /// bumped a month-old owes_me onto "wen free tonight").
+    func test_parse_chasedLoop_rejectsOwesMeTarget() throws {
+        let loops = [openLoop(fingerprint: "fp-owes", predicate: .owesMe)]
+        let json = #"{"facts":[],"resolvedLoops":[],"chasedLoops":[{"loop":1,"sourceMsg":1}]}"#
+        let messages = [snippet(id: 5, sender: "Akhil", text: "wen free tonight")]
+        let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: loops,
+                                                    validFrom: Date(timeIntervalSince1970: 0),
+                                                    messages: messages)
+        XCTAssertTrue(result.chasedLoops.isEmpty)
+    }
+
     /// Review round 2, finding 5b: a short filler message must never win the
     /// substring fallback ("ok" is inside "book the hotel").
     func test_parse_fillerMessage_neverAnchorsViaSubstring() throws {
