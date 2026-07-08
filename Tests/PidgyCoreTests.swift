@@ -2081,6 +2081,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorRoutesReplyOnlyToReplyQueueInsteadOfTasks() async throws {
+        // Legacy triage pipeline: refreshNow intentionally no-ops while the
+        // context layer is ON (tasks are fact-projected). These tests keep
+        // guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task triage is disabled under the context layer")
+
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -2271,6 +2276,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorLeavesTaskOpenWhenTriageIgnoreCitesNoEvidence() async throws {
+        // Legacy triage pipeline: refreshNow intentionally no-ops while the
+        // context layer is ON (tasks are fact-projected). These tests keep
+        // guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task triage is disabled under the context layer")
+
         // Prompt-injection defense (issue #30, suppression half): an ignore route
         // that cites NO open-task source evidence is advisory — the task stays
         // open and only the sync cursor advances. (Previously this blanket-ignored
@@ -2303,6 +2313,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorIgnoresOpenTaskWhenTriageIgnoreCitesItsSourceEvidence() async throws {
+        // Legacy triage pipeline: refreshNow intentionally no-ops while the
+        // context layer is ON (tasks are fact-projected). These tests keep
+        // guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task triage is disabled under the context layer")
+
         // Legitimate stale cleanup is preserved: the prompt instructs triage to
         // cite the stale task's own source message ids, and a decision that does
         // so still retires the task.
@@ -2333,6 +2348,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorLeavesTaskOpenWhenTriageIgnoreCitesOnlyNewMessages() async throws {
+        // Legacy triage pipeline: refreshNow intentionally no-ops while the
+        // context layer is ON (tasks are fact-projected). These tests keep
+        // guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task triage is disabled under the context layer")
+
         // The attack shape from the prompt-injection eval: a NEW inbound message
         // forces route=ignore and the model cites only that new message. It can
         // never cite the task's stored evidence rows, so the task must survive.
@@ -2463,6 +2483,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorKeepsOpenTaskWhenExtractionReturnsNothingCitingIt() async throws {
+        // Legacy dashboard_tasks pipeline: fact-mode loadFromStore/refreshNow
+        // intentionally bypass it while the context layer is ON. These tests
+        // keep guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
+
         // Prompt-injection defense (issue #30, suppression half): extraction
         // returning nothing (which a crafted message can force) no longer
         // retires open tasks. Retirement requires a retained candidate that
@@ -2561,6 +2586,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorKeepsOpenTasksOwnedByAnotherNamedPersonOnLoad() async throws {
+        // Legacy dashboard_tasks pipeline: fact-mode loadFromStore/refreshNow
+        // intentionally bypass it while the context layer is ON. These tests
+        // keep guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
+
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -2639,6 +2669,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorKeepsAnotherNamedOwnerBeforeCurrentUserLoads() async throws {
+        // Legacy dashboard_tasks pipeline: fact-mode loadFromStore/refreshNow
+        // intentionally bypass it while the context layer is ON. These tests
+        // keep guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
+
         try await withTempDatabase { _ in
             let now = Date()
             let chat = makeChat(
@@ -2698,6 +2733,11 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorPersistsExtractedTaskOwnedByAnotherNamedPerson() async throws {
+        // Legacy dashboard_tasks pipeline: fact-mode loadFromStore/refreshNow
+        // intentionally bypass it while the context layer is ON. These tests
+        // keep guarding the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
+
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -2795,6 +2835,9 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorMarksOutgoingMessagesAsMeForDashboardAI() async throws {
+        // Legacy dashboard_tasks pipeline: bypassed while the context layer is
+        // ON (tasks are fact-projected). Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -2876,6 +2919,9 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorSendsOpenTaskEvidenceToTriageForStaleCleanup() async throws {
+        // Legacy dashboard_tasks pipeline: bypassed while the context layer is
+        // ON (tasks are fact-projected). Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -3017,6 +3063,9 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorRescansOpenTaskChatsOutsideVisibleCandidates() async throws {
+        // Legacy dashboard_tasks pipeline: bypassed while the context layer is
+        // ON (tasks are fact-projected). Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -3125,6 +3174,9 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorReplacesStaleMeTaskWhenExtractionReassignsOwner() async throws {
+        // Legacy dashboard_tasks pipeline: bypassed while the context layer is
+        // ON (tasks are fact-projected). Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -3252,6 +3304,9 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorMarksExistingTaskDoneWhenReplyCompletesIt() async throws {
+        // Legacy dashboard_tasks pipeline: bypassed while the context layer is
+        // ON (tasks are fact-projected). Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
         try await withTempDatabase { _ in
             let now = Date()
             let myUser = TGUser(
@@ -3365,6 +3420,9 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testTaskIndexCoordinatorLeavesTaskOpenWhenCompletedTaskNotCorroboratedByMe() async throws {
+        // Legacy dashboard_tasks pipeline: bypassed while the context layer is
+        // ON (tasks are fact-projected). Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy task pipeline is disabled under the context layer")
         // Prompt-injection defense (issue #30): a `completed_task` decision driven
         // purely by attacker-controlled INBOUND messages — with NO genuine outgoing
         // [ME] message in the window (a forged "[ME]:" inside the body must not
@@ -3484,6 +3542,13 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testAttentionStoreLocksImmediatelyDuringFollowUpLoad() async throws {
+        // Legacy reply-queue pipeline (isExecuting lock / cache hydration /
+        // background AI refresh): all intentionally bypassed while the context
+        // layer is ON — the queue is a debounced fact projection, and legacy
+        // cache hydration is disabled so frozen pre-#48 rows can't stomp fact
+        // lanes. Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy reply-queue pipeline is disabled under the context layer")
+
         try await withTempDatabase { _ in
             let now = Date()
             let chat = makeChat(
@@ -3557,6 +3622,13 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testAttentionStoreHydratesNewlyVisibleCachedFollowUpsWithoutAI() async throws {
+        // Legacy reply-queue pipeline (isExecuting lock / cache hydration /
+        // background AI refresh): all intentionally bypassed while the context
+        // layer is ON — the queue is a debounced fact projection, and legacy
+        // cache hydration is disabled so frozen pre-#48 rows can't stomp fact
+        // lanes. Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy reply-queue pipeline is disabled under the context layer")
+
         try await withTempDatabase { _ in
             let now = Date()
             let initiallyVisibleChats = [
@@ -3673,6 +3745,13 @@ final class PidgyCoreTests: XCTestCase {
 
     @MainActor
     func testAttentionStoreBackgroundRefreshSkipsExcludedChatsAndStillDiscoversNewOnes() async throws {
+        // Legacy reply-queue pipeline (isExecuting lock / cache hydration /
+        // background AI refresh): all intentionally bypassed while the context
+        // layer is ON — the queue is a debounced fact projection, and legacy
+        // cache hydration is disabled so frozen pre-#48 rows can't stomp fact
+        // lanes. Still guards the flag-OFF build.
+        try XCTSkipIf(ContextLayer.enabled, "legacy reply-queue pipeline is disabled under the context layer")
+
         try await withTempDatabase { _ in
             let excludedChatId: Int64 = 46_001
             let newChatId: Int64 = 46_002
@@ -5636,7 +5715,9 @@ final class PidgyCoreTests: XCTestCase {
             title: "Stale DM",
             chatType: .privateChat(userId: 33),
             unreadCount: 0,
-            lastMessageDate: now.addingTimeInterval(-(15 * 86_400))
+            // Older than maxPipelineAgeSeconds (30 days since the Gemini-triage
+            // scope widening) — this test previously assumed the old 14-day cap.
+            lastMessageDate: now.addingTimeInterval(-(31 * 86_400))
         )
         let noisyGroup = makeChat(
             id: 4,
@@ -5670,7 +5751,7 @@ final class PidgyCoreTests: XCTestCase {
         )
 
         XCTAssertEqual(result.included.map(\.id), [recentPrivate.id, recentGroup.id, midSizeGroup.id])
-        XCTAssertTrue(result.exclusions.contains(.init(reason: "older than 14 days", chatTitle: "Stale DM")))
+        XCTAssertTrue(result.exclusions.contains(.init(reason: "older than 30 days", chatTitle: "Stale DM")))
         XCTAssertTrue(result.exclusions.contains(.init(reason: "group unread too high", chatTitle: "Noisy Group")))
         XCTAssertTrue(result.exclusions.contains(.init(reason: "group too large", chatTitle: "Huge Group")))
         XCTAssertTrue(result.exclusions.contains(.init(reason: "channel skipped", chatTitle: "Channel")))
@@ -10281,6 +10362,10 @@ private struct DashboardTaskTriageAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
+    func answer(systemPrompt: String, userMessage: String) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
         throw AIError.providerNotConfigured
     }
@@ -10366,6 +10451,10 @@ private struct CountingPipelineAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
+    func answer(systemPrompt: String, userMessage: String) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
         throw AIError.providerNotConfigured
     }
@@ -10447,6 +10536,10 @@ private struct StubAIProvider: AIProvider {
     var pipelineCategoryError: Error?
 
     func summarize(messages: [MessageSnippet], prompt: String) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
+    func answer(systemPrompt: String, userMessage: String) async throws -> String {
         throw AIError.providerNotConfigured
     }
 

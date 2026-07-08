@@ -27,9 +27,20 @@ final class FactExtractionCoordinator: ObservableObject {
     private var contactDirectory: FactContactDirectory?
     private var directoryBuiltAt: Date?
     private var isRunning = false
+    private var didBackfillLoopKinds = false
+    /// Consecutive unparseable-reply failures per chat at a given cursor — after
+    /// 3 the poison window is skipped so one bad window can't wedge the crawl.
+    private var extractFailures: [Int64: (cursor: Int64, count: Int)] = [:]
 
     @Published private(set) var lastPassAt: Date?
     @Published private(set) var lastPassNewFacts = 0
+    /// True while the crawl has BACKLOG left to read (cursor behind the 30-day
+    /// window on some chat) — surfaces show a playful loader instead of a bare
+    /// empty state. Backlog-based, NOT "did the last pass add facts": a steady
+    /// stream of new facts on a caught-up account must not pin the loader, and a
+    /// closes-only pass mid-crawl must not drop it. Cleared when Telegram can't
+    /// run a pass (auth lost) so the loader always yields to a real state.
+    @Published private(set) var isCrawling = false
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.pidgy.app",
@@ -42,6 +53,9 @@ final class FactExtractionCoordinator: ObservableObject {
     /// periodic refresh. No-op unless the context layer is enabled.
     func start(telegramService: TelegramService, aiService: AIService) {
         guard ContextLayer.enabled else { return }
+        // Arm the loader from launch so an empty surface shows the pigeon (not a
+        // bare empty state) during the window before the first pass resolves.
+        isCrawling = true
         self.telegramService = telegramService
         self.aiService = aiService
 
@@ -57,8 +71,15 @@ final class FactExtractionCoordinator: ObservableObject {
         passTask = Task { @MainActor [weak self] in
             // Wait for auth + a populated chat list (up to ~60s), then run.
             for _ in 0..<30 {
+                guard !Task.isCancelled else { return }
                 if let ts = self?.telegramService, ts.authState == .ready, !ts.visibleChats.isEmpty { break }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            // Auth never arrived: yield the loader to the real empty state
+            // instead of a pigeon that can never finish.
+            if let self, self.telegramService?.authState != .ready, self.isCrawling {
+                self.isCrawling = false
             }
             await self?.runPass()
         }
@@ -85,10 +106,15 @@ final class FactExtractionCoordinator: ObservableObject {
     }
 
     private func runPass() async {
-        guard ContextLayer.enabled, !isRunning,
-              let telegramService, let aiService,
-              telegramService.authState == .ready
-        else { return }
+        guard ContextLayer.enabled, !isRunning, let telegramService, let aiService else { return }
+        guard telegramService.authState == .ready else {
+            // Can't crawl without Telegram (session revoked / signed out): drop
+            // the loader so surfaces settle to their real states; the next
+            // successful pass re-arms it if backlog remains.
+            if isCrawling { isCrawling = false }
+            return
+        }
+        guard !Task.isCancelled else { return }
         isRunning = true
         defer { isRunning = false }
 
@@ -127,10 +153,18 @@ final class FactExtractionCoordinator: ObservableObject {
         }
 
         var newFacts = 0
+        var closedLoops = 0
+        var chasedLoops = 0
         var scannedWindows = 0
         var workedChats = 0
+        // Backlog detection: true when this pass stopped for BUDGET reasons
+        // (per-chat window cap, per-pass chat cap) rather than catching up —
+        // that's what keeps the loader up, independent of how many facts the
+        // pass happened to add.
+        var backlogRemains = false
         for chat in eligible {
-            guard !Task.isCancelled, workedChats < ContextLayer.maxChatsPerPass else { break }
+            guard !Task.isCancelled else { backlogRemains = true; break }
+            guard workedChats < ContextLayer.maxChatsPerPass else { backlogRemains = true; break }
 
             var cursor = await DatabaseManager.shared.factExtractionCursor(chatId: chat.id)
             var windows = 0
@@ -163,6 +197,7 @@ final class FactExtractionCoordinator: ObservableObject {
                         myUserId: myUserId,
                         myUser: myUser
                     )
+                    extractFailures[chat.id] = nil
                     // Resolve each subject to a canonical person id (DM
                     // counterparty / chat-sender match) so name variants collapse
                     // and facts join the People graph.
@@ -179,33 +214,76 @@ final class FactExtractionCoordinator: ObservableObject {
                         d.subjectEntity = name
                         return d
                     }
+                    // Structural gates for closing loops — never message content,
+                    // so crafted text alone can't forge a closure:
+                    //  - i_owe closes only when a genuine outgoing/[ME] message
+                    //    exists in the window (the user acted);
+                    //  - owes_me closes only when a genuine INBOUND message exists
+                    //    (the other side acted — they delivered/answered). Worst
+                    //    case for a malicious sender is hiding a reminder about
+                    //    what THEY owe, never the user's own tasks.
+                    // The model is the targeting check on top: resolvedLoops must
+                    // name the specific loop the new messages addressed.
+                    let myOutgoingId = records
+                        .filter { $0.isOutgoing || (myUserId > 0 && $0.senderUserId == myUserId) }
+                        .map(\.id).max()
+                    let hasInbound = records.contains {
+                        !$0.isOutgoing && !(myUserId > 0 && $0.senderUserId == myUserId)
+                    }
+
+                    // Close BEFORE upserting: a legitimate re-ask in this same
+                    // window can carry the SAME fingerprint as the loop being
+                    // closed — invalidating first lets the new draft insert as a
+                    // fresh live row instead of being upserted into the old row
+                    // and then invalidated along with it.
+                    if !result.resolvedFingerprints.isEmpty {
+                        let resolvedSet = Set(result.resolvedFingerprints)
+                        let safe = openLoops
+                            .filter { f in
+                                guard resolvedSet.contains(f.fingerprint) else { return false }
+                                switch f.predicate {
+                                case .iOwe: return myOutgoingId != nil
+                                case .owesMe: return hasInbound
+                                default: return false
+                                }
+                            }
+                            .map(\.fingerprint)
+                        if !safe.isEmpty {
+                            await DatabaseManager.shared.invalidateFacts(fingerprints: safe, reason: .replied)
+                            closedLoops += safe.count
+                        }
+                    }
                     if !resolved.isEmpty {
                         await DatabaseManager.shared.upsertFacts(resolved)
                         newFacts += resolved.count
                     }
-                    // Anti-injection gate (mirrors the #30 task-completion defense):
-                    // only HONOR a closure that a genuine outgoing/[ME] message in
-                    // this window backs, and only for i_owe (something the USER
-                    // delivers). "From me" is structural (isOutgoing / sender id),
-                    // never message content, so a crafted inbound message can't
-                    // forge a closure. owes_me is never closed from inbound text —
-                    // that's left to the UI / recency expiry.
-                    if !result.resolvedFingerprints.isEmpty {
-                        let corroboratedByMe = records.contains {
-                            $0.isOutgoing || (myUserId > 0 && $0.senderUserId == myUserId)
-                        }
-                        if corroboratedByMe {
-                            let resolvedSet = Set(result.resolvedFingerprints)
-                            let safe = openLoops
-                                .filter { $0.predicate == .iOwe && resolvedSet.contains($0.fingerprint) }
-                                .map(\.fingerprint)
-                            if !safe.isEmpty {
-                                await DatabaseManager.shared.invalidateFacts(fingerprints: safe)
-                            }
-                        }
+                    // Chases: a follow-up ping bumps the existing loop to the
+                    // chase message (date + evidence), gated like owes_me closes
+                    // on a genuine inbound message — [ME]'s own text can't bump.
+                    if !result.chasedLoops.isEmpty, hasInbound {
+                        await DatabaseManager.shared.refreshChasedLoops(result.chasedLoops)
+                        chasedLoops += result.chasedLoops.count
                     }
                 } catch {
                     logger.error("extractFacts failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    // A window whose CONTENT deterministically breaks the model
+                    // (unparseable reply every time) must not wedge this chat's
+                    // crawl forever: after 3 failed attempts on the SAME cursor,
+                    // skip past the poison window. Transient provider/network
+                    // errors don't count — they retry indefinitely and self-heal.
+                    if case FactExtractionError.unparseableResponse = error {
+                        let windowMax = records.map(\.id).max() ?? cursor
+                        var entry = extractFailures[chat.id] ?? (cursor: cursor, count: 0)
+                        if entry.cursor != cursor { entry = (cursor: cursor, count: 0) }
+                        entry.count += 1
+                        extractFailures[chat.id] = entry
+                        if entry.count >= 3 {
+                            logger.error("skipping poison window for chat \(chat.id, privacy: .public) after \(entry.count, privacy: .public) unparseable replies")
+                            cursor = windowMax
+                            await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
+                            extractFailures[chat.id] = nil
+                        }
+                    }
                     break
                 }
 
@@ -216,24 +294,74 @@ final class FactExtractionCoordinator: ObservableObject {
                 if records.count < ContextLayer.extractionWindow { break } // caught up to now
                 try? await Task.sleep(nanoseconds: 300_000_000) // gentle on the API
             }
+            // Exited on the per-chat window cap (not the caught-up break) →
+            // this chat still has unread backlog.
+            if windows >= ContextLayer.maxWindowsPerChatPerPass { backlogRemains = true }
             if didWork { workedChats += 1 }
         }
 
-        lastPassAt = Date()
-        lastPassNewFacts = newFacts
-        logger.info("fact pass done: \(scannedWindows, privacy: .public) windows over \(workedChats, privacy: .public) chats, \(newFacts, privacy: .public) new facts")
+        // A cancelled task must not stamp pass state — its replacement runs the
+        // real pass (a cancelled tail once cleared the loader mid-crawl).
+        guard !Task.isCancelled else { return }
 
-        // If we filled the per-pass budget there's likely more backlog —
-        // continue shortly (cursor-gated, so finished chats are skipped cheaply).
-        // Only continue if this pass actually produced facts — if a full-budget
-        // pass found nothing new, the backlog is content-empty and re-arming
-        // would just churn. The 15s spacing keeps cold-start catch-up gentle.
-        if workedChats >= ContextLayer.maxChatsPerPass, newFacts > 0 {
+        lastPassAt = Date()
+        if lastPassNewFacts != newFacts { lastPassNewFacts = newFacts }
+        if isCrawling != backlogRemains { isCrawling = backlogRemains }
+        logger.info("fact pass done: \(scannedWindows, privacy: .public) windows over \(workedChats, privacy: .public) chats, \(newFacts, privacy: .public) new facts, \(closedLoops, privacy: .public) closed, \(chasedLoops, privacy: .public) chased")
+
+        // One-time backfill: tag pre-existing i_owe loops reply/action so the
+        // Reply queue / Tasks split applies to facts created before loop_kind.
+        // Runs BEFORE the change notification so its reclassification (it moves
+        // items between Tasks and the Reply queue) is included in the re-project.
+        let backfillUpdated = await backfillLoopKindsIfNeeded(aiService: aiService)
+
+        // Tell the Tasks + Reply queue views to re-project now (closed loops,
+        // new loops, chases, reclassified kinds) instead of waiting for the
+        // next tick.
+        if newFacts > 0 || closedLoops > 0 || chasedLoops > 0 || backfillUpdated {
+            NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
+        }
+
+        // Backlog left (window/chat caps hit)? Continue shortly — cursor-gated,
+        // so finished chats are skipped cheaply. The 15s spacing keeps cold-start
+        // catch-up gentle; when nothing remains, backlogRemains goes false and
+        // the chain stops on its own.
+        if backlogRemains {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 self?.triggerPass()
             }
         }
+    }
+
+    /// One-time per launch: classify open i_owe loops that predate the loop_kind
+    /// tag so the Reply queue / Tasks split applies to existing facts without
+    /// waiting for every chat to re-extract. The model decides reply vs action —
+    /// no keyword heuristics. Returns whether any loop_kind actually changed so
+    /// the caller can include the reclassification in its change notification.
+    private func backfillLoopKindsIfNeeded(aiService: AIService) async -> Bool {
+        guard !didBackfillLoopKinds else { return false }
+        let pending = await DatabaseManager.shared.loadUnclassifiedIOweLoops(limit: 500)
+        guard !pending.isEmpty else { didBackfillLoopKinds = true; return false }
+        var classified = 0
+        for batch in pending.chunked(into: 40) {
+            do {
+                let kinds = try await aiService.classifyLoops(batch)
+                await DatabaseManager.shared.updateLoopKinds(kinds)
+                classified += kinds.count
+            } catch {
+                logger.error("loop_kind backfill failed: \(error.localizedDescription, privacy: .public)")
+                // Leave the flag false so the next pass retries the rest —
+                // classifyLoops THROWS on an unparseable reply (it never silently
+                // returns empty), so a failed batch can't mark the backfill done.
+                return classified > 0
+            }
+        }
+        // Only a run that classified something (or had nothing to do) is done —
+        // 0/N classified with no error would otherwise never retry this session.
+        didBackfillLoopKinds = classified > 0 || pending.isEmpty
+        logger.info("loop_kind backfill: classified \(classified, privacy: .public)/\(pending.count, privacy: .public) loops")
+        return classified > 0
     }
 
     private static func tgMessage(from record: DatabaseManager.MessageRecord, chatTitle: String?) -> TGMessage {

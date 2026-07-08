@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct DashboardTaskDetail: View {
+    @EnvironmentObject private var telegramService: TelegramService
     let task: DashboardTask?
     let evidence: [DashboardTaskSourceMessage]
     let isRefreshing: Bool
@@ -92,7 +93,13 @@ struct DashboardTaskDetail: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
                             ForEach(merged) { item in
-                                DashboardEvidenceContextRow(item: item)
+                                Button {
+                                    Task { await telegramService.openMessageInTelegram(chatId: task.chatId, messageId: item.id) }
+                                } label: {
+                                    DashboardEvidenceContextRow(item: item)
+                                }
+                                .buttonStyle(.pidgyPress)
+                                .help("Open this message in Telegram")
                             }
                         }
                     }
@@ -171,13 +178,24 @@ struct DashboardTaskDetail: View {
         }
         isLoadingContext = true
         defer { isLoadingContext = false }
-        // Pull a few extra so after deduping against source snippets we
-        // still have enough non-source rows to fill the merged list.
-        let recent = await DatabaseManager.shared.loadMessages(
-            chatId: chatId,
-            limit: Self.maxEvidenceRows + 4
-        )
-        conversationContext = recent.sorted { $0.date < $1.date }
+        // Anchor context on the SOURCE message so the user sees the conversation
+        // AROUND where the loop was created — not the chat's latest, unrelated
+        // chatter. Fall back to recent messages only if there's no source id.
+        let anchor = evidence.map(\.messageId).max() ?? 0
+        let nearby: [DatabaseManager.MessageRecord]
+        if anchor > 0 {
+            nearby = await DatabaseManager.shared.loadMessagesAround(
+                chatId: chatId,
+                messageId: anchor,
+                window: Self.maxEvidenceRows
+            )
+        } else {
+            nearby = await DatabaseManager.shared.loadMessages(
+                chatId: chatId,
+                limit: Self.maxEvidenceRows + 4
+            )
+        }
+        conversationContext = nearby.sorted { $0.date < $1.date }
     }
 
     /// Combines source snippets (always shown) with a few surrounding chat

@@ -235,6 +235,16 @@ final class ClaudeProvider: AIProvider {
 
     // MARK: - HTTP
 
+    func answer(systemPrompt: String, userMessage: String) async throws -> String {
+        try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: systemPrompt,
+                userMessage: userMessage,
+                requestKind: .summary
+            )
+        }
+    }
+
     private func makeRequest(
         systemPrompt: String,
         userMessage: String,

@@ -5,6 +5,10 @@ protocol AIProvider {
     /// Summarize a group's recent activity in 1-2 lines.
     func summarize(messages: [MessageSnippet], prompt: String) async throws -> String
 
+    /// Free-form Q&A — answer a question given a system prompt + user message.
+    /// Powers the fact-grounded answer engine (#48 search).
+    func answer(systemPrompt: String, userMessage: String) async throws -> String
+
     /// Semantic search: find chats relevant to a topic/concept.
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO]
 

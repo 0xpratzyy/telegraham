@@ -30,26 +30,23 @@ enum FactProjection {
     /// drop-in for the live Tasks surface once the approach is blessed).
     static func tasks(from facts: [Fact], chatTitles: [Int64: String]) -> [DashboardTask] {
         facts
-            .filter { $0.isOpen && $0.predicate.isOpenLoop }
+            .filter { f in
+                // Tasks = work/effort items only: i_owe loops that need an action,
+                // not a quick reply. Replies AND waiting-on-them (owes_me) live in
+                // the reply queue — task is task, reply is reply (split on effort).
+                f.isOpen && f.predicate == .iOwe && f.loopKind != .reply
+            }
             .map { f in
                 let chatTitle = !f.sourceChatTitle.isEmpty
                     ? f.sourceChatTitle
                     : (chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)")
                 // Prefer the model's natural phrasing; fall back to a readable
                 // template only when an older fact has no action yet.
-                let title: String
-                let suggested: String
-                let owner: String
-                switch f.predicate {
-                case .iOwe:
-                    title = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
-                    suggested = "Reply to \(f.subjectEntity)"
-                    owner = "Me"
-                default: // .owesMe
-                    title = f.action.isEmpty ? "Waiting on \(f.subjectEntity) for \(f.objectText)" : f.action
-                    suggested = "Nudge \(f.subjectEntity)"
-                    owner = f.subjectEntity
-                }
+                // All tasks are i_owe work-items now. The title IS the action
+                // ("Pay the Hetzner invoice") — no redundant "Reply to X" hint.
+                let title = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
+                let suggested = ""
+                let owner = "Me"
                 let priority: DashboardTaskPriority = f.confidence >= 0.8 ? .high : (f.confidence >= 0.5 ? .medium : .low)
                 return DashboardTask(
                     id: f.id,
@@ -77,11 +74,33 @@ enum FactProjection {
             .sorted { ($0.latestSourceDate ?? .distantPast) > ($1.latestSourceDate ?? .distantPast) }
     }
 
-    /// Open-loop facts → reply-queue rows. i_owe = on me, owes_me = on them.
+    /// THE reply-queue lane routing — single definition consumed by BOTH the
+    /// live surface (AttentionStore) and the inspector, so they can never
+    /// disagree: freshest i_owe .reply per chat → ON ME (quick reply owed by
+    /// the user); freshest owes_me per chat → ON THEM (waiting on them).
+    /// i_owe .action / unclassified are Tasks — the split is on effort.
+    static func replyLanes(from facts: [Fact]) -> (onMe: [Int64: Fact], onThem: [Int64: Fact]) {
+        (
+            onMe: freshestPerChat(facts.filter { $0.isOpen && $0.predicate == .iOwe && $0.loopKind == .reply }),
+            onThem: freshestPerChat(facts.filter { $0.isOpen && $0.predicate == .owesMe })
+        )
+    }
+
+    private static func freshestPerChat(_ facts: [Fact]) -> [Int64: Fact] {
+        var byChat: [Int64: Fact] = [:]
+        for f in facts where (byChat[f.sourceChatId].map { $0.validFrom < f.validFrom } ?? true) {
+            byChat[f.sourceChatId] = f
+        }
+        return byChat
+    }
+
+    /// Open-loop facts → reply-queue rows (both lanes, mirroring the live
+    /// surface exactly — the inspector renders this to debug the real queue).
     static func replyQueue(from facts: [Fact], chatTitles: [Int64: String]) -> [FactReplyItem] {
-        facts
-            .filter { $0.isOpen && $0.predicate.isOpenLoop }
-            .map { f in
+        let lanes = replyLanes(from: facts)
+        let all = lanes.onMe.values.map { ($0, true) } + lanes.onThem.values.map { ($0, false) }
+        return all
+            .map { f, onMe in
                 FactReplyItem(
                     id: f.id,
                     chatId: f.sourceChatId,
@@ -89,7 +108,7 @@ enum FactProjection {
                         ? f.sourceChatTitle
                         : (chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)"),
                     person: f.subjectEntity,
-                    onMe: f.predicate == .iOwe,
+                    onMe: onMe,
                     object: f.objectText,
                     action: f.action.isEmpty ? f.objectText : f.action,
                     evidence: f.sourceText,
@@ -97,5 +116,41 @@ enum FactProjection {
                 )
             }
             .sorted { $0.date > $1.date }
+    }
+
+    /// USER-closed loops → Done/Ignored task rows, so the Tasks page's status
+    /// tabs have history and an accidental Mark Done is one click to undo.
+    static func closedTasks(from facts: [Fact], chatTitles: [Int64: String]) -> [DashboardTask] {
+        facts
+            .filter { $0.closeReason == .userDone || $0.closeReason == .userIgnored }
+            .map { f in
+                let chatTitle = !f.sourceChatTitle.isEmpty
+                    ? f.sourceChatTitle
+                    : (chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)")
+                let title = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
+                return DashboardTask(
+                    id: f.id,
+                    stableFingerprint: f.fingerprint,
+                    title: title,
+                    summary: f.sourceText.isEmpty ? title : f.sourceText,
+                    suggestedAction: "",
+                    ownerName: "Me",
+                    personName: f.subjectEntity,
+                    chatId: f.sourceChatId,
+                    chatTitle: chatTitle,
+                    topicId: nil,
+                    topicName: nil,
+                    priority: f.confidence >= 0.8 ? .high : (f.confidence >= 0.5 ? .medium : .low),
+                    status: f.closeReason == .userIgnored ? .ignored : .done,
+                    confidence: f.confidence,
+                    createdAt: f.createdAt,
+                    updatedAt: f.updatedAt,
+                    dueAt: nil,
+                    snoozedUntil: nil,
+                    latestSourceDate: f.validFrom,
+                    statusSetByUserAt: f.invalidAt
+                )
+            }
+            .sorted { ($0.statusSetByUserAt ?? .distantPast) > ($1.statusSetByUserAt ?? .distantPast) }
     }
 }

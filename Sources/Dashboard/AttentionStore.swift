@@ -80,6 +80,10 @@ final class AttentionStore: ObservableObject {
     func dropChat(id: Int64) {
         guard allFollowUpItems.contains(where: { $0.chat.id == id }) else { return }
         allFollowUpItems.removeAll { $0.chat.id == id }
+        // The published list no longer matches the last projected signature —
+        // reset it, or an unarchived chat whose re-projection hashes identically
+        // would hit the "unchanged" guard and never return to the queue.
+        lastFactReplySignature = ""
         republishFiltered()
     }
 
@@ -97,12 +101,120 @@ final class AttentionStore: ObservableObject {
     // redundant republishes that flicker the list on startup.
     private var lastFactReplySignature = ""
 
+    /// Flips true after the FIRST settled fact projection completes. The reply
+    /// view shows a skeleton until then, so the user sees one finished list
+    /// instead of watching it assemble from the streaming chat list + facts.
+    @Published private(set) var hasLoadedFactReplies = false
+
+    // Stashed services + observer so the reply queue re-projects the instant the
+    // fact store changes (a loop closed by a reply, the cleanup) — not only when
+    // the chat list ticks.
+    private weak var lastTelegramService: TelegramService?
+    private weak var lastAIService: AIService?
+    private var lastIncludeBots = false
+    private var factsChangedObserver: NSObjectProtocol?
+    private var factReplyDebounceTask: Task<Void, Never>?
+    private var lastFactProjectionAt: Date = .distantPast
+
+    /// Project the reply queue from open-loop facts (the debounced ContextLayer
+    /// path). Lane routing lives in FactProjection.replyLanes — ONE definition
+    /// shared with the inspector: i_owe .reply → ON ME, owes_me → ON THEM,
+    /// else QUIET. The signature guard skips redundant republishes so the list
+    /// doesn't re-render for identical content.
+    private func projectFactReplyQueue(telegramService: TelegramService, includeBots: Bool) async {
+        let candidates = collectPipelineCandidates(telegramService: telegramService, includeBots: includeBots)
+        let openFacts = await DatabaseManager.shared.loadOpenFacts()
+        // A debounce-cancelled run resumes here with an EMPTY fact read (the DB
+        // layer swallows CancellationError) — publishing it would flash every
+        // lane to QUIET for ~400ms until the newer projection heals it.
+        guard !Task.isCancelled else { return }
+        let lanes = FactProjection.replyLanes(from: openFacts)
+        var items: [FollowUpItem] = []
+        for chat in candidates {
+            guard let lastMessage = chat.lastMessage else { continue }
+            let hit: (loop: Fact, category: FollowUpItem.Category)? =
+                lanes.onMe[chat.id].map { ($0, .onMe) } ?? lanes.onThem[chat.id].map { ($0, .onThem) }
+            // ON ME / ON THEM rank + timestamp by the AGE OF THE ASK (the loop's
+            // date), so an old pending ask doesn't ride a recent unrelated
+            // message to the top. QUIET falls back to the chat's last message.
+            let refDate = hit?.loop.validFrom ?? lastMessage.date
+            items.append(FollowUpItem(
+                chat: chat,
+                category: hit?.category ?? .quiet,
+                lastMessage: lastMessage,
+                timeSinceLastActivity: Date().timeIntervalSince(refDate),
+                suggestedAction: hit.flatMap { $0.loop.action.isEmpty ? nil : $0.loop.action },
+                loopSourceMessageId: hit?.loop.sourceMessageId,
+                loopEvidence: hit?.loop.sourceText,
+                loopDate: hit?.loop.validFrom,
+                loopPersonName: hit?.loop.subjectEntity
+            ))
+        }
+        // "Loaded" means projected over a REAL chat snapshot — an empty candidate
+        // list before TDLib streams chats must keep the skeleton up, or the view
+        // flashes an empty state and then assembles row by row (the exact
+        // flicker this flag exists to prevent). Once Telegram is ready, even a
+        // genuinely-empty account settles.
+        if !candidates.isEmpty || telegramService.authState == .ready {
+            if !hasLoadedFactReplies { hasLoadedFactReplies = true }
+        }
+        // Every completed projection is a refresh, changed content or not — the
+        // "Updated Nm ago" label must advance even when nothing changed.
+        lastFollowUpsRefreshAt = Date()
+        // Signature includes the loop anchor + ask date: a projection whose only
+        // change is a re-anchored/refreshed loop must still republish.
+        let signature = items
+            .map { "\($0.chat.id)|\($0.category.rawValue)|\($0.lastMessage.id)|\($0.loopSourceMessageId ?? 0)|\(Int($0.loopDate?.timeIntervalSince1970 ?? 0))|\($0.suggestedAction ?? "")" }
+            .sorted()
+            .joined(separator: ";")
+        guard signature != lastFactReplySignature else { return }
+        lastFactReplySignature = signature
+        allFollowUpItems = items
+        sortPipelineItems()
+        republishFiltered()
+    }
+
+    private func setupFactsChangedObserverIfNeeded() {
+        guard factsChangedObserver == nil else { return }
+        factsChangedObserver = NotificationCenter.default.addObserver(
+            forName: .contextFactsChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let ts = self.lastTelegramService, let ai = self.lastAIService else { return }
+                self.loadFollowUps(telegramService: ts, aiService: ai, includeBots: self.lastIncludeBots)
+            }
+        }
+    }
+
     func loadFollowUps(
         telegramService: TelegramService,
         aiService: AIService,
         includeBots: Bool,
         force: Bool = false
     ) {
+        lastTelegramService = telegramService
+        lastAIService = aiService
+        lastIncludeBots = includeBots
+        setupFactsChangedObserverIfNeeded()
+        // Context layer (#48): the reply queue is a VIEW over open-loop facts —
+        // the i_owe loops tagged "reply". Leading + trailing debounce: project
+        // IMMEDIATELY when idle (first render never waits), coalesce bursts on a
+        // 400ms trailing edge — and because "elapsed since last projection"
+        // gates the leading edge, a sustained chat-stream storm still projects
+        // every ~400ms instead of being starved by endless re-arms.
+        if ContextLayer.enabled {
+            factReplyDebounceTask?.cancel()
+            let elapsed = Date().timeIntervalSince(lastFactProjectionAt)
+            let delayMs = elapsed > 0.4 ? 0 : 400
+            factReplyDebounceTask = Task { @MainActor [weak self] in
+                if delayMs > 0 { try? await Task.sleep(for: .milliseconds(delayMs)) }
+                guard !Task.isCancelled, let self else { return }
+                self.lastFactProjectionAt = Date()
+                await self.projectFactReplyQueue(telegramService: telegramService, includeBots: includeBots)
+            }
+            return
+        }
+
         guard !isExecuting else {
             queueRefresh(
                 telegramService: telegramService,
@@ -110,68 +222,6 @@ final class AttentionStore: ObservableObject {
                 includeBots: includeBots,
                 force: force
             )
-            return
-        }
-
-        // Context layer (#48): the reply queue is a VIEW over open-loop facts.
-        // A chat's freshest open loop sets its lane (i_owe → ON ME, owes_me →
-        // ON THEM) with the model's natural phrasing as the suggested action;
-        // candidate chats with no open loop are QUIET. No AI call — pure
-        // projection of facts the FactExtractionCoordinator already maintains.
-        if ContextLayer.enabled {
-            isExecuting = true
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                defer {
-                    self.lastFollowUpsRefreshAt = Date()
-                    self.isExecuting = false
-                    self.runQueuedRefreshIfNeeded()
-                }
-                let candidates = self.collectPipelineCandidates(
-                    telegramService: telegramService,
-                    includeBots: includeBots
-                )
-                let openFacts = await DatabaseManager.shared.loadOpenFacts()
-                var loopByChat: [Int64: Fact] = [:]
-                for f in openFacts {
-                    if let existing = loopByChat[f.sourceChatId], existing.validFrom >= f.validFrom { continue }
-                    loopByChat[f.sourceChatId] = f
-                }
-                var items: [FollowUpItem] = []
-                for chat in candidates {
-                    guard let lastMessage = chat.lastMessage else { continue }
-                    let category: FollowUpItem.Category
-                    let action: String?
-                    if let loop = loopByChat[chat.id] {
-                        category = loop.predicate == .iOwe ? .onMe : .onThem
-                        action = loop.action.isEmpty ? nil : loop.action
-                    } else {
-                        category = .quiet
-                        action = nil
-                    }
-                    items.append(FollowUpItem(
-                        chat: chat,
-                        category: category,
-                        lastMessage: lastMessage,
-                        timeSinceLastActivity: Date().timeIntervalSince(lastMessage.date),
-                        suggestedAction: action
-                    ))
-                }
-                // Skip redundant rebuilds: TDLib streams the chat list on
-                // startup, firing this repeatedly. Re-publishing identical
-                // content (with fresh FollowUpItem UUIDs) makes the whole list
-                // re-render = flicker. Only republish when the loop set or a
-                // chat's latest message actually changed.
-                let signature = items
-                    .map { "\($0.chat.id)|\($0.category.rawValue)|\($0.lastMessage.id)|\($0.suggestedAction ?? "")" }
-                    .sorted()
-                    .joined(separator: ";")
-                guard signature != self.lastFactReplySignature else { return }
-                self.lastFactReplySignature = signature
-                self.allFollowUpItems = items
-                self.sortPipelineItems()
-                self.republishFiltered()
-            }
             return
         }
 
@@ -312,6 +362,11 @@ final class AttentionStore: ObservableObject {
         telegramService: TelegramService,
         includeBots: Bool
     ) {
+        // Legacy-cache hydration is the PRE-#48 pipeline's warm start. Under the
+        // context layer the queue is projected from facts — letting frozen
+        // pre-#48 cache rows upsert over it stomped lanes/timestamps, and the
+        // projection's signature guard then refused to repair them.
+        guard !ContextLayer.enabled else { return }
         let candidates = collectPipelineCandidates(
             telegramService: telegramService,
             includeBots: includeBots

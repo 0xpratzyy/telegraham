@@ -349,7 +349,7 @@ struct DashboardReplyQueuePage: View {
 
     private var queueRows: some View {
         VStack(spacing: 0) {
-            if filteredItems.isEmpty && isLoading {
+            if filteredItems.isEmpty && (isLoading || (ContextLayer.enabled && !attentionStore.hasLoadedFactReplies)) {
                 DashboardSkeletonRows(count: selectedItem == nil ? 9 : 7)
                     .padding(.top, 6)
             } else if filteredItems.isEmpty && !searchText.isEmpty {
@@ -470,7 +470,8 @@ struct DashboardReplyDetail: View {
                     HStack(spacing: 8) {
                         Text(item.chat.chatType.displayName)
                         Text("·")
-                        Text(item.lastMessage.relativeDate)
+                        // Age of the ASK (loop date), not the chat's last message.
+                        Text(DateFormatting.compactRelativeTime(from: item.loopDate ?? item.lastMessage.date))
                     }
                     .font(PidgyDashboardTheme.metadataFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
@@ -523,7 +524,13 @@ struct DashboardReplyDetail: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
                             ForEach(evidenceItems) { row in
-                                DashboardEvidenceContextRow(item: row)
+                                Button {
+                                    Task { await telegramService.openMessageInTelegram(chatId: item.chat.id, messageId: row.id) }
+                                } label: {
+                                    DashboardEvidenceContextRow(item: row)
+                                }
+                                .buttonStyle(.pidgyPress)
+                                .help("Open this message in Telegram")
                             }
                         }
                     }
@@ -575,7 +582,11 @@ struct DashboardReplyDetail: View {
                 }
             }
         }
-        .task(id: item?.chat.id) {
+        // Keyed on chat AND loop anchor: the item's identity is chat-stable, so
+        // when a re-projection swaps the chat's loop in place (old one closed, a
+        // new ask opened), the anchor changes without the chat changing — the
+        // evidence window must reload around the NEW anchor.
+        .task(id: "\(item?.chat.id ?? 0)-\(item?.loopSourceMessageId ?? 0)") {
             // Reset AI sections FIRST, before any await. The error
             // branches aren't chat-scoped, and loadConversationContext
             // awaits DB reads + TDLib name lookups — so if we reset
@@ -821,10 +832,22 @@ struct DashboardReplyDetail: View {
         }
         isLoadingContext = true
         defer { isLoadingContext = false }
-        let recent = await DatabaseManager.shared.loadMessages(
-            chatId: chatId,
-            limit: Self.maxEvidenceRows + 2
-        )
+        // Anchor on the loop's trigger message (the reason this chat is ON ME)
+        // so Evidence shows the conversation around it, not the chat's latest
+        // unrelated messages. QUIET items have no loop → fall back to recent.
+        let recent: [DatabaseManager.MessageRecord]
+        if let anchor = item?.loopSourceMessageId, anchor > 0 {
+            recent = await DatabaseManager.shared.loadMessagesAround(
+                chatId: chatId,
+                messageId: anchor,
+                window: Self.maxEvidenceRows
+            )
+        } else {
+            recent = await DatabaseManager.shared.loadMessages(
+                chatId: chatId,
+                limit: Self.maxEvidenceRows + 2
+            )
+        }
         conversationContext = recent.sorted { $0.date < $1.date }
         await resolveMissingSenderNames(in: recent)
     }
@@ -858,7 +881,9 @@ struct DashboardReplyDetail: View {
     /// loaded from the DB and rendered as context. Falls back to a one-row
     /// list with just the last message if the DB hasn't cached the chat yet.
     private func mergedEvidenceItems(for item: FollowUpItem) -> [EvidenceContextItem] {
-        let sourceId = item.lastMessage.id
+        // Source = the loop's trigger message (why this chat is ON ME) when we
+        // have it; QUIET items fall back to the chat's last message.
+        let sourceId = item.loopSourceMessageId ?? item.lastMessage.id
         let context = conversationContext
             .filter { $0.id != sourceId }
             .suffix(Self.maxEvidenceRows - 1)
@@ -873,14 +898,40 @@ struct DashboardReplyDetail: View {
                 )
             }
 
-        let source = EvidenceContextItem(
-            id: sourceId,
-            date: item.lastMessage.date,
-            senderName: sourceSenderLabel(for: item),
-            isOutgoing: item.lastMessage.isOutgoing,
-            text: item.lastMessage.displayText,
-            isSource: true
-        )
+        // Prefer the real loop-source record from the loaded window (true sender
+        // + text); else the stored evidence text; else the chat's last message.
+        let source: EvidenceContextItem
+        if let rec = conversationContext.first(where: { $0.id == sourceId }) {
+            source = EvidenceContextItem(
+                id: rec.id,
+                date: rec.date,
+                senderName: senderLabel(for: rec),
+                isOutgoing: rec.isOutgoing,
+                text: nonEmptyDisplayText(for: rec),
+                isSource: true
+            )
+        } else if let evidence = item.loopEvidence, !evidence.isEmpty {
+            // The anchor record isn't in the loaded window — render the stored
+            // loop: ITS date (age of the ask, so it sorts chronologically) and
+            // ITS person (the asker), never the chat's unrelated last message.
+            source = EvidenceContextItem(
+                id: sourceId,
+                date: item.loopDate ?? item.lastMessage.date,
+                senderName: item.loopPersonName ?? sourceSenderLabel(for: item),
+                isOutgoing: false,
+                text: evidence,
+                isSource: true
+            )
+        } else {
+            source = EvidenceContextItem(
+                id: sourceId,
+                date: item.lastMessage.date,
+                senderName: sourceSenderLabel(for: item),
+                isOutgoing: item.lastMessage.isOutgoing,
+                text: item.lastMessage.displayText,
+                isSource: true
+            )
+        }
 
         return (context + [source]).sorted { $0.date < $1.date }
     }
@@ -1034,7 +1085,7 @@ struct DashboardAttentionRow: View {
 
             Spacer(minLength: 12)
 
-            Text(DateFormatting.compactRelativeTime(from: item.lastMessage.date))
+            Text(DateFormatting.compactRelativeTime(from: item.loopDate ?? item.lastMessage.date))
                 .font(PidgyDashboardTheme.monoTimestampFont)
                 .foregroundStyle(item.category == .onMe ? PidgyDashboardTheme.brand : PidgyDashboardTheme.secondary)
                 .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)

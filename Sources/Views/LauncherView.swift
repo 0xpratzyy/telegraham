@@ -33,6 +33,12 @@ struct LauncherView: View {
     // Search & filter
     @State private var searchText = ""
     @State private var factHits: [Fact] = []   // context-layer (#48) fact search results
+    @State private var factSearchTask: Task<Void, Never>?  // in-flight facts search (stale-result guard)
+    // Context layer (#48): the fact-grounded answer engine ("Ask Pidgy").
+    @State private var answerText: String?
+    @State private var answerError: String?
+    @State private var isAnswering = false
+    @State private var answeredQuery = ""
     @FocusState private var isSearchFocused: Bool
 
     // Filter tags
@@ -319,11 +325,23 @@ struct LauncherView: View {
             triggerSearch()
             // Context layer (#48): surface matching facts alongside chat results.
             if ContextLayer.enabled {
+                // Clear any stale answer when the query changes out from under it.
+                if answeredQuery != trimmedQuery {
+                    answerText = nil
+                    answerError = nil
+                }
                 let q = trimmedQuery
-                Task { @MainActor in
-                    factHits = q.count >= 2
+                // Cancel the in-flight search and re-check the query after the
+                // await — a slower earlier read must never overwrite a newer
+                // one (typing "akhil" could show the stale "ak" hits).
+                factSearchTask?.cancel()
+                factSearchTask = Task { @MainActor in
+                    let hits = q.count >= 2
                         ? await DatabaseManager.shared.searchFacts(query: q, limit: 6)
                         : []
+                    guard !Task.isCancelled,
+                          searchText.trimmingCharacters(in: .whitespacesAndNewlines) == q else { return }
+                    factHits = hits
                 }
             }
         }
@@ -996,58 +1014,87 @@ struct LauncherView: View {
                     .padding(.bottom, 6)
             }
 
-            // Context layer (#48): facts pinned ABOVE the results, in both the
-            // local and AI-ranked modes, so they don't vanish when AI ranking
-            // lands (the "flash two screens" bug).
-            if ContextLayer.enabled, !searchText.isEmpty, !factHits.isEmpty {
-                factsSection
+            // Context layer (#48): the fact-grounded answer engine. Shows an
+            // "Ask Pidgy" affordance for a substantial query; on tap it answers
+            // over the fact store in the question's own language.
+            if ContextLayer.enabled, aiService.isConfigured,
+               searchText.trimmingCharacters(in: .whitespacesAndNewlines).count >= 6 {
+                askSection
             }
 
-            if isAISearching {
-                VStack(spacing: 0) {
-                    if !aiResults.isEmpty {
-                        aiResultsList
-                    } else if aiSearchMode == .summarySearch, let summaryOutput {
-                        summaryOnlyStateView(summaryOutput)
-                    } else {
-                        aiLoadingStateView
-                    }
-                }
-            } else if let error = aiSearchError {
-                ErrorStateView(message: error) {
-                    triggerSearch()
-                }
-            } else if let aiSearchMode, aiSearchMode != .unsupported, !aiResults.isEmpty {
-                aiResultsList
-                flagAnswerFooter
-            } else if aiSearchMode == .summarySearch, let summaryOutput {
-                summaryOnlyStateView(summaryOutput)
-                flagAnswerFooter
-            } else if aiSearchMode == .messageSearch && aiResults.isEmpty {
-                EmptyStateView(
-                    icon: "magnifyingglass",
-                    title: "No exact matches found",
-                    subtitle: "Try a more specific phrase or identifier"
-                )
-            } else if aiSearchMode == .summarySearch && aiResults.isEmpty {
-                EmptyStateView(
-                    icon: "text.book.closed",
-                    title: "No summary context found",
-                    subtitle: "Try a narrower person, topic, or time window"
-                )
-            } else if aiSearchMode == .semanticSearch && aiResults.isEmpty {
-                EmptyStateView(
-                    icon: "magnifyingglass",
-                    title: "No relevant chats found",
-                    subtitle: "Try a different search query"
-                )
-            } else if aiSearchMode == .agenticSearch && aiResults.isEmpty {
-                agenticEmptyStateView
-            } else if telegramService.isLoading && telegramService.chats.isEmpty {
-                LoadingStateView(message: "Loading chats...")
-            } else {
-                chatResultsList
+            // Context layer (#48): once an answer is showing (or loading), the
+            // facts list + chat-link results below become redundant — hide them
+            // so the synthesized answer stands alone instead of stacking lists.
+            if !answerActive {
+                searchResultsBody
             }
+        }
+    }
+
+    /// True while the "Ask Pidgy" answer engine is engaged (thinking, or showing
+    /// an answer for the current query). When true the facts + chat results are
+    /// hidden so the answer stands alone.
+    private var answerActive: Bool {
+        if isAnswering { return true }
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let answerText, answeredQuery == q, !answerText.isEmpty { return true }
+        return false
+    }
+
+    // The facts + AI/chat results — everything below the "Ask Pidgy" card, shown
+    // only when an answer is not currently the focus.
+    @ViewBuilder
+    private var searchResultsBody: some View {
+        // Facts pinned ABOVE the results, in both local and AI-ranked modes, so
+        // they don't vanish when AI ranking lands (the "flash two screens" bug).
+        if ContextLayer.enabled, !searchText.isEmpty, !factHits.isEmpty {
+            factsSection
+        }
+
+        if isAISearching {
+            VStack(spacing: 0) {
+                if !aiResults.isEmpty {
+                    aiResultsList
+                } else if aiSearchMode == .summarySearch, let summaryOutput {
+                    summaryOnlyStateView(summaryOutput)
+                } else {
+                    aiLoadingStateView
+                }
+            }
+        } else if let error = aiSearchError {
+            ErrorStateView(message: error) {
+                triggerSearch()
+            }
+        } else if let aiSearchMode, aiSearchMode != .unsupported, !aiResults.isEmpty {
+            aiResultsList
+            flagAnswerFooter
+        } else if aiSearchMode == .summarySearch, let summaryOutput {
+            summaryOnlyStateView(summaryOutput)
+            flagAnswerFooter
+        } else if aiSearchMode == .messageSearch && aiResults.isEmpty {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: "No exact matches found",
+                subtitle: "Try a more specific phrase or identifier"
+            )
+        } else if aiSearchMode == .summarySearch && aiResults.isEmpty {
+            EmptyStateView(
+                icon: "text.book.closed",
+                title: "No summary context found",
+                subtitle: "Try a narrower person, topic, or time window"
+            )
+        } else if aiSearchMode == .semanticSearch && aiResults.isEmpty {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: "No relevant chats found",
+                subtitle: "Try a different search query"
+            )
+        } else if aiSearchMode == .agenticSearch && aiResults.isEmpty {
+            agenticEmptyStateView
+        } else if telegramService.isLoading && telegramService.chats.isEmpty {
+            LoadingStateView(message: "Loading chats...")
+        } else {
+            chatResultsList
         }
     }
 
@@ -1257,9 +1304,91 @@ struct LauncherView: View {
         return trimmedPreferred.isEmpty ? "Chat \(chatId)" : trimmedPreferred
     }
 
+    // Context layer (#48): the "Ask Pidgy" answer-engine card. On tap it answers
+    // the query over the fact store, in the question's own language.
+    @ViewBuilder
+    private var askSection: some View {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        VStack(alignment: .leading, spacing: 5) {
+            if let answerText, answeredQuery == q, !answerText.isEmpty {
+                Text("✦ PIDGY")
+                    .font(Font.Pidgy.monoSm)
+                    .foregroundStyle(Color.Pidgy.accent)
+                Text(Self.renderAnswerMarkdown(answerText))
+                    .font(Font.Pidgy.bodySm)
+                    .foregroundStyle(Color.Pidgy.fg1)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if isAnswering {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Pidgy is thinking…")
+                        .font(Font.Pidgy.bodySm)
+                        .foregroundStyle(Color.Pidgy.fg3)
+                }
+            } else {
+                Button {
+                    runAnswer(q)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text("✦")
+                            .font(Font.Pidgy.bodySm)
+                            .foregroundStyle(Color.Pidgy.accent)
+                        Text("Ask Pidgy about “\(q)”")
+                            .font(Font.Pidgy.bodySm)
+                            .foregroundStyle(Color.Pidgy.fg2)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text("⏎")
+                            .font(Font.Pidgy.monoSm)
+                            .foregroundStyle(Color.Pidgy.fg3)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.pidgyPress)
+            }
+            if let answerError {
+                Text(answerError)
+                    .font(Font.Pidgy.monoSm)
+                    .foregroundStyle(Color.Pidgy.warning)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    /// Render the answer's inline markdown (**bold** names) while preserving
+    /// line breaks; falls back to plain text if parsing fails.
+    private static func renderAnswerMarkdown(_ s: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: s,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace,
+                failurePolicy: .returnPartiallyParsedIfPossible
+            )
+        )) ?? AttributedString(s)
+    }
+
+    private func runAnswer(_ query: String) {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, !isAnswering else { return }
+        isAnswering = true
+        answerError = nil
+        answerText = nil
+        Task { @MainActor in
+            do {
+                answerText = try await aiService.answerQuestion(q)
+                answeredQuery = q
+            } catch {
+                answerError = "Couldn’t answer right now — try again."
+            }
+            isAnswering = false
+        }
+    }
+
     // Context layer (#48): a "Facts" section above chat results. Tapping a fact
     // opens its chat. Pure read of the fact store — no AI, flag-gated.
-    @ViewBuilder
     private var factsSection: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text("FACTS")

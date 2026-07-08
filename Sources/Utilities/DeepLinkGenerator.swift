@@ -67,7 +67,8 @@ enum DeepLinkGenerator {
         chat: TGChat,
         username: String? = nil,
         phoneNumber: String? = nil,
-        target: ChatOpenTarget = .current
+        target: ChatOpenTarget = .current,
+        targetMessageId: Int64? = nil
     ) -> [URL] {
         var candidates: [String] = []
 
@@ -90,7 +91,10 @@ enum DeepLinkGenerator {
             }
 
         case .desktop:
-            let lastServerMessageId = chat.lastMessage.flatMap { serverMessageId($0.id) }
+            // Prefer the requested target message; fall back to the chat's latest
+            // message so a plain "open chat" still lands on something real.
+            let anchorServerId = targetMessageId.flatMap { serverMessageId($0) }
+                ?? chat.lastMessage.flatMap { serverMessageId($0.id) }
 
             switch chat.chatType {
             case .privateChat(let userId):
@@ -132,15 +136,21 @@ enum DeepLinkGenerator {
 
             case .supergroup(let supergroupId, _):
                 if let username, !username.isEmpty {
-                    candidates.append("tg://resolve?domain=\(username)")
+                    // Public group/channel: anchor on the message when we have one.
+                    if let anchorServerId {
+                        candidates.append("tg://resolve?domain=\(username)&post=\(anchorServerId)")
+                        candidates.append("https://t.me/\(username)/\(anchorServerId)")
+                    } else {
+                        candidates.append("tg://resolve?domain=\(username)")
+                    }
                 }
-                // privatepost / t.me/c need a real message to land on —
-                // use the latest message's SERVER id. (This used to
-                // hardcode post=1, which is virtually always a deleted
+                // privatepost / t.me/c need a real message to land on — use the
+                // target message's SERVER id (falls back to the latest message).
+                // (This used to hardcode post=1, virtually always a deleted
                 // message → Telegram showed "message not found".)
-                if let lastServerMessageId {
-                    candidates.append("tg://privatepost?channel=\(supergroupId)&post=\(lastServerMessageId)")
-                    candidates.append("https://t.me/c/\(supergroupId)/\(lastServerMessageId)")
+                if let anchorServerId {
+                    candidates.append("tg://privatepost?channel=\(supergroupId)&post=\(anchorServerId)")
+                    candidates.append("https://t.me/c/\(supergroupId)/\(anchorServerId)")
                 }
                 candidates.append("tg://openmessage?chat_id=\(chat.id)")
 
@@ -161,13 +171,15 @@ enum DeepLinkGenerator {
         _ chat: TGChat,
         username: String? = nil,
         phoneNumber: String? = nil,
-        target: ChatOpenTarget = .current
+        target: ChatOpenTarget = .current,
+        targetMessageId: Int64? = nil
     ) -> Bool {
         let urls = candidateChatURLs(
             chat: chat,
             username: username,
             phoneNumber: phoneNumber,
-            target: target
+            target: target,
+            targetMessageId: targetMessageId
         )
         for url in urls where NSWorkspace.shared.open(url) {
             return true

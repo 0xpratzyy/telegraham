@@ -529,6 +529,23 @@ class TelegramService: ObservableObject {
         return false
     }
 
+    /// Open a specific message in the Telegram app by deep link — used by the
+    /// dashboard's Evidence rows so clicking an old message lands on THAT exact
+    /// message, not just the chat. (DMs can't anchor a message via deep link, so
+    /// they open the conversation.)
+    @MainActor
+    func openMessageInTelegram(chatId: Int64, messageId: Int64) async {
+        guard let chat = visibleChats.first(where: { $0.id == chatId })
+            ?? chats.first(where: { $0.id == chatId }) else { return }
+        let hints = await getDeepLinkHints(for: chat)
+        _ = DeepLinkGenerator.openChat(
+            chat,
+            username: hints.username,
+            phoneNumber: hints.phoneNumber,
+            targetMessageId: messageId
+        )
+    }
+
     /// Resolves username/phone hints for deep-link generation.
     /// Uses lightweight TDLib lookups and local caches when available.
     func getDeepLinkHints(for chat: TGChat) async -> (username: String?, phoneNumber: String?) {

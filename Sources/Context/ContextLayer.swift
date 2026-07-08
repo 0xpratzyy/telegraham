@@ -46,6 +46,32 @@ enum FactPredicate: String, Codable, CaseIterable, Sendable {
     var isOpenLoop: Bool { Self.openLoops.contains(self) }
 }
 
+/// For an `i_owe` open loop, whether the user can close it with a quick reply or
+/// it needs real work first. This is what splits the Reply queue (just respond)
+/// from Tasks (takes time). Decided by the model at extraction.
+/// `nil` = not yet classified → treated as a Task, so nothing wrongly lands in
+/// the reply queue. `owes_me` loops don't use this (they're always follow-ups).
+enum LoopKind: String, Codable, Sendable {
+    case reply    // closable by sending a message now (answer / confirm / share)
+    case action   // needs a deliverable, payment, build, or chase first
+}
+
+/// WHY a loop was invalidated. Distinguishes user actions (browsable in the
+/// Done tab, undoable) from automatic reply-closes — without it, Mark Done made
+/// a task vanish from every tab with no history and no way back.
+enum FactCloseReason: String, Codable, Sendable {
+    case replied = "replied"          // auto: the loop was addressed in chat
+    case userDone = "user_done"       // user clicked Mark Done
+    case userIgnored = "user_ignored" // user clicked Ignore
+}
+
+extension Notification.Name {
+    /// Posted after the fact store changes (loops opened / closed / cleaned) so
+    /// the Tasks + Reply queue views re-project immediately instead of waiting
+    /// for the next chat-update tick.
+    static let contextFactsChanged = Notification.Name("contextFactsChanged")
+}
+
 /// A stored fact — one row of `facts`.
 struct Fact: Identifiable, Equatable, Sendable {
     var id: Int64
@@ -54,10 +80,12 @@ struct Fact: Identifiable, Equatable, Sendable {
     var predicate: FactPredicate
     var objectText: String
     var action: String            // model-written natural to-do phrasing (display)
+    var loopKind: LoopKind? = nil // i_owe: reply vs action; nil = unclassified
     var objectEntity: String?
     var confidence: Double
     var validFrom: Date
     var invalidAt: Date?          // nil = still valid (bi-temporal)
+    var closeReason: FactCloseReason? = nil // why invalidated (nil while open)
     var sourceChatId: Int64
     var sourceChatTitle: String = ""   // chat display title captured at extraction
     var sourceMessageId: Int64
@@ -77,6 +105,7 @@ struct FactDraft: Equatable, Sendable {
     var predicate: FactPredicate
     var objectText: String
     var action: String = ""             // model-written natural to-do phrasing
+    var loopKind: LoopKind? = nil       // i_owe: reply vs action (set by extraction)
     var objectEntity: String?
     var confidence: Double
     var validFrom: Date
@@ -92,12 +121,27 @@ struct FactDraft: Equatable, Sendable {
     /// When the subject resolved to a person id, identity keys on THAT (so
     /// "Piyush" and "Piyush Avantis" share one note); otherwise on the name.
     var fingerprint: String {
-        let obj = objectText
+        let subjectKey = subjectPersonId.map { "p:\($0)" } ?? "n:\(subjectEntity.lowercased())"
+        return "\(subjectKey)|\(predicate.rawValue)|\(ContextLayer.normalizedLoopObject(objectText))"
+    }
+}
+
+extension ContextLayer {
+    /// THE canonical normalization of a loop's object noun phrase — used by BOTH
+    /// the store identity (fingerprint) and the parser's re-emission drop-set,
+    /// so the two layers can never disagree about what "the same loop" means
+    /// (a divergence let whitespace-variant re-emissions slip the parser yet
+    /// collide on fingerprint, silently re-anchoring the fact's evidence).
+    /// Lowercase, collapse ALL whitespace, strip one leading article.
+    static func normalizedLoopObject(_ raw: String) -> String {
+        var t = raw
             .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
-        let subjectKey = subjectPersonId.map { "p:\($0)" } ?? "n:\(subjectEntity.lowercased())"
-        return "\(subjectKey)|\(predicate.rawValue)|\(obj)"
+        for article in ["the ", "a ", "an "] where t.hasPrefix(article) {
+            t = String(t.dropFirst(article.count))
+            break // one leading article, never a cascade ("the a cappella group")
+        }
+        return t
     }
 }

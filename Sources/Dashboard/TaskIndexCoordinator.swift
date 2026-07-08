@@ -56,6 +56,7 @@ final class TaskIndexCoordinator: ObservableObject {
     /// the burst settles, so a busy chat doesn't drive 50 triages per minute.
     private var debouncedRefreshTask: Task<Void, Never>?
     private var messagesUpdatedObserver: NSObjectProtocol?
+    private var factsChangedObserver: NSObjectProtocol?
     /// Combine subscription to the chat list. Tasks used to refresh only on
     /// new-message bursts + the 8-min tick — so chats streaming into the main
     /// list (a position update, NOT a message) wouldn't trigger a scan until
@@ -77,6 +78,9 @@ final class TaskIndexCoordinator: ObservableObject {
     deinit {
         if let messagesUpdatedObserver {
             NotificationCenter.default.removeObserver(messagesUpdatedObserver)
+        }
+        if let factsChangedObserver {
+            NotificationCenter.default.removeObserver(factsChangedObserver)
         }
     }
 
@@ -101,6 +105,24 @@ final class TaskIndexCoordinator: ObservableObject {
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.scheduleDebouncedRefresh()
+                }
+            }
+        }
+
+        // Re-project immediately when the fact store changes (a loop closed by a
+        // reply, the cleanup, Mark Done elsewhere) — don't wait for a message burst.
+        if factsChangedObserver == nil {
+            factsChangedObserver = NotificationCenter.default.addObserver(
+                forName: .contextFactsChanged,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, let ts = self.filteringTelegramService else { return }
+                    await self.loadFromStore(
+                        telegramService: ts,
+                        includeBotsInAISearch: self.includeBotsInAISearch
+                    )
                 }
             }
         }
@@ -268,14 +290,18 @@ final class TaskIndexCoordinator: ObservableObject {
             }
             let openFacts = await DatabaseManager.shared.loadOpenFacts()
             let factTasks = FactProjection.tasks(from: openFacts, chatTitles: chatTitles)
+            // USER-closed loops (done/ignored) stay browsable in the status tabs
+            // and reopenable — Mark Done must not erase all history.
+            let closedFacts = await DatabaseManager.shared.loadUserClosedFacts()
+            let closedTasks = FactProjection.closedTasks(from: closedFacts, chatTitles: chatTitles)
             let visibleTasks = await botFilteredTasks(
-                factTasks,
+                factTasks + closedTasks,
                 telegramService: telegramService,
                 includeBotsInAISearch: includeBotsInAISearch
             )
             let visibleIds = Set(visibleTasks.map(\.id))
             var evidence: [Int64: [DashboardTaskSourceMessage]] = [:]
-            for f in openFacts where visibleIds.contains(f.id) && !f.sourceText.isEmpty {
+            for f in openFacts + closedFacts where visibleIds.contains(f.id) && !f.sourceText.isEmpty {
                 evidence[f.id] = [DashboardTaskSourceMessage(
                     chatId: f.sourceChatId,
                     messageId: f.sourceMessageId,
@@ -615,13 +641,24 @@ final class TaskIndexCoordinator: ObservableObject {
         snoozedUntil: Date? = nil
     ) async {
         // Context layer (#48): a fact-derived task closes by INVALIDATING its
-        // underlying fact (done/ignored). Snooze isn't modeled on facts yet, so
+        // underlying fact with a USER reason (browsable in Done/Ignored, and
+        // reopenable — the undo path). Snooze isn't modeled on facts yet, so
         // it's a no-op here for now (the loop stays open).
         if ContextLayer.enabled {
-            if status == .done || status == .ignored {
-                await DatabaseManager.shared.invalidateFacts(fingerprints: [task.stableFingerprint])
+            switch status {
+            case .done:
+                await DatabaseManager.shared.invalidateFacts(fingerprints: [task.stableFingerprint], reason: .userDone)
+            case .ignored:
+                await DatabaseManager.shared.invalidateFacts(fingerprints: [task.stableFingerprint], reason: .userIgnored)
+            case .open where task.status != .open:
+                await DatabaseManager.shared.reopenFact(fingerprint: task.stableFingerprint)
+            default:
+                break
             }
             await loadFromStore()
+            // Other fact surfaces (reply queue, launcher) must see the close /
+            // reopen too — mutations notify, not only the extraction pass.
+            NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
             return
         }
         await DatabaseManager.shared.updateDashboardTaskStatus(
@@ -997,19 +1034,3 @@ final class TaskIndexCoordinator: ObservableObject {
     }
 }
 
-private extension Array {
-    func chunked(into size: Int) -> [[Element]] {
-        guard size > 0 else { return [self] }
-        var chunks: [[Element]] = []
-        chunks.reserveCapacity((count / size) + 1)
-
-        var index = startIndex
-        while index < endIndex {
-            let nextIndex = self.index(index, offsetBy: size, limitedBy: endIndex) ?? endIndex
-            chunks.append(Array(self[index..<nextIndex]))
-            index = nextIndex
-        }
-
-        return chunks
-    }
-}

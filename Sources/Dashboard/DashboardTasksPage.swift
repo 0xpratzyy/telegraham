@@ -19,6 +19,11 @@ struct DashboardTasksPage: View {
     @State private var liveSearchHits: [DashboardTaskOwnerSearchOption] = []
     @State private var liveSearchTask: Task<Void, Never>?
     @StateObject private var pinsStore = DashboardOwnerPinsStore.shared
+    // Crawl state as deduped local @State (via onReceive below) rather than
+    // @ObservedObject on the coordinator — observing it re-rendered the WHOLE
+    // page on every pass's lastPassAt/lastPassNewFacts publish, even when the
+    // loader could never show.
+    @State private var isFactCrawlRunning = FactExtractionCoordinator.shared.isCrawling
 
     private var filteredTasks: [DashboardTask] {
         DashboardTaskListFilters.filteredTasks(
@@ -124,6 +129,15 @@ struct DashboardTasksPage: View {
         tasks.isEmpty && isRefreshing
     }
 
+    // The whole store is empty AND still being populated → show the playful
+    // pigeon loader rather than "No tasks match". Gated on AI (no provider =
+    // nothing will populate → real "extraction off" state) AND on the context
+    // layer — with the kill-switch off, the legacy pipeline keeps its original
+    // skeleton, not a crawl-themed pigeon.
+    private var shouldShowPigeonLoader: Bool {
+        ContextLayer.enabled && aiConfigured && tasks.isEmpty && (isRefreshing || isFactCrawlRunning)
+    }
+
     private var tasksForSelectedStatus: [DashboardTask] {
         DashboardTaskListFilters.tasksForStatusFilter(tasks, statusFilter: statusFilter)
     }
@@ -169,6 +183,9 @@ struct DashboardTasksPage: View {
         }
         .task(id: searchSnapshotKey) {
             await refreshSearchCandidates()
+        }
+        .onReceive(FactExtractionCoordinator.shared.$isCrawling.removeDuplicates()) { crawling in
+            isFactCrawlRunning = crawling
         }
         .onChange(of: ownerSearchQuery) { _, newValue in
             scheduleLiveSearch(query: newValue)
@@ -428,7 +445,11 @@ struct DashboardTasksPage: View {
 
     private var taskRows: some View {
         VStack(spacing: 0) {
-            if shouldShowTaskSkeleton {
+            if shouldShowPigeonLoader {
+                DashboardPigeonLoader()
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 36)
+            } else if shouldShowTaskSkeleton {
                 DashboardSkeletonRows(count: selectedTask == nil ? 9 : 7)
                     .padding(.top, 6)
             } else if filteredTasks.isEmpty {

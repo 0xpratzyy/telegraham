@@ -13,6 +13,10 @@ struct MessageSnippet: Codable, Sendable {
     let relativeTimestamp: String
     let chatId: Int64
     let chatName: String
+    /// The message's real timestamp — fact extraction stamps each fact's
+    /// validFrom with its CITED message's date (the age of the ask), not the
+    /// batch-newest date. Optional so older call sites stay source-compatible.
+    var date: Date? = nil
 
     static func fromMessages(_ messages: [TGMessage], chatTitle: String? = nil) -> [MessageSnippet] {
         messages.compactMap { msg in
@@ -24,7 +28,8 @@ struct MessageSnippet: Codable, Sendable {
                 text: text,
                 relativeTimestamp: msg.relativeDate,
                 chatId: msg.chatId,
-                chatName: chatTitle ?? msg.chatTitle ?? "Unknown"
+                chatName: chatTitle ?? msg.chatTitle ?? "Unknown",
+                date: msg.date
             )
         }
     }

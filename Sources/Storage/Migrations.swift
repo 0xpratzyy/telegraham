@@ -700,6 +700,40 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v27_fact_loop_kind") { db in
+            // For an i_owe loop, whether closing it is a quick reply or real
+            // work. This is what splits the Reply queue (just respond) from
+            // Tasks (takes time). NULL = unclassified → treated as a Task.
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN loop_kind TEXT")
+        }
+
+        migrator.registerMigration("v28_fact_source_message_repoint") { db in
+            // Early facts stored the batch-NEWEST message as source_message_id
+            // (shared across the whole batch), so the Evidence panel showed the
+            // wrong source message + surrounding context. Re-point each fact to
+            // the message whose text IS its stored evidence (source_text). Keep
+            // the existing id when there's no exact text match.
+            try db.execute(sql: """
+                UPDATE facts
+                SET source_message_id = COALESCE((
+                    SELECT m.id FROM messages m
+                    WHERE m.chat_id = facts.source_chat_id
+                      AND m.text_content = facts.source_text
+                    ORDER BY m.id DESC
+                    LIMIT 1
+                ), source_message_id)
+                WHERE invalid_at IS NULL AND source_text <> ''
+                """)
+        }
+
+        migrator.registerMigration("v29_fact_closed_reason") { db in
+            // WHY a fact was invalidated ('replied' | 'user_done' |
+            // 'user_ignored'). User-closed loops stay browsable in the Tasks
+            // Done tab and can be reopened — previously Mark Done erased the
+            // task from every tab with no history and no undo.
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN closed_reason TEXT")
+        }
+
         return migrator
     }
 }

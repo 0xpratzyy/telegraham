@@ -617,6 +617,55 @@ struct DashboardEmptyState: View {
     }
 }
 
+/// Playful "still populating" state — the Pidgy mascot doing a little hop with
+/// rotating quips. Shown while a surface (Tasks / reply queue) is being filled by
+/// the first extraction crawl, instead of a bare empty state that reads as "broken".
+struct DashboardPigeonLoader: View {
+    @State private var hop = false
+    @State private var quipIndex = 0
+    // @State, NOT a plain let: the parent re-inits this struct on every render,
+    // and a per-init publisher makes onReceive resubscribe + restart the 2.4s
+    // countdown each time — under render churn (chats streaming, typing) the
+    // quip stayed frozen on the first line forever. @State's initial value
+    // survives re-init, so the tick cadence does too.
+    @State private var ticker = Timer.publish(every: 2.4, on: .main, in: .common).autoconnect()
+
+    private static let quips = [
+        "Rounding up your tasks…",
+        "Herding the pigeons…",
+        "Pecking through your chats…",
+        "Shaking out the crumbs…",
+        "Almost there — coo coo…"
+    ]
+
+    private var currentQuip: String { DashboardPigeonLoader.quips[quipIndex] }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            PidgyMascotMark(size: 56)
+                .rotationEffect(.degrees(hop ? -7 : 7))
+                .scaleEffect(x: hop ? 1.0 : 1.05, y: hop ? 1.0 : 0.94, anchor: .bottom)
+                .offset(y: hop ? -12 : 0)
+                .animation(.easeInOut(duration: 0.62).repeatForever(autoreverses: true), value: hop)
+
+            Text(currentQuip)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 300)
+                .id(currentQuip)
+                .transition(.opacity)
+        }
+        .padding(28)
+        .onAppear { hop = true }
+        .onReceive(ticker) { _ in
+            withAnimation(.easeInOut(duration: 0.35)) {
+                quipIndex = (quipIndex + 1) % DashboardPigeonLoader.quips.count
+            }
+        }
+    }
+}
+
 struct DashboardSmallEmptyText: View {
     let text: String
 

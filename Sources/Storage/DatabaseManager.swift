@@ -272,6 +272,34 @@ actor DatabaseManager {
         }
     }
 
+    /// Messages surrounding a source message (a few before and after, by id) —
+    /// the conversation around where a fact was extracted. Task Evidence uses
+    /// this so it shows the RELEVANT lead-up, not the chat's latest unrelated
+    /// chatter (the bug where an old task showed today's banter as "context").
+    func loadMessagesAround(chatId: Int64, messageId: Int64, window: Int) async -> [MessageRecord] {
+        guard let pool = await ensureDatabase() else { return [] }
+        let cols = "id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing"
+        do {
+            return try await pool.read { db in
+                // The source + `window` messages before it, and `window` after.
+                let before = try Row.fetchAll(
+                    db,
+                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND id <= ? ORDER BY id DESC LIMIT ?",
+                    arguments: [chatId, messageId, window + 1]
+                )
+                let after = try Row.fetchAll(
+                    db,
+                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+                    arguments: [chatId, messageId, window]
+                )
+                return (before + after).map(Self.messageRecord(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadMessagesAround failed for chat \(chatId): \(error)")
+            return []
+        }
+    }
+
     /// Messages with id > afterMessageId AND date >= since, OLDEST first — the
     /// forward crawl the fact extractor walks across passes (cursor =
     /// extracted_through_message_id). id ASC keeps the transcript chronological
@@ -2195,15 +2223,16 @@ actor DatabaseManager {
                     try db.execute(
                         sql: """
                             INSERT INTO facts
-                                (subject_entity, subject_person_id, predicate, object_text, action, object_entity,
+                                (subject_entity, subject_person_id, predicate, object_text, action, loop_kind, object_entity,
                                  confidence, valid_from, invalid_at, source_chat_id, source_chat_title,
                                  source_message_id, source_text, sender_name, fingerprint,
                                  created_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(fingerprint) WHERE invalid_at IS NULL DO UPDATE SET
                                 subject_entity = excluded.subject_entity,
                                 subject_person_id = excluded.subject_person_id,
                                 action = excluded.action,
+                                loop_kind = COALESCE(excluded.loop_kind, facts.loop_kind),
                                 source_chat_title = excluded.source_chat_title,
                                 source_message_id = excluded.source_message_id,
                                 source_text = excluded.source_text,
@@ -2211,7 +2240,7 @@ actor DatabaseManager {
                                 updated_at = excluded.updated_at
                             """,
                         arguments: [
-                            d.subjectEntity, d.subjectPersonId, d.predicate.rawValue, d.objectText, d.action, d.objectEntity,
+                            d.subjectEntity, d.subjectPersonId, d.predicate.rawValue, d.objectText, d.action, d.loopKind?.rawValue, d.objectEntity,
                             d.confidence, d.validFrom.timeIntervalSince1970, d.sourceChatId, d.sourceChatTitle,
                             d.sourceMessageId, d.sourceText, d.senderName, d.fingerprint,
                             now, now
@@ -2224,21 +2253,144 @@ actor DatabaseManager {
         }
     }
 
-    /// Close open loops by fingerprint (bi-temporal: stamp invalid_at, keep the row).
-    func invalidateFacts(fingerprints: [String], at date: Date = Date()) async {
+    /// Close open loops by fingerprint (bi-temporal: stamp invalid_at + WHY,
+    /// keep the row). User-reason closes stay browsable in the Done tab.
+    func invalidateFacts(fingerprints: [String], reason: FactCloseReason = .replied, at date: Date = Date()) async {
         guard !fingerprints.isEmpty, let pool = await ensureDatabase() else { return }
         let ts = date.timeIntervalSince1970
+        let reasonRaw = reason.rawValue
         do {
             try await pool.write { db in
                 for fp in fingerprints {
                     try db.execute(
-                        sql: "UPDATE facts SET invalid_at = ?, updated_at = ? WHERE fingerprint = ? AND invalid_at IS NULL",
-                        arguments: [ts, ts, fp]
+                        sql: "UPDATE facts SET invalid_at = ?, closed_reason = ?, updated_at = ? WHERE fingerprint = ? AND invalid_at IS NULL",
+                        arguments: [ts, reasonRaw, ts, fp]
                     )
                 }
             }
         } catch {
             print("[DatabaseManager] invalidateFacts failed: \(error)")
+        }
+    }
+
+    /// A follow-up ping re-anchors an open loop onto the chase message — its
+    /// rank date (valid_from), evidence text, and deep link all move to the
+    /// latest ping, so a chased item surfaces instead of staying buried under
+    /// its original ask date.
+    func refreshChasedLoops(_ updates: [ChasedLoopUpdate]) async {
+        guard !updates.isEmpty, let pool = await ensureDatabase() else { return }
+        let now = Date().timeIntervalSince1970
+        do {
+            try await pool.write { db in
+                for u in updates {
+                    try db.execute(
+                        sql: """
+                            UPDATE facts
+                            SET valid_from = ?, source_message_id = ?, source_text = ?, updated_at = ?
+                            WHERE fingerprint = ? AND invalid_at IS NULL
+                            """,
+                        arguments: [u.date.timeIntervalSince1970, u.sourceMessageId, u.sourceText, now, u.fingerprint]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] refreshChasedLoops failed: \(error)")
+        }
+    }
+
+    /// Undo a user close: re-open the NEWEST invalidated fact for this
+    /// fingerprint — but never when a live row with the same fingerprint already
+    /// exists (the partial unique index on open facts would be violated, and the
+    /// live loop already represents the task).
+    func reopenFact(fingerprint: String) async {
+        guard let pool = await ensureDatabase() else { return }
+        let ts = Date().timeIntervalSince1970
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE facts SET invalid_at = NULL, closed_reason = NULL, updated_at = ?
+                        WHERE id = (
+                            SELECT MAX(id) FROM facts f
+                            WHERE f.fingerprint = ? AND f.invalid_at IS NOT NULL
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM facts live
+                                  WHERE live.fingerprint = f.fingerprint AND live.invalid_at IS NULL
+                              )
+                        )
+                        """,
+                    arguments: [ts, fingerprint]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] reopenFact failed: \(error)")
+        }
+    }
+
+    /// Loops the USER closed (done/ignored), newest first — the Tasks page's
+    /// Done tab, so completed work has history and an accidental close is
+    /// recoverable. Auto reply-closes are deliberately excluded (chat noise).
+    func loadUserClosedFacts(limit: Int = 200) async -> [Fact] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM facts
+                        WHERE invalid_at IS NOT NULL AND closed_reason IN ('user_done', 'user_ignored')
+                        ORDER BY invalid_at DESC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadUserClosedFacts failed: \(error)")
+            return []
+        }
+    }
+
+    /// Open i_owe loops not yet tagged reply/action — for the one-time backfill
+    /// that populates the Reply queue / Tasks split on pre-existing facts.
+    func loadUnclassifiedIOweLoops(limit: Int = 100) async -> [Fact] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM facts
+                        WHERE invalid_at IS NULL AND predicate = 'i_owe' AND loop_kind IS NULL
+                        ORDER BY valid_from DESC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadUnclassifiedIOweLoops failed: \(error)")
+            return []
+        }
+    }
+
+    /// Apply backfilled loop_kind tags by fact id (only while still unclassified).
+    func updateLoopKinds(_ kinds: [Int64: LoopKind]) async {
+        guard !kinds.isEmpty, let pool = await ensureDatabase() else { return }
+        let now = Date().timeIntervalSince1970
+        do {
+            try await pool.write { db in
+                for (id, kind) in kinds {
+                    try db.execute(
+                        sql: "UPDATE facts SET loop_kind = ?, updated_at = ? WHERE id = ? AND loop_kind IS NULL",
+                        arguments: [kind.rawValue, now, id]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] updateLoopKinds failed: \(error)")
         }
     }
 
@@ -2379,6 +2531,32 @@ actor DatabaseManager {
         }
     }
 
+    /// Live durable (non-open-loop) facts about resolved people — background
+    /// context for the answer engine. Newest first.
+    func loadDurableFacts(limit: Int = 50) async -> [Fact] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM facts
+                        WHERE invalid_at IS NULL
+                          AND predicate NOT IN ('i_owe','owes_me')
+                          AND subject_person_id IS NOT NULL
+                        ORDER BY valid_from DESC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+                return rows.compactMap(Self.fact(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadDurableFacts failed: \(error)")
+            return []
+        }
+    }
+
     /// Live facts about a specific person (by resolved Telegram id) — for the
     /// People page. Open loops first, then durable facts, newest-first.
     func loadFactsForPerson(personId: Int64, limit: Int = 50) async -> [Fact] {
@@ -2446,10 +2624,12 @@ actor DatabaseManager {
             predicate: predicate,
             objectText: row["object_text"],
             action: row["action"],
+            loopKind: (row["loop_kind"] as String?).flatMap(LoopKind.init(rawValue:)),
             objectEntity: row["object_entity"],
             confidence: row["confidence"],
             validFrom: Date(timeIntervalSince1970: row["valid_from"]),
             invalidAt: invalidAt.map(Date.init(timeIntervalSince1970:)),
+            closeReason: (row["closed_reason"] as String?).flatMap(FactCloseReason.init(rawValue:)),
             sourceChatId: row["source_chat_id"],
             sourceChatTitle: row["source_chat_title"],
             sourceMessageId: row["source_message_id"],

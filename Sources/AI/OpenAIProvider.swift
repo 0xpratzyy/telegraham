@@ -46,6 +46,16 @@ final class OpenAIProvider: AIProvider {
         }
     }
 
+    func answer(systemPrompt: String, userMessage: String) async throws -> String {
+        try await RetryHelper.withRetry {
+            try await self.makeRequest(
+                systemPrompt: systemPrompt,
+                userMessage: userMessage,
+                requestKind: .summary
+            )
+        }
+    }
+
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
         let snippets = MessageSnippet.truncateToTokenBudget(messages)
         let response = try await RetryHelper.withRetry {
