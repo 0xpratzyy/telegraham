@@ -329,6 +329,56 @@ enum PidgyTelemetry {
         }
     }
 
+    // MARK: - Identity
+
+    /// Random per-install id — the Sentry user id on every event. Not PII
+    /// (never derived from the device or the Telegram account); it exists so
+    /// the dashboard can say "3 installs affected" and a beta user can be
+    /// looked up when they share it.
+    static var installId: String {
+        let defaults = UserDefaults.standard
+        if let existing = defaults.string(forKey: AppConstants.Preferences.installSupportIdKey) {
+            return existing
+        }
+        let fresh = UUID().uuidString
+        defaults.set(fresh, forKey: AppConstants.Preferences.installSupportIdKey)
+        return fresh
+    }
+
+    private static let identityLock = NSLock()
+    nonisolated(unsafe) private static var identityUsername: String?
+    nonisolated(unsafe) private static var identityName: String?
+
+    /// Record who this install belongs to (called once TDLib auth delivers
+    /// the current user). Only the @username + first name are kept, and they
+    /// reach Sentry only while the "identify crash reports" preference is on
+    /// — sanctionedUser() re-checks it per event, so flipping the toggle
+    /// applies immediately, no restart.
+    static func identify(username: String?, firstName: String?) {
+        identityLock.lock()
+        identityUsername = (username?.isEmpty == false) ? username : nil
+        identityName = (firstName?.isEmpty == false) ? firstName : nil
+        identityLock.unlock()
+    }
+
+    /// The ONLY user object allowed onto an event: our install id, plus the
+    /// Telegram @username/name iff the user hasn't opted out. Everything
+    /// Sentry auto-populated (device correlation, IP) is discarded —
+    /// scrubEvent REPLACES event.user with this, it never passes one through.
+    static func sanctionedUser() -> User {
+        let user = User(userId: installId)
+        let identifyEnabled = (UserDefaults.standard.object(
+            forKey: AppConstants.Preferences.diagnosticsIdentityEnabledKey
+        ) as? Bool) ?? true
+        if identifyEnabled {
+            identityLock.lock()
+            user.username = identityUsername
+            user.name = identityName
+            identityLock.unlock()
+        }
+        return user
+    }
+
     // MARK: - Scrubbing
 
     /// Strip well-known PII shapes from event payloads before send. This
@@ -379,9 +429,11 @@ enum PidgyTelemetry {
             }
         }
 
-        // Defense in depth — never let user data into Sentry's "user"
-        // field, which is otherwise auto-populated with the device id.
-        event.user = nil
+        // Defense in depth — whatever Sentry auto-populated into "user"
+        // (device id, IP) is DISCARDED and replaced with our sanctioned
+        // identity: the random install id, plus the Telegram @username only
+        // while the user hasn't opted out in Preferences.
+        event.user = sanctionedUser()
     }
 
     // Internal for tests — see scrubEvent.

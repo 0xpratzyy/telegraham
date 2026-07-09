@@ -390,6 +390,16 @@ enum AppConstants {
         /// launch (ContextLayer.enabled) — toggling requires a restart.
         static let contextLayerEnabledKey = "contextLayerEnabled"
 
+        /// Attach the user's Telegram @username to crash reports so the
+        /// developer can proactively reach out. Default: on (disclosed in
+        /// beta release notes); turning it off keeps reports anonymous
+        /// (random install id only).
+        static let diagnosticsIdentityEnabledKey = "diagnosticsIdentityEnabled"
+
+        /// Random per-install UUID attached to every crash report as the
+        /// Sentry user id — groups events per install without any PII.
+        static let installSupportIdKey = "installSupportId"
+
         /// Days of evidence silence after which an open AI-extracted
         /// task is automatically marked Done. A user re-opening such a
         /// task shields it for a full window (status_set_by_user_at).

@@ -794,6 +794,10 @@ class TelegramService: ObservableObject {
                 startBackgroundChatDiscovery()
                 if let me = try? await fetchCurrentUser() {
                     currentUser = me
+                    // Crash-report identity: @username so support can reach
+                    // out proactively (opt-out in Preferences; the toggle is
+                    // re-checked per event, this only caches the values).
+                    PidgyTelemetry.identify(username: me.username, firstName: me.firstName)
                 }
             }
 

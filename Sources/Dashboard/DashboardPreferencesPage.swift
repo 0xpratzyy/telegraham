@@ -8,6 +8,7 @@ struct DashboardPreferencesPage: View {
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
     @AppStorage(AppConstants.Preferences.contextLayerEnabledKey) private var contextLayerEnabled = true
+    @AppStorage(AppConstants.Preferences.diagnosticsIdentityEnabledKey) private var diagnosticsIdentityEnabled = true
     @AppStorage(AppConstants.Preferences.dashboardTaskAutoExpireDaysKey)
     private var taskAutoExpireDays = AppConstants.Preferences.dashboardTaskAutoExpireDaysDefault
     @AppStorage(AppConstants.Preferences.chatOpenTargetKey)
@@ -527,6 +528,13 @@ struct DashboardPreferencesPage: View {
                     hint: "Tasks and the reply queue come from Pidgy's new fact memory. Turn off to fall back to the classic pipeline — takes effect after you quit and reopen Pidgy.",
                     right: {
                         PrefToggle(isOn: $contextLayerEnabled)
+                    }
+                )
+                PrefField(
+                    label: "Identify my crash reports",
+                    hint: "Attach your Telegram @username to diagnostics so we can reach out when something breaks on your machine. Off = reports stay anonymous.",
+                    right: {
+                        PrefToggle(isOn: $diagnosticsIdentityEnabled)
                     }
                 )
                 PrefField(
@@ -1820,6 +1828,7 @@ struct DashboardPreferencesPage: View {
         includeBotsInAISearch = false
         showPigeonFlock = true
         contextLayerEnabled = true
+        diagnosticsIdentityEnabled = true
         usageOverview = .empty
         graphDebugSummary = .empty
         routingSnapshots = []

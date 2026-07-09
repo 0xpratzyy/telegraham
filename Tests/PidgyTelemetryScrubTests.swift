@@ -69,15 +69,34 @@ final class PidgyTelemetryScrubTests: XCTestCase {
         XCTAssertEqual(event.extra?["durationMs"] as? Double, 137.5)
     }
 
-    func testScrubEventAlwaysNullsUserField() {
+    func testScrubEventReplacesUserWithSanctionedIdentity() {
+        // Tests share the real com.pidgy.app defaults domain — pin the keys
+        // explicitly and restore after.
+        let defaults = UserDefaults.standard
+        defer {
+            defaults.removeObject(forKey: AppConstants.Preferences.diagnosticsIdentityEnabledKey)
+        }
+
         let event = Event()
         let user = User(userId: "device-1234")
         user.email = "pii@example.com"
         event.user = user
 
+        // Identity ON (default): install id + telegram username, and NOTHING
+        // auto-populated survives (email/device id are discarded).
+        defaults.set(true, forKey: AppConstants.Preferences.diagnosticsIdentityEnabledKey)
+        PidgyTelemetry.identify(username: "pratzyy", firstName: "Pratyush")
         PidgyTelemetry.scrubEvent(event)
+        XCTAssertEqual(event.user?.userId, PidgyTelemetry.installId)
+        XCTAssertEqual(event.user?.username, "pratzyy")
+        XCTAssertNil(event.user?.email, "auto-populated PII must never pass through")
+        XCTAssertNotEqual(event.user?.userId, "device-1234", "device id must be discarded")
 
-        XCTAssertNil(event.user, "event.user must never reach Sentry — defense in depth against device-id correlation")
+        // Identity OFF: anonymous — install id only.
+        defaults.set(false, forKey: AppConstants.Preferences.diagnosticsIdentityEnabledKey)
+        PidgyTelemetry.scrubEvent(event)
+        XCTAssertEqual(event.user?.userId, PidgyTelemetry.installId)
+        XCTAssertNil(event.user?.username, "opted-out reports must stay anonymous")
     }
 
     func testScrubEventHandlesNilExtraAndNilBreadcrumbs() {
@@ -85,9 +104,9 @@ final class PidgyTelemetryScrubTests: XCTestCase {
         event.extra = nil
         event.breadcrumbs = nil
 
-        // Must not crash and must still null the user.
+        // Must not crash and must still stamp the sanctioned identity.
         PidgyTelemetry.scrubEvent(event)
-        XCTAssertNil(event.user)
+        XCTAssertEqual(event.user?.userId, PidgyTelemetry.installId)
         XCTAssertNil(event.extra)
     }
 
