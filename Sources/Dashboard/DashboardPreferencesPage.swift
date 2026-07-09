@@ -7,6 +7,7 @@ struct DashboardPreferencesPage: View {
     @StateObject private var recentSyncProgress = RecentSyncCoordinator.shared.progress
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
+    @AppStorage(AppConstants.Preferences.contextLayerEnabledKey) private var contextLayerEnabled = true
     @AppStorage(AppConstants.Preferences.dashboardTaskAutoExpireDaysKey)
     private var taskAutoExpireDays = AppConstants.Preferences.dashboardTaskAutoExpireDaysDefault
     @AppStorage(AppConstants.Preferences.chatOpenTargetKey)
@@ -519,6 +520,13 @@ struct DashboardPreferencesPage: View {
                     hint: "Show the animated flock under the page title. Drag the line to bounce them; click any to shoo.",
                     right: {
                         PrefToggle(isOn: $showPigeonFlock)
+                    }
+                )
+                PrefField(
+                    label: "Memory engine (beta)",
+                    hint: "Tasks and the reply queue come from Pidgy's new fact memory. Turn off to fall back to the classic pipeline — takes effect after you quit and reopen Pidgy.",
+                    right: {
+                        PrefToggle(isOn: $contextLayerEnabled)
                     }
                 )
                 PrefField(
@@ -1811,6 +1819,7 @@ struct DashboardPreferencesPage: View {
         selectedBYOKProvider = .openAI
         includeBotsInAISearch = false
         showPigeonFlock = true
+        contextLayerEnabled = true
         usageOverview = .empty
         graphDebugSummary = .empty
         routingSnapshots = []

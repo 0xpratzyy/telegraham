@@ -12,10 +12,15 @@ import Foundation
 
 /// Master switch for the context-layer pipeline. While ON, facts are extracted
 /// and tasks/reply-queue are derived from them; while OFF the app runs the
-/// existing re-extraction pipeline unchanged. ON for review builds; the whole
-/// feature lives behind this so it's clean to keep or scrap.
+/// classic pipeline unchanged. Runtime kill-switch: users/support can turn it
+/// off in Preferences WITHOUT a new build. Read ONCE at first access and fixed
+/// for the process lifetime — a mid-session flip would race every coordinator
+/// and view that branched on it at startup, so the toggle takes effect on the
+/// next launch (same relaunch semantics as logout).
 enum ContextLayer {
-    static let enabled = true
+    static let enabled: Bool = {
+        (UserDefaults.standard.object(forKey: AppConstants.Preferences.contextLayerEnabledKey) as? Bool) ?? true
+    }()
 
     /// How many of the newest unprocessed messages to feed one extraction call.
     static let extractionWindow = 40

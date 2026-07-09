@@ -385,6 +385,11 @@ enum AppConstants {
         /// off, the squiggle falls back to a plain divider line.
         static let showPigeonFlockKey = "showPigeonFlock"
 
+        /// Runtime kill-switch for the context layer (#48): tasks + reply
+        /// queue as views over the fact store. Default: on. Read once at
+        /// launch (ContextLayer.enabled) — toggling requires a restart.
+        static let contextLayerEnabledKey = "contextLayerEnabled"
+
         /// Days of evidence silence after which an open AI-extracted
         /// task is automatically marked Done. A user re-opening such a
         /// task shields it for a full window (status_set_by_user_at).
