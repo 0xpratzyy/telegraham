@@ -32,13 +32,27 @@ struct LauncherView: View {
 
     // Search & filter
     @State private var searchText = ""
-    @State private var factHits: [Fact] = []   // context-layer (#48) fact search results
-    @State private var factSearchTask: Task<Void, Never>?  // in-flight facts search (stale-result guard)
-    // Context layer (#48): the fact-grounded answer engine ("Ask Pidgy").
-    @State private var answerText: String?
-    @State private var answerError: String?
+    // True for a beat right after the query changes — covers the debounce/gate
+    // gap BEFORE isAISearching flips, so the results area shows a skeleton
+    // immediately instead of flashing "0 results" and then loading.
+    @State private var searchSettling = false
+    @State private var searchSettleTask: Task<Void, Never>?
+    // Context layer (#48): the fact-grounded answer engine ("Ask Pidgy"),
+    // presented as a chat thread — user bubbles + Pidgy replies, follow-ups
+    // typed into the (repurposed) search field. Esc returns to search.
+    struct AskTurn: Identifiable, Equatable {
+        enum Role { case user, pidgy }
+        let id = UUID()
+        let role: Role
+        var text: String
+        var isError = false
+    }
+    @State private var chatMode = false
+    @State private var askThread: [AskTurn] = []
     @State private var isAnswering = false
-    @State private var answeredQuery = ""
+    @State private var answeredQuery = ""   // dedups the planner auto-trigger
+    @State private var answerTask: Task<Void, Never>?
+    @State private var lastEnterAt = Date.distantPast
     @FocusState private var isSearchFocused: Bool
 
     // Filter tags
@@ -230,18 +244,26 @@ struct LauncherView: View {
     var body: some View {
         VStack(spacing: 0) {
             if telegramService.authState == .ready {
-                searchBar
+                if chatMode {
+                    // Chat layout: thread on top, composer at the bottom —
+                    // like any messaging app.
+                    chatThreadView
+                    Divider()
+                    searchBar
+                } else {
+                    searchBar
 
-                // AI mode banner
-                if let mode = aiSearchMode, !searchText.isEmpty {
-                    aiModeBanner(intent: mode)
+                    // AI mode banner
+                    if let mode = aiSearchMode, !searchText.isEmpty {
+                        aiModeBanner(intent: mode)
+                    }
+
+                    filterTags
+
+                    Divider()
+
+                    resultsList
                 }
-
-                filterTags
-
-                Divider()
-
-                resultsList
             } else {
                 // Auth happens inside the dedicated OnboardingFlow window
                 // now — don't double up the QR / phone UI here. Send the
@@ -249,7 +271,7 @@ struct LauncherView: View {
                 LauncherOnboardingHandoff()
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.Pidgy.bg1)
         .ignoresSafeArea()
         .onAppear {
@@ -312,6 +334,9 @@ struct LauncherView: View {
             refreshBotFilteredUI()
         }
         .onChange(of: searchText) {
+            // In chat mode the field is the chat composer — typing must not
+            // drive the search machinery.
+            guard !chatMode else { return }
             selectedIndex = 0
             refreshChatPreviews()
             let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -323,27 +348,43 @@ struct LauncherView: View {
                 }
             }
             triggerSearch()
-            // Context layer (#48): surface matching facts alongside chat results.
-            if ContextLayer.enabled {
-                // Clear any stale answer when the query changes out from under it.
-                if answeredQuery != trimmedQuery {
-                    answerText = nil
-                    answerError = nil
-                }
-                let q = trimmedQuery
-                // Cancel the in-flight search and re-check the query after the
-                // await — a slower earlier read must never overwrite a newer
-                // one (typing "akhil" could show the stale "ak" hits).
-                factSearchTask?.cancel()
-                factSearchTask = Task { @MainActor in
-                    let hits = q.count >= 2
-                        ? await DatabaseManager.shared.searchFacts(query: q, limit: 6)
-                        : []
-                    guard !Task.isCancelled,
-                          searchText.trimmingCharacters(in: .whitespacesAndNewlines) == q else { return }
-                    factHits = hits
+            // Loading turant: while the search machinery is deciding what to
+            // run (debounce → gate → planner), an empty list means "pending",
+            // not "no results". Settles to the truth after 1.2s if nothing
+            // deeper starts (isAISearching takes over from there).
+            searchSettleTask?.cancel()
+            if trimmedQuery.isEmpty {
+                searchSettling = false
+            } else {
+                searchSettling = true
+                searchSettleTask = Task { @MainActor in
+                    // Long enough to cover debounce + gate + planner before
+                    // isAISearching takes over — 1.2s expired mid-pipeline and
+                    // flashed "No results" before the deep search began.
+                    try? await Task.sleep(for: .milliseconds(3000))
+                    guard !Task.isCancelled else { return }
+                    searchSettling = false
                 }
             }
+        }
+        // When the AI query planner (already running for chat search) parses
+        // out WHO the query is about, a person-question auto-opens the Ask
+        // Pidgy chat: the question becomes the first user bubble and the fast
+        // answer engine (rolling summaries + open loops, ~1.5s) replies. The
+        // router routes these to local semantic ranking, so the chat is the
+        // ONLY summary surface.
+        .onReceive(searchCoordinator.$currentQuerySpec) { spec in
+            guard ContextLayer.enabled, aiService.isConfigured, !chatMode,
+                  let spec, spec.isPersonQuestion,
+                  spec.rawQuery == searchText.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            let q = spec.rawQuery
+            if answeredQuery != q, !isAnswering {
+                answeredQuery = q
+                enterChat(with: q)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .launcherEscape)) { _ in
+            exitChat()
         }
         .onChange(of: isSearchFocused) { _, focused in
             Task {
@@ -376,23 +417,17 @@ struct LauncherView: View {
         }
         // Keyboard navigation from FloatingPanel
         .onReceive(NotificationCenter.default.publisher(for: .launcherArrowDown)) { _ in
-            if selectedIndex < navigableCount - 1 {
+            if !chatMode, selectedIndex < navigableCount - 1 {
                 selectedIndex += 1
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .launcherArrowUp)) { _ in
-            if selectedIndex > 0 {
+            if !chatMode, selectedIndex > 0 {
                 selectedIndex -= 1
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .launcherEnter)) { _ in
-            if let aiSearchMode,
-               aiSearchMode != .unsupported,
-               selectedIndex < aiResults.count {
-                openAISearchResult(aiResults[selectedIndex])
-            } else if selectedIndex < displayedChats.count {
-                openChat(displayedChats[selectedIndex])
-            }
+            handleEnter()
         }
     }
 
@@ -400,23 +435,32 @@ struct LauncherView: View {
 
     private var searchBar: some View {
         HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
+            Image(systemName: chatMode ? "sparkle" : "magnifyingglass")
                 .font(Font.Pidgy.body)
-                .foregroundStyle(Color.Pidgy.fg3)
+                .foregroundStyle(chatMode ? Color.Pidgy.accent : Color.Pidgy.fg3)
 
-            TextField("Search Telegram...", text: $searchText)
+            TextField(chatMode ? "Ask a follow-up… (esc to go back)" : "Search Telegram...", text: $searchText)
                 .textFieldStyle(.plain)
                 .font(Font.Pidgy.body)
                 .focused($isSearchFocused)
+                // Return lands HERE while the field is focused (the field
+                // editor consumes the key before the panel's keyDown sees
+                // it); the panel notification covers the unfocused case.
+                // handleEnter dedupes if both ever fire.
+                .onSubmit { handleEnter() }
                 // Pulsating "I'm thinking" cue. Only dims the visible
                 // text — typing is uninterrupted because the field
                 // itself stays active.
                 .opacity(isAISearching ? inputPulseOpacity : 1.0)
 
-            if !searchText.isEmpty {
+            if !searchText.isEmpty || chatMode {
                 Button {
-                    searchText = ""
-                    searchCoordinator.clearAllState()
+                    if chatMode {
+                        exitChat()
+                    } else {
+                        searchText = ""
+                        searchCoordinator.clearAllState()
+                    }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(Font.Pidgy.bodySm)
@@ -688,6 +732,22 @@ struct LauncherView: View {
         fixture.submitToFeedbackSheet()
         // Unlike the dashboard's flag affordances, the launcher must
         // also make sure the dashboard window exists for the sheet.
+        NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
+    }
+
+    /// Flag the latest Ask Pidgy answer — same review-first feedback flow as
+    /// flagCurrentAnswer, sourced from the chat thread instead of search state.
+    private func flagChatAnswer() {
+        let lastQuestion = askThread.last(where: { $0.role == .user })?.text ?? ""
+        let lastAnswer = askThread.last(where: { $0.role == .pidgy && !$0.isError })?.text
+        let fixture = FlaggedAnswerFixture(
+            query: lastQuestion,
+            route: "askPidgyChat",
+            resultTitle: nil,
+            resultText: lastAnswer,
+            supportingSnippets: []
+        )
+        fixture.submitToFeedbackSheet()
         NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
     }
 
@@ -1014,43 +1074,15 @@ struct LauncherView: View {
                     .padding(.bottom, 6)
             }
 
-            // Context layer (#48): the fact-grounded answer engine. Shows an
-            // "Ask Pidgy" affordance for a substantial query; on tap it answers
-            // over the fact store in the question's own language.
-            if ContextLayer.enabled, aiService.isConfigured,
-               searchText.trimmingCharacters(in: .whitespacesAndNewlines).count >= 6 {
-                askSection
-            }
-
-            // Context layer (#48): once an answer is showing (or loading), the
-            // facts list + chat-link results below become redundant — hide them
-            // so the synthesized answer stands alone instead of stacking lists.
-            if !answerActive {
-                searchResultsBody
-            }
+            // Ask Pidgy has no manual affordance — a person-question
+            // auto-opens the chat (see the currentQuerySpec onReceive).
+            searchResultsBody
         }
     }
 
-    /// True while the "Ask Pidgy" answer engine is engaged (thinking, or showing
-    /// an answer for the current query). When true the facts + chat results are
-    /// hidden so the answer stands alone.
-    private var answerActive: Bool {
-        if isAnswering { return true }
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let answerText, answeredQuery == q, !answerText.isEmpty { return true }
-        return false
-    }
-
-    // The facts + AI/chat results — everything below the "Ask Pidgy" card, shown
-    // only when an answer is not currently the focus.
+    // The AI/chat results.
     @ViewBuilder
     private var searchResultsBody: some View {
-        // Facts pinned ABOVE the results, in both local and AI-ranked modes, so
-        // they don't vanish when AI ranking lands (the "flash two screens" bug).
-        if ContextLayer.enabled, !searchText.isEmpty, !factHits.isEmpty {
-            factsSection
-        }
-
         if isAISearching {
             VStack(spacing: 0) {
                 if !aiResults.isEmpty {
@@ -1125,7 +1157,10 @@ struct LauncherView: View {
                         .padding(.horizontal, 12).padding(.vertical, 4)
                     }
 
-                    if !searchText.isEmpty {
+                    // Hide the count while the search is still settling/running
+                    // with nothing to show — "0 results" mid-flight reads as a
+                    // verdict, not a status.
+                    if !searchText.isEmpty && !(displayedChats.isEmpty && (isAISearching || searchSettling)) {
                         Text("\(displayedChats.count) result\(displayedChats.count == 1 ? "" : "s")")
                             .font(Font.Pidgy.monoSm)
                             .foregroundStyle(Color.Pidgy.fg3)
@@ -1142,13 +1177,14 @@ struct LauncherView: View {
                                 subtitle: "All caught up!"
                             )
                         } else if !searchText.isEmpty {
-                            // While the AI is still ranking, "no local
-                            // title matches" is NOT "no results" — show
-                            // a loading state instead of flashing an
+                            // While the AI is still ranking OR the query just
+                            // changed and the machinery is deciding (settling),
+                            // "no local title matches" is NOT "no results" —
+                            // show a loading state instead of flashing an
                             // empty one that the AI list then replaces.
-                            if isAISearching {
+                            if isAISearching || searchSettling {
                                 aiLoadingStateView
-                            } else if factHits.isEmpty {
+                            } else {
                                 EmptyStateView(
                                     icon: "magnifyingglass",
                                     title: "No results for \"\(searchText)\""
@@ -1304,58 +1340,110 @@ struct LauncherView: View {
         return trimmedPreferred.isEmpty ? "Chat \(chatId)" : trimmedPreferred
     }
 
-    // Context layer (#48): the "Ask Pidgy" answer-engine card. On tap it answers
-    // the query over the fact store, in the question's own language.
-    @ViewBuilder
-    private var askSection: some View {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        VStack(alignment: .leading, spacing: 5) {
-            if let answerText, answeredQuery == q, !answerText.isEmpty {
-                Text("✦ PIDGY")
-                    .font(Font.Pidgy.monoSm)
-                    .foregroundStyle(Color.Pidgy.accent)
-                Text(Self.renderAnswerMarkdown(answerText))
-                    .font(Font.Pidgy.bodySm)
-                    .foregroundStyle(Color.Pidgy.fg1)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else if isAnswering {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Pidgy is thinking…")
-                        .font(Font.Pidgy.bodySm)
-                        .foregroundStyle(Color.Pidgy.fg3)
-                }
-            } else {
-                Button {
-                    runAnswer(q)
-                } label: {
-                    HStack(spacing: 8) {
-                        Text("✦")
-                            .font(Font.Pidgy.bodySm)
-                            .foregroundStyle(Color.Pidgy.accent)
-                        Text("Ask Pidgy about “\(q)”")
-                            .font(Font.Pidgy.bodySm)
-                            .foregroundStyle(Color.Pidgy.fg2)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        Text("⏎")
-                            .font(Font.Pidgy.monoSm)
-                            .foregroundStyle(Color.Pidgy.fg3)
+    // MARK: - Ask Pidgy chat thread
+
+    private var chatThreadView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(askThread) { turn in
+                        if turn.role == .user {
+                            userBubble(turn)
+                        } else {
+                            pidgyBubble(turn)
+                        }
                     }
-                    .contentShape(Rectangle())
+                    if isAnswering {
+                        thinkingBubble
+                    }
+                    if !isAnswering, askThread.contains(where: { $0.role == .pidgy && !$0.isError }) {
+                        HStack {
+                            Spacer()
+                            Button(action: flagChatAnswer) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "flag")
+                                        .font(Font.Pidgy.meta)
+                                    Text("Flag this answer")
+                                        .font(Font.Pidgy.meta)
+                                }
+                                .foregroundStyle(Color.Pidgy.fg3)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Opens Send Feedback prefilled with this question and answer — you review everything before sending.")
+                        }
+                    }
+                    Color.clear.frame(height: 1).id("chat-bottom")
                 }
-                .buttonStyle(.pidgyPress)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let answerError {
-                Text(answerError)
-                    .font(Font.Pidgy.monoSm)
-                    .foregroundStyle(Color.Pidgy.warning)
+            .onChange(of: askThread) {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                }
+            }
+            .onChange(of: isAnswering) {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                }
             }
         }
+    }
+
+    private func userBubble(_ turn: AskTurn) -> some View {
+        HStack {
+            Spacer(minLength: 60)
+            Text(turn.text)
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(Color.Pidgy.fg1)
+                .textSelection(.enabled)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.Pidgy.accent.opacity(0.18))
+                )
+        }
+    }
+
+    private func pidgyBubble(_ turn: AskTurn) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("✦")
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(Color.Pidgy.accent)
+            Text(Self.renderAnswerMarkdown(turn.text))
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(turn.isError ? Color.Pidgy.warning : Color.Pidgy.fg1)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            Spacer(minLength: 40)
+        }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.Pidgy.bg3)
+        )
+    }
+
+    private var thinkingBubble: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text("✦")
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(Color.Pidgy.accent)
+            ProgressView().controlSize(.small)
+            Text("thinking…")
+                .font(Font.Pidgy.bodySm)
+                .foregroundStyle(Color.Pidgy.fg3)
+            Spacer(minLength: 40)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.Pidgy.bg3)
+        )
     }
 
     /// Render the answer's inline markdown (**bold** names) while preserving
@@ -1370,78 +1458,83 @@ struct LauncherView: View {
         )) ?? AttributedString(s)
     }
 
-    private func runAnswer(_ query: String) {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Open the Ask Pidgy chat with `question` as the first user bubble.
+    /// The search field becomes the follow-up composer; search state clears.
+    private func enterChat(with question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        chatMode = true
+        LauncherChatSession.isActive = true
+        askThread = [AskTurn(role: .user, text: q)]
+        searchText = ""
+        searchSettleTask?.cancel()
+        searchSettling = false
+        searchCoordinator.cancelSearch()
+        searchCoordinator.clearAIState()
+        runAnswerTurn()
+    }
+
+    /// Single Enter handler for both delivery paths — the TextField's
+    /// .onSubmit (field focused) and the panel's keyDown notification
+    /// (field not focused). Deduped in case a Return ever reaches both.
+    private func handleEnter() {
+        let now = Date()
+        guard now.timeIntervalSince(lastEnterAt) > 0.15 else { return }
+        lastEnterAt = now
+        if chatMode {
+            sendFollowUp()
+        } else if let aiSearchMode,
+           aiSearchMode != .unsupported,
+           selectedIndex < aiResults.count {
+            openAISearchResult(aiResults[selectedIndex])
+        } else if selectedIndex < displayedChats.count {
+            openChat(displayedChats[selectedIndex])
+        }
+    }
+
+    private func sendFollowUp() {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !isAnswering else { return }
+        askThread.append(AskTurn(role: .user, text: q))
+        searchText = ""
+        runAnswerTurn()
+    }
+
+    private func runAnswerTurn() {
+        guard let question = askThread.last(where: { $0.role == .user })?.text else { return }
         isAnswering = true
-        answerError = nil
-        answerText = nil
-        Task { @MainActor in
+        answerTask?.cancel()
+        answerTask = Task { @MainActor in
             do {
-                answerText = try await aiService.answerQuestion(q)
-                answeredQuery = q
+                let history = askThread.dropLast().map {
+                    (role: $0.role == .user ? "user" : "assistant", text: $0.text)
+                }
+                let reply = try await aiService.answerQuestion(question, history: history)
+                guard !Task.isCancelled else { return }
+                askThread.append(AskTurn(role: .pidgy, text: reply))
             } catch {
-                answerError = "Couldn’t answer right now — try again."
+                guard !Task.isCancelled else { return }
+                askThread.append(AskTurn(
+                    role: .pidgy,
+                    text: "Couldn’t answer right now — try again.",
+                    isError: true
+                ))
             }
             isAnswering = false
         }
     }
 
-    // Context layer (#48): a "Facts" section above chat results. Tapping a fact
-    // opens its chat. Pure read of the fact store — no AI, flag-gated.
-    private var factsSection: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text("FACTS")
-                .font(Font.Pidgy.monoSm)
-                .foregroundStyle(Color.Pidgy.fg3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.top, 6)
-                .padding(.bottom, 2)
-            ForEach(factHits) { fact in
-                Button {
-                    openChatById(fact.sourceChatId, preferredChat: nil)
-                } label: {
-                    HStack(spacing: 8) {
-                        Text(factLaneLabel(fact))
-                            .font(Font.Pidgy.monoSm)
-                            .foregroundStyle(factLaneColor(fact))
-                            .frame(width: 56, alignment: .leading)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(fact.action.isEmpty ? fact.objectText : fact.action)
-                                .font(Font.Pidgy.bodySm)
-                                .foregroundStyle(Color.Pidgy.fg2)
-                                .lineLimit(1)
-                            Text("\(fact.subjectEntity) · \(fact.sourceChatTitle)")
-                                .font(Font.Pidgy.monoSm)
-                                .foregroundStyle(Color.Pidgy.fg3)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.pidgyPress)
-            }
-        }
-    }
-
-    private func factLaneLabel(_ f: Fact) -> String {
-        switch f.predicate {
-        case .iOwe: return "ON ME"
-        case .owesMe: return "ON THEM"
-        default: return "FACT"
-        }
-    }
-
-    private func factLaneColor(_ f: Fact) -> Color {
-        switch f.predicate {
-        case .iOwe: return Color.Pidgy.warning
-        case .owesMe: return Color.Pidgy.accent
-        default: return Color.Pidgy.fg3
-        }
+    /// Esc / ✕: leave the chat and return to normal search.
+    private func exitChat() {
+        guard chatMode else { return }
+        answerTask?.cancel()
+        isAnswering = false
+        chatMode = false
+        LauncherChatSession.isActive = false
+        askThread = []
+        answeredQuery = ""
+        searchText = ""
+        isSearchFocused = true
     }
 
     private func openChatById(_ chatId: Int64, preferredChat: TGChat?) {

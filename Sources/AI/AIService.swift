@@ -431,20 +431,56 @@ final class AIService: ObservableObject {
         return result
     }
 
+    /// Entity memory (M1): fold a chat's NEW messages into its rolling summary.
+    /// Old summary + new messages → updated summary; cost stays O(new
+    /// messages) and the summary compounds instead of being recomputed.
+    func foldChatSummary(
+        chat: TGChat,
+        oldSummary: String?,
+        newMessages: [TGMessage],
+        myUserId: Int64,
+        myUser: TGUser?
+    ) async throws -> String {
+        try requireAIEntitlement()
+        // Cap the fold input — a deep catch-up pass can consume hundreds of
+        // messages; the newest ~60 carry the state, older ones were either in
+        // the old summary's window or belong to history.
+        let bounded = Array(newMessages.suffix(60))
+        let snippets = conversationSnippets(messages: bounded, chatTitle: chat.title, myUserId: myUserId)
+        guard !snippets.isEmpty else { return oldSummary ?? "" }
+        let transcript = snippets
+            .map { "\($0.senderFirstName): \(PromptSafety.fence($0.text))" }
+            .joined(separator: "\n")
+        let system = SummaryFoldPrompt.systemPrompt + PromptSafety.untrustedContentClause
+        return try await provider.answer(
+            systemPrompt: system,
+            userMessage: SummaryFoldPrompt.userMessage(
+                chatTitle: chat.title,
+                chatType: chat.chatType.displayName,
+                myName: myUser?.firstName ?? "Me",
+                oldSummary: oldSummary,
+                transcript: transcript
+            )
+        )
+    }
+
     /// Fact-grounded answer engine (#48 search). Retrieves the user's open-loop
     /// and durable facts, then asks the model the question over them — a sharp,
     /// cited answer in the question's own language. Validated offline at 98%
     /// good / 100% grounded across English/Hinglish/Hindi/Spanish.
     /// (Semantic message recall is a planned follow-up.)
-    func answerQuestion(_ query: String) async throws -> String {
+    func answerQuestion(_ query: String, history: [(role: String, text: String)] = []) async throws -> String {
         try requireAIEntitlement()
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
         let openLoops = await DatabaseManager.shared.loadOpenFacts(limit: 250)
         let durable = await DatabaseManager.shared.loadDurableFacts(limit: 50)
+        // Rolling chat summaries give the "what's going on with X" narrative
+        // context that atomic facts can't answer.
+        let summaries = await DatabaseManager.shared.loadRecentChatSummaries(limit: 10)
         return try await provider.answer(
             systemPrompt: AnswerPrompt.systemPrompt,
-            userMessage: AnswerPrompt.userMessage(query: trimmed, openLoops: openLoops, durable: durable)
+            userMessage: AnswerPrompt.userMessage(query: trimmed, openLoops: openLoops, durable: durable, summaries: summaries, history: history)
         )
     }
 

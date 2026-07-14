@@ -166,6 +166,19 @@ struct QuerySpec: Codable {
         scopeWasExplicit || replyConstraint != .none || timeRange != nil
     }
 
+    /// A question ABOUT a person: the planner extracted people AND the query
+    /// is phrased as more than a bare name. Single definition shared by the
+    /// router (engine choice) and the launcher (auto-answer trigger) so the
+    /// two can never disagree.
+    static func isPersonQuestion(rawQuery: String, people: [String]) -> Bool {
+        guard !people.isEmpty else { return false }
+        return rawQuery.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count >= 3
+    }
+
+    var isPersonQuestion: Bool {
+        Self.isPersonQuestion(rawQuery: rawQuery, people: plannerHints?.people ?? [])
+    }
+
     /// Copy with planner term hints attached — used when the planner's
     /// confidence is too low to reroute the query family but its term
     /// extraction is still better evidence than raw tokenization.

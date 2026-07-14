@@ -6840,11 +6840,47 @@ final class PidgyCoreTests: XCTestCase {
         )
 
         XCTAssertEqual(resolved.family, .summary)
-        XCTAssertEqual(resolved.preferredEngine, .summarize)
+        // Person-question summaries route retrieval to LOCAL semantic ranking:
+        // the context layer's answer card owns the synthesis, so the deep
+        // summary engine (a second stacked summary) must not run.
+        XCTAssertEqual(
+            resolved.preferredEngine,
+            ContextLayer.enabled ? .semanticRetrieval : .summarize
+        )
+        XCTAssertTrue(resolved.isPersonQuestion)
         XCTAssertNotNil(resolved.timeRange)
         XCTAssertEqual(resolved.plannerHints?.people, ["jack", "emma"])
         XCTAssertEqual(resolved.plannerHints?.topicTerms, ["builder", "program"])
         XCTAssertGreaterThanOrEqual(resolved.parseConfidence, 0.93)
+    }
+
+    @MainActor
+    func testQueryRouterKeepsDeepSummaryEngineForChatSummaries() async {
+        // No people extracted → not a person-question → the deep summary
+        // engine still owns it (chat/topic summaries have no answer card).
+        let plannerResult = QueryPlannerResultDTO(
+            family: "summary",
+            scope: "inherit",
+            timeRange: "inherit",
+            people: [],
+            topicTerms: ["grampus"],
+            confidence: 0.93
+        )
+        let router = QueryRouter(
+            aiProvider: StubAIProvider(queryPlannerResult: plannerResult),
+            queryInterpreter: QueryInterpreter()
+        )
+
+        let resolved = await router.resolveQuerySpec(
+            query: "grampus chat me kya ho rha",
+            activeFilter: .all,
+            timezone: TimeZone(secondsFromGMT: 0)!,
+            now: Date(timeIntervalSince1970: 1_744_329_600)
+        )
+
+        XCTAssertEqual(resolved.family, .summary)
+        XCTAssertEqual(resolved.preferredEngine, .summarize)
+        XCTAssertFalse(resolved.isPersonQuestion)
     }
 
     @MainActor
@@ -9861,6 +9897,51 @@ final class PidgyCoreTests: XCTestCase {
         await DatabaseManager.shared.close()
         await DatabaseManager.shared.configureForTesting(databaseURLOverride: nil)
         try? FileManager.default.removeItem(at: tempDirectory)
+    }
+
+    // MARK: - Facts search (two-tier, entity-anchored)
+
+    /// A conversational query that NAMES someone must return only that
+    /// person's facts — filler tokens (kya/chal/rha) matching another fact's
+    /// raw source_text must not surface it (the "Gaurang on an Akhil query"
+    /// launcher bug).
+    func testSearchFactsAnchorsOnNamedPerson() async throws {
+        try await withTempDatabase { _ in
+            await DatabaseManager.shared.upsertFacts([
+                FactDraft(
+                    subjectEntity: "Akhil B", predicate: .owesMe, objectText: "the credit code",
+                    action: "Remind Akhil for the credit code", objectEntity: nil, confidence: 0.9,
+                    validFrom: Date(), sourceChatId: 1, sourceChatTitle: "Akhil B",
+                    sourceMessageId: 11, sourceText: "code bhejna yaar", senderName: "Akhil B"
+                ),
+                FactDraft(
+                    subjectEntity: "Gaurang Desai", predicate: .iOwe, objectText: "pidgy updates",
+                    action: "Send pidgy updates tonight", objectEntity: nil, confidence: 0.9,
+                    validFrom: Date(), sourceChatId: 2, sourceChatTitle: "Gaurang Desai",
+                    sourceMessageId: 22, sourceText: "aur kya chal rha hai bhai", senderName: "Gaurang Desai"
+                )
+            ])
+
+            let hits = await DatabaseManager.shared.searchFacts(query: "akhil ke saath kya chal rha")
+            XCTAssertFalse(hits.isEmpty)
+            XCTAssertTrue(hits.allSatisfy { $0.subjectEntity == "Akhil B" },
+                          "filler-token matches must not surface other people's facts")
+
+            // Planner-refined identity terms behave the same way.
+            let refined = await DatabaseManager.shared.searchFacts(query: "क्या चल रहा", identityTerms: ["Akhil"])
+            XCTAssertTrue(refined.allSatisfy { $0.subjectEntity == "Akhil B" })
+
+            // Content query with no named person falls back to full-text
+            // (recall preserved).
+            let content = await DatabaseManager.shared.searchFacts(query: "pidgy updates")
+            XCTAssertTrue(content.contains { $0.subjectEntity == "Gaurang Desai" })
+
+            // The launcher passes identityOnly: a query that names nobody
+            // shows NO facts (answer + chat results carry content queries) —
+            // "whats up with vibhu" must not surface "Follow up with…" items.
+            let launcher = await DatabaseManager.shared.searchFacts(query: "whats up with vibhu", identityOnly: true)
+            XCTAssertTrue(launcher.isEmpty)
+        }
     }
 
     private func withTempDatabase(

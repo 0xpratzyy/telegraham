@@ -445,6 +445,8 @@ struct DashboardReplyDetail: View {
 
     // Catch-up summary (#21) — populated for QUIET items when the
     // user taps "Catch me up".
+    @State private var storedSummary: EntitySummary?
+    @State private var catchUpExpanded = false
     @State private var catchUpText: String = ""
     @State private var isGeneratingCatchUp = false
     @State private var catchUpError: String?
@@ -492,22 +494,10 @@ struct DashboardReplyDetail: View {
                         )
                 }
 
-                // QUIET items: offer the AI catch-up summary first —
-                // it's the most useful thing for a chat the user has
-                // been ignoring. On non-quiet items, we skip this
-                // section entirely (the chat is already active).
-                if item.category == .quiet {
-                    catchUpSection(for: item)
-                }
-
-                // Suggested replies — for chats where the user
-                // probably wants to type something back. ON ME is the
-                // obvious case (the ball is in their court), but we
-                // also offer it on ON THEM in case they want to
-                // proactively nudge.
-                if item.category != .quiet {
-                    suggestedRepliesSection(for: item)
-                }
+                // One combined Assist section: "Catch me up" (rolling summary,
+                // revealed instantly on click) + "Suggest replies" side by
+                // side, instead of two stacked near-empty sections.
+                assistSection(for: item)
 
                 let evidenceItems = mergedEvidenceItems(for: item)
                 DashboardDetailSection(
@@ -598,58 +588,100 @@ struct DashboardReplyDetail: View {
             catchUpText = ""
             catchUpError = nil
             catchUpForChatId = nil
+            storedSummary = nil
+            catchUpExpanded = false
+            if let chatId = item?.chat.id {
+                storedSummary = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chatId)
+            }
             await loadConversationContext()
         }
     }
 
-    // MARK: - Suggested replies section (#20)
+    // MARK: - Assist section (catch-up + suggested replies, #20/#21)
 
+    /// One "Assist" section: both AI helpers side by side as buttons, each
+    /// revealing its content in place — replaces the two stacked sections
+    /// that were mostly empty chrome.
     @ViewBuilder
-    private func suggestedRepliesSection(for item: FollowUpItem) -> some View {
-        DashboardDetailSection(title: "Suggested replies") {
+    private func assistSection(for item: FollowUpItem) -> some View {
+        let offersCatchUp = storedSummary != nil || item.category == .quiet
+        let offersReplies = item.category != .quiet
+        let showCatchUpButton = offersCatchUp
+            && !(storedSummary != nil && catchUpExpanded)
+            && !(catchUpForChatId == item.chat.id && (isGeneratingCatchUp || !catchUpText.isEmpty))
+        let showRepliesButton = offersReplies
+            && !(suggestedRepliesForChatId == item.chat.id && (isGeneratingReplies || !suggestedReplies.isEmpty))
+
+        DashboardDetailSection(title: "Assist") {
             VStack(alignment: .leading, spacing: 10) {
                 if !aiService.isConfigured {
-                    Text("Connect an AI provider in Preferences to enable suggested replies.")
+                    Text("Connect an AI provider in Preferences to enable summaries and reply drafts.")
                         .font(PidgyDashboardTheme.detailBodyFont)
                         .foregroundStyle(PidgyDashboardTheme.secondary)
-                } else if let error = suggestedRepliesError {
-                    Text(error)
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.red)
-                } else if suggestedRepliesForChatId == item.chat.id && !suggestedReplies.isEmpty {
-                    ForEach(Array(suggestedReplies.enumerated()), id: \.offset) { _, reply in
-                        suggestedReplyChip(reply)
-                    }
-                    Button {
-                        Task { await generateSuggestedReplies(for: item) }
-                    } label: {
-                        Label("Regenerate", systemImage: "arrow.clockwise")
-                            .font(PidgyDashboardTheme.captionMediumFont)
-                    }
-                    .buttonStyle(.pidgyPress)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .padding(.top, 2)
-                } else if isGeneratingReplies && suggestedRepliesForChatId == item.chat.id {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                        Text("Drafting 3 options…")
-                            .font(PidgyDashboardTheme.detailBodyFont)
-                            .foregroundStyle(PidgyDashboardTheme.secondary)
-                    }
                 } else {
-                    Button {
-                        Task { await generateSuggestedReplies(for: item) }
-                    } label: {
-                        Label("Suggest replies", systemImage: "sparkles")
-                            .font(PidgyDashboardTheme.captionMediumFont)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .pidgyCapsuleBackground()
+                    if showCatchUpButton || showRepliesButton {
+                        HStack(spacing: 8) {
+                            if showCatchUpButton {
+                                assistButton("Catch me up", icon: "sparkles") {
+                                    if storedSummary != nil {
+                                        catchUpExpanded = true
+                                    } else {
+                                        Task { await generateCatchUpSummary(for: item) }
+                                    }
+                                }
+                            }
+                            if showRepliesButton {
+                                assistButton("Suggest replies", icon: "text.bubble") {
+                                    Task { await generateSuggestedReplies(for: item) }
+                                }
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    if offersCatchUp { catchUpContent(for: item) }
+                    if offersReplies { repliesContent(for: item) }
                 }
+            }
+        }
+    }
+
+    private func assistButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(PidgyDashboardTheme.captionMediumFont)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .pidgyCapsuleBackground()
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(PidgyDashboardTheme.primary)
+    }
+
+    @ViewBuilder
+    private func repliesContent(for item: FollowUpItem) -> some View {
+        if let error = suggestedRepliesError {
+            Text(error)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.red)
+        } else if suggestedRepliesForChatId == item.chat.id && !suggestedReplies.isEmpty {
+            ForEach(Array(suggestedReplies.enumerated()), id: \.offset) { _, reply in
+                suggestedReplyChip(reply)
+            }
+            Button {
+                Task { await generateSuggestedReplies(for: item) }
+            } label: {
+                Label("Regenerate", systemImage: "arrow.clockwise")
+                    .font(PidgyDashboardTheme.captionMediumFont)
+            }
+            .buttonStyle(.pidgyPress)
+            .foregroundStyle(PidgyDashboardTheme.secondary)
+            .padding(.top, 2)
+        } else if isGeneratingReplies && suggestedRepliesForChatId == item.chat.id {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .scaleEffect(0.6)
+                Text("Drafting 3 options…")
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
             }
         }
     }
@@ -715,54 +747,52 @@ struct DashboardReplyDetail: View {
         }
     }
 
-    // MARK: - Catch-up summary section (#21, QUIET only)
+    // MARK: - Catch-up content (rolling summary; on-demand fallback)
 
     @ViewBuilder
-    private func catchUpSection(for item: FollowUpItem) -> some View {
-        DashboardDetailSection(title: "Catch me up") {
-            VStack(alignment: .leading, spacing: 10) {
-                if !aiService.isConfigured {
-                    Text("Connect an AI provider in Preferences to enable catch-up summaries.")
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                } else if let error = catchUpError {
-                    Text(error)
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.red)
-                } else if catchUpForChatId == item.chat.id && !catchUpText.isEmpty {
-                    Text(catchUpText)
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                        .lineSpacing(3)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(PidgyDashboardTheme.paper)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(PidgyDashboardTheme.rule)
-                        )
-                } else if isGeneratingCatchUp && catchUpForChatId == item.chat.id {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                        Text("Summarizing the last week…")
-                            .font(PidgyDashboardTheme.detailBodyFont)
-                            .foregroundStyle(PidgyDashboardTheme.secondary)
-                    }
-                } else {
-                    Button {
-                        Task { await generateCatchUpSummary(for: item) }
-                    } label: {
-                        Label("Catch me up", systemImage: "sparkles")
-                            .font(PidgyDashboardTheme.captionMediumFont)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .pidgyCapsuleBackground()
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                }
+    private func catchUpContent(for item: FollowUpItem) -> some View {
+        if let stored = storedSummary, catchUpExpanded {
+            // Rolling summary from entity memory: revealed on click,
+            // instantly (no AI call — folded in the background).
+            Text(stored.summary)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .lineSpacing(3)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(PidgyDashboardTheme.paper)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(PidgyDashboardTheme.rule)
+                )
+            Text("Rolling summary · updated \(DateFormatting.compactRelativeTime(from: stored.validFrom))")
+                .font(PidgyDashboardTheme.metadataFont)
+                .foregroundStyle(PidgyDashboardTheme.tertiary)
+        } else if let error = catchUpError {
+            Text(error)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.red)
+        } else if catchUpForChatId == item.chat.id && !catchUpText.isEmpty {
+            Text(catchUpText)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .lineSpacing(3)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(PidgyDashboardTheme.paper)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(PidgyDashboardTheme.rule)
+                )
+        } else if isGeneratingCatchUp && catchUpForChatId == item.chat.id {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .scaleEffect(0.6)
+                Text("Summarizing the last week…")
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
             }
         }
     }

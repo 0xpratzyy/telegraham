@@ -39,7 +39,7 @@ struct AISearchLoadingView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            ForEach(0..<6, id: \.self) { index in
+            ForEach(0..<3, id: \.self) { index in
                 AISearchSkeletonRow(
                     pulse: pulse,
                     titleWidth: index % 3 == 0 ? 220 : (index % 3 == 1 ? 180 : 250),
@@ -49,7 +49,7 @@ struct AISearchLoadingView: View {
         }
         .padding(.horizontal, 8)
         .padding(.top, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .top)
         .onReceive(timer) { _ in
             withAnimation(.easeInOut(duration: 0.28)) {
                 pulse.toggle()

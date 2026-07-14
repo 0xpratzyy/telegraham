@@ -734,6 +734,32 @@ enum PidgyMigrations {
             try db.execute(sql: "ALTER TABLE facts ADD COLUMN closed_reason TEXT")
         }
 
+        migrator.registerMigration("v30_entity_summaries") { db in
+            // Entity memory (M1): rolling per-chat summaries, folded
+            // incrementally by the extraction pass. Bi-temporal like facts —
+            // each fold supersedes the previous row (superseded_at) instead of
+            // overwriting, so "what was going on last month" stays queryable.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS entity_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_kind TEXT NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    entity_title TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL,
+                    through_message_id INTEGER NOT NULL DEFAULT 0,
+                    valid_from REAL NOT NULL,
+                    superseded_at REAL,
+                    created_at REAL NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_entity_summaries_current
+                ON entity_summaries(entity_kind, entity_id)
+                WHERE superseded_at IS NULL
+                """)
+        }
+
+
         return migrator
     }
 }

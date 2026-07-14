@@ -24,7 +24,13 @@ enum AnswerPrompt {
     - Use ONLY the data below. If it's thin or doesn't cover the question, say so in one line — don't invent.
     """
 
-    static func userMessage(query: String, openLoops: [Fact], durable: [Fact]) -> String {
+    static func userMessage(
+        query: String,
+        openLoops: [Fact],
+        durable: [Fact],
+        summaries: [EntitySummary] = [],
+        history: [(role: String, text: String)] = []
+    ) -> String {
         let loops = openLoops.map { f -> String in
             let dir = f.predicate == .iOwe ? "I OWE" : "OWES ME"
             let what = f.action.isEmpty ? f.objectText : f.action
@@ -32,14 +38,30 @@ enum AnswerPrompt {
         }.joined(separator: "\n")
         let facts = durable.map { "- \($0.subjectEntity): \($0.predicate.rawValue) \($0.objectText)" }
             .joined(separator: "\n")
+        let context = summaries.map { "- \($0.entityTitle): \($0.summary)" }
+            .joined(separator: "\n")
+        // Follow-up questions in the launcher chat: the prior turns resolve
+        // pronouns ("uska kya hua", "and the payment?"). Cap so a long chat
+        // can't crowd out the data sections.
+        let convo = history.suffix(8)
+            .map { "\($0.role == "user" ? "USER" : "ASSISTANT"): \($0.text)" }
+            .joined(separator: "\n")
+        let convoBlock = convo.isEmpty ? "" : """
+
+        == CONVERSATION SO FAR (resolve "he/she/it/uska" etc. from here) ==
+        \(convo)
+        """
         return """
         QUESTION: \(query)
-
+        \(convoBlock)
         == OPEN LOOPS (obligations, both directions) ==
         \(loops.isEmpty ? "none" : loops)
 
         == BACKGROUND FACTS ABOUT PEOPLE ==
         \(facts.isEmpty ? "none" : facts)
+
+        == ROLLING CHAT SUMMARIES (what's currently going on, per chat) ==
+        \(context.isEmpty ? "none" : context)
         """
     }
 }

@@ -268,6 +268,15 @@ struct LauncherVisibleChatsFilter {
         isLikelyBot: (TGChat) -> Bool
     ) -> [TGChat] {
         let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Conversational queries ("whats up with vibhu") never phrase-match a
+        // title — fall back to per-token matching so the named chat surfaces
+        // INSTANTLY, before any AI ranking. Tokens under 3 chars are skipped
+        // ("up", "ke") so filler doesn't light up random titles; recall over
+        // precision, as everywhere in local search.
+        let titleTokens = trimmedSearchText
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { $0.count >= 3 }
 
         return chats.filter { chat in
             guard chatMatchesScope(chat, scope: scope) else { return false }
@@ -282,6 +291,7 @@ struct LauncherVisibleChatsFilter {
 
             return chat.title.localizedCaseInsensitiveContains(trimmedSearchText)
                 || searchResultChatIds.contains(chat.id)
+                || titleTokens.contains { chat.title.localizedCaseInsensitiveContains($0) }
         }
     }
 

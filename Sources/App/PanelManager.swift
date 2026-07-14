@@ -7,11 +7,19 @@ extension Notification.Name {
     static let launcherArrowDown = Notification.Name("launcherArrowDown")
     static let launcherArrowUp = Notification.Name("launcherArrowUp")
     static let launcherEnter = Notification.Name("launcherEnter")
+    static let launcherEscape = Notification.Name("launcherEscape")
     /// Posted by UI that wants to surface the launcher panel (e.g. the
     /// dashboard sidebar's "Jump to anything…" search button). AppDelegate
     /// listens for this and calls `PanelManager.toggle()` so we don't have
     /// to thread the panel manager all the way down into SwiftUI views.
     static let requestLauncherToggle = Notification.Name("requestLauncherToggle")
+}
+
+/// Whether the launcher is currently in Ask-Pidgy chat mode. Main-thread only.
+/// FloatingPanel consults it so Escape exits the chat first instead of
+/// closing the panel; LauncherView keeps it in sync with its `chatMode`.
+enum LauncherChatSession {
+    static var isActive = false
 }
 
 // MARK: - Floating Panel
@@ -66,8 +74,13 @@ final class FloatingPanel: NSPanel {
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
-        case 53: // Escape
-            orderOut(nil)
+        case 53: // Escape — in chat mode, first Escape leaves the chat;
+            // the next one closes the panel as usual.
+            if LauncherChatSession.isActive {
+                NotificationCenter.default.post(name: .launcherEscape, object: nil)
+            } else {
+                orderOut(nil)
+            }
         case 125: // Arrow Down
             NotificationCenter.default.post(name: .launcherArrowDown, object: nil)
         case 126: // Arrow Up
@@ -153,6 +166,10 @@ final class PanelManager {
                 .environmentObject(aiService)
         )
         hostingView.translatesAutoresizingMaskIntoConstraints = false
+        // The panel is a fixed 640×480 — never let SwiftUI's ideal size drive
+        // the window (default sizingOptions grew the panel to ~2× height when
+        // tall content like the answer card + skeletons appeared).
+        hostingView.sizingOptions = []
 
         containerView.addSubview(hostingView)
         NSLayoutConstraint.activate([

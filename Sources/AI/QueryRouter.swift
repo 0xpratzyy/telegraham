@@ -175,11 +175,23 @@ final class QueryRouter: ObservableObject {
             }
         }()
 
+        // Person-questions ("whats up with X"): the context layer's fast
+        // answer card owns the summary. Routing these to the deep summary
+        // engine stacked a SECOND ai summary under the card and cost 10s —
+        // local semantic ranking gives relevant chats under the card instead
+        // (and stays multilingual, since ranking is embedding-based).
+        let personQuestionAnswerCard = ContextLayer.enabled
+            && resolvedFamily == .summary
+            && QuerySpec.isPersonQuestion(rawQuery: baseSpec.rawQuery, people: hints?.people ?? [])
+        let resolvedEngine: QueryEngine = personQuestionAnswerCard
+            ? .semanticRetrieval
+            : preferredEngine(for: resolvedFamily)
+
         return QuerySpec(
             rawQuery: baseSpec.rawQuery,
             mode: runtimeMode(for: resolvedFamily),
             family: resolvedFamily,
-            preferredEngine: preferredEngine(for: resolvedFamily),
+            preferredEngine: resolvedEngine,
             scope: resolvedScope,
             scopeWasExplicit: baseSpec.scopeWasExplicit || resolvedScope != baseSpec.scope,
             replyConstraint: resolvedFamily == .replyQueue ? .pipelineOnMeOnly : .none,

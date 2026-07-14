@@ -169,6 +169,10 @@ final class FactExtractionCoordinator: ObservableObject {
             var cursor = await DatabaseManager.shared.factExtractionCursor(chatId: chat.id)
             var windows = 0
             var didWork = false
+            // Messages this pass consumed for THIS chat — folded into the
+            // chat's rolling summary once the windows are done (one fold call
+            // per worked chat per pass, not per window).
+            var passMessages: [TGMessage] = []
             // Forward crawl: walk this chat's 30-day window oldest-first in
             // chunks, a few per pass. The cursor persists, so a deep chat catches
             // up over subsequent passes rather than being read all at once.
@@ -295,6 +299,7 @@ final class FactExtractionCoordinator: ObservableObject {
                     break
                 }
 
+                passMessages.append(contentsOf: tgMessages)
                 cursor = records.map(\.id).max() ?? cursor
                 await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
                 windows += 1
@@ -306,6 +311,30 @@ final class FactExtractionCoordinator: ObservableObject {
             // this chat still has unread backlog.
             if windows >= ContextLayer.maxWindowsPerChatPerPass { backlogRemains = true }
             if didWork { workedChats += 1 }
+
+            // Entity memory (M1): fold what this pass consumed into the chat's
+            // rolling summary. Non-fatal — a failed fold just retries with the
+            // next pass's messages (the old summary row stays current).
+            if !passMessages.isEmpty, !Task.isCancelled {
+                let old = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chat.id)
+                do {
+                    let updated = try await aiService.foldChatSummary(
+                        chat: chat,
+                        oldSummary: old?.summary,
+                        newMessages: passMessages,
+                        myUserId: myUserId,
+                        myUser: myUser
+                    )
+                    await DatabaseManager.shared.saveChatSummary(
+                        chatId: chat.id,
+                        title: chat.title,
+                        summary: updated,
+                        throughMessageId: cursor
+                    )
+                } catch {
+                    logger.error("summary fold failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
         }
 
         // A cancelled task must not stamp pass state — its replacement runs the

@@ -2526,35 +2526,65 @@ actor DatabaseManager {
 
     /// Full-text search over LIVE facts (open loops + durable facts), BM25-ranked.
     /// Powers the "Facts" section in search — "what do I owe Akhil", "Saperly".
-    func searchFacts(query: String, limit: Int = 20) async -> [Fact] {
+    /// Two-tier facts search. Tier 1 anchors on WHO the query names: the same
+    /// OR-match, but only against identity columns (subject_entity +
+    /// source_chat_title) — "akhil ke saath kya chal rha" returns ONLY Akhil's
+    /// facts instead of every fact whose raw source_text contains a filler
+    /// token (kya/chal/rha). Tier 2 (no identity hit → the query is about
+    /// CONTENT, e.g. "hetzner invoice") keeps the recall-over-precision
+    /// full-text OR-match, re-ranked so identity/object columns outweigh raw
+    /// message text. `identityTerms` lets the AI query planner refine tier 1
+    /// with parsed people (multilingual — it transliterates scripts the FTS
+    /// tokenizer can't).
+    /// `identityOnly` skips the tier-2 content fallback entirely — the
+    /// launcher's FACTS section uses it so facts appear only when the query
+    /// actually NAMES a person/chat ("whats up with vibhu" must not surface
+    /// every "Follow up with…" action via the up/with tokens).
+    func searchFacts(query: String, identityTerms: [String] = [], identityOnly: Bool = false, limit: Int = 20) async -> [Fact] {
         guard let pool = await ensureDatabase() else { return [] }
-        // Tokenize to terms, drop FTS5 operators, OR the quoted terms so partial
-        // queries still match (recall over precision, per the search guidance).
-        let terms = query
-            .split { !$0.isLetter && !$0.isNumber }
-            .map(String.init)
-            .filter { $0.count >= 2 }
-        guard !terms.isEmpty else { return [] }
-        let match = terms.map { "\"\($0)\"" }.joined(separator: " OR ")
-        do {
-            return try await pool.read { db in
-                let rows = try Row.fetchAll(
-                    db,
-                    sql: """
-                        SELECT f.* FROM facts_fts
-                        JOIN facts f ON f.id = facts_fts.rowid
-                        WHERE facts_fts MATCH ? AND f.invalid_at IS NULL
-                        ORDER BY bm25(facts_fts), f.valid_from DESC
-                        LIMIT ?
-                        """,
-                    arguments: [match, limit]
-                )
-                return rows.compactMap(Self.fact(from:))
-            }
-        } catch {
-            print("[DatabaseManager] searchFacts failed: \(error)")
-            return []
+        let tokenize: (String) -> [String] = { text in
+            text.split { !$0.isLetter && !$0.isNumber }
+                .map(String.init)
+                .filter { $0.count >= 2 }
         }
+        let queryTerms = tokenize(query)
+        let identity = identityTerms.flatMap(tokenize)
+        let tier1Terms = identity.isEmpty ? queryTerms : identity
+        guard !queryTerms.isEmpty || !tier1Terms.isEmpty else { return [] }
+        // facts_fts column order: subject_entity, object_text, action,
+        // source_text, source_chat_title. Weights sink raw-message matches.
+        let weightedRank = "bm25(facts_fts, 10.0, 4.0, 4.0, 1.0, 8.0)"
+
+        func run(_ match: String) async -> [Fact] {
+            do {
+                return try await pool.read { db in
+                    let rows = try Row.fetchAll(
+                        db,
+                        sql: """
+                            SELECT f.* FROM facts_fts
+                            JOIN facts f ON f.id = facts_fts.rowid
+                            WHERE facts_fts MATCH ? AND f.invalid_at IS NULL
+                            ORDER BY \(weightedRank), f.valid_from DESC
+                            LIMIT ?
+                            """,
+                        arguments: [match, limit]
+                    )
+                    return rows.compactMap(Self.fact(from:))
+                }
+            } catch {
+                print("[DatabaseManager] searchFacts failed: \(error)")
+                return []
+            }
+        }
+
+        if !tier1Terms.isEmpty {
+            let identityMatch = "{subject_entity source_chat_title} : ("
+                + tier1Terms.map { "\"\($0)\"" }.joined(separator: " OR ") + ")"
+            let hits = await run(identityMatch)
+            if !hits.isEmpty { return hits }
+        }
+        guard !identityOnly, !queryTerms.isEmpty else { return [] }
+        return await run(queryTerms.map { "\"\($0)\"" }.joined(separator: " OR "))
     }
 
     /// Live durable (non-open-loop) facts about resolved people — background
@@ -2638,6 +2668,95 @@ actor DatabaseManager {
         } catch {
             print("[DatabaseManager] updateFactExtractionCursor failed: \(error)")
         }
+    }
+
+    // MARK: - Entity summaries (rolling, bi-temporal)
+
+    /// The CURRENT rolling summary for a chat (superseded_at IS NULL), if any.
+    func loadCurrentChatSummary(chatId: Int64) async -> EntitySummary? {
+        guard let pool = await ensureDatabase() else { return nil }
+        do {
+            return try await pool.read { db in
+                let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT * FROM entity_summaries
+                        WHERE entity_kind = 'chat' AND entity_id = ? AND superseded_at IS NULL
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                    arguments: [chatId]
+                )
+                return row.flatMap(Self.entitySummary(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadCurrentChatSummary failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Fold result: supersede the current summary row (kept as a dated
+    /// snapshot) and insert the fresh one. One transaction.
+    func saveChatSummary(chatId: Int64, title: String, summary: String, throughMessageId: Int64) async {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let pool = await ensureDatabase() else { return }
+        let now = Date().timeIntervalSince1970
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        UPDATE entity_summaries SET superseded_at = ?
+                        WHERE entity_kind = 'chat' AND entity_id = ? AND superseded_at IS NULL
+                        """,
+                    arguments: [now, chatId]
+                )
+                try db.execute(
+                    sql: """
+                        INSERT INTO entity_summaries
+                            (entity_kind, entity_id, entity_title, summary, through_message_id, valid_from, created_at)
+                        VALUES ('chat', ?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [chatId, title, trimmed, throughMessageId, now, now]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] saveChatSummary failed: \(error)")
+        }
+    }
+
+    /// Current summaries, freshest first — retrieval context for Ask Pidgy.
+    func loadRecentChatSummaries(limit: Int = 10) async -> [EntitySummary] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM entity_summaries
+                        WHERE entity_kind = 'chat' AND superseded_at IS NULL
+                        ORDER BY valid_from DESC LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+                return rows.compactMap(Self.entitySummary(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadRecentChatSummaries failed: \(error)")
+            return []
+        }
+    }
+
+    private static func entitySummary(from row: Row) -> EntitySummary? {
+        let superseded: Double? = row["superseded_at"]
+        return EntitySummary(
+            id: row["id"],
+            entityKind: row["entity_kind"],
+            entityId: row["entity_id"],
+            entityTitle: row["entity_title"],
+            summary: row["summary"],
+            throughMessageId: row["through_message_id"],
+            validFrom: Date(timeIntervalSince1970: row["valid_from"]),
+            supersededAt: superseded.map(Date.init(timeIntervalSince1970:))
+        )
     }
 
     static func fact(from row: Row) -> Fact? {

@@ -37,6 +37,20 @@ enum AppConstants {
         /// via the proxy's Vertex path. To switch to gpt-5, flip to "gpt-5" +
         /// "/v1/chat/completions" (proxy + Vertex auth already wired).
         static let managedModel = "google/gemini-3.1-flash-lite"
+
+        /// Per-stage model routing for the MANAGED plan only (BYOK users'
+        /// chosen model is never overridden). User-facing synthesis — the
+        /// launcher's deep-search summary and Ask-Pidgy-style answers — gets
+        /// the sharper flash tier; the high-volume background stages
+        /// (extraction, triage, folds) stay on flash-lite for cost.
+        static func managedModelOverride(for kind: AIRequestKind?) -> String? {
+            switch kind {
+            case .agenticSearch, .summary:
+                return "google/gemini-3.5-flash"
+            default:
+                return nil
+            }
+        }
         static let managedProxyPath = "/v1/vertex/chat/completions"
         static let maxResponseTokens = 4096
         static let maxTokenBudgetChars = 16000

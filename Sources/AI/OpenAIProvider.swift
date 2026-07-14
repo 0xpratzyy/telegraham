@@ -304,8 +304,18 @@ final class OpenAIProvider: AIProvider {
             request.setValue(licenseKey, forHTTPHeaderField: "X-Pidgy-License")
         }
 
+        // Managed plan: user-facing synthesis stages route to a sharper model;
+        // everything else keeps the provider's configured model. BYOK users'
+        // explicit model choice is never overridden.
+        let effectiveModel: String
+        if model == AppConstants.AI.managedModel,
+           let override = AppConstants.AI.managedModelOverride(for: requestKind) {
+            effectiveModel = override
+        } else {
+            effectiveModel = model
+        }
         var body: [String: Any] = [
-            "model": model,
+            "model": effectiveModel,
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": userMessage]
@@ -336,7 +346,7 @@ final class OpenAIProvider: AIProvider {
         // AND cost — measured ~360 reasoning tokens on a trivial triage, billed
         // at the output rate — so cap it the same way we do for gpt-5: minimal
         // on the hot triage path, low elsewhere.
-        if model.hasPrefix("gpt-5") || model.contains("gemini") {
+        if effectiveModel.hasPrefix("gpt-5") || effectiveModel.contains("gemini") {
             body["reasoning_effort"] = requestKind == .pipelineTriage ? "minimal" : "low"
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -354,7 +364,7 @@ final class OpenAIProvider: AIProvider {
                 if !(error is CancellationError) && (error as NSError).code != NSURLErrorCancelled {
                     LocalAITraceRecorder.shared.record(
                         provider: "openai",
-                        model: model,
+                        model: effectiveModel,
                         runName: requestKind?.rawValue ?? "openai_chat",
                         systemPrompt: systemPrompt,
                         userMessage: userMessage,
@@ -367,7 +377,7 @@ final class OpenAIProvider: AIProvider {
                         costUSD: nil,
                         chatId: chatId
                     )
-                    PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "transport")
+                    PidgyTelemetry.captureAIFailure(provider: "openai", model: effectiveModel, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "transport")
                 }
                 throw error
             }
@@ -392,7 +402,7 @@ final class OpenAIProvider: AIProvider {
 
         guard let httpResponse = response as? HTTPURLResponse else {
             LocalAITraceRecorder.shared.record(
-                provider: "openai", model: model,
+                provider: "openai", model: effectiveModel,
                 runName: requestKind?.rawValue ?? "openai_chat",
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
@@ -400,14 +410,14 @@ final class OpenAIProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
-            PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "invalid_response")
+            PidgyTelemetry.captureAIFailure(provider: "openai", model: effectiveModel, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "invalid_response")
             throw AIError.invalidResponse
         }
 
         guard httpResponse.statusCode == 200 else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
             LocalAITraceRecorder.shared.record(
-                provider: "openai", model: model,
+                provider: "openai", model: effectiveModel,
                 runName: requestKind?.rawValue ?? "openai_chat",
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
@@ -415,7 +425,7 @@ final class OpenAIProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
-            PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "http_\(httpResponse.statusCode)")
+            PidgyTelemetry.captureAIFailure(provider: "openai", model: effectiveModel, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "http_\(httpResponse.statusCode)")
             // 429/503 reach here only after the in-loop backoff above exhausted
             // its retries. Surface a distinct rate-limit error so RetryHelper
             // treats it as terminal and does not re-retry on top of that backoff.
@@ -432,7 +442,7 @@ final class OpenAIProvider: AIProvider {
               let message = firstChoice["message"] as? [String: Any],
               let content = extractMessageContent(from: message["content"]) else {
             LocalAITraceRecorder.shared.record(
-                provider: "openai", model: model,
+                provider: "openai", model: effectiveModel,
                 runName: requestKind?.rawValue ?? "openai_chat",
                 systemPrompt: systemPrompt, userMessage: userMessage,
                 startedAt: startedAt, completedAt: Date(),
@@ -441,7 +451,7 @@ final class OpenAIProvider: AIProvider {
                 inputTokens: nil, outputTokens: nil, costUSD: nil,
                 chatId: chatId
             )
-            PidgyTelemetry.captureAIFailure(provider: "openai", model: model, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "parse")
+            PidgyTelemetry.captureAIFailure(provider: "openai", model: effectiveModel, runName: requestKind?.rawValue ?? "openai_chat", errorClass: "parse")
             throw AIError.invalidResponse
         }
 
@@ -450,7 +460,7 @@ final class OpenAIProvider: AIProvider {
         if let requestKind {
             await AIUsageStore.shared.record(
                 provider: .openAI,
-                model: model,
+                model: effectiveModel,
                 requestKind: requestKind,
                 usage: usage
             )
@@ -467,7 +477,7 @@ final class OpenAIProvider: AIProvider {
 
         LocalAITraceRecorder.shared.record(
             provider: "openai",
-            model: model,
+            model: effectiveModel,
             runName: requestKind?.rawValue ?? "openai_chat",
             systemPrompt: systemPrompt,
             userMessage: userMessage,
@@ -478,7 +488,7 @@ final class OpenAIProvider: AIProvider {
             inputTokens: usage?.inputTokens,
             outputTokens: usage?.outputTokens,
             costUSD: AIUsagePricingCatalog
-                .pricing(for: .openAI, model: model)
+                .pricing(for: .openAI, model: effectiveModel)
                 .flatMap { p in
                     guard let usage else { return nil }
                     return p.estimatedCostUSD(

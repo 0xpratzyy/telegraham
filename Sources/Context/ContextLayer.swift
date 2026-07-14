@@ -77,6 +77,20 @@ extension Notification.Name {
     static let contextFactsChanged = Notification.Name("contextFactsChanged")
 }
 
+/// A rolling entity summary — one row of `entity_summaries`. Bi-temporal like
+/// facts: the current row has supersededAt == nil; every fold supersedes the
+/// old row and inserts a fresh one, so history stays queryable.
+struct EntitySummary: Identifiable, Equatable, Sendable {
+    var id: Int64
+    var entityKind: String        // "chat" (person/topic in later milestones)
+    var entityId: Int64
+    var entityTitle: String
+    var summary: String
+    var throughMessageId: Int64   // fold cursor: newest message folded in
+    var validFrom: Date
+    var supersededAt: Date?       // nil = current
+}
+
 /// A stored fact — one row of `facts`.
 struct Fact: Identifiable, Equatable, Sendable {
     var id: Int64
