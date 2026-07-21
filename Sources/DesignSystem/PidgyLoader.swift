@@ -25,20 +25,6 @@ struct PidgyLoader: View {
     }
 }
 
-/// The static mascot mark — wings folded, no animation. Replaces generic
-/// sparkle glyphs anywhere Pidgy "speaks" (chat avatar, Ask entry points).
-struct PidgyMark: View {
-    var size: CGFloat = 16
-
-    var body: some View {
-        Canvas { ctx, sz in
-            PidgyPigeonDrawing.draw(&ctx, sz, flap: -1)  // -1 = wings folded
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
-    }
-}
-
 enum PidgyPigeonDrawing {
     static func draw(_ ctx: inout GraphicsContext, _ sz: CGSize, flap: CGFloat) {
                 let s = min(sz.width, sz.height) / 100

@@ -59,7 +59,6 @@ struct MessageSnippet: Codable, Sendable {
 enum QueryIntent: String, Codable, Sendable {
     case messageSearch = "message_search"
     case semanticSearch = "semantic_search"
-    case agenticSearch = "agentic_search"
     case summarySearch = "summary_search"
     case unsupported = "unsupported"
 }
@@ -70,12 +69,50 @@ enum QueryFamily: String, Codable, Sendable {
     case replyQueue = "reply_queue"
     case relationship = "relationship"
     case summary = "summary"
+
+    /// THE single family→engine mapping. QueryInterpreter (deterministic
+    /// parse, planner-skip, planner-error fallback) and QueryRouter
+    /// (planner merge) both route through this — two hand-maintained
+    /// copies once drifted only because the compiler happened to catch it.
+    var preferredEngine: QueryEngine {
+        switch self {
+        case .exactLookup:
+            return .messageLookup
+        case .topicSearch:
+            return .semanticRetrieval
+        case .replyQueue:
+            // Reply-queue questions are answered by the context layer's
+            // open-loop facts (answer card + reply queue view) — local
+            // semantic ranking surfaces the relevant chats underneath.
+            return .semanticRetrieval
+        case .relationship:
+            return .graphCRM
+        case .summary:
+            return .summarize
+        }
+    }
+}
+
+extension QueryEngine {
+    /// The runtime intent each engine executes under — the other half of
+    /// the single routing table above.
+    var runtimeMode: QueryIntent {
+        switch self {
+        case .messageLookup:
+            return .messageSearch
+        case .semanticRetrieval:
+            return .semanticSearch
+        case .summarize:
+            return .summarySearch
+        case .graphCRM:
+            return .unsupported
+        }
+    }
 }
 
 enum QueryEngine: String, Codable, Sendable {
     case messageLookup = "message_lookup"
     case semanticRetrieval = "semantic_retrieval"
-    case replyTriage = "reply_triage"
     case graphCRM = "graph_crm"
     case summarize = "summarize"
 }
@@ -179,6 +216,17 @@ struct QuerySpec: Codable {
         Self.isPersonQuestion(rawQuery: rawQuery, people: plannerHints?.people ?? [])
     }
 
+    /// THE single definition of "the Ask Pidgy answer engine owns this
+    /// query" — shared by the router (which keeps these on local semantic
+    /// ranking so the chat is the only summary surface) and the launcher's
+    /// auto-open. Summary-family person questions and reply-queue questions
+    /// qualify; a topic/lookup query that merely NAMES a person does not —
+    /// the user asked for messages, not a recap, and auto-opening the chat
+    /// would swallow their results.
+    var isAnswerEngineQuestion: Bool {
+        family == .replyQueue || (family == .summary && isPersonQuestion)
+    }
+
     /// Copy with planner term hints attached — used when the planner's
     /// confidence is too low to reroute the query family but its term
     /// extraction is still better evidence than raw tokenization.
@@ -199,9 +247,6 @@ struct QuerySpec: Codable {
         )
     }
 
-    var requiresExhaustiveChatReview: Bool {
-        preferredEngine == .replyTriage
-    }
 }
 
 struct SearchRoutingSnapshot: Identifiable {
@@ -210,13 +255,6 @@ struct SearchRoutingSnapshot: Identifiable {
     let runtimeIntent: QueryIntent
 
     var id: String { query }
-}
-
-struct AgenticSearchCandidate {
-    let chat: TGChat
-    let pipelineCategory: String
-    let strictReplySignal: Bool
-    let messages: [TGMessage]
 }
 
 // MARK: - Semantic Search
@@ -237,57 +275,6 @@ struct SemanticSearchResult: Identifiable {
             switch self {
             case .high: return Color.Pidgy.avPurple
             case .medium: return Color.Pidgy.accent
-            }
-        }
-    }
-}
-
-struct AgenticSearchResult: Identifiable {
-    let chatId: Int64
-    let chatTitle: String
-    let score: Int
-    let warmth: Warmth
-    let replyability: Replyability
-    let reason: String
-    let suggestedAction: String
-    let confidence: Double
-    let supportingMessageIds: [Int64]
-
-    var id: Int64 { chatId }
-
-    enum Warmth: String {
-        case hot, warm, cold
-
-        var color: Color {
-            switch self {
-            case .hot: return Color.Pidgy.danger
-            case .warm: return Color.Pidgy.warning
-            case .cold: return Color.Pidgy.accentFg
-            }
-        }
-    }
-
-    enum Replyability: String {
-        case replyNow = "reply_now"
-        case worthChecking = "worth_checking"
-        case waitingOnThem = "waiting_on_them"
-        case unclear
-
-        var label: String {
-            switch self {
-            case .replyNow: return "REPLY NOW"
-            case .worthChecking: return "CHECK"
-            case .waitingOnThem: return "WAITING"
-            case .unclear: return "UNCLEAR"
-            }
-        }
-
-        var color: Color {
-            switch self {
-            case .replyNow: return Color.Pidgy.success
-            case .worthChecking: return Color.Pidgy.warning
-            case .waitingOnThem: return Color.Pidgy.accent
-            case .unclear: return Color.Pidgy.fg2
             }
         }
     }

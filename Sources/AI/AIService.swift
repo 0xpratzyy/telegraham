@@ -5,35 +5,11 @@ import SwiftUI
 /// and exposes high-level AI operations that combine TelegramService data with AI.
 @MainActor
 final class AIService: ObservableObject {
-    struct PipelineTriageResult {
-        enum Status: Equatable {
-            case decision
-            case needMore
-        }
-
-        enum Urgency: String {
-            case high
-            case low
-        }
-
-        let status: Status
-        let category: FollowUpItem.Category
-        let suggestedAction: String
-        let urgency: Urgency
-        let reason: String?
-        let additionalMessages: Int?
-        let confident: Bool
-    }
-
     @Published var isConfigured = false
     @Published var providerType: AIProviderConfig.ProviderType = .none
     @Published private(set) var providerModel: String = ""
     private(set) var provider: AIProvider = NoAIProvider()
     let queryRouter: QueryRouter
-    /// Internal-readable so module peers like ReplyQueueEngine can capture
-    /// the live key into a Sendable snapshot for parallel-batch work
-    /// without having to re-await the @MainActor service mid-loop. Setter
-    /// stays private — the only writer is the configuration path.
     private(set) var configuredAPIKey: String = ""
     /// Non-nil when the OpenAI provider targets the AI proxy Worker instead
     /// of api.openai.com (issue #26) — `configuredAPIKey` is then the proxy
@@ -151,73 +127,6 @@ final class AIService: ObservableObject {
         }
     }
 
-    /// Agentic search: rerank candidate chats for actionability and reply priority.
-    func agenticSearch(
-        query: String,
-        querySpec: QuerySpec,
-        candidates: [AgenticSearchCandidate],
-        myUserId: Int64
-    ) async throws -> [AgenticSearchResult] {
-        try requireAIEntitlement()
-        guard !candidates.isEmpty else { return [] }
-
-        let maxMessages = AppConstants.AI.AgenticSearch.maxMessagesPerChat
-        let candidateDTOs: [AgenticCandidateDTO] = candidates.compactMap { candidate in
-            let bounded = Array(candidate.messages.sorted { $0.date > $1.date }.prefix(maxMessages))
-            let snippets = conversationSnippets(messages: bounded, chatTitle: candidate.chat.title, myUserId: myUserId)
-            guard !snippets.isEmpty else { return nil }
-
-            return AgenticCandidateDTO(
-                chatId: candidate.chat.id,
-                chatName: candidate.chat.title,
-                pipelineCategory: candidate.pipelineCategory,
-                strictReplySignal: candidate.strictReplySignal,
-                messages: snippets
-            )
-        }
-        guard !candidateDTOs.isEmpty else { return [] }
-
-        let knownTitles = Dictionary(uniqueKeysWithValues: candidates.map { ($0.chat.id, $0.chat.title) })
-        let knownIds = Set(knownTitles.keys)
-        let dtos = try await provider.agenticSearch(
-            query: query,
-            constraints: makeAgenticConstraintsDTO(from: querySpec),
-            candidates: candidateDTOs
-        )
-
-        return dtos
-            .filter { knownIds.contains($0.chatId) }
-            .map { dto in
-                let warmth: AgenticSearchResult.Warmth
-                switch dto.warmth.lowercased() {
-                case "hot": warmth = .hot
-                case "warm": warmth = .warm
-                default: warmth = .cold
-                }
-
-                let replyability: AgenticSearchResult.Replyability
-                switch dto.replyability.lowercased() {
-                case "reply_now": replyability = .replyNow
-                case "worth_checking": replyability = .worthChecking
-                case "waiting_on_them": replyability = .waitingOnThem
-                default: replyability = .unclear
-                }
-
-                return AgenticSearchResult(
-                    chatId: dto.chatId,
-                    chatTitle: knownTitles[dto.chatId] ?? "Unknown",
-                    score: max(0, min(100, dto.score)),
-                    warmth: warmth,
-                    replyability: replyability,
-                    reason: dto.reason,
-                    suggestedAction: dto.suggestedAction,
-                    confidence: max(0, min(1, dto.confidence)),
-                    supportingMessageIds: dto.supportingMessageIds
-                )
-            }
-            .sorted { $0.score > $1.score }
-    }
-
     func rerankSearchResults(
         query: String,
         candidates: [(chatId: Int64, chatTitle: String, bestMessage: String)]
@@ -280,102 +189,6 @@ final class AIService: ObservableObject {
         respond. Plain text only. No bullet points.
         """
         return try await provider.summarize(messages: snippets, prompt: prompt)
-    }
-
-    /// Generate a follow-up suggestion for a conversation. Marks the user's own messages with [ME].
-    /// Returns (isRelevant, suggestedAction). AI decides if the chat is BD-relevant.
-    func followUpSuggestion(chatTitle: String, messages: [TGMessage], myUserId: Int64) async throws -> (Bool, String) {
-        try requireAIEntitlement()
-        let snippets = conversationSnippets(messages: messages, chatTitle: chatTitle, myUserId: myUserId)
-        guard !snippets.isEmpty else { return (true, "") }
-        return try await provider.generateFollowUpSuggestion(chatTitle: chatTitle, messages: snippets)
-    }
-
-    /// AI-powered pipeline triage. Marks [ME] messages and sends to AI.
-    /// Supports decision + one-step "need_more" requests.
-    func categorizePipelineChat(chat: TGChat, messages: [TGMessage], myUserId: Int64, myUser: TGUser?) async throws -> PipelineTriageResult {
-        try requireAIEntitlement()
-        let snippets = conversationSnippets(messages: messages, chatTitle: chat.title, myUserId: myUserId)
-        guard !snippets.isEmpty else {
-            return PipelineTriageResult(
-                status: .decision,
-                category: .quiet,
-                suggestedAction: "",
-                urgency: .low,
-                reason: nil,
-                additionalMessages: nil,
-                confident: true
-            )
-        }
-
-        let context = PipelineChatContext(
-            chatId: chat.id,
-            chatTitle: chat.title,
-            chatType: chat.chatType.displayName,
-            unreadCount: chat.unreadCount,
-            memberCount: chat.memberCount,
-            myName: myUser?.firstName ?? "Me",
-            myUsername: myUser?.username
-        )
-
-        let dto = try await provider.categorizePipelineChat(context: context, messages: snippets)
-
-        let status: PipelineTriageResult.Status
-        switch dto.status?.lowercased() {
-        case "need_more":
-            status = .needMore
-        default:
-            status = .decision
-        }
-
-        let category: FollowUpItem.Category
-        switch dto.category?.lowercased() {
-        case "on_me": category = .onMe
-        case "on_them": category = .onThem
-        default: category = .quiet
-        }
-
-        let urgency: PipelineTriageResult.Urgency
-        switch dto.urgency?.lowercased() {
-        case "high":
-            urgency = .high
-        default:
-            urgency = .low
-        }
-
-        return PipelineTriageResult(
-            status: status,
-            category: category,
-            suggestedAction: dto.suggestedAction,
-            urgency: urgency,
-            reason: dto.reason,
-            additionalMessages: dto.additionalMessages,
-            confident: dto.confident ?? true
-        )
-    }
-
-    func discoverDashboardTopics(messages: [TGMessage]) async throws -> [DashboardTopicDTO] {
-        try requireAIEntitlement()
-        let snippets = MessageSnippet.fromMessages(messages)
-        guard !snippets.isEmpty else { return [] }
-        return try await provider.discoverDashboardTopics(messages: snippets)
-    }
-
-    func extractDashboardTasks(
-        chat: TGChat,
-        messages: [TGMessage],
-        topics: [DashboardTopic],
-        myUserId: Int64
-    ) async throws -> [DashboardTaskCandidate] {
-        try requireAIEntitlement()
-        let snippets = conversationSnippets(messages: messages, chatTitle: chat.title, myUserId: myUserId)
-        guard !snippets.isEmpty else { return [] }
-        let extracted = try await provider.extractDashboardTasks(
-            chat: chat,
-            topics: topics,
-            messages: snippets
-        )
-        return extracted.map { $0.resolvingSourceMetadata(from: messages, myUserId: myUserId) }
     }
 
     /// Context layer (#48): extract facts from a chat's NEW messages, folding in
@@ -605,69 +418,6 @@ final class AIService: ObservableObject {
         return try await provider.summarize(messages: snippets, prompt: VoiceProfilePrompt.systemPrompt)
     }
 
-    func triageDashboardTaskCandidates(
-        _ candidates: [DashboardTaskTriageCandidate],
-        myUserId: Int64
-    ) async throws -> [DashboardTaskTriageResultDTO] {
-        try requireAIEntitlement()
-        let candidateDTOs = candidates.compactMap { candidate -> DashboardTaskTriageCandidateDTO? in
-            let snippets = conversationSnippets(
-                messages: candidate.messages,
-                chatTitle: candidate.chat.title,
-                myUserId: myUserId
-            )
-            guard !snippets.isEmpty else { return nil }
-            return DashboardTaskTriageCandidateDTO(
-                chatId: candidate.chat.id,
-                chatTitle: candidate.chat.title,
-                chatType: candidate.chat.chatType.displayName,
-                unreadCount: candidate.chat.unreadCount,
-                memberCount: candidate.chat.memberCount,
-                messages: snippets,
-                openTasks: candidate.openTasks.map {
-                    Self.dashboardTaskTriageOpenTaskDTO(
-                        from: $0,
-                        evidence: candidate.openTaskEvidenceByTaskId[$0.id] ?? []
-                    )
-                }
-            )
-        }
-        guard !candidateDTOs.isEmpty else { return [] }
-        return try await provider.triageDashboardTaskCandidates(candidates: candidateDTOs)
-    }
-
-    private static func dashboardTaskTriageOpenTaskDTO(
-        from task: DashboardTask,
-        evidence: [DashboardTaskSourceMessage]
-    ) -> DashboardTaskTriageOpenTaskDTO {
-        DashboardTaskTriageOpenTaskDTO(
-            taskId: task.id,
-            title: task.title,
-            summary: task.summary,
-            suggestedAction: task.suggestedAction,
-            ownerName: task.ownerName,
-            personName: task.personName.isEmpty ? task.ownerName : task.personName,
-            latestSourceDateISO8601: task.latestSourceDate.map {
-                ISO8601DateFormatter.dashboard.string(from: $0)
-            },
-            sourceMessages: evidence
-                .sorted { $0.date < $1.date }
-                .map(Self.dashboardTaskSourceDTO)
-        )
-    }
-
-    private static func dashboardTaskSourceDTO(
-        from source: DashboardTaskSourceMessage
-    ) -> DashboardTaskSourceMessageDTO {
-        DashboardTaskSourceMessageDTO(
-            chatId: source.chatId,
-            messageId: source.messageId,
-            senderName: source.senderName,
-            text: source.text,
-            dateISO8601: ISO8601DateFormatter.dashboard.string(from: source.date)
-        )
-    }
-
     private func conversationSnippets(messages: [TGMessage], chatTitle: String, myUserId: Int64) -> [MessageSnippet] {
         messages
             .sorted { $0.date < $1.date }
@@ -692,21 +442,6 @@ final class AIService: ObservableObject {
                 date: msg.date
             )
         }
-    }
-
-    private func makeAgenticConstraintsDTO(from querySpec: QuerySpec) -> AgenticSearchConstraintsDTO {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-
-        return AgenticSearchConstraintsDTO(
-            scope: querySpec.scope.rawValue,
-            replyConstraint: querySpec.replyConstraint.rawValue,
-            startDateISO8601: querySpec.timeRange.map { formatter.string(from: $0.startDate) },
-            endDateISO8601: querySpec.timeRange.map { formatter.string(from: $0.endDate) },
-            timeRangeLabel: querySpec.timeRange?.label,
-            parseConfidence: querySpec.parseConfidence,
-            unsupportedFragments: querySpec.unsupportedFragments
-        )
     }
 
     /// Validates AI provider connection by making a minimal test request.

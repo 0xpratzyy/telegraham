@@ -82,11 +82,10 @@ struct DashboardView: View {
 
             VStack(spacing: 0) {
                 if chromePolicy.showsDashboardTopBar {
-                    // Route per-page state. The Tasks coordinator does
-                    // background ticks every ~8 min PLUS debounced
-                    // refreshes on every message-arrival burst, so its
-                    // generic `isRefreshing` is true most of the time on
-                    // an active account. Bind the UI to the
+                    // Route per-page state. The Tasks coordinator reloads
+                    // on fact-store changes and debounced message bursts,
+                    // so its generic `isRefreshing` flips for silent
+                    // background loads too. Bind the UI to the
                     // user-initiated subset so the button only spins for
                     // refreshes the user actually asked for.
                     DashboardTopBar(
@@ -95,7 +94,7 @@ struct DashboardView: View {
                             ? attentionStore.lastFollowUpsRefreshAt
                             : taskIndex.lastRefreshAt,
                         isRefreshing: currentPage == .replyQueue
-                            ? attentionStore.isFollowUpsLoading
+                            ? (!attentionStore.hasLoadedFactReplies || attentionStore.isProjecting)
                             : taskIndex.isUserInitiatedRefreshing,
                         onRefresh: refreshDashboard,
                         // When the sidebar is collapsed the top bar
@@ -208,7 +207,6 @@ struct DashboardView: View {
         .task {
             attentionStore.loadFollowUps(
                 telegramService: telegramService,
-                aiService: aiService,
                 includeBots: includeBotsInAISearch
             )
             telegramService.scheduleBotMetadataWarm(
@@ -262,7 +260,6 @@ struct DashboardView: View {
                 )
                 attentionStore.loadFollowUps(
                     telegramService: telegramService,
-                    aiService: aiService,
                     includeBots: includeBotsInAISearch
                 )
             }
@@ -280,10 +277,6 @@ struct DashboardView: View {
                 for: telegramService.visibleChats,
                 includeBots: includeBotsInAISearch
             )
-            attentionStore.hydrateCachedFollowUps(
-                telegramService: telegramService,
-                includeBots: includeBotsInAISearch
-            )
             Task {
                 await taskIndex.setBotInclusion(
                     includeBotsInAISearch,
@@ -291,7 +284,6 @@ struct DashboardView: View {
                 )
                 attentionStore.loadFollowUps(
                     telegramService: telegramService,
-                    aiService: aiService,
                     includeBots: includeBotsInAISearch
                 )
             }
@@ -439,7 +431,7 @@ struct DashboardView: View {
             DashboardHomePage(
                 tasks: myTasks,
                 followUpItems: attentionStore.followUpItems,
-                isLoading: attentionStore.isFollowUpsLoading || taskIndex.isRefreshing,
+                isLoading: !attentionStore.hasLoadedFactReplies || taskIndex.isRefreshing,
                 aiConfigured: aiService.isConfigured,
                 onOpenTask: { task in
                     navigation.selectedPage = .tasks
@@ -454,19 +446,14 @@ struct DashboardView: View {
         case .replyQueue:
             DashboardReplyQueuePage(
                 items: attentionStore.followUpItems,
-                isLoading: attentionStore.isFollowUpsLoading,
-                processedCount: attentionStore.pipelineProcessedCount,
-                totalCount: attentionStore.pipelineTotalCount,
+                isLoading: !attentionStore.hasLoadedFactReplies,
                 selectedChatId: $selectedReplyChatId,
-                // Single Refresh entry point — top bar only. Incremental:
-                // cached decisions with matching lastMessageId stay; only
-                // chats with new messages or no cache go through AI.
+                // Single Refresh entry point — top bar only. Re-projects the
+                // queue from the current open-loop facts.
                 onRefresh: {
                     attentionStore.loadFollowUps(
                         telegramService: telegramService,
-                        aiService: aiService,
-                        includeBots: includeBotsInAISearch,
-                        force: false
+                        includeBots: includeBotsInAISearch
                     )
                 },
                 onOpenChat: { chat in openChat(chat) }
@@ -633,26 +620,21 @@ struct DashboardView: View {
 
     private func refreshDashboard() {
         // The ONE refresh entry point. Bound to the top-bar button and the
-        // burger menu's "Refresh dashboard". Incremental: only chats with
-        // new messages get re-evaluated. Marked user-initiated so the
-        // top-bar button correctly shows the "Refreshing" spinner; the
-        // separate isUserInitiatedRefreshing flag keeps the silent
-        // background ticks (8-min loop + message-burst debounce) from
-        // perpetually animating the button.
+        // burger menu's "Refresh dashboard". Re-projects both views from the
+        // current fact store (extraction itself runs on its own schedule in
+        // FactExtractionCoordinator). Marked user-initiated so the top-bar
+        // button shows the "Refreshing" spinner only for refreshes the user
+        // actually asked for.
         attentionStore.loadFollowUps(
             telegramService: telegramService,
-            aiService: aiService,
-            includeBots: includeBotsInAISearch,
-            force: false
+            includeBots: includeBotsInAISearch
         )
 
         Task {
             async let peopleRefresh: Void = loadPeople()
             await taskIndex.refreshNow(
                 telegramService: telegramService,
-                aiService: aiService,
                 includeBotsInAISearch: includeBotsInAISearch,
-                forceRescan: false,
                 userInitiated: true
             )
             await peopleRefresh

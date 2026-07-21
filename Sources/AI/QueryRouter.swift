@@ -99,8 +99,6 @@ final class QueryRouter: ObservableObject {
             return .messageSearch
         case .semanticRetrieval:
             return .semanticSearch
-        case .replyTriage:
-            return .agenticSearch
         case .summarize:
             return .summarySearch
         case .graphCRM:
@@ -287,32 +285,10 @@ final class QueryRouter: ObservableObject {
     }
 
     private func preferredEngine(for family: QueryFamily) -> QueryEngine {
-        switch family {
-        case .exactLookup:
-            return .messageLookup
-        case .topicSearch:
-            return .semanticRetrieval
-        case .replyQueue:
-            return .replyTriage
-        case .relationship:
-            return .graphCRM
-        case .summary:
-            return .summarize
-        }
+        family.preferredEngine
     }
 
     private func runtimeMode(for family: QueryFamily) -> QueryIntent {
-        switch preferredEngine(for: family) {
-        case .messageLookup:
-            return .messageSearch
-        case .semanticRetrieval:
-            return .semanticSearch
-        case .summarize:
-            return .summarySearch
-        case .replyTriage:
-            return .agenticSearch
-        case .graphCRM:
-            return .unsupported
-        }
+        family.preferredEngine.runtimeMode
     }
 }

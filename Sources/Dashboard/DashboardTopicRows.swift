@@ -285,45 +285,6 @@ struct DashboardCatchUpSectionRow: View {
     }
 }
 
-struct DashboardCatchUpBulletRow: View {
-    let bullet: DashboardCatchUpBullet
-    let highlightEntities: [DashboardEntityHighlight]
-    let chatById: [Int64: TGChat]
-    let onOpenChat: (Int64) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if let title = bullet.title {
-                DashboardHighlightedEntityText(
-                    text: title,
-                    highlightEntities: highlightEntities,
-                    chatById: chatById,
-                    onOpenChat: onOpenChat,
-                    font: PidgyDashboardTheme.rowEmphasisFont,
-                    baseColor: PidgyDashboardTheme.primary
-                )
-                DashboardHighlightedEntityText(
-                    text: bullet.detail,
-                    highlightEntities: highlightEntities,
-                    chatById: chatById,
-                    onOpenChat: onOpenChat,
-                    font: PidgyDashboardTheme.detailBodyFont,
-                    baseColor: PidgyDashboardTheme.secondary
-                )
-            } else {
-                DashboardHighlightedEntityText(
-                    text: bullet.detail,
-                    highlightEntities: highlightEntities,
-                    chatById: chatById,
-                    onOpenChat: onOpenChat,
-                    font: PidgyDashboardTheme.detailBodyFont,
-                    baseColor: PidgyDashboardTheme.primary
-                )
-            }
-        }
-    }
-}
-
 struct DashboardHighlightedEntityText: View {
     let text: String
     let highlightEntities: [DashboardEntityHighlight]

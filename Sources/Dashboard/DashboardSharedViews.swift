@@ -59,10 +59,8 @@ enum PidgyDashboardTheme {
 
     // Legacy aliases kept until call sites migrate.
     static let displayTitleFont = Font.Pidgy.heroTitle
-    static let topicDisplayTitleFont = Font.Pidgy.heroTitle
     static let titleFont = Font.Pidgy.h2
     static let pageSubtitleFont = Font.Pidgy.bodySm
-    static let sectionLabelFont = Font.Pidgy.eyebrow
     static let rowTitleFont = Font.Pidgy.bodyMd
     static let rowEmphasisFont = Font.Pidgy.bodyMd
     static let metadataFont = Font.Pidgy.bodySm

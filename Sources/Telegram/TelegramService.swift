@@ -357,19 +357,6 @@ class TelegramService: ObservableObject {
         return result.messages.compactMap { mapMessage($0) }
     }
 
-    /// Test-only seam — production callers now go through `runFTSVariants` /
-    /// `localFTSRawSearch`. Safe to delete once the `TestTelegramService`
-    /// mock in PidgyCoreTests is refactored to override the variant API.
-    func localScoredSearch(query: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [LocalMessageSearchHit] {
-        let records = await DatabaseManager.shared.localSearchScored(query: query, chatIds: chatIds, limit: limit)
-        return records.map { record in
-            LocalMessageSearchHit(
-                message: mapStoredMessage(record.message),
-                score: record.score
-            )
-        }
-    }
-
     /// Run a pre-built FTS5 MATCH expression directly. The caller is
     /// responsible for shape — used by SummaryEngine's graduated FTS
     /// variants (phrase / AND / OR / prefix) so each one yields its own
@@ -517,13 +504,6 @@ class TelegramService: ObservableObject {
         }
 
         return false
-    }
-
-    /// Best-effort display name for a user id from the in-memory
-    /// cache only (synchronous, no network). Returns nil if the user
-    /// hasn't been fetched yet.
-    func cachedDisplayName(for userId: Int64) -> String? {
-        userCache[userId]?.displayName
     }
 
     /// Resolve a user's display name, fetching from TDLib if it
@@ -704,8 +684,6 @@ class TelegramService: ObservableObject {
                     textContent: textContent,
                     mediaType: mediaType
                 )
-                // Content edits can change follow-up semantics; force fresh categorization next run.
-                await MessageCacheService.shared.invalidatePipelineCategory(chatId: contentUpdate.chatId)
             }
 
         case .updateDeleteMessages(let deleteUpdate):
@@ -718,8 +696,6 @@ class TelegramService: ObservableObject {
                         chatId: deleteUpdate.chatId,
                         messageIds: deleteUpdate.messageIds
                     )
-                    // Deletions can alter conversation state; avoid stale cached AI category.
-                    await MessageCacheService.shared.invalidatePipelineCategory(chatId: deleteUpdate.chatId)
                 }
             }
 
@@ -1192,26 +1168,6 @@ class TelegramService: ObservableObject {
     /// Chats in the main list (excludes archived chats)
     var visibleChats: [TGChat] {
         chats.filter { $0.isInMainList }
-    }
-
-    /// Fetch recent messages from multiple chats
-    func getRecentMessagesAcrossChats(chatIds: [Int64], perChatLimit: Int = 20) async throws -> [TGMessage] {
-        var allMessages: [TGMessage] = []
-        var failCount = 0
-        for chatId in chatIds {
-            do {
-                let messages = try await getChatHistory(chatId: chatId, limit: perChatLimit)
-                allMessages.append(contentsOf: messages)
-            } catch {
-                failCount += 1
-                print("[TelegramService] Failed to fetch history for chat \(chatId): \(error)")
-            }
-        }
-        // Surface error if ALL chats failed instead of returning silent empty results
-        if allMessages.isEmpty && failCount == chatIds.count && !chatIds.isEmpty {
-            throw TGError.allChatsFailed
-        }
-        return allMessages.sorted { $0.date > $1.date }
     }
 
     // MARK: - Cache Management

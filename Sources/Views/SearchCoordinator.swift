@@ -62,7 +62,12 @@ final class SearchCoordinator: ObservableObject {
     @Published var isAISearching = false
     @Published var aiSearchError: String?
     @Published var currentQuerySpec: QuerySpec?
-    @Published var agenticDebugInfo: AgenticDebugInfo?
+    /// Published ONLY once the async router has resolved the spec (planner
+    /// included) — never on the per-keystroke deterministic parse. Auto-open
+    /// affordances (Ask Pidgy chat) must observe THIS, not currentQuerySpec:
+    /// it fires from inside the search task, so a listener that cancels the
+    /// search genuinely stops it at the next cancellation checkpoint.
+    @Published var resolvedQuerySpec: QuerySpec?
     @Published var summaryOutput: SummarySearchOutput?
     @Published var semanticMatchedChats: Int = 0
     @Published var totalChatsToScan: Int = 0
@@ -101,7 +106,7 @@ final class SearchCoordinator: ObservableObject {
         isAISearching = false
         aiSearchError = nil
         currentQuerySpec = nil
-        agenticDebugInfo = nil
+        resolvedQuerySpec = nil
         summaryOutput = nil
         semanticMatchedChats = 0
         totalChatsToScan = 0
@@ -116,9 +121,7 @@ final class SearchCoordinator: ObservableObject {
         scopedAISearchSourceChats: [TGChat],
         includeBotsInAISearch: Bool,
         telegramService: TelegramService,
-        aiService: AIService,
-        pipelineCategoryProvider: @escaping (Int64) -> FollowUpItem.Category?,
-        pipelineHintProvider: @escaping (Int64) async -> String
+        aiService: AIService
     ) {
         cancelSearch()
 
@@ -144,6 +147,7 @@ final class SearchCoordinator: ObservableObject {
         let optimisticStartDate = optimisticIntent == nil ? nil : Foundation.Date()
 
         currentQuerySpec = deterministicSpec
+        resolvedQuerySpec = nil
         let searchRunID = UUID()
         activeSearchRunID = searchRunID
         routedQueryIntent = optimisticIntent
@@ -151,7 +155,6 @@ final class SearchCoordinator: ObservableObject {
         aiSearchMode = optimisticIntent
         aiResults = []
         aiSearchError = nil
-        agenticDebugInfo = nil
         summaryOutput = nil
         semanticMatchedChats = 0
         totalChatsToScan = 0
@@ -171,6 +174,7 @@ final class SearchCoordinator: ObservableObject {
             guard !Task.isCancelled else { return }
 
             currentQuerySpec = resolvedSpec
+            resolvedQuerySpec = resolvedSpec
             let intent = await aiService.queryRouter.route(
                 query: query,
                 querySpec: resolvedSpec,
@@ -206,7 +210,6 @@ final class SearchCoordinator: ObservableObject {
             aiSearchMode = intent
             isAISearching = true
             aiSearchError = nil
-            currentQuerySpec = resolvedSpec
             summaryOutput = nil
             searchResultChatIds = []
 
@@ -221,9 +224,7 @@ final class SearchCoordinator: ObservableObject {
                     scopedAISearchSourceChats: scopedAISearchSourceChats,
                     includeBotsInAISearch: includeBotsInAISearch,
                     telegramService: telegramService,
-                    aiService: aiService,
-                    pipelineCategoryProvider: pipelineCategoryProvider,
-                    pipelineHintProvider: pipelineHintProvider
+                    aiService: aiService
                 )
                 guard !Task.isCancelled else { return }
                 aiResults = results
@@ -240,7 +241,7 @@ final class SearchCoordinator: ObservableObject {
 
     private func optimisticIntent(for spec: QuerySpec) -> QueryIntent? {
         switch spec.preferredEngine {
-        case .messageLookup, .replyTriage, .summarize:
+        case .messageLookup, .summarize:
             return spec.mode
         case .semanticRetrieval, .graphCRM:
             return nil
@@ -264,9 +265,7 @@ final class SearchCoordinator: ObservableObject {
         scopedAISearchSourceChats: [TGChat],
         includeBotsInAISearch: Bool,
         telegramService: TelegramService,
-        aiService: AIService,
-        pipelineCategoryProvider: @escaping (Int64) -> FollowUpItem.Category?,
-        pipelineHintProvider: @escaping (Int64) async -> String
+        aiService: AIService
     ) async throws -> [AISearchResult] {
         let resolvedQuerySpec = querySpec ?? queryInterpreter.parse(
             query: query,
@@ -298,19 +297,6 @@ final class SearchCoordinator: ObservableObject {
                 scopedChats: resolvedScopedChats,
                 telegramService: telegramService,
                 aiService: aiService
-            )
-        case .replyTriage:
-            return try await executeAgenticSearch(
-                query: query,
-                querySpec: resolvedQuerySpec,
-                searchRunID: searchRunID,
-                activeScope: activeScope,
-                aiSearchSourceChats: aiSearchSourceChats,
-                includeBotsInAISearch: includeBotsInAISearch,
-                telegramService: telegramService,
-                aiService: aiService,
-                pipelineCategoryProvider: pipelineCategoryProvider,
-                pipelineHintProvider: pipelineHintProvider
             )
         case .summarize:
             return await executeSummarySearch(
@@ -694,24 +680,6 @@ final class SearchCoordinator: ObservableObject {
                 candidatesByChatId[chat.id] = titleCandidate
             }
         }
-    }
-
-    private func betterSemanticCandidate(
-        _ existing: LocalSemanticChatCandidate,
-        _ incoming: LocalSemanticChatCandidate
-    ) -> LocalSemanticChatCandidate {
-        let existingScore = semanticCandidateScore(existing)
-        let incomingScore = semanticCandidateScore(incoming)
-
-        if incomingScore > existingScore {
-            return incoming
-        }
-
-        if incomingScore == existingScore && incoming.sortDate > existing.sortDate {
-            return incoming
-        }
-
-        return existing
     }
 
     private func semanticMessageScore(_ hit: LocalSemanticMessageScore) -> Double {

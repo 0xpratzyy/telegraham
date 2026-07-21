@@ -2,26 +2,6 @@ import SwiftUI
 import Combine
 import TDLibKit
 
-enum LauncherChromeAction: String, CaseIterable, Identifiable {
-    case dashboard
-
-    var id: String { rawValue }
-
-    var systemImage: String {
-        switch self {
-        case .dashboard:
-            return "rectangle.grid.2x2"
-        }
-    }
-
-    var accessibilityLabel: String {
-        switch self {
-        case .dashboard:
-            return "Open Dashboard"
-        }
-    }
-}
-
 struct LauncherView: View {
     @EnvironmentObject var telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
@@ -73,7 +53,6 @@ struct LauncherView: View {
     @State private var chatPreviewById: [Int64: String] = [:]
     @State private var chatPreviewTask: Task<Void, Never>?
 
-    var onOpenDashboard: () -> Void = {}
 
     // MARK: - AI Search Result Types
     // MARK: - Computed
@@ -86,19 +65,12 @@ struct LauncherView: View {
     private var aiSearchError: String? { searchCoordinator.aiSearchError }
     private var currentQuerySpec: QuerySpec? { searchCoordinator.currentQuerySpec }
     private var routingSnapshot: SearchRoutingSnapshot? { searchCoordinator.routingSnapshot }
-    private var agenticDebugInfo: AgenticDebugInfo? { searchCoordinator.agenticDebugInfo }
     private var summaryOutput: SummarySearchOutput? { searchCoordinator.summaryOutput }
     private var semanticMatchedChats: Int { searchCoordinator.semanticMatchedChats }
     private var totalChatsToScan: Int { searchCoordinator.totalChatsToScan }
     private var searchStartedAt: Foundation.Date? { searchCoordinator.searchStartedAt }
     private var lastSearchDuration: TimeInterval? { searchCoordinator.lastSearchDuration }
     private var followUpItems: [FollowUpItem] { attentionStore.followUpItems }
-    private var isFollowUpsLoading: Bool { attentionStore.isFollowUpsLoading }
-    private var pipelineProcessedCount: Int { attentionStore.pipelineProcessedCount }
-    private var pipelineTotalCount: Int { attentionStore.pipelineTotalCount }
-    private var agenticUsedLocalFallback: Bool {
-        agenticDebugInfo?.stopReason.contains("using local fallback") == true
-    }
     private var showLauncherDebugOverlays: Bool { false }
 
     private var displayedChats: [TGChat] {
@@ -211,16 +183,6 @@ struct LauncherView: View {
         }
     }
 
-    private func pipelineHintForSearch(chatId: Int64) async -> String {
-        if let category = pipelineCategory(for: chatId) {
-            return FollowUpPipelineAnalyzer.pipelineCategoryString(category)
-        }
-        if let cached = await MessageCacheService.shared.getPipelineCategory(chatId: chatId) {
-            return cached.category
-        }
-        return "unknown"
-    }
-
     /// Total navigable items (either AI results or chat rows depending on mode).
     private var navigableCount: Int {
         if let aiSearchMode,
@@ -317,7 +279,6 @@ struct LauncherView: View {
                 .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
         ) { _ in
             refreshChatPreviews()
-            hydrateCachedFollowUps()
         }
         .onReceive(
             telegramService.$chats
@@ -328,7 +289,7 @@ struct LauncherView: View {
                 for: telegramService.visibleChats,
                 includeBots: includeBotsInAISearch
             )
-            backgroundRefreshPipeline()
+            loadFollowUps()
         }
         .onChange(of: telegramService.botMetadataRefreshVersion) {
             refreshBotFilteredUI()
@@ -372,10 +333,16 @@ struct LauncherView: View {
         // Pidgy chat: the question becomes the first user bubble and the fast
         // answer engine (rolling summaries + open loops, ~1.5s) replies. The
         // router routes these to local semantic ranking, so the chat is the
-        // ONLY summary surface.
-        .onReceive(searchCoordinator.$currentQuerySpec) { spec in
+        // ONLY summary surface. Reply-queue questions ("who do I owe replies")
+        // take the same path — the answer engine holds the open loops.
+        // Observes resolvedQuerySpec (post-planner), NEVER currentQuerySpec:
+        // the deterministic parse publishes per keystroke, which would open
+        // the chat mid-typing on a truncated query — and firing from inside
+        // the search task means enterChat's cancelSearch() genuinely stops
+        // the underlying search instead of racing it.
+        .onReceive(searchCoordinator.$resolvedQuerySpec) { spec in
             guard ContextLayer.enabled, aiService.isConfigured, !chatMode,
-                  let spec, spec.isPersonQuestion,
+                  let spec, spec.isAnswerEngineQuestion,
                   spec.rawQuery == searchText.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
             let q = spec.rawQuery
             if answeredQuery != q, !askChat.isAnswering {
@@ -388,9 +355,11 @@ struct LauncherView: View {
         }
         // Dashboard's "Ask anything…" (and its ⌘K) — straight into an empty
         // chat with the composer focused; first Enter starts the conversation.
+        // Without an AI provider (or with the memory engine killed) the chat
+        // can't answer, so degrade to plain focused search — the field must
+        // still get focus, or ⌘K opens a panel with a dead input.
         .onReceive(NotificationCenter.default.publisher(for: .requestLauncherAsk)) { _ in
-            guard ContextLayer.enabled, aiService.isConfigured else { return }
-            if !chatMode {
+            if ContextLayer.enabled, aiService.isConfigured, !chatMode {
                 chatMode = true
                 LauncherChatSession.isActive = true
                 askChat.reset()
@@ -477,8 +446,9 @@ struct LauncherView: View {
                 .onSubmit { handleEnter() }
                 // Pulsating "I'm thinking" cue. Only dims the visible
                 // text — typing is uninterrupted because the field
-                // itself stays active.
-                .opacity(isAISearching ? inputPulseOpacity : 1.0)
+                // itself stays active. Never pulses in chat mode (the
+                // thread has its own thinking indicator).
+                .opacity(isAISearching && !chatMode ? inputPulseOpacity : 1.0)
 
             if !searchText.isEmpty || chatMode {
                 Button {
@@ -518,13 +488,6 @@ struct LauncherView: View {
                     inputPulseOpacity = 1.0
                 }
             }
-        }
-    }
-
-    private func performChromeAction(_ action: LauncherChromeAction) {
-        switch action {
-        case .dashboard:
-            onOpenDashboard()
         }
     }
 
@@ -582,15 +545,6 @@ struct LauncherView: View {
         "consulting the vectors…",
         "skimming…"
     ]
-    private static let agenticWittyMessages: [String] = [
-        "spotting open loops…",
-        "stalking your inbox (politely)…",
-        "ranking warm leads…",
-        "untangling threads…",
-        "checking who's on you…",
-        "drafting next actions…",
-        "doing the math…"
-    ]
     private static let messageWittyMessages: [String] = [
         "hunting the exact phrase…",
         "scrolling back…",
@@ -614,8 +568,6 @@ struct LauncherView: View {
             pool = Self.summaryWittyMessages
         case .semanticSearch:
             pool = Self.semanticWittyMessages
-        case .agenticSearch:
-            pool = Self.agenticWittyMessages
         case .messageSearch:
             pool = Self.messageWittyMessages
         case .unsupported:
@@ -649,24 +601,6 @@ struct LauncherView: View {
                 }
             }
 
-            if intent == .agenticSearch,
-               let querySpec = currentQuerySpec {
-                let chips = agenticConstraintChips(from: querySpec)
-                    + (agenticUsedLocalFallback ? ["Local Fallback"] : [])
-                if !chips.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(chips, id: \.self) { chip in
-                            Text(chip)
-                                .font(Font.Pidgy.monoSm)
-                                .foregroundStyle(Color.Pidgy.fg2)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(Color.Pidgy.bg4.opacity(0.55))
-                                .clipShape(Capsule())
-                        }
-                    }
-                }
-            }
         }
         .padding(.horizontal, PidgySpace.s3)
         .padding(.vertical, 5)
@@ -734,22 +668,15 @@ struct LauncherView: View {
             resultText: summaryOutput?.summaryText,
             supportingSnippets: aiResults.prefix(5).map(flaggedSnippet(for:))
         )
-        fixture.submitToFeedbackSheet()
-        // Unlike the dashboard's flag affordances, the launcher must
-        // also make sure the dashboard window exists for the sheet.
-        NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
+        fixture.submitToFeedbackSheetPresentingDashboard()
     }
 
     private func flaggedSnippet(for result: AISearchResult) -> String {
         switch result {
         case .semanticResult(let r):
             return "\(r.chatTitle): \(r.matchingMessages.first ?? r.reason)"
-        case .agenticResult(let r):
-            return "\(r.chatTitle): \(r.reason)"
         case .patternResult(let r):
             return "\(r.chatTitle): \(r.snippet)"
-        case .replyQueueResult(let r):
-            return "\(r.chatTitle): \(r.suggestedAction)"
         }
     }
 
@@ -766,29 +693,6 @@ struct LauncherView: View {
             } else {
                 return "Searching local index..."
             }
-        case .agenticSearch:
-            if isAISearching {
-                if !aiResults.isEmpty {
-                    if agenticUsedLocalFallback {
-                        return "Showing \(aiResults.count) likely chats • degraded mode • still scanning \(semanticMatchedChats) of \(totalChatsToScan)"
-                    }
-                    return "Showing \(aiResults.count) confident chats • still scanning \(semanticMatchedChats) of \(totalChatsToScan)"
-                }
-                if totalChatsToScan > 0 {
-                    if agenticUsedLocalFallback {
-                        return "Using limited local fallback • scanning \(semanticMatchedChats) of \(totalChatsToScan)"
-                    }
-                    return "Scanning \(semanticMatchedChats) of \(totalChatsToScan), ranking intent..."
-                }
-                return "Ranking warm, reply-ready chats..."
-            }
-            if agenticUsedLocalFallback {
-                return "Agentic fallback ranking"
-            }
-            if let querySpec = currentQuerySpec, !querySpec.unsupportedFragments.isEmpty {
-                return "Agentic ranking (partial parse)"
-            }
-            return "Agentic ranking ready"
         case .messageSearch:
             return isAISearching ? "Searching exact matches..." : "Exact lookup ready"
         case .summarySearch:
@@ -800,14 +704,6 @@ struct LauncherView: View {
 
     private func loadingKeywords(for intent: QueryIntent) -> [String] {
         switch intent {
-        case .agenticSearch:
-            return [
-                "detecting open loops",
-                "checking on-me threads",
-                "ranking warm leads",
-                "validating date filters",
-                "crafting next actions"
-            ]
         case .semanticSearch:
             return [
                 "searching local keywords",
@@ -838,10 +734,7 @@ struct LauncherView: View {
     private func aiLoadingProgressText(for intent: QueryIntent) -> String? {
         guard totalChatsToScan > 0 else { return nil }
         switch intent {
-        case .agenticSearch, .semanticSearch:
-            if intent == .agenticSearch, !aiResults.isEmpty {
-                return "Scanned \(semanticMatchedChats) of \(totalChatsToScan) chats • showing \(aiResults.count) confident results"
-            }
+        case .semanticSearch:
             return "Scanned \(semanticMatchedChats) of \(totalChatsToScan) chats"
         case .messageSearch:
             return nil
@@ -867,82 +760,6 @@ struct LauncherView: View {
         case .all: return .all
         case .dms: return .dms
         case .groups: return .groups
-        }
-    }
-
-    private func agenticConstraintChips(from querySpec: QuerySpec) -> [String] {
-        var chips: [String] = []
-        if querySpec.scope != .all {
-            chips.append(querySpec.scope.label)
-        }
-        if let timeRange = querySpec.timeRange {
-            chips.append(timeRange.label)
-        }
-        if querySpec.replyConstraint == .pipelineOnMeOnly {
-            chips.append("Pipeline: On Me")
-        }
-        if !querySpec.unsupportedFragments.isEmpty {
-            chips.append("Partial Parse")
-        }
-        return chips
-    }
-
-    private func agenticEmptyStateContent() -> (title: String, subtitle: String) {
-        guard let querySpec = currentQuerySpec else {
-            return (
-                title: "No warm, reply-ready chats found",
-                subtitle: "Try a more specific intent query"
-            )
-        }
-
-        let chips = agenticConstraintChips(from: querySpec)
-        if !chips.isEmpty {
-            let subtitle: String
-            if !querySpec.unsupportedFragments.isEmpty {
-                subtitle = "No chats matched \(chips.joined(separator: " • ")). Try simpler wording or widen constraints."
-            } else {
-                subtitle = "No chats matched \(chips.joined(separator: " • ")). Try widening scope or date range."
-            }
-            return (
-                title: "No chats matched your constraints",
-                subtitle: subtitle
-            )
-        }
-
-        return (
-            title: "No warm, reply-ready chats found",
-            subtitle: "Try a more specific intent query"
-        )
-    }
-
-    private func agenticDebugLines() -> [String] {
-        guard let debug = agenticDebugInfo else { return [] }
-        var lines: [String] = []
-        if !debug.providerName.isEmpty {
-            if debug.providerModel.isEmpty {
-                lines.append("provider \(debug.providerName)")
-            } else {
-                lines.append("provider \(debug.providerName) • model \(debug.providerModel)")
-            }
-        }
-        lines.append(contentsOf: [
-            "scoped \(debug.scopedChats) • eligibleDMs \(debug.eligiblePrivateChats) • eligibleGroups \(debug.eligibleGroupChats)",
-            "scanCap \(debug.maxScanChats) • cappedDMs \(debug.cappedPrivateChats) • cappedGroups \(debug.cappedGroupChats) • scanned \(debug.scannedChats)",
-            "inRange \(debug.inRangeChats) • replyOwed \(debug.replyOwedChats) • queryMatch \(debug.matchedChats)",
-            "matchedDMs \(debug.matchedPrivateChats) • matchedGroups \(debug.matchedGroupChats) • finalDMs \(debug.finalPrivateChats) • finalGroups \(debug.finalGroupChats)",
-            "toAI \(debug.candidatesSentToAI) • aiReturned \(debug.aiReturned) • ranked \(debug.rankedBeforeValidation)",
-            "dropped \(debug.droppedByValidation) • final \(debug.finalCount) • reason \(debug.stopReason)"
-        ])
-        return lines
-    }
-
-    private var agenticDebugBuckets: [AgenticDebugExclusionBucket] {
-        guard let debug = agenticDebugInfo else { return [] }
-        return debug.exclusionBuckets.sorted { lhs, rhs in
-            if lhs.count != rhs.count {
-                return lhs.count > rhs.count
-            }
-            return lhs.reason < rhs.reason
         }
     }
 
@@ -982,75 +799,6 @@ struct LauncherView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private var agenticDebugSection: some View {
-        let debugLines = agenticDebugLines()
-        let buckets = agenticDebugBuckets
-
-        return VStack(alignment: .leading, spacing: 6) {
-            Text("Debug")
-                .font(Font.Pidgy.monoSm)
-                .foregroundStyle(Color.Pidgy.fg2)
-
-            ForEach(Array(debugLines.enumerated()), id: \.offset) { _, line in
-                Text(line)
-                    .font(Font.Pidgy.monoSm)
-                    .foregroundStyle(Color.Pidgy.fg2)
-            }
-
-            if !buckets.isEmpty {
-                Divider()
-                    .overlay(Color.Pidgy.border2)
-
-                Text("Excluded")
-                    .font(Font.Pidgy.monoSm)
-                    .foregroundStyle(Color.Pidgy.fg2)
-
-                ForEach(buckets.prefix(6)) { bucket in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("\(bucket.reason) • \(bucket.count)")
-                            .font(Font.Pidgy.monoSm)
-                            .foregroundStyle(Color.Pidgy.fg2)
-                        if !bucket.sampleChats.isEmpty {
-                            Text(bucket.sampleChats.joined(separator: ", "))
-                                .font(Font.Pidgy.meta)
-                                .foregroundStyle(Color.Pidgy.fg3)
-                        }
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.Pidgy.bg3)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var agenticEmptyStateView: some View {
-        let content = agenticEmptyStateContent()
-        let hasDebug = showLauncherDebugOverlays && (!agenticDebugLines().isEmpty || !agenticDebugBuckets.isEmpty)
-
-        return VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "sparkles")
-                .font(Font.Pidgy.displayH1)
-                .foregroundStyle(Color.Pidgy.fg4)
-            Text(content.title)
-                .font(Font.Pidgy.body)
-                .foregroundStyle(Color.Pidgy.fg2)
-            Text(content.subtitle)
-                .font(Font.Pidgy.bodySm)
-                .foregroundStyle(Color.Pidgy.fg3)
-
-            if hasDebug {
-                agenticDebugSection
-                    .padding(.top, 4)
-            }
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
-
     // MARK: - Results List
 
     @ViewBuilder
@@ -1064,7 +812,7 @@ struct LauncherView: View {
             }
 
             // Ask Pidgy has no manual affordance — a person-question
-            // auto-opens the chat (see the currentQuerySpec onReceive).
+            // auto-opens the chat (see the resolvedQuerySpec onReceive).
             searchResultsBody
         }
     }
@@ -1110,8 +858,6 @@ struct LauncherView: View {
                 title: "No relevant chats found",
                 subtitle: "Try a different search query"
             )
-        } else if aiSearchMode == .agenticSearch && aiResults.isEmpty {
-            agenticEmptyStateView
         } else if telegramService.isLoading && telegramService.chats.isEmpty {
             LoadingStateView(message: "Loading chats...")
         } else {
@@ -1127,24 +873,6 @@ struct LauncherView: View {
                 LazyVStack(spacing: 2) {
                     // Pipeline sub-filter bar
                     pipelineSubFilterBar
-
-                    // Pipeline loading indicator
-                    if isFollowUpsLoading {
-                        HStack(spacing: 5) {
-                            ProgressView().scaleEffect(0.4).frame(width: 10, height: 10)
-                            if pipelineTotalCount > 0 {
-                                Text("Analyzing \(pipelineProcessedCount)/\(pipelineTotalCount) chats...")
-                                    .font(Font.Pidgy.monoSm)
-                                    .foregroundStyle(Color.Pidgy.fg3)
-                            } else {
-                                Text("Loading pipeline...")
-                                    .font(Font.Pidgy.monoSm)
-                                    .foregroundStyle(Color.Pidgy.fg3)
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 12).padding(.vertical, 4)
-                    }
 
                     // Hide the count while the search is still settling/running
                     // with nothing to show — "0 results" mid-flight reads as a
@@ -1233,22 +961,10 @@ struct LauncherView: View {
                             .padding(.bottom, 6)
                     }
 
-                    // AI semantic/agentic results
+                    // AI semantic results
                     ForEach(Array(aiResults.enumerated()), id: \.element.id) { index, result in
-                        if let sectionTitle = replyQueueSectionHeaderTitle(for: result, at: index) {
-                            replyQueueSectionHeader(title: sectionTitle)
-                        }
                         aiResultRow(result: result, index: index)
                             .id(result.id)
-                    }
-
-                    if showLauncherDebugOverlays,
-                       aiSearchMode == .agenticSearch,
-                       (!agenticDebugLines().isEmpty || !agenticDebugBuckets.isEmpty) {
-                        agenticDebugSection
-                            .padding(.horizontal, 10)
-                            .padding(.top, 8)
-                            .padding(.bottom, 6)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -1271,42 +987,12 @@ struct LauncherView: View {
         switch result {
         case .semanticResult(let result):
             semanticResultRow(result: result, index: index)
-        case .agenticResult(let result):
-            agenticResultRow(result: result, index: index)
         case .patternResult(let result):
             patternResultRow(result: result, index: index)
-        case .replyQueueResult(let result):
-            replyQueueResultRow(result: result, index: index)
         }
-    }
-
-    private func replyQueueSectionHeaderTitle(for result: AISearchResult, at index: Int) -> String? {
-        guard case .replyQueueResult(let replyResult) = result,
-              replyResult.classification == .worthChecking else {
-            return nil
-        }
-        guard index > 0 else { return "Worth checking" }
-        guard case .replyQueueResult(let previousResult) = aiResults[index - 1] else {
-            return "Worth checking"
-        }
-        return previousResult.classification == .worthChecking ? nil : "Worth checking"
-    }
-
-    private func replyQueueSectionHeader(title: String) -> some View {
-        Text(title.uppercased())
-            .font(Font.Pidgy.eyebrow)
-            .foregroundStyle(Color.Pidgy.fg3)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-            .padding(.bottom, 2)
     }
 
     private func chatForSemanticResult(_ result: SemanticSearchResult) -> TGChat? {
-        telegramService.chats.first(where: { $0.id == result.chatId })
-    }
-
-    private func chatForAgenticResult(_ result: AgenticSearchResult) -> TGChat? {
         telegramService.chats.first(where: { $0.id == result.chatId })
     }
 
@@ -1442,12 +1128,8 @@ struct LauncherView: View {
         switch result {
         case .semanticResult(let semantic):
             openChatById(semantic.chatId, preferredChat: chatForSemanticResult(semantic))
-        case .agenticResult(let agentic):
-            openChatById(agentic.chatId, preferredChat: chatForAgenticResult(agentic))
         case .patternResult(let pattern):
             openChatById(pattern.message.chatId, preferredChat: pattern.chat)
-        case .replyQueueResult(let replyQueue):
-            openChatById(replyQueue.chatId, preferredChat: telegramService.chats.first(where: { $0.id == replyQueue.chatId }))
         }
     }
 
@@ -1543,68 +1225,6 @@ struct LauncherView: View {
         .buttonStyle(.plain)
     }
 
-    private func agenticResultRow(result: AgenticSearchResult, index: Int) -> some View {
-        let linkedChat = chatForAgenticResult(result)
-        let displayTitle = resolvedChatTitle(
-            chatId: result.chatId,
-            preferredTitle: result.chatTitle,
-            linkedChat: linkedChat
-        )
-        let subtitle = agenticSubtitleText(for: result)
-
-        return Button {
-            openChatById(result.chatId, preferredChat: linkedChat)
-        } label: {
-            HStack(spacing: 8) {
-                avatarForChat(chat: linkedChat, fallbackTitle: displayTitle)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Text(displayTitle)
-                            .font(Font.Pidgy.bodyMd)
-                            .foregroundStyle(Color.Pidgy.fg1)
-                            .lineLimit(1)
-
-                        Text(result.warmth.rawValue.uppercased())
-                            .font(Font.Pidgy.eyebrow)
-                            .foregroundStyle(result.warmth.color)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(result.warmth.color.opacity(0.14))
-                            .clipShape(Capsule())
-
-                        Text(result.replyability.label)
-                            .font(Font.Pidgy.eyebrow)
-                            .foregroundStyle(result.replyability.color)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(result.replyability.color.opacity(0.14))
-                            .clipShape(Capsule())
-
-                        Spacer()
-
-                        Text("\(result.score)")
-                            .font(Font.Pidgy.monoSm)
-                            .foregroundStyle(Color.Pidgy.fg2)
-                    }
-
-                    Text("→ \(subtitle)")
-                        .font(Font.Pidgy.bodySm)
-                        .foregroundStyle(Color.Pidgy.fg2)
-                        .lineLimit(1)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(index == selectedIndex ? Color.Pidgy.bg4 : Color.clear)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
     private func patternResultRow(result: PatternSearchResult, index: Int) -> some View {
         Button {
             openChatById(result.message.chatId, preferredChat: result.chat)
@@ -1645,67 +1265,6 @@ struct LauncherView: View {
                     }
 
                     Text(result.snippet)
-                        .font(Font.Pidgy.bodySm)
-                        .foregroundStyle(Color.Pidgy.fg2)
-                        .lineLimit(2)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(index == selectedIndex ? Color.Pidgy.bg4 : Color.clear)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func replyQueueResultRow(result: ReplyQueueResult, index: Int) -> some View {
-        let linkedChat = telegramService.chats.first(where: { $0.id == result.chatId })
-        let displayTitle = resolvedChatTitle(
-            chatId: result.chatId,
-            preferredTitle: result.chatTitle,
-            linkedChat: linkedChat
-        )
-
-        return Button {
-            openChatById(result.chatId, preferredChat: linkedChat)
-        } label: {
-            HStack(spacing: 8) {
-                avatarForChat(chat: linkedChat, fallbackTitle: displayTitle)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Text(displayTitle)
-                            .font(Font.Pidgy.bodyMd)
-                            .foregroundStyle(Color.Pidgy.fg1)
-                            .lineLimit(1)
-
-                        Text(result.urgency.warmth.rawValue.uppercased())
-                            .font(Font.Pidgy.eyebrow)
-                            .foregroundStyle(result.urgency.warmth.color)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(result.urgency.warmth.color.opacity(0.14))
-                            .clipShape(Capsule())
-
-                        Text(result.replyability.label)
-                            .font(Font.Pidgy.eyebrow)
-                            .foregroundStyle(result.replyability.color)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(result.replyability.color.opacity(0.14))
-                            .clipShape(Capsule())
-
-                        Spacer()
-
-                        Text(DateFormatting.compactRelativeTime(from: result.latestMessageDate))
-                            .font(Font.Pidgy.monoSm)
-                            .foregroundStyle(Color.Pidgy.fg2)
-                    }
-
-                    Text("→ \(result.suggestedAction)")
                         .font(Font.Pidgy.bodySm)
                         .foregroundStyle(Color.Pidgy.fg2)
                         .lineLimit(2)
@@ -1769,24 +1328,6 @@ struct LauncherView: View {
         }
     }
 
-    private func agenticSubtitleText(for result: AgenticSearchResult) -> String {
-        let action = result.suggestedAction.trimmingCharacters(in: .whitespacesAndNewlines)
-        let reason = result.reason.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !action.isEmpty else { return reason }
-
-        let normalized = action.lowercased()
-        let genericPhrases = [
-            "reply to the latest inbound message",
-            "move the thread forward",
-            "no immediate reply owed"
-        ]
-
-        if genericPhrases.contains(where: { normalized.contains($0) }), !reason.isEmpty {
-            return reason
-        }
-        return action
-    }
-
     // MARK: - Pipeline Sub-Filter
 
     private var pipelineSubFilterBar: some View {
@@ -1848,25 +1389,6 @@ struct LauncherView: View {
     private func loadFollowUps() {
         attentionStore.loadFollowUps(
             telegramService: telegramService,
-            aiService: aiService,
-            includeBots: includeBotsInAISearch
-        )
-    }
-
-    private func hydrateCachedFollowUps() {
-        attentionStore.hydrateCachedFollowUps(
-            telegramService: telegramService,
-            includeBots: includeBotsInAISearch
-        )
-    }
-
-    // MARK: - Background Pipeline Refresh
-
-    /// Incrementally re-analyze only pipeline chats whose lastMessage changed since last categorization.
-    private func backgroundRefreshPipeline() {
-        attentionStore.backgroundRefreshPipeline(
-            telegramService: telegramService,
-            aiService: aiService,
             includeBots: includeBotsInAISearch
         )
     }
@@ -1907,143 +1429,8 @@ struct LauncherView: View {
             scopedAISearchSourceChats: scopedAISearchSourceChats,
             includeBotsInAISearch: includeBotsInAISearch,
             telegramService: telegramService,
-            aiService: aiService,
-            pipelineCategoryProvider: { chatId in
-                pipelineCategory(for: chatId)
-            },
-            pipelineHintProvider: { chatId in
-                await pipelineHintForSearch(chatId: chatId)
-            }
+            aiService: aiService
         )
     }
 
 }
-
-enum LauncherChatPreviewResolver {
-    enum Source: Equatable {
-        case currentMessage
-        case recentContext
-        case none
-    }
-
-    struct Resolution: Equatable {
-        let text: String
-        let source: Source
-    }
-
-    static let contextMessageLimit = 10
-
-    static func resolvePreview(for chat: TGChat, recentMessages: [TGMessage]) -> Resolution {
-        guard let lastMessage = chat.lastMessage else {
-            return Resolution(text: "", source: .none)
-        }
-
-        if let currentText = meaningfulPreviewText(for: lastMessage) {
-            return Resolution(text: currentText, source: .currentMessage)
-        }
-
-        let contextualMessages = recentMessages
-            .sorted {
-                if $0.date != $1.date { return $0.date > $1.date }
-                return $0.id > $1.id
-            }
-            .filter { $0.id != lastMessage.id }
-
-        if let recentContext = contextualMessages.compactMap(meaningfulPreviewText).first {
-            return Resolution(text: recentContext, source: .recentContext)
-        }
-
-        return Resolution(text: "", source: .none)
-    }
-
-    static func shouldFetchRecentContext(
-        for chat: TGChat,
-        recentMessages: [TGMessage],
-        currentResolution: Resolution,
-        cachedMessageCount: Int
-    ) -> Bool {
-        guard let lastMessage = chat.lastMessage else { return false }
-        guard meaningfulPreviewText(for: lastMessage) == nil else { return false }
-        guard currentResolution.source != .recentContext else { return false }
-        if cachedMessageCount < contextMessageLimit {
-            return true
-        }
-        return recentMessages.contains { message in
-            guard let text = message.normalizedTextContent else { return false }
-            return isSyntheticPlaceholderText(text)
-        }
-    }
-
-    private static func meaningfulPreviewText(for message: TGMessage) -> String? {
-        guard let text = message.normalizedTextContent else { return nil }
-        return isSyntheticPlaceholderText(text) ? nil : text
-    }
-
-    private static func isSyntheticPlaceholderText(_ text: String) -> Bool {
-        let normalized = text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        let syntheticLabels: Set<String> = [
-            "[photo]", "photo",
-            "[video]", "video", "video note",
-            "[document]", "document",
-            "[audio]", "audio",
-            "[voice]", "voice", "voice note",
-            "[sticker]", "sticker",
-            "[gif]", "gif",
-            "[media]", "media",
-            "[message]", "message",
-            "contact",
-            "poll",
-            "venue",
-            "location",
-            "live location",
-            "emoji"
-        ]
-
-        return syntheticLabels.contains(normalized)
-    }
-}
-
-// MARK: - Onboarding handoff
-
-/// Shown in the launcher panel when Telegram isn't authenticated yet.
-/// Onboarding is now done in a dedicated window (OnboardingWindowController),
-/// so the panel just nudges the user there instead of duplicating the QR /
-/// phone-login UI in two places.
-struct LauncherOnboardingHandoff: View {
-    var body: some View {
-        VStack(spacing: PidgySpace.s4) {
-            PidgyMascotMark(size: 56)
-            VStack(spacing: PidgySpace.s2) {
-                Text("Finish setting up Pidgy")
-                    .font(Font.Pidgy.h3)
-                    .foregroundStyle(Color.Pidgy.fg1)
-                Text("Connect Telegram in the welcome window to start using the launcher.")
-                    .font(Font.Pidgy.bodySm)
-                    .foregroundStyle(Color.Pidgy.fg3)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(2)
-            }
-            .padding(.horizontal, PidgySpace.s6)
-            Button {
-                NotificationCenter.default.post(name: .pidgyShowOnboardingWindow, object: nil)
-            } label: {
-                Text("Open welcome window")
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .foregroundStyle(Color.Pidgy.bg1)
-                    .padding(.horizontal, PidgySpace.s5)
-                    .padding(.vertical, PidgySpace.s3)
-                    .background(
-                        RoundedRectangle(cornerRadius: PidgyRadius.md, style: .continuous)
-                            .fill(Color.Pidgy.fg1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(PidgySpace.s6)
-    }
-}
-

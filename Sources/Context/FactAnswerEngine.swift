@@ -21,6 +21,7 @@ enum AnswerPrompt {
     - KEEP IT SHORT — this is a glance, not a report. Lead with a one-line answer. Then list AT MOST 5 items, most urgent / overdue / largest first. If more remain, end with a single line like "…+4 more" — never list them all.
     - Each item on its own line: "• [**Name**](pidgy://chat/ID) — short what" (keep the part after the dash under ~8 words). The link's ID comes from that item's [id:...] tag in the data — clicking it opens that chat. Copy ids EXACTLY, never invent one; if an item has no [id:...], just bold the name without a link. Never show a raw id as visible text. Brevity beats completeness.
     - Direction: "I OWE" = the user must act/pay; "OWES ME" = someone owes the user. Use it when the question is about who-owes-whom; otherwise answer naturally.
+    - Loop kinds: "I OWE · REPLY" = closable by just sending a message now; "I OWE · TASK" = needs real work first. When the question asks who to REPLY/respond to (any language: "kisko reply karna hai", "who do I owe replies"), list ONLY the REPLY items. When it asks about tasks / pending work, prefer the TASK items. Broad "what do I owe" questions may mix both.
     - Use ONLY the data below. If it's thin or doesn't cover the question, say so in one line — don't invent.
     """
 
@@ -32,7 +33,16 @@ enum AnswerPrompt {
         history: [(role: String, text: String)] = []
     ) -> String {
         let loops = openLoops.map { f -> String in
-            let dir = f.predicate == .iOwe ? "I OWE" : "OWES ME"
+            // Carry the reply-vs-action split into the payload so "who should
+            // I reply to" answers from REPLY loops only (the same distinction
+            // that splits the Reply queue from Tasks). Unclassified i_owe
+            // defaults to TASK — mirrors FactProjection's lane routing.
+            let dir: String
+            if f.predicate == .iOwe {
+                dir = f.loopKind == .reply ? "I OWE · REPLY" : "I OWE · TASK"
+            } else {
+                dir = "OWES ME"
+            }
             let what = f.action.isEmpty ? f.objectText : f.action
             return "- [\(dir)] \(what) (person: \(f.subjectEntity), chat: \(f.sourceChatTitle) [id:\(f.sourceChatId)])"
         }.joined(separator: "\n")

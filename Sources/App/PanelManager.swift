@@ -12,7 +12,6 @@ extension Notification.Name {
     /// dashboard sidebar's "Jump to anything…" search button). AppDelegate
     /// listens for this and calls `PanelManager.toggle()` so we don't have
     /// to thread the panel manager all the way down into SwiftUI views.
-    static let requestLauncherToggle = Notification.Name("requestLauncherToggle")
     /// Open the launcher straight into Ask Pidgy chat mode (empty thread,
     /// composer focused) — the dashboard's "Ask anything…" entry.
     static let requestLauncherAsk = Notification.Name("requestLauncherAsk")
@@ -168,9 +167,7 @@ final class PanelManager {
         containerView.layer?.cornerRadius = PidgyRadius.lg
 
         let hostingView = NSHostingView(
-            rootView: LauncherView(onOpenDashboard: { [weak self] in
-                    self?.onOpenDashboard?()
-                })
+            rootView: LauncherView()
                 .environmentObject(telegramService)
                 .environmentObject(aiService)
         )

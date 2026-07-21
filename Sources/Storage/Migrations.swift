@@ -795,6 +795,16 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v33_drop_legacy_pipeline_tables") { db in
+            // The pre-context-layer pipelines were retired (July 2026): the
+            // pipeline-category cache and the dashboard-task sync cursor have
+            // no readers or writers left. Drop them so stale rows stop
+            // shipping in every backup. dashboard_tasks/_sources stay — they
+            // hold historical extractions and are harmless.
+            try db.execute(sql: "DROP TABLE IF EXISTS pipeline_cache")
+            try db.execute(sql: "DROP TABLE IF EXISTS dashboard_task_sync_state")
+        }
+
         return migrator
     }
 }

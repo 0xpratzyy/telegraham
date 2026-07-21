@@ -4,7 +4,6 @@ import Foundation
 /// Two-tier: in-memory recent window + durable SQLite history read-through.
 actor MessageCacheService {
     static let shared = MessageCacheService()
-    static let pipelineCacheSchemaVersion = 5
 
     enum MessageLoadSource: String, Sendable, Codable {
         case memory
@@ -13,18 +12,8 @@ actor MessageCacheService {
     }
 
     private var memoryCache: [Int64: CachedChatMessages] = [:]
-    private var pipelineCache: [Int64: CachedPipelineCategory] = [:]
 
     // MARK: - Codable Models
-
-    struct CachedPipelineCategory: Codable {
-        let chatId: Int64
-        let category: String          // "on_me", "on_them", "quiet"
-        let suggestedAction: String
-        let lastMessageId: Int64      // staleness key: compared against chat.lastMessage.id
-        let analyzedAt: Date
-        let schemaVersion: Int
-    }
 
     struct CachedChatMessages: Codable {
         let chatId: Int64
@@ -232,74 +221,8 @@ actor MessageCacheService {
         }
     }
 
-    // MARK: - Pipeline Category Cache
-
-    func getPipelineCategory(chatId: Int64) async -> CachedPipelineCategory? {
-        if let cached = pipelineCache[chatId] {
-            return cached
-        }
-
-        guard let record = await DatabaseManager.shared.loadPipelineCache(chatId: chatId) else {
-            return nil
-        }
-
-        let cached = CachedPipelineCategory(
-            chatId: record.chatId,
-            category: record.category,
-            suggestedAction: record.suggestedAction,
-            lastMessageId: record.lastMessageId,
-            analyzedAt: record.analyzedAt,
-            schemaVersion: record.schemaVersion
-        )
-        guard cached.schemaVersion == Self.pipelineCacheSchemaVersion else {
-            await invalidatePipelineCategory(chatId: chatId)
-            return nil
-        }
-        pipelineCache[chatId] = cached
-        return cached
-    }
-
-    func cachePipelineCategory(
-        chatId: Int64,
-        category: String,
-        suggestedAction: String,
-        lastMessageId: Int64
-    ) async {
-        let cached = CachedPipelineCategory(
-            chatId: chatId,
-            category: category,
-            suggestedAction: suggestedAction,
-            lastMessageId: lastMessageId,
-            analyzedAt: Date(),
-            schemaVersion: Self.pipelineCacheSchemaVersion
-        )
-        pipelineCache[chatId] = cached
-
-        await DatabaseManager.shared.savePipelineCache(
-            DatabaseManager.PipelineCacheRecord(
-                chatId: cached.chatId,
-                category: cached.category,
-                suggestedAction: cached.suggestedAction,
-                lastMessageId: cached.lastMessageId,
-                analyzedAt: cached.analyzedAt,
-                schemaVersion: cached.schemaVersion
-            )
-        )
-    }
-
-    func invalidatePipelineCategory(chatId: Int64) async {
-        pipelineCache.removeValue(forKey: chatId)
-        await DatabaseManager.shared.deletePipelineCache(chatId: chatId)
-    }
-
-    func invalidateAllPipelineCache() async {
-        pipelineCache.removeAll()
-        await DatabaseManager.shared.clearPipelineCache()
-    }
-
     func invalidateAllLocalData() async {
         memoryCache.removeAll()
-        pipelineCache.removeAll()
         await DatabaseManager.shared.clearAllMessageAndPipelineData()
     }
 
@@ -315,7 +238,6 @@ actor MessageCacheService {
 
     func resetInMemoryCachesForTesting() async {
         memoryCache.removeAll()
-        pipelineCache.removeAll()
     }
 
     // MARK: - Flush

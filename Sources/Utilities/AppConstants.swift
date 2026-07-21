@@ -43,7 +43,7 @@ enum AppConstants {
         /// flash-lite — trialing whether the sharper 3.5-flash tier is worth
         /// 6x on the user-facing synthesis stages. If deep-summary prose or
         /// search ranking feels dumber, restore:
-        ///   case .agenticSearch, .summary: return "google/gemini-3.5-flash"
+        ///   case .summary: return "google/gemini-3.5-flash"
         static func managedModelOverride(for kind: AIRequestKind?) -> String? {
             nil
         }
@@ -51,27 +51,6 @@ enum AppConstants {
         static let maxResponseTokens = 4096
         static let maxTokenBudgetChars = 16000
         static let requestTimeoutSeconds: TimeInterval = 90
-
-        enum AgenticSearch {
-            static let maxCandidateChats = 12
-            static let retrievalBatchCount = 3
-            static let retrievalBatchSize = 10
-            static let initialScanChats = 12
-            static let adaptiveExpansionStep = 8
-            static let maxAdaptiveScanChats = 48
-            static let maxAdaptiveRounds = 5
-            static let replyQueueMinimumScanChats = 32
-            static let replyQueueMinimumFinalResults = 5
-            static let replyQueuePrivateMaxAgeSeconds: TimeInterval = 45 * 86_400
-            static let confidentTopAverageThreshold = 0.72
-            static let initialMessagesPerChat = 8
-            static let topUpAdditionalMessages = 4
-            static let maxMessagesPerChat = 12
-            static let maxLowConfidenceTopUps = 2
-            static let lowConfidenceThreshold = 0.60
-            static let dateProbeStep = 12
-            static let maxDateProbeMessagesPerChat = 80
-        }
 
         enum SemanticSearch {
             static let ftsTopMessages = 50
@@ -358,15 +337,6 @@ enum AppConstants {
 
     enum Dashboard {
         static let maxTopicCount = 6
-        // Bump on any change to the task-triage prompt/schema — forces a
-        // one-time full rescan of all main-list chats.
-        static let taskTriageContextVersion = 9
-        static let taskTriageChatLimit = 48
-        static let taskTriageBatchSize = 12
-        static let taskExtractionMessagesPerChat = 16
-        static let taskRefreshIntervalSeconds: TimeInterval = 8 * 60
-        static let topicDiscoveryMessageLimit = 160
-        static let defaultTaskLimit = 200
     }
 
     enum App {
@@ -375,8 +345,6 @@ enum AppConstants {
 
     enum Preferences {
         static let includeBotsInAISearchKey = "includeBotsInAISearch"
-        static let persistReplyQueueCandidateSnapshotsKey = "persistReplyQueueCandidateSnapshots"
-        static let dashboardTaskTriageContextVersionKey = "dashboardTaskTriageContextVersion"
         static let dashboardTaskPinnedOwnersKey = "dashboardTaskPinnedOwners"
         static let didCompleteOnboardingKey = "pidgyDidCompleteOnboarding"
         /// Set of chat IDs (Int64, serialized as NSNumber array) the
@@ -409,13 +377,6 @@ enum AppConstants {
         /// Random per-install UUID attached to every crash report as the
         /// Sentry user id — groups events per install without any PII.
         static let installSupportIdKey = "installSupportId"
-
-        /// Days of evidence silence after which an open AI-extracted
-        /// task is automatically marked Done. A user re-opening such a
-        /// task shields it for a full window (status_set_by_user_at).
-        /// 0 = never auto-complete. Default when the key is unset: 30.
-        static let dashboardTaskAutoExpireDaysKey = "dashboardTaskAutoExpireDays"
-        static let dashboardTaskAutoExpireDaysDefault = 30
 
         /// Where "Open in chat" lands: "desktop" (tg:// deep links) or
         /// "web" (web.telegram.org). Unset = auto-detect from whether a

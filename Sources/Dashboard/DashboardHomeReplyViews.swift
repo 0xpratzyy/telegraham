@@ -17,16 +17,15 @@ struct DashboardHomePage: View {
     private var feedItems: [DashboardFeedItem] {
         let actionableTasks = tasks.filter(\.isActionableNow)
         let taskItems = actionableTasks.map(DashboardFeedItem.task)
-        var replies = followUpItems
-        if ContextLayer.enabled {
-            // Tasks + reply are both views over the same open-loop facts, so a
-            // loop would otherwise appear twice on this blended feed. Keep the
-            // task and drop the reply duplicate (on_me/on_them = a loop the chat
-            // already has a task for); quiet chats have no loop, so they stay.
-            let chatsWithTasks = Set(actionableTasks.map(\.chatId))
-            replies = followUpItems.filter { item in
-                item.category == .quiet || !chatsWithTasks.contains(item.chat.id)
-            }
+        // Tasks + reply are both views over the same open-loop facts, so a
+        // loop would otherwise appear twice on this blended feed. Keep the
+        // task and drop the reply duplicate (on_me/on_them = a loop the chat
+        // already has a task for); quiet chats have no loop, so they stay.
+        // Unconditional: with the memory engine OFF both views still project
+        // the frozen last-known facts, so the duplicate exists there too.
+        let chatsWithTasks = Set(actionableTasks.map(\.chatId))
+        let replies = followUpItems.filter { item in
+            item.category == .quiet || !chatsWithTasks.contains(item.chat.id)
         }
         let replyItems = replies.map(DashboardFeedItem.reply)
         return (taskItems + replyItems)
@@ -157,12 +156,9 @@ struct DashboardReplyQueuePage: View {
     @EnvironmentObject private var attentionStore: AttentionStore
     let items: [FollowUpItem]
     let isLoading: Bool
-    let processedCount: Int
-    let totalCount: Int
     @Binding var selectedChatId: Int64?
-    /// Incremental refresh — only entry point for re-analysis. Top-bar
-    /// button only; detail panes have no Refresh of their own. Only
-    /// analyzes chats with new messages since their cached decision.
+    /// Re-projects the queue from the current open-loop facts. Top-bar
+    /// button only; detail panes have no Refresh of their own.
     let onRefresh: () -> Void
     let onOpenChat: (TGChat) -> Void
 
@@ -279,11 +275,6 @@ struct DashboardReplyQueuePage: View {
                 .font(PidgyDashboardTheme.pageTitleFont)
                 .tracking(-0.6)
                 .foregroundStyle(PidgyDashboardTheme.primary)
-            if isLoading, totalCount > 0 {
-                Text("Analyzing \(processedCount)/\(totalCount) chats")
-                    .font(PidgyDashboardTheme.pageSubtitleFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(selectedItem == nil ? EdgeInsets(top: 0, leading: 8, bottom: 12, trailing: 8) : EdgeInsets())

@@ -116,17 +116,31 @@ extension FlaggedAnswerFixture {
         FeedbackPrefillStore.shared.pending = attachmentText()
     }
 
+    /// Launcher-hosted surfaces (search results, Ask Pidgy chat) must also
+    /// make sure the dashboard window exists to present the sheet — one
+    /// helper so the two flag buttons can't drift.
+    @MainActor
+    func submitToFeedbackSheetPresentingDashboard() {
+        submitToFeedbackSheet()
+        NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
+    }
+
     /// Flag a reply-queue triage decision (wrong category / bad
     /// suggested action).
     static func replyTriage(_ item: FollowUpItem) -> FlaggedAnswerFixture {
-        FlaggedAnswerFixture(
+        // The category comes from a fact loop anchored at loopEvidence — the
+        // chat's latest message is often unrelated. Capture the evidence the
+        // projection actually used, or the fixture can't reproduce the case.
+        var snippets = ["\(item.chat.title) (latest): \(item.lastMessage.displayText)"]
+        if let evidence = item.loopEvidence, !evidence.isEmpty {
+            snippets.insert("loop evidence (\(item.loopPersonName ?? "?")): \(evidence)", at: 0)
+        }
+        return FlaggedAnswerFixture(
             query: "reply-queue triage for \(item.chat.title)",
             route: "reply_queue_triage",
             resultTitle: "Categorized \(item.category.rawValue)",
             resultText: item.suggestedAction,
-            supportingSnippets: [
-                "\(item.chat.title) (latest): \(item.lastMessage.displayText)"
-            ]
+            supportingSnippets: snippets
         )
     }
 

@@ -150,13 +150,15 @@ enum PreferencesResetPlan {
 
     static let userDefaultsKeysToDelete: [String] = [
         AppConstants.Preferences.includeBotsInAISearchKey,
-        AppConstants.Preferences.dashboardTaskTriageContextVersionKey,
         AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
         AppConstants.Preferences.didCompleteOnboardingKey,
         AppConstants.Preferences.showPigeonFlockKey,
-        AppConstants.Preferences.dashboardTaskAutoExpireDaysKey,
         AppConstants.Preferences.chatOpenTargetKey,
-        AppConstants.Preferences.subscriptionStateKey
+        AppConstants.Preferences.subscriptionStateKey,
+        // Raw strings: keys written by retired pipelines — still swept so
+        // old installs reset cleanly.
+        "dashboardTaskTriageContextVersion",
+        "dashboardTaskAutoExpireDays"
     ]
 
     static func pidgyDataDirectory(in applicationSupportDirectory: URL?) -> URL? {

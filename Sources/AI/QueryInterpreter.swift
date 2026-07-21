@@ -143,7 +143,6 @@ final class QueryInterpreter: QueryInterpreting {
         )
 
         var confidence = 0.45
-        if mode == .agenticSearch { confidence += 0.15 }
         if scopeWasExplicit { confidence += 0.15 }
         if replyConstraint != .none { confidence += 0.20 }
         if timeRange != nil { confidence += 0.20 }
@@ -292,33 +291,11 @@ final class QueryInterpreter: QueryInterpreting {
     }
 
     private func preferredEngine(for family: QueryFamily) -> QueryEngine {
-        switch family {
-        case .exactLookup:
-            return .messageLookup
-        case .topicSearch:
-            return .semanticRetrieval
-        case .replyQueue:
-            return .replyTriage
-        case .relationship:
-            return .graphCRM
-        case .summary:
-            return .summarize
-        }
+        family.preferredEngine
     }
 
     private func runtimeMode(for family: QueryFamily, preferredEngine: QueryEngine) -> QueryIntent {
-        switch preferredEngine {
-        case .messageLookup:
-            return .messageSearch
-        case .semanticRetrieval:
-            return .semanticSearch
-        case .summarize:
-            return .summarySearch
-        case .replyTriage:
-            return .agenticSearch
-        case .graphCRM:
-            return .unsupported
-        }
+        preferredEngine.runtimeMode
     }
 
     private func normalize(_ query: String) -> String {

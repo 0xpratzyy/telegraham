@@ -190,16 +190,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
 
         NotificationCenter.default.addObserver(
-            forName: .requestLauncherToggle,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.panelManager?.toggle()
-            }
-        }
-
-        NotificationCenter.default.addObserver(
             forName: .requestLauncherAsk,
             object: nil,
             queue: .main
@@ -375,18 +365,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 await VoiceProfileService.shared.refreshIfNeeded(aiService: aiService)
             }
 
-            // Task extraction used to be the LAST thing in the chain — gated
-            // behind the full graph build, which on a fresh install can take
-            // many minutes. Move it here so the Tasks page populates roughly
-            // in step with reply queue. TaskIndexCoordinator.start() spawns
-            // its own loop and returns immediately.
+            // The Tasks view projects from the fact store —
+            // TaskIndexCoordinator.start() registers change observers, kicks
+            // one initial load, and returns immediately (extraction itself is
+            // FactExtractionCoordinator's job below).
             logger.info("Startup pipeline starting task index")
             let includeBotsInAISearch = UserDefaults.standard.bool(
                 forKey: AppConstants.Preferences.includeBotsInAISearchKey
             )
             TaskIndexCoordinator.shared.start(
                 telegramService: telegramService,
-                aiService: aiService,
                 includeBotsInAISearch: includeBotsInAISearch
             )
 

@@ -30,48 +30,6 @@ final class NoAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
-    func agenticSearch(
-        query: String,
-        constraints: AgenticSearchConstraintsDTO,
-        candidates: [AgenticCandidateDTO]
-    ) async throws -> [AgenticSearchResultDTO] {
-        throw AIError.providerNotConfigured
-    }
-
-    func triageReplyQueue(
-        query: String,
-        scope: QueryScope,
-        candidates: [ReplyQueueCandidateDTO]
-    ) async throws -> [ReplyQueueTriageResultDTO] {
-        throw AIError.providerNotConfigured
-    }
-
-    func generateFollowUpSuggestion(chatTitle: String, messages: [MessageSnippet]) async throws -> (Bool, String) {
-        return (true, "")
-    }
-
-    func categorizePipelineChat(context: PipelineChatContext, messages: [MessageSnippet]) async throws -> PipelineCategoryDTO {
-        throw AIError.providerNotConfigured
-    }
-
-    func discoverDashboardTopics(messages: [MessageSnippet]) async throws -> [DashboardTopicDTO] {
-        throw AIError.providerNotConfigured
-    }
-
-    func extractDashboardTasks(
-        chat: TGChat,
-        topics: [DashboardTopic],
-        messages: [MessageSnippet]
-    ) async throws -> [DashboardTaskCandidate] {
-        throw AIError.providerNotConfigured
-    }
-
-    func triageDashboardTaskCandidates(
-        candidates: [DashboardTaskTriageCandidateDTO]
-    ) async throws -> [DashboardTaskTriageResultDTO] {
-        throw AIError.providerNotConfigured
-    }
-
     func extractPersonProfile(
         personName: String,
         messages: [MessageSnippet]

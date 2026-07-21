@@ -82,8 +82,7 @@ final class AskPidgyChatModel: ObservableObject {
             resultText: lastAnswer,
             supportingSnippets: []
         )
-        fixture.submitToFeedbackSheet()
-        NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
+        fixture.submitToFeedbackSheetPresentingDashboard()
     }
 }
 
@@ -179,7 +178,21 @@ struct AskPidgyThreadView: View {
             let chat = (telegramService.chats + telegramService.visibleChats)
                 .first { $0.id == id }
             if let chat {
-                DeepLinkGenerator.openChat(chat)
+                // The canonical open flow (same as the launcher rows):
+                // resolve username/phone hints first — a bare user_id deep
+                // link is unreliable across Telegram clients — and fall
+                // back to opening Telegram itself if no candidate works.
+                Task { @MainActor in
+                    let hints = await telegramService.getDeepLinkHints(for: chat)
+                    let opened = DeepLinkGenerator.openChat(
+                        chat,
+                        username: hints.username,
+                        phoneNumber: hints.phoneNumber
+                    )
+                    if !opened, let fallback = URL(string: "tg://resolve?domain=telegram") {
+                        _ = DeepLinkGenerator.openInTelegram(fallback)
+                    }
+                }
             }
             return .handled
         })

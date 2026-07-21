@@ -11,8 +11,10 @@
 import Foundation
 
 /// Master switch for the context-layer pipeline. While ON, facts are extracted
-/// and tasks/reply-queue are derived from them; while OFF the app runs the
-/// classic pipeline unchanged. Runtime kill-switch: users/support can turn it
+/// and tasks/reply-queue are derived from them; while OFF, fact EXTRACTION
+/// stops (no AI spend) and the tasks/reply-queue views keep projecting the
+/// last-known facts — they freeze rather than fall back (the pre-facts
+/// pipeline was retired). Runtime kill-switch: users/support can turn it
 /// off in Preferences WITHOUT a new build. Read ONCE at first access and fixed
 /// for the process lifetime — a mid-session flip would race every coordinator
 /// and view that branched on it at startup, so the toggle takes effect on the
