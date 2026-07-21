@@ -661,7 +661,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildTask?.cancel()
         graphBuildLoopTask?.cancel()
         TaskIndexCoordinator.shared.stop()
-        FactExtractionCoordinator.shared.stop()
         telegramService.stop()
 
         // Reply exactly once — whichever fires first, the async stops or
@@ -682,6 +681,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
 
         Task { @MainActor in
+            // Fact extraction is a DB writer — stop() awaits its in-flight
+            // pass draining out (bounded) before the close below.
+            await FactExtractionCoordinator.shared.stop()
             await RecentSyncCoordinator.shared.stop()
             await MajorChatCoverageCoordinator.shared.stop()
             await IndexScheduler.shared.stop()

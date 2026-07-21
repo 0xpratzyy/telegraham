@@ -879,11 +879,20 @@ struct DashboardTopicsPage: View {
     private func runSemanticSearchIfNeeded() async {
         semanticRequestGeneration += 1
         let generation = semanticRequestGeneration
+        // Installed IMMEDIATELY after taking the ticket, before ANY early
+        // return: if this (newest) request exits on a guard while an older
+        // request had set the spinner, the older one's stale-generation defer
+        // refuses to clear it — only the current owner can, so it must always
+        // do so on the way out, whichever path it takes.
+        defer {
+            if generation == semanticRequestGeneration {
+                isLoadingSemanticResults = false
+            }
+        }
         guard isSemanticSearchActive, let selectedTopic else {
             semanticResults = []
             semanticSummary = nil
             semanticSearchError = nil
-            isLoadingSemanticResults = false
             return
         }
 
@@ -913,13 +922,6 @@ struct DashboardTopicsPage: View {
         semanticSearchError = nil
         if selectedCommand != .catchUp {
             semanticSummary = nil
-        }
-        // Generation-owned: a superseded request must not clear the loading
-        // state the newer request just set.
-        defer {
-            if generation == semanticRequestGeneration {
-                isLoadingSemanticResults = false
-            }
         }
 
         let ftsHits = await runFTSVariantsFused(
@@ -953,21 +955,26 @@ struct DashboardTopicsPage: View {
         guard generation == semanticRequestGeneration, !Task.isCancelled else { return }
         semanticResults = results
         if selectedCommand == .catchUp {
-            let summary = await makeCatchUpSummary(topic: selectedTopic, results: results)
+            let outcome = await makeCatchUpSummary(topic: selectedTopic, results: results)
             // The AI call is the longest await — re-check before publishing so
-            // a topic switched mid-summary never shows the OLD topic's recap.
+            // a topic switched mid-summary never shows the OLD topic's recap
+            // (or its error banner). makeCatchUpSummary returns outcome as
+            // DATA; only the generation owner here mutates UI state.
             guard generation == semanticRequestGeneration, !Task.isCancelled else { return }
-            semanticSummary = summary
+            if outcome.aiFailed {
+                semanticSearchError = "AI recap failed, showing local evidence."
+            }
+            semanticSummary = outcome.text
         }
     }
 
     private func makeCatchUpSummary(
         topic: DashboardTopicOption,
         results: [DashboardTopicSemanticSearchResult]
-    ) async -> String? {
-        guard !results.isEmpty else { return nil }
+    ) async -> (text: String?, aiFailed: Bool) {
+        guard !results.isEmpty else { return (nil, false) }
         guard aiService.isConfigured else {
-            return localCatchUpSummary(results)
+            return (localCatchUpSummary(results), false)
         }
 
         let snippets = results.prefix(16).enumerated().map { index, result in
@@ -995,15 +1002,21 @@ struct DashboardTopicsPage: View {
         """
 
         do {
-            return try await aiService.summarizeSnippets(snippets, prompt: prompt)
+            return (try await aiService.summarizeSnippets(snippets, prompt: prompt), false)
         } catch is CancellationError {
             // Topic switched mid-call — not a failure. Publishing the local
             // fallback here is exactly the stale-overwrite bug; stay silent
             // and let the newer request own the UI.
-            return nil
+            return (nil, false)
+        } catch let error as URLError where error.code == .cancelled {
+            // URLSession surfaces a cancelled task as NSURLErrorCancelled,
+            // not CancellationError — same situation, same silence.
+            return (nil, false)
         } catch {
-            semanticSearchError = "AI recap failed, showing local evidence."
-            return localCatchUpSummary(results)
+            // Genuine failure — but this helper never touches UI state; the
+            // caller publishes the error only if its generation still owns
+            // the screen.
+            return (localCatchUpSummary(results), true)
         }
     }
 

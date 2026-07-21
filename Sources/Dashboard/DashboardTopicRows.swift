@@ -61,6 +61,10 @@ struct DashboardTopicChatSignal: Identifiable {
 /// fallback for unstructured lines (old-format summaries render as plain
 /// sections instead of breaking).
 struct DashboardCatchUpSection: Identifiable, Equatable {
+    /// Position within the parsed summary — part of the identity so two
+    /// sections that happen to share category/headline/person (or even
+    /// full content) can never collide as duplicate SwiftUI ids.
+    let index: Int
     let category: String?
     let headline: String
     let keyPerson: String?
@@ -70,36 +74,38 @@ struct DashboardCatchUpSection: Identifiable, Equatable {
     /// same summary must yield the same ids, or SwiftUI treats every
     /// unchanged section as a brand-new row (full re-render + animation
     /// churn on each republish).
-    var id: String { "\(category ?? "")|\(headline)|\(keyPerson ?? "")" }
+    var id: String { "\(index)|\(category ?? "")|\(headline)|\(keyPerson ?? "")|\(detail)" }
 
     static func parse(_ summary: String) -> [DashboardCatchUpSection] {
-        summary
-            .components(separatedBy: .newlines)
-            .compactMap { rawLine -> DashboardCatchUpSection? in
-                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !line.isEmpty else { return nil }
-                let parts = line.components(separatedBy: "|").map {
-                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                if parts.count >= 4, !parts[1].isEmpty, !parts[3].isEmpty {
-                    let person = parts[2]
-                    return DashboardCatchUpSection(
-                        category: parts[0].isEmpty ? nil : parts[0].uppercased(),
-                        headline: parts[1],
-                        keyPerson: (person.isEmpty || person == "-") ? nil : person,
-                        detail: parts[3]
-                    )
-                }
-                // Fallback: old bullet format → plain section.
-                let bullet = DashboardCatchUpBullet.parse(line).first
-                guard let bullet else { return nil }
-                return DashboardCatchUpSection(
-                    category: nil,
-                    headline: bullet.title ?? bullet.detail,
-                    keyPerson: nil,
-                    detail: bullet.title == nil ? "" : bullet.detail
-                )
+        var sections: [DashboardCatchUpSection] = []
+        for rawLine in summary.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+            let parts = line.components(separatedBy: "|").map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
             }
+            if parts.count >= 4, !parts[1].isEmpty, !parts[3].isEmpty {
+                let person = parts[2]
+                sections.append(DashboardCatchUpSection(
+                    index: sections.count,
+                    category: parts[0].isEmpty ? nil : parts[0].uppercased(),
+                    headline: parts[1],
+                    keyPerson: (person.isEmpty || person == "-") ? nil : person,
+                    detail: parts[3]
+                ))
+                continue
+            }
+            // Fallback: old bullet format → plain section.
+            guard let bullet = DashboardCatchUpBullet.parse(line).first else { continue }
+            sections.append(DashboardCatchUpSection(
+                index: sections.count,
+                category: nil,
+                headline: bullet.title ?? bullet.detail,
+                keyPerson: nil,
+                detail: bullet.title == nil ? "" : bullet.detail
+            ))
+        }
+        return sections
     }
 }
 

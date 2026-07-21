@@ -197,9 +197,10 @@ struct PreferencesResetService {
         // perceived delay before the file removal could even start.
         TaskIndexCoordinator.shared.stop()
         // The fact-extraction crawl (and its OCR pass) is a WRITER — it must
-        // stop before the DB below is closed and deleted, or a suspended
-        // pass resumes mid-wipe and writes into / reopens the dying handle.
-        FactExtractionCoordinator.shared.stop()
+        // stop AND DRAIN before the DB below is closed and deleted, or a
+        // suspended pass resumes mid-wipe and writes into / reopens the
+        // dying handle. stop() awaits the in-flight pass (bounded ~5s).
+        await FactExtractionCoordinator.shared.stop()
         // Cancel the GraphBuilder background loop owned by AppDelegate.
         // It's a Task.detached `while !Task.isCancelled` cycle —
         // without this explicit cancel, the next 2-minute tick would

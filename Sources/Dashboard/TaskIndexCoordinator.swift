@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import OSLog
+import TDLibKit
 
 /// Projects the context layer's open-loop facts into the Tasks page model.
 /// Extraction itself lives in FactExtractionCoordinator — this coordinator
@@ -24,7 +25,7 @@ final class TaskIndexCoordinator: ObservableObject {
     /// True only while a user-initiated refresh is running — the button
     /// the user actually clicked.
     @Published private(set) var isUserInitiatedRefreshing = false
-    @Published private(set) var lastRefreshAt: Date?
+    @Published private(set) var lastRefreshAt: Foundation.Date?
     @Published private(set) var lastError: String?
 
     private var includeBotsInAISearch = false
@@ -40,7 +41,7 @@ final class TaskIndexCoordinator: ObservableObject {
     /// list (a position update, NOT a message) refresh the projection too, so
     /// the Tasks page fills incrementally right after load.
     private var chatListCancellable: AnyCancellable?
-    private var firstNotifyAtForCurrentBurst: Date?
+    private var firstNotifyAtForCurrentBurst: Foundation.Date?
     private static let debouncedRefreshDelay: Duration = .seconds(20)
     /// If notifications keep resetting the debounce, force a refresh anyway
     /// after this much wall-clock time since the burst's first notification —
@@ -322,7 +323,7 @@ final class TaskIndexCoordinator: ObservableObject {
     func updateStatus(
         task: DashboardTask,
         status: DashboardTaskStatus,
-        snoozedUntil: Date? = nil
+        snoozedUntil: Foundation.Date? = nil
     ) async {
         // A fact-derived task closes by INVALIDATING its underlying fact with
         // a USER reason (browsable in Done/Ignored, and reopenable — the undo
@@ -370,10 +371,6 @@ final class TaskIndexCoordinator: ObservableObject {
         for chatId in taskChatIds.subtracting(resolvedChatIds) where !unresolvableChatIds.contains(chatId) {
             do {
                 guard let chat = try await telegramService.getChat(id: chatId) else {
-                    // A definitive nil from TDLib = chat genuinely not found
-                    // (left/deleted) — the ONLY case worth a session
-                    // blacklist, so the failing lookup isn't retried on
-                    // every reload.
                     unresolvableChatIds.insert(chatId)
                     continue
                 }
@@ -384,10 +381,16 @@ final class TaskIndexCoordinator: ObservableObject {
                 // publish guards drop this run. Crucially, do NOT blacklist:
                 // these chats are resolvable, the lookup was just cut short.
                 break
+            } catch let error as TDLibKit.Error where error.code == 400 || error.code == 404 {
+                // TDLib's DEFINITIVE not-found shapes ("Chat not found" /
+                // invalid id — the user left or the chat was deleted, but its
+                // facts outlive it). The only case worth a session blacklist,
+                // so the doomed lookup isn't retried on every reload.
+                unresolvableChatIds.insert(chatId)
             } catch {
-                // Transient (network / rate-limit / TDLib not ready): skip
-                // this pass only. Blacklisting here made a valid chat's
-                // tasks vanish for the whole session over one flaky call.
+                // Anything else (network / rate-limit / TDLib not ready) is
+                // transient: skip this pass only. Blacklisting here made a
+                // valid chat's tasks vanish all session over one flaky call.
                 continue
             }
         }

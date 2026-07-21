@@ -22,6 +22,15 @@ final class FactExtractionCoordinator: ObservableObject {
     private weak var telegramService: TelegramService?
     private weak var aiService: AIService?
     private var passTask: Task<Void, Never>?
+    /// The 15s "backlog remains, continue shortly" continuation — tracked so
+    /// stop() can cancel it (an untracked Task survived shutdown and kicked
+    /// a fresh pass onto a freshly-reset database).
+    private var backlogTask: Task<Void, Never>?
+    /// Lifecycle latch: stop() flips it, start() resets it. Guards every
+    /// pass entry AND the write sites — cancellation alone can't cover
+    /// caller-owned runs (the inspector's runPassNow awaits runPass outside
+    /// passTask, so passTask.cancel() never reaches it).
+    nonisolated(unsafe) private var stopped = false
     private var timer: Timer?
     private var chatListCancellable: AnyCancellable?
     private var contactDirectory: FactContactDirectory?
@@ -53,6 +62,7 @@ final class FactExtractionCoordinator: ObservableObject {
     /// periodic refresh. No-op unless the context layer is enabled.
     func start(telegramService: TelegramService, aiService: AIService) {
         guard ContextLayer.enabled else { return }
+        stopped = false
         // Arm the loader from launch so an empty surface shows the pigeon (not a
         // bare empty state) during the window before the first pass resolves.
         isCrawling = true
@@ -95,18 +105,29 @@ final class FactExtractionCoordinator: ObservableObject {
     /// closes/deletes the database (and on app termination) — otherwise a
     /// suspended extraction/OCR pass resumes mid-wipe and writes into (or
     /// reopens) the database being destroyed.
-    func stop() {
+    func stop() async {
+        stopped = true
         passTask?.cancel()
         passTask = nil
+        backlogTask?.cancel()
+        backlogTask = nil
         timer?.invalidate()
         timer = nil
         chatListCancellable = nil
+        PhotoOCRIndexer.shared.stop()
+        // AWAIT the in-flight pass draining out through its stopped/cancelled
+        // checkpoints — reset closes and deletes SQLite right after this, so
+        // returning while a writer is suspended mid-await would let it write
+        // into (or reopen) the dying handle. Bounded so quit can never wedge.
+        for _ in 0..<100 where isRunning {   // ≤ ~5s
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
         isCrawling = false
     }
 
     /// Kick a pass if one isn't already running (used by the timer + any manual refresh).
     func triggerPass() {
-        guard ContextLayer.enabled, !isRunning else { return }
+        guard ContextLayer.enabled, !stopped, !isRunning else { return }
         passTask?.cancel()
         passTask = Task { @MainActor [weak self] in await self?.runPass() }
     }
@@ -115,12 +136,12 @@ final class FactExtractionCoordinator: ObservableObject {
     /// now" reload on real completion instead of guessing a delay. No-op if a
     /// pass is already in flight (runPass self-guards on isRunning).
     func runPassNow() async {
-        guard ContextLayer.enabled else { return }
+        guard ContextLayer.enabled, !stopped else { return }
         await runPass()
     }
 
     private func runPass() async {
-        guard ContextLayer.enabled, !isRunning, let telegramService, let aiService else { return }
+        guard ContextLayer.enabled, !stopped, !isRunning, let telegramService, let aiService else { return }
         guard telegramService.authState == .ready else {
             // Can't crawl without Telegram (session revoked / signed out): drop
             // the loader so surfaces settle to their real states; the next
@@ -200,7 +221,7 @@ final class FactExtractionCoordinator: ObservableObject {
         await withTaskGroup(of: ChatCrawlOutcome.self) { group in
             var inFlight = 0
             func launchNext() -> Bool {
-                guard !Task.isCancelled,
+                guard !Task.isCancelled, !stopped,
                       workedChats + inFlight < ContextLayer.maxChatsPerPass else { return false }
                 guard let chat = chatIterator.next() else {
                     ranOutOfChats = true
@@ -262,10 +283,12 @@ final class FactExtractionCoordinator: ObservableObject {
         // so finished chats are skipped cheaply. The 15s spacing keeps cold-start
         // catch-up gentle; when nothing remains, backlogRemains goes false and
         // the chain stops on its own.
-        if backlogRemains {
-            Task { @MainActor [weak self] in
+        if backlogRemains, !stopped {
+            backlogTask?.cancel()
+            backlogTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
-                self?.triggerPass()
+                guard let self, !Task.isCancelled, !self.stopped else { return }
+                self.triggerPass()
             }
         }
     }
@@ -307,7 +330,10 @@ final class FactExtractionCoordinator: ObservableObject {
             // chunks, a few per pass. The cursor persists, so a deep chat catches
             // up over subsequent passes rather than being read all at once.
             while windows < ContextLayer.maxWindowsPerChatPerPass {
-                guard !Task.isCancelled else { out.cancelled = true; break }
+                // stopped covers caller-owned runs (runPassNow) that task
+                // cancellation can't reach — no window may start, and no
+                // write below may land, once shutdown began.
+                guard !Task.isCancelled, !stopped else { out.cancelled = true; break }
                 let records = await DatabaseManager.shared.loadMessagesForward(
                     chatId: chat.id,
                     afterMessageId: cursor,
@@ -466,7 +492,7 @@ final class FactExtractionCoordinator: ObservableObject {
             // fold the next pass sees no new extraction work — a didWork
             // gate left quiet chats stale until another message arrived.
             // The threshold check below is two cheap local reads.
-            if !Task.isCancelled {
+            if !Task.isCancelled, !stopped {
                 let current = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chat.id)
                 let foldedThrough = current?.throughMessageId ?? 0
                 // FORWARD from the summary's own cursor (oldest unfolded
