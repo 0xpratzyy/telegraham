@@ -145,8 +145,8 @@ struct DashboardTopicsPage: View {
             .sorted { $0.lastMessage.date > $1.lastMessage.date }
     }
 
-    private var semanticSummaryBullets: [DashboardCatchUpBullet] {
-        DashboardCatchUpBullet.parse(semanticSummary ?? "")
+    private var semanticCatchUpSections: [DashboardCatchUpSection] {
+        DashboardCatchUpSection.parse(semanticSummary ?? "")
     }
 
     private var chatById: [Int64: TGChat] {
@@ -376,6 +376,14 @@ struct DashboardTopicsPage: View {
         .onChange(of: topics.map(\.id)) {
             selectDefaultTopicIfNeeded()
         }
+        // Hot-swap on topic change: the semantic task re-runs via its key,
+        // but the PREVIOUS topic's digest/results stayed on screen until the
+        // new call landed — clear immediately so the skeleton takes over.
+        .onChange(of: selectedTopicId) {
+            semanticSummary = nil
+            semanticResults = []
+            semanticSearchError = nil
+        }
     }
 
     /// Skeleton placeholder rendered before any topic is selected
@@ -533,21 +541,33 @@ struct DashboardTopicsPage: View {
                 }
             }
 
-            if !semanticSummaryBullets.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(semanticSummaryBullets) { bullet in
-                        DashboardCatchUpBulletRow(
-                            bullet: bullet,
-                            highlightEntities: semanticHighlightEntities,
+            if !semanticCatchUpSections.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(semanticCatchUpSections.enumerated()), id: \.element.id) { index, section in
+                        if index > 0 {
+                            Divider()
+                                .overlay(PidgyDashboardTheme.rule.opacity(0.6))
+                                .padding(.vertical, 14)
+                        }
+                        DashboardCatchUpSectionRow(
+                            section: section,
                             chatById: chatById,
-                            onOpenChat: onOpenChat
+                            onOpenChat: onOpenChat,
+                            onExplore: {
+                                // Dig into this theme: switch to search mode
+                                // with the headline as the query — the fused
+                                // FTS+vector search surfaces its messages
+                                // and evidence in this topic's scope.
+                                selectedCommand = .allChats
+                                searchText = section.headline
+                            }
                         )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 2)
             } else if isLoadingSemanticResults {
-                DashboardSkeletonTextBlock(lineCount: 5)
+                DashboardCatchUpSkeleton()
                     .padding(.top, 4)
             } else if let semanticSearchError {
                 DashboardSmallEmptyText(semanticSearchError)
@@ -944,11 +964,15 @@ struct DashboardTopicsPage: View {
 
         let prompt = """
         You are Pidgy, a concise Telegram workspace copilot.
-        Summarize only the provided evidence for the topic "\(topic.name)".
-        Return 3-5 compact plain-text bullets covering important updates, asks, decisions, and open loops.
-        Each bullet should mention the relevant person and group/chat name when the evidence contains them.
-        Do not use Markdown syntax, bold markers, headings, or labels.
-        Do not invent facts. If evidence is thin, say what is thin.
+        Summarize only the provided evidence for the topic "\(topic.name)" as 2-4 THEMED sections.
+        Return one section per line, EXACTLY this pipe-separated format, nothing else:
+        CATEGORY | Headline | KeyPerson | Detail
+        - CATEGORY: a 1-2 word ALL-CAPS theme (e.g. PLANS, PARTNERSHIP, DECISIONS, ASKS, LAUNCH, LOGISTICS, OTHER)
+        - Headline: a short editorial line, max 8 words, sentence case, no trailing period (e.g. "Road trip plans, but light on specifics")
+        - KeyPerson: the main person's first name for this theme, or "-" if none
+        - Detail: ONE sentence of what happened; mention people and the chat naturally
+        Group related evidence under the same theme. No markdown, no bullets, no extra lines.
+        Do not invent facts. If evidence is thin, say so in a Detail.
         """
 
         do {

@@ -56,6 +56,48 @@ struct DashboardTopicChatSignal: Identifiable {
     var id: Int64 { chatId }
 }
 
+/// One themed section of the Catch-me-up digest — parsed from the model's
+/// "CATEGORY | Headline | KeyPerson | Detail" line format, with a graceful
+/// fallback for unstructured lines (old-format summaries render as plain
+/// sections instead of breaking).
+struct DashboardCatchUpSection: Identifiable, Equatable {
+    let id = UUID()
+    let category: String?
+    let headline: String
+    let keyPerson: String?
+    let detail: String
+
+    static func parse(_ summary: String) -> [DashboardCatchUpSection] {
+        summary
+            .components(separatedBy: .newlines)
+            .compactMap { rawLine -> DashboardCatchUpSection? in
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !line.isEmpty else { return nil }
+                let parts = line.components(separatedBy: "|").map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if parts.count >= 4, !parts[1].isEmpty, !parts[3].isEmpty {
+                    let person = parts[2]
+                    return DashboardCatchUpSection(
+                        category: parts[0].isEmpty ? nil : parts[0].uppercased(),
+                        headline: parts[1],
+                        keyPerson: (person.isEmpty || person == "-") ? nil : person,
+                        detail: parts[3]
+                    )
+                }
+                // Fallback: old bullet format → plain section.
+                let bullet = DashboardCatchUpBullet.parse(line).first
+                guard let bullet else { return nil }
+                return DashboardCatchUpSection(
+                    category: nil,
+                    headline: bullet.title ?? bullet.detail,
+                    keyPerson: nil,
+                    detail: bullet.title == nil ? "" : bullet.detail
+                )
+            }
+    }
+}
+
 struct DashboardCatchUpBullet: Identifiable, Equatable {
     let id = UUID()
     let title: String?
@@ -100,6 +142,146 @@ struct DashboardCatchUpBullet: Identifiable, Equatable {
             options: .regularExpression
         )
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Skeleton mirroring the editorial Catch-me-up shape (eyebrow bar, big
+/// headline bar, chip + prose line) so loading previews the real layout.
+struct DashboardCatchUpSkeleton: View {
+    @State private var pulse = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(0..<2, id: \.self) { index in
+                if index > 0 {
+                    Divider()
+                        .overlay(PidgyDashboardTheme.rule.opacity(0.6))
+                        .padding(.vertical, 14)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    bar(width: 130, height: 8)
+                    bar(width: index == 0 ? 340 : 260, height: 20)
+                    HStack(spacing: 8) {
+                        Capsule()
+                            .fill(Color.Pidgy.fg2.opacity(pulse ? 0.20 : 0.12))
+                            .frame(width: 96, height: 22)
+                        bar(width: 240, height: 11)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+    }
+
+    private func bar(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: height / 2)
+            .fill(Color.Pidgy.fg2.opacity(pulse ? 0.18 : 0.10))
+            .frame(width: width, height: height)
+    }
+}
+
+/// Editorial Catch-me-up section: eyebrow category, serif headline, then a
+/// person chip leading one line of prose — magazine digest, not chip soup.
+struct DashboardCatchUpSectionRow: View {
+    let section: DashboardCatchUpSection
+    let chatById: [Int64: TGChat]
+    let onOpenChat: (Int64) -> Void
+    /// Tapping the headline digs into the theme — the host runs a topic
+    /// search on it so evidence/messages for that thread surface below.
+    var onExplore: (() -> Void)? = nil
+    @State private var isHovering = false
+
+    private var personChat: TGChat? {
+        guard let person = section.keyPerson else { return nil }
+        let all = Array(chatById.values)
+        return all.first { $0.chatType.isPrivate && $0.title.localizedCaseInsensitiveContains(person) }
+            ?? all.first { $0.title.localizedCaseInsensitiveContains(person) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(Color.Pidgy.accent.opacity(0.85))
+                    .frame(width: 5, height: 5)
+                Text("\(section.category ?? "UPDATE")  ·  LAST 30 DAYS")
+                    .font(Font.Pidgy.eyebrow)
+                    .tracking(1.2)
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+            }
+
+            Button {
+                onExplore?()
+            } label: {
+                HStack(alignment: .center, spacing: 8) {
+                    Text(section.headline)
+                        .font(PidgyDashboardTheme.sectionTitleFont)
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                    if onExplore != nil {
+                        Image(systemName: "arrow.right")
+                            .font(Font.Pidgy.bodySm)
+                            .foregroundStyle(PidgyDashboardTheme.tertiary)
+                            .opacity(isHovering ? 1 : 0)
+                            .offset(x: isHovering ? 0 : -4)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(onExplore == nil)
+            .onHover { hovering in
+                withAnimation(PidgyMotion.easeOutFast) { isHovering = hovering }
+            }
+            .pointerStyle(.link)
+
+            if !section.detail.isEmpty {
+                // Person chip flows INLINE with the prose (Text concatenation
+                // can't embed views, so chip + first line share an HStack and
+                // long details wrap below).
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if let person = section.keyPerson {
+                        Button {
+                            if let chat = personChat { onOpenChat(chat.id) }
+                        } label: {
+                            HStack(spacing: 6) {
+                                // Real profile photo (falls back to initials
+                                // while the photo downloads / for no-photo).
+                                DashboardTelegramAvatar(
+                                    chat: personChat,
+                                    fallbackTitle: person,
+                                    size: 17
+                                )
+                                Text(person)
+                                    .font(Font.Pidgy.bodyMd)
+                                    .foregroundStyle(PidgyDashboardTheme.primary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(PidgyDashboardTheme.raised))
+                            .overlay(Capsule().stroke(Color.Pidgy.border1, lineWidth: 1))
+                            .contentShape(Capsule())
+                        }
+                        .buttonStyle(.pidgyPress)
+                    }
+                    Text(section.detail)
+                        .font(Font.Pidgy.body)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .lineSpacing(3)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 6)
     }
 }
 
