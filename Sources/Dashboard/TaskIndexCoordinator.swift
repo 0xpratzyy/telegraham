@@ -121,6 +121,20 @@ final class TaskIndexCoordinator: ObservableObject {
     func stop() {
         debouncedRefreshTask?.cancel()
         debouncedRefreshTask = nil
+        // Full teardown, not just the debounce: the observers and the chat
+        // subscription each fire loadFromStore, and a reset that closes the
+        // DB mid-read would have it reopened by the very next notification.
+        if let messagesUpdatedObserver {
+            NotificationCenter.default.removeObserver(messagesUpdatedObserver)
+            self.messagesUpdatedObserver = nil
+        }
+        if let factsChangedObserver {
+            NotificationCenter.default.removeObserver(factsChangedObserver)
+            self.factsChangedObserver = nil
+        }
+        chatListCancellable = nil
+        // Invalidate any in-flight load so its publish guards drop it.
+        loadGeneration += 1
     }
 
     /// Coalesces a burst of message-arrival notifications into a single
@@ -187,6 +201,10 @@ final class TaskIndexCoordinator: ObservableObject {
     /// True after the first COMPLETED projection — the setBotInclusion
     /// early-return keys on this, not on task count.
     private var hasCompletedInitialLoad = false
+    /// Ticket for user-initiated refreshes: only the NEWEST one may clear
+    /// the spinner (a first click finishing must not stop it while a second
+    /// overlapping click's load is still in flight — and vice versa).
+    private var userRefreshGeneration = 0
     /// Chats whose getChat lookup failed this session (left/deleted chats
     /// whose facts outlive them). Without this, every reload retries the
     /// same failing rate-limited TDLib calls forever.
@@ -281,13 +299,19 @@ final class TaskIndexCoordinator: ObservableObject {
         includeBotsInAISearch: Bool? = nil,
         userInitiated: Bool = false
     ) async {
-        // Only the click that FLIPPED the flag clears it — two overlapping
-        // user-initiated refreshes must not stop the spinner while the
-        // second is still loading.
-        let shouldClearUserFlag = userInitiated && !isUserInitiatedRefreshing
-        if userInitiated { isUserInitiatedRefreshing = true }
+        // Generation-owned spinner: each user click takes a ticket; only the
+        // newest clears the flag, so overlapping clicks can't stop the
+        // spinner while another user load is still in flight.
+        var myUserGeneration = 0
+        if userInitiated {
+            userRefreshGeneration += 1
+            myUserGeneration = userRefreshGeneration
+            isUserInitiatedRefreshing = true
+        }
         defer {
-            if shouldClearUserFlag { isUserInitiatedRefreshing = false }
+            if userInitiated, myUserGeneration == userRefreshGeneration {
+                isUserInitiatedRefreshing = false
+            }
         }
         await loadFromStore(
             telegramService: telegramService,
@@ -346,6 +370,10 @@ final class TaskIndexCoordinator: ObservableObject {
         for chatId in taskChatIds.subtracting(resolvedChatIds) where !unresolvableChatIds.contains(chatId) {
             do {
                 guard let chat = try await telegramService.getChat(id: chatId) else {
+                    // A definitive nil from TDLib = chat genuinely not found
+                    // (left/deleted) — the ONLY case worth a session
+                    // blacklist, so the failing lookup isn't retried on
+                    // every reload.
                     unresolvableChatIds.insert(chatId)
                     continue
                 }
@@ -357,9 +385,10 @@ final class TaskIndexCoordinator: ObservableObject {
                 // these chats are resolvable, the lookup was just cut short.
                 break
             } catch {
-                // Left/deleted chat — don't retry the failing TDLib call on
-                // every reload for the rest of the session.
-                unresolvableChatIds.insert(chatId)
+                // Transient (network / rate-limit / TDLib not ready): skip
+                // this pass only. Blacklisting here made a valid chat's
+                // tasks vanish for the whole session over one flaky call.
+                continue
             }
         }
 

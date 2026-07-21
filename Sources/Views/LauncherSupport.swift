@@ -127,4 +127,3 @@ struct LauncherOnboardingHandoff: View {
         .padding(PidgySpace.s6)
     }
 }
-

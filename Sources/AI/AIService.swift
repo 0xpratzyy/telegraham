@@ -105,7 +105,10 @@ final class AIService: ObservableObject {
     /// point that forgot to check; the Worker license gate is the server-side
     /// backstop. NOTE for cutover: if AI search should stay free, drop the
     /// guard from semanticSearch/agenticSearch/rerankSearchResults only.
-    private func requireAIEntitlement() throws {
+    /// Internal (not private): engines that capture the provider into a
+    /// Sendable snapshot for parallel work (SummaryEngine's map step) must
+    /// still gate ONCE up front before fanning out.
+    func requireAIEntitlement() throws {
         guard BillingGate.aiAllowed(EntitlementStore.shared.status) else {
             throw AIError.providerNotConfigured
         }
@@ -173,6 +176,16 @@ final class AIService: ObservableObject {
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "-*•\"' ")) }
             .filter { !$0.isEmpty }
         return Array(lines.prefix(3))
+    }
+
+    /// Entitlement-gated passthrough for surfaces that build their own
+    /// snippets (topic catch-up, deep-summary synthesis). Every provider
+    /// call must route through AIService so requireAIEntitlement() gates
+    /// paid usage at ONE choke point — direct `provider.` calls from views
+    /// become a paid-feature leak the day billing enforcement flips on.
+    func summarizeSnippets(_ snippets: [MessageSnippet], prompt: String) async throws -> String {
+        try requireAIEntitlement()
+        return try await provider.summarize(messages: snippets, prompt: prompt)
     }
 
     /// Catch-up summary for a quiet group — what the user missed in

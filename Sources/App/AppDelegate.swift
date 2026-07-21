@@ -661,6 +661,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildTask?.cancel()
         graphBuildLoopTask?.cancel()
         TaskIndexCoordinator.shared.stop()
+        FactExtractionCoordinator.shared.stop()
         telegramService.stop()
 
         // Reply exactly once — whichever fires first, the async stops or

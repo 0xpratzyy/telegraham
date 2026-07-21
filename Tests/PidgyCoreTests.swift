@@ -6431,6 +6431,52 @@ final class PidgyCoreTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempDirectory)
     }
 
+    // MARK: - OCR survives metadata enrichment
+
+    /// A metadata-only re-sync (sender-name/direction enrichment on UNCHANGED
+    /// text) must not wipe the "[photo text: …]" OCR append or reset
+    /// ocr_state — the full upsert path writes the raw Telegram text and
+    /// queues a pointless, lossy re-OCR. Regression for the Codex P1.
+    func testMetadataOnlyResyncPreservesPhotoOCR() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = 9_101
+            let sentAt = Date()
+            // Photo lands before the group sender's user record is cached.
+            let photo = DatabaseManager.MessageRecord(
+                id: 1, chatId: chatId, senderUserId: 7, senderName: nil,
+                date: sentAt, textContent: "check this", mediaTypeRaw: "Photo",
+                isOutgoing: false
+            )
+            await DatabaseManager.shared.upsertLiveMessages(chatId: chatId, messages: [photo])
+            await DatabaseManager.shared.applyPhotoOCR(
+                messageId: 1, chatId: chatId, text: "invoice #442 due friday"
+            )
+
+            // Re-sync re-delivers the SAME message, now with the sender resolved.
+            let enriched = DatabaseManager.MessageRecord(
+                id: 1, chatId: chatId, senderUserId: 7, senderName: "Akhil",
+                date: sentAt, textContent: "check this", mediaTypeRaw: "Photo",
+                isOutgoing: false
+            )
+            await DatabaseManager.shared.upsertLiveMessages(chatId: chatId, messages: [enriched])
+
+            let row = try await DatabaseManager.shared.read { db in
+                try Row.fetchOne(
+                    db,
+                    sql: "SELECT text_content, sender_name, ocr_state FROM messages WHERE chat_id = ? AND id = 1",
+                    arguments: [chatId]
+                )
+            }
+            let text: String? = row?["text_content"]
+            XCTAssertTrue(
+                text?.contains("[photo text: invoice #442 due friday]") == true,
+                "OCR append must survive sender enrichment; got: \(text ?? "nil")"
+            )
+            XCTAssertEqual(row?["sender_name"] as String?, "Akhil", "the enrichment itself must still land")
+            XCTAssertEqual(row?["ocr_state"] as Int?, 1, "ocr_state must not reset to pending")
+        }
+    }
+
     // MARK: - Answer engine reply parity
 
     /// "Who should I reply to" must be answerable from REPLY-kind loops

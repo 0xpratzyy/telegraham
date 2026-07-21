@@ -90,6 +90,20 @@ final class FactExtractionCoordinator: ObservableObject {
         }
     }
 
+    /// Tear down every write source: the in-flight pass, the periodic timer,
+    /// and the chat-list subscription. MUST run before "Reset all local data"
+    /// closes/deletes the database (and on app termination) — otherwise a
+    /// suspended extraction/OCR pass resumes mid-wipe and writes into (or
+    /// reopens) the database being destroyed.
+    func stop() {
+        passTask?.cancel()
+        passTask = nil
+        timer?.invalidate()
+        timer = nil
+        chatListCancellable = nil
+        isCrawling = false
+    }
+
     /// Kick a pass if one isn't already running (used by the timer + any manual refresh).
     func triggerPass() {
         guard ContextLayer.enabled, !isRunning else { return }
@@ -447,8 +461,12 @@ final class FactExtractionCoordinator: ObservableObject {
             // of times a day for 2-message drips (90% of the AI bill). Below
             // the threshold the summary's through-cursor stays put, so those
             // messages simply fold later, nothing is lost. Non-fatal — a
-            // failed fold retries next pass.
-            if didWork, !Task.isCancelled {
+            // failed fold retries next pass. NOT gated on didWork: the
+            // extraction cursor advances BEFORE folding, so after a failed
+            // fold the next pass sees no new extraction work — a didWork
+            // gate left quiet chats stale until another message arrived.
+            // The threshold check below is two cheap local reads.
+            if !Task.isCancelled {
                 let current = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chat.id)
                 let foldedThrough = current?.throughMessageId ?? 0
                 // FORWARD from the summary's own cursor (oldest unfolded

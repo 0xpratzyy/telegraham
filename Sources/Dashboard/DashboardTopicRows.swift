@@ -61,11 +61,16 @@ struct DashboardTopicChatSignal: Identifiable {
 /// fallback for unstructured lines (old-format summaries render as plain
 /// sections instead of breaking).
 struct DashboardCatchUpSection: Identifiable, Equatable {
-    let id = UUID()
     let category: String?
     let headline: String
     let keyPerson: String?
     let detail: String
+
+    /// Content-derived identity, NOT a fresh UUID per parse: reparsing the
+    /// same summary must yield the same ids, or SwiftUI treats every
+    /// unchanged section as a brand-new row (full re-render + animation
+    /// churn on each republish).
+    var id: String { "\(category ?? "")|\(headline)|\(keyPerson ?? "")" }
 
     static func parse(_ summary: String) -> [DashboardCatchUpSection] {
         summary

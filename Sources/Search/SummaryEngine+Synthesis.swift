@@ -81,8 +81,8 @@ extension SummaryEngine {
                 scopeDescription: scopeDescription
             )
             do {
-                let synthesized = try await aiService.provider.summarize(
-                    messages: synthesisInput,
+                let synthesized = try await aiService.summarizeSnippets(
+                    synthesisInput,
                     prompt: synthesisPrompt
                 )
                 return SummarizeResult(text: synthesized, extracts: extracts)
@@ -125,6 +125,10 @@ extension SummaryEngine {
         perChatDigest: [PerChatDigest],
         aiService: AIService
     ) async -> [(chat: TGChat, text: String)] {
+        // Entitlement is gated ONCE here — the task group below captures the
+        // provider directly (Sendable snapshot for parallel map calls), which
+        // would otherwise bypass AIService's paid-usage choke point.
+        guard (try? aiService.requireAIEntitlement()) != nil else { return [] }
         let provider = aiService.provider
         let indexedResults: [(Int, TGChat, String?)] =
             await withTaskGroup(of: (Int, TGChat, String?).self) { group in

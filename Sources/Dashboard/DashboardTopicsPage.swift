@@ -21,6 +21,12 @@ struct DashboardTopicsPage: View {
     @State private var semanticSummary: String?
     @State private var semanticSearchError: String?
     @State private var isLoadingSemanticResults = false
+    /// Monotonic ticket for the semantic search/catch-up pipeline. SwiftUI
+    /// cancels the old .task on topic switch, but cancellation surfaces as a
+    /// generic error inside the AI call — without generation ownership the
+    /// OLD topic's fallback summary published over the NEW topic, and the old
+    /// task's defer cleared the new request's loading spinner.
+    @State private var semanticRequestGeneration = 0
     /// True once we've waited long enough that an empty `topics` array
     /// almost certainly means "no topics" rather than "still loading".
     /// Drives the skeleton-vs-empty-state choice in `body` below — the
@@ -871,6 +877,8 @@ struct DashboardTopicsPage: View {
     }
 
     private func runSemanticSearchIfNeeded() async {
+        semanticRequestGeneration += 1
+        let generation = semanticRequestGeneration
         guard isSemanticSearchActive, let selectedTopic else {
             semanticResults = []
             semanticSummary = nil
@@ -906,7 +914,13 @@ struct DashboardTopicsPage: View {
         if selectedCommand != .catchUp {
             semanticSummary = nil
         }
-        defer { isLoadingSemanticResults = false }
+        // Generation-owned: a superseded request must not clear the loading
+        // state the newer request just set.
+        defer {
+            if generation == semanticRequestGeneration {
+                isLoadingSemanticResults = false
+            }
+        }
 
         let ftsHits = await runFTSVariantsFused(
             rawQuery: query,
@@ -936,9 +950,14 @@ struct DashboardTopicsPage: View {
             limit: selectedCommand == .catchUp ? 18 : 36
         )
 
+        guard generation == semanticRequestGeneration, !Task.isCancelled else { return }
         semanticResults = results
         if selectedCommand == .catchUp {
-            semanticSummary = await makeCatchUpSummary(topic: selectedTopic, results: results)
+            let summary = await makeCatchUpSummary(topic: selectedTopic, results: results)
+            // The AI call is the longest await — re-check before publishing so
+            // a topic switched mid-summary never shows the OLD topic's recap.
+            guard generation == semanticRequestGeneration, !Task.isCancelled else { return }
+            semanticSummary = summary
         }
     }
 
@@ -976,7 +995,12 @@ struct DashboardTopicsPage: View {
         """
 
         do {
-            return try await aiService.provider.summarize(messages: snippets, prompt: prompt)
+            return try await aiService.summarizeSnippets(snippets, prompt: prompt)
+        } catch is CancellationError {
+            // Topic switched mid-call — not a failure. Publishing the local
+            // fallback here is exactly the stale-overwrite bug; stay silent
+            // and let the newer request own the UI.
+            return nil
         } catch {
             semanticSearchError = "AI recap failed, showing local evidence."
             return localCatchUpSummary(results)

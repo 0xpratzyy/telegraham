@@ -346,6 +346,31 @@ actor DatabaseManager {
                     && ((record.senderName == nil) || (existing["sender_name"] as String?) == record.senderName)
                 let sameDirection = (((existing["is_outgoing"] as Int64?) ?? 0) == 1) == record.isOutgoing
                 if sameSender && sameDirection { continue }
+
+                // Sender/direction enrichment on UNCHANGED content: update
+                // metadata only. The full upsert below would write the raw
+                // Telegram text over the stored one — which may carry the
+                // "[photo text: …]" OCR append — and its ocr_state CASE would
+                // then reset the row for a pointless (and lossy) re-OCR.
+                try db.execute(
+                    sql: """
+                        UPDATE messages SET
+                            sender_user_id = ?,
+                            sender_name = COALESCE(?, sender_name),
+                            date = ?,
+                            is_outgoing = ?
+                        WHERE chat_id = ? AND id = ?
+                        """,
+                    arguments: [
+                        record.senderUserId,
+                        record.senderName,
+                        record.date.timeIntervalSince1970,
+                        record.isOutgoing ? 1 : 0,
+                        record.chatId,
+                        record.id
+                    ]
+                )
+                continue
             }
 
             // COALESCE keeps display-time enrichments (resolved sender names,
