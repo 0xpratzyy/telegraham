@@ -1,91 +1,61 @@
 # Eval-First Workflow
 
-Last updated: 2026-04-11
+Last updated: 2026-07-21
 
-We should prefer offline/scripted evaluation before promoting search or ranking behavior into the live product.
+Prefer offline/scripted evaluation before promoting search, ranking, or
+prompt behavior into the live product.
 
 ## Rule
 
-For search and reply-quality changes:
+For search, answer, and extraction-quality changes:
 
 1. test the behavior with scripts or automated fixtures first
 2. compare against the current baseline
 3. only then promote the winner into the app path
 
-This keeps us from discovering basic regressions through the live launcher UI.
+This keeps us from discovering basic regressions through the live launcher
+UI. Corollary from the fact-extraction work: **fix AI mistakes in the
+prompt** — never with post-AI regex/keyword/count heuristics, and never with
+an LLM judge cleaning up another LLM's output.
 
-## Reply Queue
+## Current harnesses
 
-Use the existing harness first:
+Oracles live in `evals/`, runners in `tools/`:
 
-- [reply_queue_harness.py](/Users/pratyushrungta/telegraham/tools/reply_queue_harness.py)
-- [reply-queue-harness.md](/Users/pratyushrungta/telegraham/docs/reply-queue-harness.md)
+| Area | Oracle(s) | Runner |
+|---|---|---|
+| Exact lookup | `exact_lookup_oracle_v*.json` | `tools/exact_lookup_answer_bench.py`, probe: `tools/exact_lookup_probe.py` |
+| Topic search | `topic_search_oracle_v*.json` | `tools/topic_search_answer_bench.py`, probe: `tools/topic_search_probe.py` |
+| Summary | `summary_oracle_v*.json` | `tools/summary_answer_bench.py` |
+| Query routing | — | `tools/query_routing_bench.py` / `query_routing_probe.py` |
+| Prompt injection | `prompt_injection_oracle_v1.json` | `tools/prompt_injection_eval.py` |
+| Model swaps | — | `tools/model_swap_eval.py` (replays LangSmith traces; see archive for past results) |
+| Everything at once | `thesis_eval_suite.json` | `tools/thesis_bulk_eval.py` |
 
-This is the required loop for prompt/digest work:
+Planner / embedding diagnostics also run as env-gated tests:
+`TEST_RUNNER_PIDGY_PLANNER_DIAG=1` (and the embedding equivalent) against
+the normal test target.
 
-1. add or edit the variant in [reply_queue_variant_bench.py](/Users/pratyushrungta/telegraham/tools/reply_queue_variant_bench.py)
-2. run the harness against the gold set
-3. inspect leaderboard + false positives/misses
-4. only then promote the variant into [ReplyQueueTriagePrompt.swift](/Users/pratyushrungta/telegraham/Sources/AI/Prompts/ReplyQueueTriagePrompt.swift)
+## Retired harnesses
 
-## Exact Lookup
-
-Use both:
-
-1. automated unit tests in [PidgyCoreTests.swift](/Users/pratyushrungta/telegraham/Tests/PidgyCoreTests.swift)
-2. local evidence probe in [exact_lookup_probe.py](/Users/pratyushrungta/telegraham/tools/exact_lookup_probe.py)
-
-### Why the probe exists
-
-Before changing ranking/product behavior, we should be able to answer:
-
-- does local SQLite even contain a true exact candidate?
-- are we missing a real match, or is the query just too broad for exact lookup?
-
-### Example
-
-```bash
-/usr/bin/python3 /Users/pratyushrungta/telegraham/tools/exact_lookup_probe.py "wallet I sent to Rahul"
-```
-
-This prints:
-
-- artifact keywords
-- recipient keywords
-- direct artifact+recipient hits in the same message
-- same-chat overlap between artifact evidence and recipient evidence
-- representative local snippets
+The reply-queue triage harness family (`reply_queue_*` oracles and runners)
+benchmarked the deleted per-query AI triage engine. The reply queue is now a
+deterministic projection of the fact store — its correctness is covered by
+unit tests (structural close, lane routing, answer-payload parity), not a
+prompt harness. The old sheets live in [archive/](archive/). The oracles are
+kept in `evals/` for provenance; don't spend model calls re-running them.
 
 ## Promotion Rule
 
-Do not promote a search/ranking change into product unless at least one of these is true:
+Do not promote a search/ranking/prompt change unless at least one is true:
 
-- it improves the relevant harness/fixture score
+- it improves the relevant harness/oracle score
 - it fixes a real failing regression test
-- the offline evidence probe shows a product bug rather than a missing-data case
+- the offline evidence probe shows a product bug rather than a missing-data
+  case
 
 ## Current Principle
 
-- reply queue: harness first
-- exact lookup: tests + local evidence probe first
+- extraction & answers: oracle bench first, prompt-only fixes
+- exact lookup / topic search: tests + probes first
 - launcher UI: last step, not the first debugging tool
-
-## Bulk MVP Thesis Run
-
-Use [thesis_bulk_eval.py](/Users/pratyushrungta/telegraham/tools/thesis_bulk_eval.py) when we want one consolidated run across the current MVP theses.
-
-This is the right command when we want to ask:
-
-- how are the core theses doing together right now?
-- which thesis has a real harness?
-- which thesis still only has tests or a gap marker?
-
-Default command:
-
-```bash
-/usr/bin/python3 /Users/pratyushrungta/telegraham/tools/thesis_bulk_eval.py
-```
-
-Reference:
-
-- [Thesis Bulk Eval](/Users/pratyushrungta/telegraham/docs/thesis-bulk-eval.md)

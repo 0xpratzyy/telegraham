@@ -1,9 +1,11 @@
 # Pidgy AI proxy (issue #26)
 
-A bare Cloudflare Worker that lets beta builds ship **without** the OpenAI API
+A bare Cloudflare Worker that lets beta builds ship **without** a provider API
 key in the bundle. The app presents a revocable **gate token**; the Worker
 holds the real key as a secret and forwards `POST /v1/chat/completions`
-verbatim to OpenAI.
+verbatim to OpenAI — or, on the managed plan's current path,
+`POST /v1/vertex/chat/completions` to Gemini via Google Vertex (secret:
+`GCP_SA_KEY`).
 
 ```
 Pidgy.app ──Bearer <gate token>──▶ Worker ──Bearer <OPENAI_API_KEY>──▶ api.openai.com

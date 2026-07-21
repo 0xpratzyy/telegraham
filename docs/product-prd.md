@@ -92,8 +92,8 @@ Examples:
 Expected behavior:
 
 - actionable queue of chats
-- recent-first usefulness
-- progressive rendering while AI triage continues
+- ranked by the age of the ask, not chat activity
+- instant projection from the fact store (no per-query AI triage)
 - better trust than generic semantic search for ownership questions
 
 Reply queue is the first true CRM primitive in the product.

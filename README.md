@@ -2,6 +2,8 @@
 
 Local-first Telegram command center for replies, tasks, people, topics, and search. Native macOS, SwiftUI, TDLib.
 
+How it works in one line: messages sync into a local SQLite store, an AI pass extracts durable **facts** (open loops, summaries) from them, and every surface — the reply queue, the Tasks page, and the "Ask Pidgy" answer chat — is a view over that one fact store. Details in [docs/architecture.md](docs/architecture.md).
+
 ## For developers — building from source
 
 ### Prerequisites
@@ -9,7 +11,7 @@ Local-first Telegram command center for replies, tasks, people, topics, and sear
 - macOS 26+, Xcode 17+
 - [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - A Telegram api_id / api_hash from <https://my.telegram.org/apps>
-- An OpenAI API key (default model is `gpt-5.4-mini`) or an Anthropic Claude key
+- Optional: an OpenAI or Anthropic API key for BYOK builds. Managed builds route AI through the bundled Cloudflare proxy (`infra/ai-proxy/`) instead — no local provider key needed
 
 ### One-time setup
 
@@ -84,8 +86,9 @@ You should have received a `Pidgy-<sha>.dmg` file. To install:
 | Endpoint | When | What gets sent |
 |---|---|---|
 | `api.telegram.org` (via TDLib) | Always, while signed in | Your Telegram session — sync chats and download message history |
-| `api.openai.com/v1/chat/completions` | When AI features run (reply suggestions, task extraction, semantic search) and an OpenAI key is configured | Recent message snippets from the chat being analyzed + the prompt that drives that feature |
+| `api.openai.com/v1/chat/completions` | When AI features run (fact extraction, Ask Pidgy answers, semantic search, summaries, reply suggestions) and an OpenAI key is configured | Recent message snippets from the chat being analyzed + the prompt that drives that feature |
 | `api.anthropic.com/v1/messages` | Same as above, if a Claude key is configured instead | Same |
+| Pidgy AI proxy (Cloudflare Worker) | Same as above, on the managed plan (no BYO key) | Same snippets — the proxy forwards to the model provider (Gemini via Vertex) and holds the provider key server-side |
 | `*.ingest.us.sentry.io` (Sentry SDK) | If a Sentry DSN was bundled into the build — crashes only, plus the explicit `PidgyTelemetry.capture(error:)` non-fatal sites | Stack trace + device/OS metadata. Event bodies pass through `scrubEvent` (`Sources/App/PidgyTelemetry.swift`) before send, which strips raw Telegram message text, sender names, phone numbers, and API tokens. You can disable by building from source without `PIDGY_SENTRY_DSN` set |
 
 **Telemetry honesty:**
