@@ -195,7 +195,7 @@ struct DashboardView: View {
         // button) is collapsed.
         .background {
             Button {
-                NotificationCenter.default.post(name: .requestLauncherToggle, object: nil)
+                NotificationCenter.default.post(name: .requestLauncherAsk, object: nil)
             } label: {
                 EmptyView()
             }
@@ -946,7 +946,7 @@ struct DashboardSidebar: View {
 
     private var sidebarLauncherShortcut: some View {
         SidebarLauncherShortcutButton {
-            NotificationCenter.default.post(name: .requestLauncherToggle, object: nil)
+            NotificationCenter.default.post(name: .requestLauncherAsk, object: nil)
         }
     }
 

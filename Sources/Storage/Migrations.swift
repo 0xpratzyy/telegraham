@@ -759,6 +759,12 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v31_message_ocr_state") { db in
+            // On-device OCR over photo messages: 0 = pending, 1 = processed.
+            // Recognized text is appended into text_content, so extraction,
+            // search, and evidence all see it with no reader changes.
+            try db.execute(sql: "ALTER TABLE messages ADD COLUMN ocr_state INTEGER NOT NULL DEFAULT 0")
+        }
 
         return migrator
     }

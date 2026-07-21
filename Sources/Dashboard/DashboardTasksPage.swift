@@ -446,9 +446,11 @@ struct DashboardTasksPage: View {
     private var taskRows: some View {
         VStack(spacing: 0) {
             if shouldShowPigeonLoader {
-                DashboardPigeonLoader()
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 36)
+                DashboardPigeonLoader(
+                    subtitle: "Tasks land here as Pidgy works through your last 30 days of chats."
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.top, 36)
             } else if shouldShowTaskSkeleton {
                 DashboardSkeletonRows(count: selectedTask == nil ? 9 : 7)
                     .padding(.top, 6)

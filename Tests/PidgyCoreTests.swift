@@ -9944,6 +9944,84 @@ final class PidgyCoreTests: XCTestCase {
         }
     }
 
+    /// Structural close (#48): a reply-kind loop is an unanswered ping — any
+    /// outgoing message after its source closes it. Action/owes_me untouched;
+    /// outgoing BEFORE the ask (or a chase-bumped source) keeps it open.
+    func testCloseAnsweredReplyLoopsIsStructuralAndKindScoped() async throws {
+        try await withTempDatabase { _ in
+            var replyLoop = FactDraft(
+                subjectEntity: "me", predicate: .iOwe, objectText: "who wants the couch",
+                action: "Tell Karan who wants the couch", objectEntity: nil, confidence: 0.9,
+                validFrom: Date(), sourceChatId: 1, sourceChatTitle: "Karan",
+                sourceMessageId: 100, sourceText: "Who wants the couch?", senderName: "Karan"
+            )
+            replyLoop.loopKind = .reply
+            var actionLoop = FactDraft(
+                subjectEntity: "me", predicate: .iOwe, objectText: "the iOS build",
+                action: "Send the iOS build", objectEntity: nil, confidence: 0.9,
+                validFrom: Date(), sourceChatId: 1, sourceChatTitle: "Karan",
+                sourceMessageId: 100, sourceText: "build bhejo", senderName: "Karan"
+            )
+            actionLoop.loopKind = .action
+            var owesMe = FactDraft(
+                subjectEntity: "Karan", predicate: .owesMe, objectText: "the TV answer",
+                action: "Remind Karan about the TV", objectEntity: nil, confidence: 0.9,
+                validFrom: Date(), sourceChatId: 1, sourceChatTitle: "Karan",
+                sourceMessageId: 100, sourceText: "TV ka bataunga", senderName: "Karan"
+            )
+            owesMe.loopKind = .reply // even mislabeled, owes_me must never close on MY reply
+            // A reply loop in another chat where my message came BEFORE the ask.
+            var freshLoop = FactDraft(
+                subjectEntity: "me", predicate: .iOwe, objectText: "signup status",
+                action: "Confirm signup status", objectEntity: nil, confidence: 0.9,
+                validFrom: Date(), sourceChatId: 2, sourceChatTitle: "Brandon",
+                sourceMessageId: 500, sourceText: "can you confirm?", senderName: "Brandon"
+            )
+            freshLoop.loopKind = .reply
+            await DatabaseManager.shared.upsertFacts([replyLoop, actionLoop, owesMe, freshLoop])
+
+            // My replies: chat 1 AFTER the ask; chat 2 BEFORE the ask.
+            await DatabaseManager.shared.upsertLiveMessages(chatId: 1, messages: [
+                DatabaseManager.MessageRecord(
+                    id: 101, chatId: 1, senderUserId: 7, senderName: "Me",
+                    date: Date(), textContent: "lol who is trying to sell", mediaTypeRaw: nil, isOutgoing: true
+                )
+            ])
+            await DatabaseManager.shared.upsertLiveMessages(chatId: 2, messages: [
+                DatabaseManager.MessageRecord(
+                    id: 400, chatId: 2, senderUserId: 7, senderName: "Me",
+                    date: Date(), textContent: "hey brandon", mediaTypeRaw: nil, isOutgoing: true
+                )
+            ])
+
+            // The live hook in upsertLiveMessages already swept chat 1; a full
+            // sweep must find nothing further.
+            let closedAgain = await DatabaseManager.shared.closeAnsweredReplyLoops()
+            XCTAssertEqual(closedAgain, 0)
+
+            let open = await DatabaseManager.shared.loadOpenFacts(limit: 50)
+            let openActions = open.map(\.action)
+            XCTAssertFalse(openActions.contains("Tell Karan who wants the couch"),
+                           "answered reply-kind ping must close structurally")
+            XCTAssertTrue(openActions.contains("Send the iOS build"),
+                          "action-kind survives a mere reply")
+            XCTAssertTrue(openActions.contains("Remind Karan about the TV"),
+                          "owes_me never closes on the user's own message")
+            XCTAssertTrue(openActions.contains("Confirm signup status"),
+                          "outgoing BEFORE the ask must not close the loop")
+
+            // An inbound-only message (their chase) must not close anything.
+            await DatabaseManager.shared.upsertLiveMessages(chatId: 2, messages: [
+                DatabaseManager.MessageRecord(
+                    id: 600, chatId: 2, senderUserId: 9, senderName: "Brandon",
+                    date: Date(), textContent: "any update?", mediaTypeRaw: nil, isOutgoing: false
+                )
+            ])
+            let openAfterInbound = await DatabaseManager.shared.loadOpenFacts(limit: 50)
+            XCTAssertTrue(openAfterInbound.map(\.action).contains("Confirm signup status"))
+        }
+    }
+
     private func withTempDatabase(
         _ body: (URL) async throws -> Void
     ) async throws {

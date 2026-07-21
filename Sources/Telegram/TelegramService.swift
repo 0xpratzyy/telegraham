@@ -258,6 +258,25 @@ class TelegramService: ObservableObject {
         return file.local.path
     }
 
+    /// Fetch a photo message's image at a readable-but-small size for
+    /// on-device OCR. Returns nil when the message isn't a photo (deleted,
+    /// or actually another media kind). Low priority — OCR is background work.
+    func downloadMessagePhoto(chatId: Int64, messageId: Int64) async throws -> String? {
+        guard let client else { throw TGError.clientNotInitialized }
+        let message = try await client.getMessage(chatId: chatId, messageId: messageId)
+        guard case .messagePhoto(let photo) = message.content else { return nil }
+        let sizes = photo.photo.sizes.sorted { $0.width < $1.width }
+        guard let pick = sizes.first(where: { $0.width >= 640 }) ?? sizes.last else { return nil }
+        let file = try await client.downloadFile(
+            fileId: pick.photo.id,
+            limit: 0,
+            offset: 0,
+            priority: 1,
+            synchronous: true
+        )
+        return file.local.path.isEmpty ? nil : file.local.path
+    }
+
     // MARK: - Message History (read-only)
 
     func getChatHistory(
@@ -929,8 +948,14 @@ class TelegramService: ObservableObject {
 
         let chatTitle = chatCache[message.chatId]?.title
         var senderName: String? = nil
-        if case .user(let userId) = senderId {
+        switch senderId {
+        case .user(let userId):
             senderName = userCache[userId]?.displayName
+        case .chat(let senderChatId):
+            // Sent-as-channel / anonymous-admin messages have a CHAT sender —
+            // its title (channel name, or the group itself for anon admins) is
+            // the honest display name; leaving it nil rendered as "Someone".
+            senderName = chatCache[senderChatId]?.title
         }
 
         return TGMessage(

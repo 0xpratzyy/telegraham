@@ -199,6 +199,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
+        NotificationCenter.default.addObserver(
+            forName: .requestLauncherAsk,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.panelManager?.open()
+            }
+        }
+
         replayOnboardingObserver = NotificationCenter.default.addObserver(
             forName: .pidgyReplayOnboarding,
             object: nil,

@@ -13,6 +13,9 @@ extension Notification.Name {
     /// listens for this and calls `PanelManager.toggle()` so we don't have
     /// to thread the panel manager all the way down into SwiftUI views.
     static let requestLauncherToggle = Notification.Name("requestLauncherToggle")
+    /// Open the launcher straight into Ask Pidgy chat mode (empty thread,
+    /// composer focused) — the dashboard's "Ask anything…" entry.
+    static let requestLauncherAsk = Notification.Name("requestLauncherAsk")
 }
 
 /// Whether the launcher is currently in Ask-Pidgy chat mode. Main-thread only.
@@ -119,6 +122,12 @@ final class PanelManager {
         } else {
             show()
         }
+    }
+
+    /// Always bring the panel up (never hides) — used by "Ask anything",
+    /// which then flips the launcher into chat mode via its own listener.
+    func open() {
+        show()
     }
 
     func showForDebugTesting() {

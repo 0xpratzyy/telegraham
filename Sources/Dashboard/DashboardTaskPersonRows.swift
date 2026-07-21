@@ -79,7 +79,7 @@ struct DashboardPersonRow: View {
                     .font(PidgyDashboardTheme.rowEmphasisFont)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                     .lineLimit(1)
-                Text(contact.lastInteractionAt.map { "last \(DateFormatting.compactRelativeTime(from: $0)) ago" } ?? contact.category)
+                Text(contact.lastInteractionAt.map(Self.lastActiveLabel) ?? contact.category)
                     .font(PidgyDashboardTheme.metadataFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
                     .lineLimit(1)
@@ -116,6 +116,17 @@ struct DashboardPersonRow: View {
             guard case .privateChat(let userId) = chat.chatType else { return false }
             return userId == contact.entityId
         }
+    }
+
+    /// "active now" / "last active 2d ago" for recent dates; beyond a week
+    /// compactRelativeTime returns an ABSOLUTE date ("Apr 9"), where the old
+    /// "last Apr 9 ago" phrasing read broken.
+    private static func lastActiveLabel(_ date: Date) -> String {
+        let stamp = DateFormatting.compactRelativeTime(from: date)
+        if stamp == "now" { return "active now" }
+        return stamp.first?.isNumber == true && !stamp.contains(" ")
+            ? "last active \(stamp) ago"
+            : "last active \(stamp)"
     }
 }
 

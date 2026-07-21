@@ -246,6 +246,18 @@ actor DatabaseManager {
         } catch {
             print("[DatabaseManager] Failed to upsert live messages for chat \(chatId): \(error)")
         }
+
+        // Structural close (#48): the user replying in this chat answers any
+        // open reply-kind loop instantly — the Reply queue updates on send,
+        // not on the next extraction pass.
+        if ContextLayer.enabled, messages.contains(where: { $0.isOutgoing }) {
+            let closed = await closeAnsweredReplyLoops(chatId: chatId)
+            if closed > 0 {
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
+                }
+            }
+        }
     }
 
     func loadMessages(chatId: Int64, limit: Int) async -> [MessageRecord] {
@@ -2296,6 +2308,120 @@ actor DatabaseManager {
             }
         } catch {
             print("[DatabaseManager] invalidateFacts failed: \(error)")
+        }
+    }
+
+    /// Photo messages awaiting on-device OCR — newest first so fresh payment
+    /// screenshots / tickets get their text before the next extraction pass.
+    func pendingPhotoOCRMessages(limit: Int = 24, maxAge: TimeInterval = 30 * 86_400) async -> [(id: Int64, chatId: Int64)] {
+        guard let pool = await ensureDatabase() else { return [] }
+        let cutoff = Date().addingTimeInterval(-maxAge).timeIntervalSince1970
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id FROM messages
+                        WHERE media_type = 'Photo' AND ocr_state = 0 AND date >= ?
+                        ORDER BY id DESC LIMIT ?
+                        """,
+                    arguments: [cutoff, limit]
+                )
+                return rows.map { (id: $0["id"] as Int64, chatId: $0["chat_id"] as Int64) }
+            }
+        } catch {
+            print("[DatabaseManager] pendingPhotoOCRMessages failed: \(error)")
+            return []
+        }
+    }
+
+    /// Record an OCR result: marks the message processed and, when text was
+    /// recognized, appends it to text_content as "[photo text: …]" so every
+    /// reader (extraction transcript, search FTS, evidence rows) sees it.
+    func applyPhotoOCR(messageId: Int64, chatId: Int64, text: String?) async {
+        guard let pool = await ensureDatabase() else { return }
+        let cleaned = text?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\u{00}", with: "")
+        do {
+            try await pool.write { db in
+                if let cleaned, !cleaned.isEmpty {
+                    let capped = String(cleaned.prefix(500))
+                    let existing = try String.fetchOne(
+                        db,
+                        sql: "SELECT text_content FROM messages WHERE id = ? AND chat_id = ?",
+                        arguments: [messageId, chatId]
+                    ) ?? ""
+                    let marker = "[photo text: \(capped)]"
+                    let combined = existing.isEmpty ? marker : existing + "\n" + marker
+                    try db.execute(
+                        sql: "UPDATE messages SET text_content = ?, ocr_state = 1 WHERE id = ? AND chat_id = ?",
+                        arguments: [combined, messageId, chatId]
+                    )
+                } else {
+                    try db.execute(
+                        sql: "UPDATE messages SET ocr_state = 1 WHERE id = ? AND chat_id = ?",
+                        arguments: [messageId, chatId]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] applyPhotoOCR failed: \(error)")
+        }
+    }
+
+    /// Fill in sender names for cached messages stored before the sender's
+    /// user record was fetched — resolved once at display time, persisted so
+    /// every later read has the real name.
+    func backfillSenderNames(_ namesByUserId: [Int64: String]) async {
+        guard !namesByUserId.isEmpty, let pool = await ensureDatabase() else { return }
+        do {
+            try await pool.write { db in
+                for (userId, name) in namesByUserId {
+                    try db.execute(
+                        sql: "UPDATE messages SET sender_name = ? WHERE sender_user_id = ? AND (sender_name IS NULL OR sender_name = '')",
+                        arguments: [name, userId]
+                    )
+                }
+            }
+        } catch {
+            print("[DatabaseManager] backfillSenderNames failed: \(error)")
+        }
+    }
+
+    /// Structural close (#48): a REPLY-kind loop is an unanswered ping — ANY
+    /// outgoing message in that chat after the loop's source message answers
+    /// it. Deterministic (message ids + is_outgoing, never content), so
+    /// crafted text can't forge a closure. Action-kind loops are untouched:
+    /// saying "will do" doesn't complete the work. Chase-safe: a re-ask bumps
+    /// source_message_id forward, so the reply clock resets with it.
+    /// Returns how many loops were closed.
+    func closeAnsweredReplyLoops(chatId: Int64? = nil) async -> Int {
+        guard let pool = await ensureDatabase() else { return 0 }
+        let now = Date().timeIntervalSince1970
+        do {
+            return try await pool.write { db in
+                var sql = """
+                    UPDATE facts SET invalid_at = ?, closed_reason = 'replied', updated_at = ?
+                    WHERE invalid_at IS NULL AND predicate = 'i_owe' AND loop_kind = 'reply'
+                      AND EXISTS (
+                          SELECT 1 FROM messages m
+                          WHERE m.chat_id = facts.source_chat_id
+                            AND m.id > facts.source_message_id
+                            AND m.is_outgoing = 1
+                      )
+                    """
+                var arguments: [DatabaseValueConvertible] = [now, now]
+                if let chatId {
+                    sql += " AND source_chat_id = ?"
+                    arguments.append(chatId)
+                }
+                try db.execute(sql: sql, arguments: StatementArguments(arguments))
+                return db.changesCount
+            }
+        } catch {
+            print("[DatabaseManager] closeAnsweredReplyLoops failed: \(error)")
+            return 0
         }
     }
 

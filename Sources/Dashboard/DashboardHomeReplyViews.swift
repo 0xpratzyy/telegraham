@@ -168,6 +168,7 @@ struct DashboardReplyQueuePage: View {
 
     @State private var filter: DashboardReplyFilter = .onMe
     @State private var searchText = ""
+    @State private var isFactCrawlRunning = FactExtractionCoordinator.shared.isCrawling
     /// User-controlled sort direction. `true` = newest activity at
     /// the top (default, canonical messaging-app behaviour); `false`
     /// = oldest at the top (useful when triaging chats you've been
@@ -212,20 +213,25 @@ struct DashboardReplyQueuePage: View {
     }
 
     var body: some View {
-        if let selectedItem {
-            HStack(spacing: 0) {
-                compactList
-                    .frame(minWidth: 460)
+        Group {
+            if let selectedItem {
+                HStack(spacing: 0) {
+                    compactList
+                        .frame(minWidth: 460)
 
-                DashboardReplyDetail(
-                    item: selectedItem,
-                    onOpenChat: onOpenChat,
-                    onClose: { selectedChatId = nil }
-                )
-                .frame(width: 420)
+                    DashboardReplyDetail(
+                        item: selectedItem,
+                        onOpenChat: onOpenChat,
+                        onClose: { selectedChatId = nil }
+                    )
+                    .frame(width: 420)
+                }
+            } else {
+                centeredList
             }
-        } else {
-            centeredList
+        }
+        .onReceive(FactExtractionCoordinator.shared.$isCrawling.removeDuplicates()) { crawling in
+            isFactCrawlRunning = crawling
         }
     }
 
@@ -360,11 +366,19 @@ struct DashboardReplyQueuePage: View {
                 )
                 .frame(maxWidth: .infinity)
                 .padding(.top, 36)
+            } else if filteredItems.isEmpty, ContextLayer.enabled, isFactCrawlRunning {
+                // Mid-crawl an empty tab isn't "nothing to reply to" — say
+                // what's actually happening instead of "try refreshing".
+                DashboardPigeonLoader(
+                    subtitle: "Messages waiting on you will queue up here as Pidgy reads your chats."
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.top, 36)
             } else if filteredItems.isEmpty {
                 DashboardEmptyState(
                     systemImage: "checkmark.circle",
-                    title: "No matching chats",
-                    subtitle: "Try a different tab or refresh."
+                    title: "All clear here",
+                    subtitle: "Nothing in this tab right now."
                 )
                 .frame(maxWidth: .infinity)
                 .padding(.top, 36)
@@ -896,13 +910,21 @@ struct DashboardReplyDetail: View {
         )
         guard !unresolved.isEmpty else { return }
         var resolved = resolvedSenderNames
+        var freshlyResolved: [Int64: String] = [:]
         for userId in unresolved where resolved[userId] == nil {
             if let name = await telegramService.resolveDisplayName(for: userId) {
                 resolved[userId] = name
+                freshlyResolved[userId] = name
             }
         }
         if resolved != resolvedSenderNames {
             resolvedSenderNames = resolved
+        }
+        // Heal the cache permanently: a name resolved once shouldn't need
+        // re-resolving on every view (or render as "Someone" in surfaces
+        // that read the DB directly).
+        if !freshlyResolved.isEmpty {
+            await DatabaseManager.shared.backfillSenderNames(freshlyResolved)
         }
     }
 
@@ -974,6 +996,11 @@ struct DashboardReplyDetail: View {
         // messages whose cached senderName was nil.
         if let userId = record.senderUserId, let resolved = resolvedSenderNames[userId] {
             return resolved
+        }
+        // No sender USER at all = a sent-as-channel / anonymous-admin post —
+        // Telegram itself shows those under the chat's name.
+        if record.senderUserId == nil, let item {
+            return item.chat.title
         }
         return unknownSenderFallback
     }

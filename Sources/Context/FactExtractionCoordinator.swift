@@ -157,185 +157,70 @@ final class FactExtractionCoordinator: ObservableObject {
         var chasedLoops = 0
         var scannedWindows = 0
         var workedChats = 0
+        // Structural sweep (#48): reply-kind loops with an outgoing message
+        // after their ask are answered pings — close them without depending
+        // on the model emitting resolvedLoops. One global sweep per pass also
+        // heals loops stuck from before this rule (a loop born in the same
+        // window as the user's reply could NEVER close via resolvedLoops: it
+        // wasn't in the OPEN LOOPS list yet, and later passes never see the
+        // ask+reply together again).
+        closedLoops += await DatabaseManager.shared.closeAnsweredReplyLoops()
+
+        // On-device OCR batch: newest pending photo messages get their text
+        // into text_content BEFORE windows are read, so a payment screenshot
+        // can close the "send 35k" loop the same way a typed reply would.
+        await PhotoOCRIndexer.shared.runPass(telegramService: telegramService)
         // Backlog detection: true when this pass stopped for BUDGET reasons
         // (per-chat window cap, per-pass chat cap) rather than catching up —
         // that's what keeps the loader up, independent of how many facts the
         // pass happened to add.
         var backlogRemains = false
-        for chat in eligible {
-            guard !Task.isCancelled else { backlogRemains = true; break }
-            guard workedChats < ContextLayer.maxChatsPerPass else { backlogRemains = true; break }
-
-            var cursor = await DatabaseManager.shared.factExtractionCursor(chatId: chat.id)
-            var windows = 0
-            var didWork = false
-            // Messages this pass consumed for THIS chat — folded into the
-            // chat's rolling summary once the windows are done (one fold call
-            // per worked chat per pass, not per window).
-            var passMessages: [TGMessage] = []
-            // Forward crawl: walk this chat's 30-day window oldest-first in
-            // chunks, a few per pass. The cursor persists, so a deep chat catches
-            // up over subsequent passes rather than being read all at once.
-            while windows < ContextLayer.maxWindowsPerChatPerPass {
-                guard !Task.isCancelled else { break }
-                let records = await DatabaseManager.shared.loadMessagesForward(
-                    chatId: chat.id,
-                    afterMessageId: cursor,
-                    since: cutoff,
-                    limit: ContextLayer.extractionWindow
-                )
-                guard !records.isEmpty else { break }
-                didWork = true
-
-                // Records are id ASC (chronological); extractFacts re-sorts by date too.
-                let tgMessages = records.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
-                // Trailing context: the last few ALREADY-processed messages, so a
-                // tiny window (one terse ping after a long thread) isn't judged
-                // blind — that produced invented connections and re-emissions.
-                let contextRecords = cursor > 0
-                    ? await DatabaseManager.shared.loadMessagesBefore(chatId: chat.id, throughMessageId: cursor, limit: 8)
-                    : []
-                let contextMessages = contextRecords.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
-                let openLoops = await DatabaseManager.shared
-                    .loadOpenFacts(chatId: chat.id)
-                    .filter { $0.predicate.isOpenLoop }
-
-                do {
-                    let result = try await aiService.extractFacts(
-                        chat: chat,
-                        newMessages: tgMessages,
-                        contextMessages: contextMessages,
-                        openLoops: openLoops,
-                        myUserId: myUserId,
-                        myUser: myUser
-                    )
-                    extractFailures[chat.id] = nil
-                    // Resolve each subject to a canonical person id (DM
-                    // counterparty / chat-sender match) so name variants collapse
-                    // and facts join the People graph.
-                    let resolved = result.drafts.map { draft -> FactDraft in
-                        var d = draft
-                        let (pid, name) = FactEntityResolver.resolve(
-                            subject: draft.subjectEntity,
-                            predicate: draft.predicate,
-                            chat: chat,
-                            myUserId: myUserId,
-                            directory: directory
-                        )
-                        d.subjectPersonId = pid
-                        d.subjectEntity = name
-                        return d
-                    }
-                    // Structural gates for closing loops — never message content,
-                    // so crafted text alone can't forge a closure:
-                    //  - i_owe closes only when a genuine outgoing/[ME] message
-                    //    exists in the window (the user acted);
-                    //  - owes_me closes only when a genuine INBOUND message exists
-                    //    (the other side acted — they delivered/answered). Worst
-                    //    case for a malicious sender is hiding a reminder about
-                    //    what THEY owe, never the user's own tasks.
-                    // The model is the targeting check on top: resolvedLoops must
-                    // name the specific loop the new messages addressed.
-                    let myOutgoingId = records
-                        .filter { $0.isOutgoing || (myUserId > 0 && $0.senderUserId == myUserId) }
-                        .map(\.id).max()
-                    let hasInbound = records.contains {
-                        !$0.isOutgoing && !(myUserId > 0 && $0.senderUserId == myUserId)
-                    }
-
-                    // Close BEFORE upserting: a legitimate re-ask in this same
-                    // window can carry the SAME fingerprint as the loop being
-                    // closed — invalidating first lets the new draft insert as a
-                    // fresh live row instead of being upserted into the old row
-                    // and then invalidated along with it.
-                    if !result.resolvedFingerprints.isEmpty {
-                        let resolvedSet = Set(result.resolvedFingerprints)
-                        let safe = openLoops
-                            .filter { f in
-                                guard resolvedSet.contains(f.fingerprint) else { return false }
-                                switch f.predicate {
-                                case .iOwe: return myOutgoingId != nil
-                                case .owesMe: return hasInbound
-                                default: return false
-                                }
-                            }
-                            .map(\.fingerprint)
-                        if !safe.isEmpty {
-                            await DatabaseManager.shared.invalidateFacts(fingerprints: safe, reason: .replied)
-                            closedLoops += safe.count
-                        }
-                    }
-                    if !resolved.isEmpty {
-                        await DatabaseManager.shared.upsertFacts(resolved)
-                        newFacts += resolved.count
-                    }
-                    // Chases: a follow-up ping bumps the existing loop to the
-                    // chase message (date + evidence), gated like owes_me closes
-                    // on a genuine inbound message — [ME]'s own text can't bump.
-                    if !result.chasedLoops.isEmpty, hasInbound {
-                        await DatabaseManager.shared.refreshChasedLoops(result.chasedLoops)
-                        chasedLoops += result.chasedLoops.count
-                    }
-                } catch {
-                    logger.error("extractFacts failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    // A window whose CONTENT deterministically breaks the model
-                    // (unparseable reply every time) must not wedge this chat's
-                    // crawl forever: after 3 failed attempts on the SAME cursor,
-                    // skip past the poison window. Transient provider/network
-                    // errors don't count — they retry indefinitely and self-heal.
-                    if case FactExtractionError.unparseableResponse = error {
-                        let windowMax = records.map(\.id).max() ?? cursor
-                        var entry = extractFailures[chat.id] ?? (cursor: cursor, count: 0)
-                        if entry.cursor != cursor { entry = (cursor: cursor, count: 0) }
-                        entry.count += 1
-                        extractFailures[chat.id] = entry
-                        if entry.count >= 3 {
-                            logger.error("skipping poison window for chat \(chat.id, privacy: .public) after \(entry.count, privacy: .public) unparseable replies")
-                            cursor = windowMax
-                            await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
-                            extractFailures[chat.id] = nil
-                        }
-                    }
-                    break
+        // Parallel crawl: chats are independent (a chat's windows must stay
+        // sequential — cursor + open-loops feed the next window — but there is
+        // no cross-chat state). Five chats in flight overlap their AI calls,
+        // which is where all the time goes; the @MainActor hops between
+        // awaits are negligible. Newest-active chats still start first.
+        let maxConcurrentChats = 5
+        var chatIterator = eligible.makeIterator()
+        var ranOutOfChats = false
+        await withTaskGroup(of: ChatCrawlOutcome.self) { group in
+            var inFlight = 0
+            func launchNext() -> Bool {
+                guard !Task.isCancelled,
+                      workedChats + inFlight < ContextLayer.maxChatsPerPass else { return false }
+                guard let chat = chatIterator.next() else {
+                    ranOutOfChats = true
+                    return false
                 }
-
-                passMessages.append(contentsOf: tgMessages)
-                cursor = records.map(\.id).max() ?? cursor
-                await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
-                windows += 1
-                scannedWindows += 1
-                if records.count < ContextLayer.extractionWindow { break } // caught up to now
-                try? await Task.sleep(nanoseconds: 300_000_000) // gentle on the API
+                group.addTask {
+                    await self.crawlChat(
+                        chat,
+                        cutoff: cutoff,
+                        myUserId: myUserId,
+                        myUser: myUser,
+                        directory: directory,
+                        aiService: aiService
+                    )
+                }
+                inFlight += 1
+                return true
             }
-            // Exited on the per-chat window cap (not the caught-up break) →
-            // this chat still has unread backlog.
-            if windows >= ContextLayer.maxWindowsPerChatPerPass { backlogRemains = true }
-            if didWork { workedChats += 1 }
-
-            // Entity memory (M1): fold what this pass consumed into the chat's
-            // rolling summary. Non-fatal — a failed fold just retries with the
-            // next pass's messages (the old summary row stays current).
-            if !passMessages.isEmpty, !Task.isCancelled {
-                let old = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chat.id)
-                do {
-                    let updated = try await aiService.foldChatSummary(
-                        chat: chat,
-                        oldSummary: old?.summary,
-                        newMessages: passMessages,
-                        myUserId: myUserId,
-                        myUser: myUser
-                    )
-                    await DatabaseManager.shared.saveChatSummary(
-                        chatId: chat.id,
-                        title: chat.title,
-                        summary: updated,
-                        throughMessageId: cursor
-                    )
-                } catch {
-                    logger.error("summary fold failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                }
+            while inFlight < maxConcurrentChats, launchNext() {}
+            for await outcome in group {
+                inFlight -= 1
+                newFacts += outcome.newFacts
+                closedLoops += outcome.closedLoops
+                chasedLoops += outcome.chasedLoops
+                scannedWindows += outcome.scannedWindows
+                if outcome.didWork { workedChats += 1 }
+                if outcome.hitWindowCap || outcome.cancelled { backlogRemains = true }
+                while inFlight < maxConcurrentChats, launchNext() {}
             }
         }
+        // Stopped on budget/cancel with chats unvisited → backlog remains
+        // (same semantics as the old cap-break).
+        if !ranOutOfChats { backlogRemains = true }
+
 
         // A cancelled task must not stamp pass state — its replacement runs the
         // real pass (a cancelled tail once cleared the loader mid-crawl).
@@ -376,6 +261,224 @@ final class FactExtractionCoordinator: ObservableObject {
     /// waiting for every chat to re-extract. The model decides reply vs action —
     /// no keyword heuristics. Returns whether any loop_kind actually changed so
     /// the caller can include the reclassification in its change notification.
+
+    /// Everything the pass does for ONE chat — windows walked sequentially
+    /// (cursor + open-loop state feed the next window), returning deltas the
+    /// pass aggregates. Runs inside a task group; only AI/network awaits
+    /// overlap across chats.
+    private struct ChatCrawlOutcome {
+        var newFacts = 0
+        var closedLoops = 0
+        var chasedLoops = 0
+        var scannedWindows = 0
+        var didWork = false
+        var hitWindowCap = false
+        var cancelled = false
+    }
+
+    private func crawlChat(
+        _ chat: TGChat,
+        cutoff: Date,
+        myUserId: Int64,
+        myUser: TGUser?,
+        directory: FactContactDirectory,
+        aiService: AIService
+    ) async -> ChatCrawlOutcome {
+        var out = ChatCrawlOutcome()
+
+            var cursor = await DatabaseManager.shared.factExtractionCursor(chatId: chat.id)
+            var windows = 0
+            var didWork = false
+            // Forward crawl: walk this chat's 30-day window oldest-first in
+            // chunks, a few per pass. The cursor persists, so a deep chat catches
+            // up over subsequent passes rather than being read all at once.
+            while windows < ContextLayer.maxWindowsPerChatPerPass {
+                guard !Task.isCancelled else { out.cancelled = true; break }
+                let records = await DatabaseManager.shared.loadMessagesForward(
+                    chatId: chat.id,
+                    afterMessageId: cursor,
+                    since: cutoff,
+                    limit: ContextLayer.extractionWindow
+                )
+                guard !records.isEmpty else { break }
+                didWork = true
+
+                // Records are id ASC (chronological); extractFacts re-sorts by date too.
+                let tgMessages = records.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
+                // Trailing context: the last few ALREADY-processed messages, so a
+                // tiny window (one terse ping after a long thread) isn't judged
+                // blind — that produced invented connections and re-emissions.
+                let contextRecords = cursor > 0
+                    ? await DatabaseManager.shared.loadMessagesBefore(chatId: chat.id, throughMessageId: cursor, limit: 8)
+                    : []
+                let contextMessages = contextRecords.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
+                let openLoops = await DatabaseManager.shared
+                    .loadOpenFacts(chatId: chat.id)
+                    .filter { $0.predicate.isOpenLoop }
+
+                do {
+                    let result = try await aiService.extractFacts(
+                        chat: chat,
+                        newMessages: tgMessages,
+                        contextMessages: contextMessages,
+                        openLoops: openLoops,
+                        myUserId: myUserId,
+                        myUser: myUser
+                    )
+                    extractFailures[chat.id] = nil
+                    // Structural gates for closing loops — never message content,
+                    // so crafted text alone can't forge a closure:
+                    //  - i_owe closes only when a genuine outgoing/[ME] message
+                    //    exists in the window (the user acted);
+                    //  - owes_me closes only when a genuine INBOUND message exists
+                    //    (the other side acted — they delivered/answered). Worst
+                    //    case for a malicious sender is hiding a reminder about
+                    //    what THEY owe, never the user's own tasks.
+                    // The model is the targeting check on top: resolvedLoops must
+                    // name the specific loop the new messages addressed.
+                    let myOutgoingId = records
+                        .filter { $0.isOutgoing || (myUserId > 0 && $0.senderUserId == myUserId) }
+                        .map(\.id).max()
+                    let hasInbound = records.contains {
+                        !$0.isOutgoing && !(myUserId > 0 && $0.senderUserId == myUserId)
+                    }
+                    // Resolve each subject to a canonical person id (DM
+                    // counterparty / chat-sender match) so name variants collapse
+                    // and facts join the People graph. Then the stillborn gate:
+                    // a reply-kind loop whose ask the user ALREADY answered in
+                    // this same window must not be born — resolvedLoops can only
+                    // target pre-existing loops, so it could never close later.
+                    let resolved = result.drafts.map { draft -> FactDraft in
+                        var d = draft
+                        let (pid, name) = FactEntityResolver.resolve(
+                            subject: draft.subjectEntity,
+                            predicate: draft.predicate,
+                            chat: chat,
+                            myUserId: myUserId,
+                            directory: directory
+                        )
+                        d.subjectPersonId = pid
+                        d.subjectEntity = name
+                        return d
+                    }
+                    .filter { d in
+                        guard d.predicate == .iOwe, d.loopKind == .reply,
+                              let out = myOutgoingId else { return true }
+                        return out <= d.sourceMessageId
+                    }
+
+                    // Close BEFORE upserting: a legitimate re-ask in this same
+                    // window can carry the SAME fingerprint as the loop being
+                    // closed — invalidating first lets the new draft insert as a
+                    // fresh live row instead of being upserted into the old row
+                    // and then invalidated along with it.
+                    if !result.resolvedFingerprints.isEmpty {
+                        let resolvedSet = Set(result.resolvedFingerprints)
+                        let safe = openLoops
+                            .filter { f in
+                                guard resolvedSet.contains(f.fingerprint) else { return false }
+                                switch f.predicate {
+                                case .iOwe: return myOutgoingId != nil
+                                case .owesMe: return hasInbound
+                                default: return false
+                                }
+                            }
+                            .map(\.fingerprint)
+                        if !safe.isEmpty {
+                            await DatabaseManager.shared.invalidateFacts(fingerprints: safe, reason: .replied)
+                            out.closedLoops += safe.count
+                        }
+                    }
+                    if !resolved.isEmpty {
+                        await DatabaseManager.shared.upsertFacts(resolved)
+                        out.newFacts += resolved.count
+                    }
+                    // Structural sweep: this window's outgoing messages answer
+                    // any older reply-kind loop of this chat, whether or not
+                    // the model emitted resolvedLoops for it.
+                    if myOutgoingId != nil {
+                        out.closedLoops += await DatabaseManager.shared.closeAnsweredReplyLoops(chatId: chat.id)
+                    }
+                    // Chases: a follow-up ping bumps the existing loop to the
+                    // chase message (date + evidence), gated like owes_me closes
+                    // on a genuine inbound message — [ME]'s own text can't bump.
+                    if !result.chasedLoops.isEmpty, hasInbound {
+                        await DatabaseManager.shared.refreshChasedLoops(result.chasedLoops)
+                        out.chasedLoops += result.chasedLoops.count
+                    }
+                } catch {
+                    logger.error("extractFacts failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    // A window whose CONTENT deterministically breaks the model
+                    // (unparseable reply every time) must not wedge this chat's
+                    // crawl forever: after 3 failed attempts on the SAME cursor,
+                    // skip past the poison window. Transient provider/network
+                    // errors don't count — they retry indefinitely and self-heal.
+                    if case FactExtractionError.unparseableResponse = error {
+                        let windowMax = records.map(\.id).max() ?? cursor
+                        var entry = extractFailures[chat.id] ?? (cursor: cursor, count: 0)
+                        if entry.cursor != cursor { entry = (cursor: cursor, count: 0) }
+                        entry.count += 1
+                        extractFailures[chat.id] = entry
+                        if entry.count >= 3 {
+                            logger.error("skipping poison window for chat \(chat.id, privacy: .public) after \(entry.count, privacy: .public) unparseable replies")
+                            cursor = windowMax
+                            await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
+                            extractFailures[chat.id] = nil
+                        }
+                    }
+                    break
+                }
+
+                cursor = records.map(\.id).max() ?? cursor
+                await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
+                windows += 1
+                out.scannedWindows += 1
+                if records.count < ContextLayer.extractionWindow { break } // caught up to now
+                try? await Task.sleep(nanoseconds: 300_000_000) // gentle on the API
+            }
+            // Exited on the per-chat window cap (not the caught-up break) →
+            // this chat still has unread backlog.
+            if windows >= ContextLayer.maxWindowsPerChatPerPass { out.hitWindowCap = true }
+            out.didWork = didWork
+
+            // Entity memory (M1): fold ACCUMULATED unfolded messages into the
+            // chat's rolling summary — but only once enough conversation has
+            // built up. Folding every pass ran the priciest AI stage hundreds
+            // of times a day for 2-message drips (90% of the AI bill). Below
+            // the threshold the summary's through-cursor stays put, so those
+            // messages simply fold later, nothing is lost. Non-fatal — a
+            // failed fold retries next pass.
+            if didWork, !Task.isCancelled {
+                let current = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chat.id)
+                let foldedThrough = current?.throughMessageId ?? 0
+                let unfoldedRecords = await DatabaseManager.shared
+                    .loadMessagesBefore(chatId: chat.id, throughMessageId: cursor, limit: 60)
+                    .filter { $0.id > foldedThrough }
+                let bootstrap = current == nil && unfoldedRecords.count >= 2
+                if bootstrap || unfoldedRecords.count >= 6 {
+                    let unfolded = unfoldedRecords.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
+                    do {
+                        let updated = try await aiService.foldChatSummary(
+                            chat: chat,
+                            oldSummary: current?.summary,
+                            newMessages: unfolded,
+                            myUserId: myUserId,
+                            myUser: myUser
+                        )
+                        await DatabaseManager.shared.saveChatSummary(
+                            chatId: chat.id,
+                            title: chat.title,
+                            summary: updated,
+                            throughMessageId: cursor
+                        )
+                    } catch {
+                        logger.error("summary fold failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+            }
+        return out
+    }
+
     private func backfillLoopKindsIfNeeded(aiService: AIService) async -> Bool {
         guard !didBackfillLoopKinds else { return false }
         let pending = await DatabaseManager.shared.loadUnclassifiedIOweLoops(limit: 500)

@@ -40,18 +40,10 @@ struct LauncherView: View {
     // Context layer (#48): the fact-grounded answer engine ("Ask Pidgy"),
     // presented as a chat thread — user bubbles + Pidgy replies, follow-ups
     // typed into the (repurposed) search field. Esc returns to search.
-    struct AskTurn: Identifiable, Equatable {
-        enum Role { case user, pidgy }
-        let id = UUID()
-        let role: Role
-        var text: String
-        var isError = false
-    }
+    // Engine + thread UI live in AskPidgyChat.swift (shared with dashboard).
+    @StateObject private var askChat = AskPidgyChatModel()
     @State private var chatMode = false
-    @State private var askThread: [AskTurn] = []
-    @State private var isAnswering = false
     @State private var answeredQuery = ""   // dedups the planner auto-trigger
-    @State private var answerTask: Task<Void, Never>?
     @State private var lastEnterAt = Date.distantPast
     @FocusState private var isSearchFocused: Bool
 
@@ -247,7 +239,14 @@ struct LauncherView: View {
                 if chatMode {
                     // Chat layout: thread on top, composer at the bottom —
                     // like any messaging app.
-                    chatThreadView
+                    Group {
+                        if askChat.thread.isEmpty && !askChat.isAnswering {
+                            askChatEmptyState
+                        } else {
+                            AskPidgyThreadView(model: askChat)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .offset(y: 10)))
                     Divider()
                     searchBar
                 } else {
@@ -272,6 +271,7 @@ struct LauncherView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(PidgyMotion.easeOut, value: chatMode)
         .background(Color.Pidgy.bg1)
         .ignoresSafeArea()
         .onAppear {
@@ -378,13 +378,33 @@ struct LauncherView: View {
                   let spec, spec.isPersonQuestion,
                   spec.rawQuery == searchText.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
             let q = spec.rawQuery
-            if answeredQuery != q, !isAnswering {
+            if answeredQuery != q, !askChat.isAnswering {
                 answeredQuery = q
                 enterChat(with: q)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .launcherEscape)) { _ in
             exitChat()
+        }
+        // Dashboard's "Ask anything…" (and its ⌘K) — straight into an empty
+        // chat with the composer focused; first Enter starts the conversation.
+        .onReceive(NotificationCenter.default.publisher(for: .requestLauncherAsk)) { _ in
+            guard ContextLayer.enabled, aiService.isConfigured else { return }
+            if !chatMode {
+                chatMode = true
+                LauncherChatSession.isActive = true
+                askChat.reset()
+                searchText = ""
+                searchCoordinator.cancelSearch()
+                searchCoordinator.clearAIState()
+            }
+            isSearchFocused = true
+        }
+        // Esc lands HERE when the text field is focused (the field editor
+        // consumes the key before the panel's keyDown sees it) — same story
+        // as Return/.onSubmit. The panel notification covers the rest.
+        .onExitCommand {
+            if chatMode { exitChat() }
         }
         .onChange(of: isSearchFocused) { _, focused in
             Task {
@@ -435,13 +455,20 @@ struct LauncherView: View {
 
     private var searchBar: some View {
         HStack(spacing: 10) {
-            Image(systemName: chatMode ? "sparkle" : "magnifyingglass")
-                .font(Font.Pidgy.body)
-                .foregroundStyle(chatMode ? Color.Pidgy.accent : Color.Pidgy.fg3)
+            if !chatMode {
+                Image(systemName: "magnifyingglass")
+                    .font(.custom("Inter", size: 17))
+                    .foregroundStyle(Color.Pidgy.fg3)
+            }
 
-            TextField(chatMode ? "Ask a follow-up… (esc to go back)" : "Search Telegram...", text: $searchText)
+            TextField(
+                chatMode
+                    ? (askChat.thread.isEmpty ? "Ask anything…" : "Ask a follow-up… (esc to go back)")
+                    : "Search or ask anything…",
+                text: $searchText
+            )
                 .textFieldStyle(.plain)
-                .font(Font.Pidgy.body)
+                .font(.custom("Inter", size: 17))
                 .focused($isSearchFocused)
                 // Return lands HERE while the field is focused (the field
                 // editor consumes the key before the panel's keyDown sees
@@ -469,31 +496,9 @@ struct LauncherView: View {
                 .buttonStyle(.plain)
             }
 
-            // Connection status
-            HStack(spacing: 4) {
-                StatusDot(isConnected: telegramService.authState == .ready)
-                if let user = telegramService.currentUser {
-                    Text(user.firstName)
-                        .font(Font.Pidgy.monoSm)
-                        .foregroundStyle(Color.Pidgy.fg3)
-                }
-            }
-
-            ForEach(LauncherChromeAction.allCases) { action in
-                Button {
-                    performChromeAction(action)
-                } label: {
-                    Image(systemName: action.systemImage)
-                        .font(Font.Pidgy.bodySm)
-                        .foregroundStyle(Color.Pidgy.fg3)
-                }
-                .buttonStyle(.plain)
-                .help(action.accessibilityLabel)
-                .accessibilityLabel(action.accessibilityLabel)
-            }
         }
         .padding(.horizontal, PidgySpace.s3)
-        .padding(.vertical, PidgySpace.s2)
+        .padding(.vertical, 14)
         .background(Color.clear)
         .onChange(of: isAISearching) { _, isSearching in
             // Kick off / cancel the pulsing-input animation when the
@@ -533,10 +538,10 @@ struct LauncherView: View {
                         activeFilter = filter
                     } label: {
                         Text(filter.rawValue)
-                            .font(activeFilter == filter ? Font.Pidgy.eyebrow : Font.Pidgy.meta)
+                            .font(.custom("Inter", size: 13).weight(activeFilter == filter ? .semibold : .regular))
                             .foregroundStyle(activeFilter == filter ? Color.Pidgy.fg1 : Color.Pidgy.fg3)
                             .padding(.horizontal, PidgySpace.s2)
-                            .padding(.vertical, 3)
+                            .padding(.vertical, 4)
                     }
                     .buttonStyle(.plain)
                 }
@@ -732,22 +737,6 @@ struct LauncherView: View {
         fixture.submitToFeedbackSheet()
         // Unlike the dashboard's flag affordances, the launcher must
         // also make sure the dashboard window exists for the sheet.
-        NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
-    }
-
-    /// Flag the latest Ask Pidgy answer — same review-first feedback flow as
-    /// flagCurrentAnswer, sourced from the chat thread instead of search state.
-    private func flagChatAnswer() {
-        let lastQuestion = askThread.last(where: { $0.role == .user })?.text ?? ""
-        let lastAnswer = askThread.last(where: { $0.role == .pidgy && !$0.isError })?.text
-        let fixture = FlaggedAnswerFixture(
-            query: lastQuestion,
-            route: "askPidgyChat",
-            resultTitle: nil,
-            resultText: lastAnswer,
-            supportingSnippets: []
-        )
-        fixture.submitToFeedbackSheet()
         NotificationCenter.default.post(name: .pidgyOpenFeedbackWithPrefill, object: nil)
     }
 
@@ -1340,122 +1329,44 @@ struct LauncherView: View {
         return trimmedPreferred.isEmpty ? "Chat \(chatId)" : trimmedPreferred
     }
 
-    // MARK: - Ask Pidgy chat thread
-
-    private var chatThreadView: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(askThread) { turn in
-                        if turn.role == .user {
-                            userBubble(turn)
-                        } else {
-                            pidgyBubble(turn)
-                        }
-                    }
-                    if isAnswering {
-                        thinkingBubble
-                    }
-                    if !isAnswering, askThread.contains(where: { $0.role == .pidgy && !$0.isError }) {
-                        HStack {
-                            Spacer()
-                            Button(action: flagChatAnswer) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "flag")
-                                        .font(Font.Pidgy.meta)
-                                    Text("Flag this answer")
-                                        .font(Font.Pidgy.meta)
-                                }
-                                .foregroundStyle(Color.Pidgy.fg3)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Opens Send Feedback prefilled with this question and answer — you review everything before sending.")
-                        }
-                    }
-                    Color.clear.frame(height: 1).id("chat-bottom")
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .onChange(of: askThread) {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("chat-bottom", anchor: .bottom)
-                }
-            }
-            .onChange(of: isAnswering) {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("chat-bottom", anchor: .bottom)
-                }
-            }
-        }
-    }
-
-    private func userBubble(_ turn: AskTurn) -> some View {
-        HStack {
-            Spacer(minLength: 60)
-            Text(turn.text)
-                .font(Font.Pidgy.bodySm)
-                .foregroundStyle(Color.Pidgy.fg1)
-                .textSelection(.enabled)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.Pidgy.accent.opacity(0.18))
-                )
-        }
-    }
-
-    private func pidgyBubble(_ turn: AskTurn) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text("✦")
-                .font(Font.Pidgy.bodySm)
+    /// Empty chat (opened via "Ask anything…"): tappable example prompts
+    /// instead of a blank thread.
+    private var askChatEmptyState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ASK PIDGY")
+                .font(Font.Pidgy.monoSm)
                 .foregroundStyle(Color.Pidgy.accent)
-            Text(Self.renderAnswerMarkdown(turn.text))
-                .font(Font.Pidgy.bodySm)
-                .foregroundStyle(turn.isError ? Color.Pidgy.warning : Color.Pidgy.fg1)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-            Spacer(minLength: 40)
+                .padding(.bottom, 2)
+            ForEach(["What should I reply to first?",
+                     "Who owes me something right now?",
+                     "whats up with akhil"], id: \.self) { example in
+                Button {
+                    askChat.start(with: example, aiService: aiService)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.up.right")
+                            .font(Font.Pidgy.meta)
+                            .foregroundStyle(Color.Pidgy.fg4)
+                        Text(example)
+                            .font(.custom("Inter", size: 13))
+                            .foregroundStyle(Color.Pidgy.fg2)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9)
+                            .fill(Color.white.opacity(0.03))
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.pidgyPress)
+            }
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.Pidgy.bg3)
-        )
-    }
-
-    private var thinkingBubble: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Text("✦")
-                .font(Font.Pidgy.bodySm)
-                .foregroundStyle(Color.Pidgy.accent)
-            ProgressView().controlSize(.small)
-            Text("thinking…")
-                .font(Font.Pidgy.bodySm)
-                .foregroundStyle(Color.Pidgy.fg3)
-            Spacer(minLength: 40)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.Pidgy.bg3)
-        )
-    }
-
-    /// Render the answer's inline markdown (**bold** names) while preserving
-    /// line breaks; falls back to plain text if parsing fails.
-    private static func renderAnswerMarkdown(_ s: String) -> AttributedString {
-        (try? AttributedString(
-            markdown: s,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace,
-                failurePolicy: .returnPartiallyParsedIfPossible
-            )
-        )) ?? AttributedString(s)
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// Open the Ask Pidgy chat with `question` as the first user bubble.
@@ -1465,13 +1376,12 @@ struct LauncherView: View {
         guard !q.isEmpty else { return }
         chatMode = true
         LauncherChatSession.isActive = true
-        askThread = [AskTurn(role: .user, text: q)]
         searchText = ""
         searchSettleTask?.cancel()
         searchSettling = false
         searchCoordinator.cancelSearch()
         searchCoordinator.clearAIState()
-        runAnswerTurn()
+        askChat.start(with: q, aiService: aiService)
     }
 
     /// Single Enter handler for both delivery paths — the TextField's
@@ -1482,56 +1392,30 @@ struct LauncherView: View {
         guard now.timeIntervalSince(lastEnterAt) > 0.15 else { return }
         lastEnterAt = now
         if chatMode {
-            sendFollowUp()
+            let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !q.isEmpty, !askChat.isAnswering else { return }
+            searchText = ""
+            askChat.send(q, aiService: aiService)
         } else if let aiSearchMode,
            aiSearchMode != .unsupported,
            selectedIndex < aiResults.count {
             openAISearchResult(aiResults[selectedIndex])
         } else if selectedIndex < displayedChats.count {
             openChat(displayedChats[selectedIndex])
-        }
-    }
-
-    private func sendFollowUp() {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty, !isAnswering else { return }
-        askThread.append(AskTurn(role: .user, text: q))
-        searchText = ""
-        runAnswerTurn()
-    }
-
-    private func runAnswerTurn() {
-        guard let question = askThread.last(where: { $0.role == .user })?.text else { return }
-        isAnswering = true
-        answerTask?.cancel()
-        answerTask = Task { @MainActor in
-            do {
-                let history = askThread.dropLast().map {
-                    (role: $0.role == .user ? "user" : "assistant", text: $0.text)
-                }
-                let reply = try await aiService.answerQuestion(question, history: history)
-                guard !Task.isCancelled else { return }
-                askThread.append(AskTurn(role: .pidgy, text: reply))
-            } catch {
-                guard !Task.isCancelled else { return }
-                askThread.append(AskTurn(
-                    role: .pidgy,
-                    text: "Couldn’t answer right now — try again.",
-                    isError: true
-                ))
-            }
-            isAnswering = false
+        } else if ContextLayer.enabled, aiService.isConfigured,
+                  !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Nothing to open (no results, or none selected) — Enter hands the
+            // query to the chat instead of dying on an empty screen.
+            enterChat(with: searchText)
         }
     }
 
     /// Esc / ✕: leave the chat and return to normal search.
     private func exitChat() {
         guard chatMode else { return }
-        answerTask?.cancel()
-        isAnswering = false
+        askChat.reset()
         chatMode = false
         LauncherChatSession.isActive = false
-        askThread = []
         answeredQuery = ""
         searchText = ""
         isSearchFocused = true
@@ -1926,18 +1810,18 @@ struct LauncherView: View {
         return Button {
             pipelineSubFilter = filter
         } label: {
-            HStack(spacing: 3) {
+            HStack(spacing: 4) {
                 if let c = count, c > 0 {
                     Text("\(c)")
-                        .font(Font.Pidgy.monoSm)
+                        .font(Font.Pidgy.mono)
                         .foregroundStyle(isActive ? Color.white : color)
                 }
                 Text(label)
-                    .font(isActive ? Font.Pidgy.eyebrow : Font.Pidgy.meta)
+                    .font(.custom("Inter", size: 13).weight(isActive ? .semibold : .regular))
                     .foregroundStyle(isActive ? Color.white : Color.Pidgy.fg2)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
             .background(
                 Capsule()
                     .fill(isActive ? color.opacity(0.8) : Color.Pidgy.bg4.opacity(0.55))

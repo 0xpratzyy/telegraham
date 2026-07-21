@@ -1355,7 +1355,9 @@ enum DashboardPeopleDirectory {
         staleContactIds: Set<Int64>,
         now: Date = Date()
     ) -> [DashboardPersonSignal] {
-        let uniqueContacts = uniqueContacts(contacts)
+        // Nameless nodes are unusable rows AND poison the name-based matching
+        // below (an "Unknown" contact matches every "Unknown"-owner task).
+        let uniqueContacts = uniqueContacts(contacts).filter(\.hasResolvedName)
         let matchers = uniqueContacts.map { ContactMatcher(contact: $0, terms: searchTerms(for: $0)) }
         var replyCounts: [Int64: Int] = [:]
         var taskCounts: [Int64: Int] = [:]
@@ -1551,7 +1553,11 @@ struct DashboardPersonContextSummary: Sendable, Equatable {
         if openReplyCount + openTaskCount > 0 {
             headline = "\(contact.bestDisplayName) has \(openParts.joined(separator: " and ")) open."
         } else if let lastInteractionAt = contact.lastInteractionAt {
-            headline = "No open work. Last touched \(compactRelativeTime(from: lastInteractionAt, now: now)) ago."
+            let stamp = compactRelativeTime(from: lastInteractionAt, now: now)
+            // Beyond a week the stamp is an ABSOLUTE date ("Apr 9") — "ago"
+            // only reads right after a relative one ("3d").
+            let suffix = stamp.first?.isNumber == true && !stamp.contains(" ") ? " ago" : ""
+            headline = "No open work. Last touched \(stamp)\(suffix)."
         } else {
             headline = "No open work or recent touch recorded."
         }
@@ -1622,5 +1628,14 @@ extension ISO8601DateFormatter {
 extension RelationGraph.Node {
     var bestDisplayName: String {
         displayName?.isEmpty == false ? displayName! : (username ?? "Unknown")
+    }
+
+    /// True when we actually know who this is. Contacts without any name are
+    /// noise in People lists — a row reading "Unknown" identifies nobody, and
+    /// its name-based task matching latches onto other "Unknown"-owner rows.
+    /// (GraphBuilder bakes the literal "Unknown" into unnamed nodes.)
+    var hasResolvedName: Bool {
+        let name = bestDisplayName
+        return name != "Unknown" && !name.hasPrefix("User ")
     }
 }

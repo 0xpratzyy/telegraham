@@ -97,9 +97,7 @@ struct SidebarLauncherShortcutButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11, weight: .medium))
-                Text("Jump to anything…")
+                Text("Ask anything…")
                     .font(PidgyDashboardTheme.metadataFont)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -132,7 +130,7 @@ struct SidebarLauncherShortcutButton: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .animation(PidgyMotion.easeOutFast, value: isHovering)
-        .help("Jump to anything (⌘K)")
+        .help("Search or ask anything (⌘K)")
     }
 }
 
@@ -617,52 +615,27 @@ struct DashboardEmptyState: View {
     }
 }
 
-/// Playful "still populating" state — the Pidgy mascot doing a little hop with
-/// rotating quips. Shown while a surface (Tasks / reply queue) is being filled by
-/// the first extraction crawl, instead of a bare empty state that reads as "broken".
+/// "Still populating" state — shown while a surface (Tasks / Reply queue) is
+/// being filled by the extraction crawl, instead of a bare empty state that
+/// reads as "broken". Simple and honest: the line-art loader plus one line
+/// saying what's happening and where results will land.
 struct DashboardPigeonLoader: View {
-    @State private var hop = false
-    @State private var quipIndex = 0
-    // @State, NOT a plain let: the parent re-inits this struct on every render,
-    // and a per-init publisher makes onReceive resubscribe + restart the 2.4s
-    // countdown each time — under render churn (chats streaming, typing) the
-    // quip stayed frozen on the first line forever. @State's initial value
-    // survives re-init, so the tick cadence does too.
-    @State private var ticker = Timer.publish(every: 2.4, on: .main, in: .common).autoconnect()
-
-    private static let quips = [
-        "Rounding up your tasks…",
-        "Herding the pigeons…",
-        "Pecking through your chats…",
-        "Shaking out the crumbs…",
-        "Almost there — coo coo…"
-    ]
-
-    private var currentQuip: String { DashboardPigeonLoader.quips[quipIndex] }
+    var title: String = "Reading your chats…"
+    var subtitle: String = "New items land here as Pidgy works through the last 30 days."
 
     var body: some View {
-        VStack(spacing: 14) {
-            PidgyMascotMark(size: 56)
-                .rotationEffect(.degrees(hop ? -7 : 7))
-                .scaleEffect(x: hop ? 1.0 : 1.05, y: hop ? 1.0 : 0.94, anchor: .bottom)
-                .offset(y: hop ? -12 : 0)
-                .animation(.easeInOut(duration: 0.62).repeatForever(autoreverses: true), value: hop)
-
-            Text(currentQuip)
+        VStack(spacing: 12) {
+            PidgyLoader(size: 38)
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(PidgyDashboardTheme.primary)
+            Text(subtitle)
                 .font(PidgyDashboardTheme.detailBodyFont)
                 .foregroundStyle(PidgyDashboardTheme.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 300)
-                .id(currentQuip)
-                .transition(.opacity)
+                .frame(maxWidth: 320)
         }
         .padding(28)
-        .onAppear { hop = true }
-        .onReceive(ticker) { _ in
-            withAnimation(.easeInOut(duration: 0.35)) {
-                quipIndex = (quipIndex + 1) % DashboardPigeonLoader.quips.count
-            }
-        }
     }
 }
 
