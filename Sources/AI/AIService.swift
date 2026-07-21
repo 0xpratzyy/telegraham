@@ -413,7 +413,7 @@ final class AIService: ObservableObject {
         // Already-processed context rides along unnumbered so a tiny window
         // (one terse ping) isn't judged blind.
         let transcript = FactExtractionPrompt.numberedTranscript(snippets: snippets, context: contextSnippets)
-        let response = try await provider.answer(systemPrompt: systemPrompt, userMessage: transcript)
+        let response = try await provider.answer(systemPrompt: systemPrompt, userMessage: transcript, kind: .factExtraction)
         // validFrom fallback for a snippet with no date — parse() prefers each
         // fact's CITED message date.
         let newest = newMessages.max(by: { $0.date < $1.date })
@@ -460,7 +460,8 @@ final class AIService: ObservableObject {
                 myName: myUser?.firstName ?? "Me",
                 oldSummary: oldSummary,
                 transcript: transcript
-            )
+            ),
+            kind: .factExtraction
         )
     }
 
@@ -475,12 +476,42 @@ final class AIService: ObservableObject {
         guard !trimmed.isEmpty else { return "" }
         let openLoops = await DatabaseManager.shared.loadOpenFacts(limit: 250)
         let durable = await DatabaseManager.shared.loadDurableFacts(limit: 50)
+
+        // Relevance-first payload: sending the ENTIRE store every call was
+        // ~10-12k input tokens (and again per follow-up). Deterministic token
+        // match against the conversation ranks query-relevant items first,
+        // then hard caps trim the tail. Recall stays safe: unmatched items
+        // still ride along up to the cap, so "who owes me money" (no name
+        // tokens) sees everything it did before.
+        let convoText = ([trimmed] + history.suffix(4).map(\.text)).joined(separator: " ").lowercased()
+        let tokens = Set(convoText.split { !$0.isLetter && !$0.isNumber }.filter { $0.count >= 3 }.map(String.init))
+
         // Rolling chat summaries give the "what's going on with X" narrative
-        // context that atomic facts can't answer.
-        let summaries = await DatabaseManager.shared.loadRecentChatSummaries(limit: 10)
+        // context that atomic facts can't answer. Recency alone missed quiet
+        // people — union the entity-title MATCHES with the recent set so
+        // "whats up with vibhu" finds Vibhu's summary wherever it sits.
+        let matchedSummaries = await DatabaseManager.shared.loadChatSummaries(matching: Array(tokens), limit: 6)
+        let recentSummaries = await DatabaseManager.shared.loadRecentChatSummaries(limit: 20)
+        var seenSummaryIds = Set<Int64>()
+        let summaries = (matchedSummaries + recentSummaries).filter { seenSummaryIds.insert($0.id).inserted }
+        func matches(_ hay: String...) -> Bool {
+            guard !tokens.isEmpty else { return false }
+            let joined = hay.joined(separator: " ").lowercased()
+            return tokens.contains { joined.contains($0) }
+        }
+        func prioritized<T>(_ items: [T], cap: Int, isMatch: (T) -> Bool) -> [T] {
+            let matched = items.filter(isMatch)
+            let rest = items.filter { !isMatch($0) }
+            return Array((matched + rest).prefix(cap))
+        }
+        let loops = prioritized(openLoops, cap: 100) { matches($0.subjectEntity, $0.sourceChatTitle) }
+        let facts = prioritized(durable, cap: 30) { matches($0.subjectEntity, $0.sourceChatTitle) }
+        let sums = prioritized(summaries, cap: 8) { matches($0.entityTitle) }
+
         return try await provider.answer(
             systemPrompt: AnswerPrompt.systemPrompt,
-            userMessage: AnswerPrompt.userMessage(query: trimmed, openLoops: openLoops, durable: durable, summaries: summaries, history: history)
+            userMessage: AnswerPrompt.userMessage(query: trimmed, openLoops: loops, durable: facts, summaries: sums, history: history),
+            kind: .answerEngine
         )
     }
 
@@ -499,7 +530,7 @@ final class AIService: ObservableObject {
         - "action" = it needs real work or time first (build/fix something, pay, prepare or send a deliverable, review, chase someone).
         Return EXACTLY one JSON object: {"items":[{"id":<number>,"kind":"reply"|"action"}, ...]}. Classify every id. Output ONLY the JSON.
         """
-        let response = try await provider.answer(systemPrompt: system, userMessage: "ITEMS:\n\(lines)")
+        let response = try await provider.answer(systemPrompt: system, userMessage: "ITEMS:\n\(lines)", kind: .factExtraction)
         // Unparseable must THROW, not return [:] — the backfill treats a thrown
         // error as "retry next pass"; a silent empty result would mark the
         // backfill done with 0/N classified and never retry that session.

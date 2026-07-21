@@ -39,17 +39,13 @@ enum AppConstants {
         static let managedModel = "google/gemini-3.1-flash-lite"
 
         /// Per-stage model routing for the MANAGED plan only (BYOK users'
-        /// chosen model is never overridden). User-facing synthesis — the
-        /// launcher's deep-search summary and Ask-Pidgy-style answers — gets
-        /// the sharper flash tier; the high-volume background stages
-        /// (extraction, triage, folds) stay on flash-lite for cost.
+        /// chosen model is never overridden). Currently EVERYTHING runs on
+        /// flash-lite — trialing whether the sharper 3.5-flash tier is worth
+        /// 6x on the user-facing synthesis stages. If deep-summary prose or
+        /// search ranking feels dumber, restore:
+        ///   case .agenticSearch, .summary: return "google/gemini-3.5-flash"
         static func managedModelOverride(for kind: AIRequestKind?) -> String? {
-            switch kind {
-            case .agenticSearch, .summary:
-                return "google/gemini-3.5-flash"
-            default:
-                return nil
-            }
+            nil
         }
         static let managedProxyPath = "/v1/vertex/chat/completions"
         static let maxResponseTokens = 4096

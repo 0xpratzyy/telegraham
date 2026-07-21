@@ -451,9 +451,15 @@ final class FactExtractionCoordinator: ObservableObject {
             if didWork, !Task.isCancelled {
                 let current = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chat.id)
                 let foldedThrough = current?.throughMessageId ?? 0
+                // FORWARD from the summary's own cursor (oldest unfolded
+                // first), capped per fold — and the cursor advances only to
+                // the last message actually folded. Loading the NEWEST 60
+                // and stamping the crawl cursor silently dropped everything
+                // between the two on deep backlogs; now a >60 backlog just
+                // takes extra folds on later passes, losing nothing.
                 let unfoldedRecords = await DatabaseManager.shared
-                    .loadMessagesBefore(chatId: chat.id, throughMessageId: cursor, limit: 60)
-                    .filter { $0.id > foldedThrough }
+                    .loadMessagesForward(chatId: chat.id, afterMessageId: foldedThrough, since: cutoff, limit: 60)
+                    .filter { $0.id <= cursor }
                 let bootstrap = current == nil && unfoldedRecords.count >= 2
                 if bootstrap || unfoldedRecords.count >= 6 {
                     let unfolded = unfoldedRecords.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
@@ -469,7 +475,7 @@ final class FactExtractionCoordinator: ObservableObject {
                             chatId: chat.id,
                             title: chat.title,
                             summary: updated,
-                            throughMessageId: cursor
+                            throughMessageId: unfoldedRecords.map(\.id).max() ?? foldedThrough
                         )
                     } catch {
                         logger.error("summary fold failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")

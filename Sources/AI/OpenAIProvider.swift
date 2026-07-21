@@ -47,11 +47,15 @@ final class OpenAIProvider: AIProvider {
     }
 
     func answer(systemPrompt: String, userMessage: String) async throws -> String {
+        try await answer(systemPrompt: systemPrompt, userMessage: userMessage, kind: .summary)
+    }
+
+    func answer(systemPrompt: String, userMessage: String, kind: AIRequestKind) async throws -> String {
         try await RetryHelper.withRetry {
             try await self.makeRequest(
                 systemPrompt: systemPrompt,
                 userMessage: userMessage,
-                requestKind: .summary
+                requestKind: kind
             )
         }
     }

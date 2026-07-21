@@ -246,15 +246,20 @@ class TelegramService: ObservableObject {
     // MARK: - File Downloads (read-only)
 
     /// Download a file by ID and return the local path once complete.
-    func downloadFile(fileId: Int) async throws -> String {
-        guard let client else { throw TGError.clientNotInitialized }
-        let file = try await client.downloadFile(
-            fileId: fileId,
-            limit: 0,
-            offset: 0,
-            priority: 16,
-            synchronous: true
-        )
+    /// Rate-limited: uncounted downloads (avatars, OCR photos) could trigger
+    /// a FLOOD_WAIT that throttles the whole app. Default priority is
+    /// user-initiated — avatars render in visible rows; queueing them behind
+    /// the OCR/backfill bucket made every list paint initials-first.
+    func downloadFile(fileId: Int, priority: RateLimiter.Priority = .userInitiated) async throws -> String {
+        let file = try await withRateLimitedCall(priority: priority, method: "downloadFile") { client in
+            try await client.downloadFile(
+                fileId: fileId,
+                limit: 0,
+                offset: 0,
+                priority: 16,
+                synchronous: true
+            )
+        }
         return file.local.path
     }
 
@@ -262,18 +267,21 @@ class TelegramService: ObservableObject {
     /// on-device OCR. Returns nil when the message isn't a photo (deleted,
     /// or actually another media kind). Low priority — OCR is background work.
     func downloadMessagePhoto(chatId: Int64, messageId: Int64) async throws -> String? {
-        guard let client else { throw TGError.clientNotInitialized }
-        let message = try await client.getMessage(chatId: chatId, messageId: messageId)
+        let message = try await withRateLimitedCall(priority: .background, method: "getMessage") { client in
+            try await client.getMessage(chatId: chatId, messageId: messageId)
+        }
         guard case .messagePhoto(let photo) = message.content else { return nil }
         let sizes = photo.photo.sizes.sorted { $0.width < $1.width }
         guard let pick = sizes.first(where: { $0.width >= 640 }) ?? sizes.last else { return nil }
-        let file = try await client.downloadFile(
-            fileId: pick.photo.id,
-            limit: 0,
-            offset: 0,
-            priority: 1,
-            synchronous: true
-        )
+        let file = try await withRateLimitedCall(priority: .background, method: "downloadFile") { client in
+            try await client.downloadFile(
+                fileId: pick.photo.id,
+                limit: 0,
+                offset: 0,
+                priority: 1,
+                synchronous: true
+            )
+        }
         return file.local.path.isEmpty ? nil : file.local.path
     }
 

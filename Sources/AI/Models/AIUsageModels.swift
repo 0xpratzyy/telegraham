@@ -12,6 +12,8 @@ enum AIRequestKind: String, Codable, CaseIterable {
     case dashboardTaskExtraction
     case personProfile
     case summary
+    case factExtraction
+    case answerEngine
 
     var label: String {
         switch self {
@@ -35,6 +37,10 @@ enum AIRequestKind: String, Codable, CaseIterable {
             return "Dashboard Tasks"
         case .personProfile:
             return "Person Profile"
+        case .factExtraction:
+            return "Fact Extraction"
+        case .answerEngine:
+            return "Ask Pidgy"
         case .summary:
             return "Summary"
         }

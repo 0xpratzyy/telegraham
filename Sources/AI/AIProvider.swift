@@ -8,6 +8,7 @@ protocol AIProvider {
     /// Free-form Q&A — answer a question given a system prompt + user message.
     /// Powers the fact-grounded answer engine (#48 search).
     func answer(systemPrompt: String, userMessage: String) async throws -> String
+    func answer(systemPrompt: String, userMessage: String, kind: AIRequestKind) async throws -> String
 
     /// Semantic search: find chats relevant to a topic/concept.
     func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO]
@@ -508,5 +509,14 @@ struct PipelineCategoryDTO: Codable {
 
         relevant = try container.decodeIfPresent(Bool.self, forKey: .relevant)
         confident = try container.decodeIfPresent(Bool.self, forKey: .confident)
+    }
+}
+
+
+extension AIProvider {
+    /// Default: providers without per-kind billing (Claude, mocks) ignore the
+    /// kind; OpenAIProvider overrides to route + meter per stage.
+    func answer(systemPrompt: String, userMessage: String, kind: AIRequestKind) async throws -> String {
+        try await answer(systemPrompt: systemPrompt, userMessage: userMessage)
     }
 }

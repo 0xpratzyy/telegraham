@@ -2850,6 +2850,34 @@ actor DatabaseManager {
     }
 
     /// Current summaries, freshest first — retrieval context for Ask Pidgy.
+    /// Summaries whose entity TITLE matches any of the query's tokens — so
+    /// asking about someone quiet ("whats up with vibhu") finds their summary
+    /// even when it's far outside the newest-N recency window.
+    func loadChatSummaries(matching tokens: [String], limit: Int = 6) async -> [EntitySummary] {
+        let cleaned = tokens.map { $0.lowercased() }.filter { $0.count >= 3 }
+        guard !cleaned.isEmpty, let pool = await ensureDatabase() else { return [] }
+        let clauses = cleaned.map { _ in "lower(entity_title) LIKE ?" }.joined(separator: " OR ")
+        var arguments = StatementArguments(cleaned.map { "%\($0)%" })
+        arguments += [limit]
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM entity_summaries
+                        WHERE entity_kind = 'chat' AND superseded_at IS NULL AND (\(clauses))
+                        ORDER BY valid_from DESC LIMIT ?
+                        """,
+                    arguments: arguments
+                )
+                return rows.compactMap(Self.entitySummary(from:))
+            }
+        } catch {
+            print("[DatabaseManager] loadChatSummaries(matching:) failed: \(error)")
+            return []
+        }
+    }
+
     func loadRecentChatSummaries(limit: Int = 10) async -> [EntitySummary] {
         guard let pool = await ensureDatabase() else { return [] }
         do {
@@ -3478,12 +3506,21 @@ actor DatabaseManager {
         return lhs.id > rhs.id
     }
 
+    /// Marker appended by the on-device photo OCR. Re-syncs deliver the
+    /// ORIGINAL Telegram text — comparing against the stripped base keeps a
+    /// re-sync from reading as an "edit" and wiping the OCR text.
+    private static func strippedOCRBase(_ text: String?) -> String? {
+        guard let text, let range = text.range(of: "[photo text:") else { return text }
+        let base = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return base.isEmpty ? nil : base
+    }
+
     private static func insertMessages(_ records: [MessageRecord], into db: Database) throws {
         for record in records {
             let existing = try Row.fetchOne(
                 db,
                 sql: """
-                    SELECT text_content, media_type
+                    SELECT text_content, media_type, sender_user_id, sender_name, is_outgoing
                     FROM messages
                     WHERE chat_id = ? AND id = ?
                     """,
@@ -3492,8 +3529,23 @@ actor DatabaseManager {
             let existingText: String? = existing?["text_content"]
             let existingMediaType: String? = existing?["media_type"]
             let contentChanged = existing != nil
-                && (existingText != record.textContent || existingMediaType != record.mediaTypeRaw)
+                && (strippedOCRBase(existingText) != record.textContent
+                    || existingMediaType != record.mediaTypeRaw)
 
+            // Recent-sync re-delivers the newest rows of every chat over and
+            // over — an unchanged row must not run the UPDATE (each one fired
+            // the FTS delete+reinsert trigger for identical text).
+            if let existing, !contentChanged {
+                let sameSender = (existing["sender_user_id"] as Int64?) == record.senderUserId
+                    && ((record.senderName == nil) || (existing["sender_name"] as String?) == record.senderName)
+                let sameDirection = (((existing["is_outgoing"] as Int64?) ?? 0) == 1) == record.isOutgoing
+                if sameSender && sameDirection { continue }
+            }
+
+            // COALESCE keeps display-time enrichments (resolved sender names,
+            // OCR text) from being wiped by a re-sync whose payload simply
+            // lacks them; a genuine text edit resets ocr_state so the photo
+            // is re-read.
             try db.execute(
                 sql: """
                     INSERT INTO messages
@@ -3501,11 +3553,12 @@ actor DatabaseManager {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id, chat_id) DO UPDATE SET
                         sender_user_id = excluded.sender_user_id,
-                        sender_name = excluded.sender_name,
+                        sender_name = COALESCE(excluded.sender_name, sender_name),
                         date = excluded.date,
                         text_content = excluded.text_content,
                         media_type = excluded.media_type,
-                        is_outgoing = excluded.is_outgoing
+                        is_outgoing = excluded.is_outgoing,
+                        ocr_state = CASE WHEN excluded.text_content IS NOT text_content THEN 0 ELSE ocr_state END
                     """,
                 arguments: [
                     record.id,

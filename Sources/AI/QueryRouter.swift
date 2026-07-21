@@ -5,6 +5,12 @@ import Foundation
 final class QueryRouter: ObservableObject {
     private var aiProvider: AIProvider
     private let queryInterpreter: QueryInterpreting
+    /// Planner results memoized per normalized query — retyping or re-running
+    /// the same search within the TTL costs zero AI calls. Small and
+    /// time-bounded; a plan for a given string doesn't go stale faster than
+    /// this (it extracts people/topics, not data).
+    private var planCache: [String: (plan: QueryPlannerResultDTO, at: Date)] = [:]
+    private let planCacheTTL: TimeInterval = 300
 
     init(aiProvider: AIProvider, queryInterpreter: QueryInterpreting = QueryInterpreter()) {
         self.aiProvider = aiProvider
@@ -13,6 +19,7 @@ final class QueryRouter: ObservableObject {
 
     func updateProvider(_ provider: AIProvider) {
         self.aiProvider = provider
+        planCache.removeAll()
     }
 
     func resolveQuerySpec(
@@ -32,12 +39,22 @@ final class QueryRouter: ObservableObject {
             return baseSpec
         }
 
+        let cacheKey = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() + "|\(activeFilter.rawValue)"
+        if let hit = planCache[cacheKey], Date().timeIntervalSince(hit.at) < planCacheTTL {
+            return merge(baseSpec: baseSpec, plan: hit.plan, timezone: timezone, now: now)
+        }
+
         do {
             let plan = try await aiProvider.planQuery(
                 query: query,
                 activeFilter: activeFilter,
                 deterministicSpec: baseSpec
             )
+            planCache[cacheKey] = (plan, Date())
+            if planCache.count > 60 {
+                let cutoff = Date().addingTimeInterval(-planCacheTTL)
+                planCache = planCache.filter { $0.value.at >= cutoff }
+            }
             return merge(baseSpec: baseSpec, plan: plan, timezone: timezone, now: now)
         } catch {
             // Deliberate graceful degradation — but count the shape so

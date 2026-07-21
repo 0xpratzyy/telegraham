@@ -766,6 +766,35 @@ enum PidgyMigrations {
             try db.execute(sql: "ALTER TABLE messages ADD COLUMN ocr_state INTEGER NOT NULL DEFAULT 0")
         }
 
+        migrator.registerMigration("v32_hot_path_indexes") { db in
+            // The PK is (id, chat_id) — wrong order for the app's hottest
+            // pattern, "this chat's messages after id X ordered by id"
+            // (extraction forward-crawl, trailing context, reply-close
+            // EXISTS, around-anchor loads). This composite turns those
+            // full-filters into seeks.
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id ON messages(chat_id, id)")
+            // OCR pending scan: partial index so the pass never rescans
+            // processed photos or non-photos.
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_messages_ocr_pending
+                ON messages(date DESC) WHERE ocr_state = 0 AND media_type = 'Photo'
+                """)
+            // The FTS sync trigger rebuilt a message's index entry on ANY
+            // column change — pure ocr_state flips and sender-name backfills
+            // were churning FTS for identical text. Only re-index when the
+            // text actually changed.
+            try db.execute(sql: "DROP TRIGGER IF EXISTS messages_au")
+            try db.execute(sql: """
+                CREATE TRIGGER messages_au AFTER UPDATE ON messages
+                WHEN old.text_content IS NOT new.text_content BEGIN
+                    INSERT INTO messages_fts(messages_fts, rowid, text_content)
+                    VALUES ('delete', old.rowid, pidgy_strip_urls(old.text_content));
+                    INSERT INTO messages_fts(rowid, text_content)
+                    VALUES (new.rowid, pidgy_strip_urls(new.text_content));
+                END
+                """)
+        }
+
         return migrator
     }
 }
