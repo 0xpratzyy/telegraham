@@ -155,6 +155,10 @@ enum PreferencesResetPlan {
         AppConstants.Preferences.showPigeonFlockKey,
         AppConstants.Preferences.chatOpenTargetKey,
         AppConstants.Preferences.subscriptionStateKey,
+        // Privacy opt-in — deleting it returns the install to the opt-OUT
+        // default (identity never rides crash reports without a fresh
+        // explicit enable).
+        AppConstants.Preferences.diagnosticsIdentityEnabledKey,
         // Raw strings: keys written by retired pipelines — still swept so
         // old installs reset cleanly.
         "dashboardTaskTriageContextVersion",

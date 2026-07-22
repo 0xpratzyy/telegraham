@@ -469,7 +469,11 @@ final class FactExtractionCoordinator: ObservableObject {
                         if entry.cursor != cursor { entry = (cursor: cursor, count: 0) }
                         entry.count += 1
                         extractFailures[chat.id] = entry
-                        if entry.count >= 3 {
+                        // Post-await shutdown guard: this catch runs right
+                        // after the failed AI await, and the skip below is a
+                        // WRITE. If shutdown began, leave the failure count —
+                        // the poison window just skips on a later pass.
+                        if entry.count >= 3, !Task.isCancelled, !stopped {
                             logger.error("skipping poison window for chat \(chat.id, privacy: .public) after \(entry.count, privacy: .public) unparseable replies")
                             cursor = windowMax
                             await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
@@ -548,6 +552,9 @@ final class FactExtractionCoordinator: ObservableObject {
         for batch in pending.chunked(into: 40) {
             do {
                 let kinds = try await aiService.classifyLoops(batch)
+                // Post-await shutdown guard, same rule as every writer: the
+                // classify call can outlive stop()'s bounded drain.
+                guard !Task.isCancelled, !stopped else { return classified > 0 }
                 await DatabaseManager.shared.updateLoopKinds(kinds)
                 classified += kinds.count
             } catch {

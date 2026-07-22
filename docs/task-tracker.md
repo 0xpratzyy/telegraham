@@ -27,7 +27,7 @@ shipped baseline so the issues have context.
 - AI proxy (Cloudflare Worker, Gemini via Vertex) for the managed plan;
   per-stage request kinds + model routing; payments shipped dormant.
 - July 2026 architecture cleanup: legacy per-surface AI pipelines deleted
-  (~13.5k lines net), god files split, suite at 195 tests / 0 failures.
+  (~13.5k lines net), god files split, suite at 196 tests / 0 failures.
 - CI (`.github/workflows/ci.yml`): secret scan + full suite on every PR
   and push to main.
 

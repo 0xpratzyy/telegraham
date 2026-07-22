@@ -3720,6 +3720,7 @@ final class PidgyCoreTests: XCTestCase {
                 AppConstants.Preferences.showPigeonFlockKey,
                 AppConstants.Preferences.chatOpenTargetKey,
                 AppConstants.Preferences.subscriptionStateKey,
+                AppConstants.Preferences.diagnosticsIdentityEnabledKey,
                 // Legacy-pipeline keys swept as raw strings so old installs
                 // reset cleanly.
                 "dashboardTaskTriageContextVersion",
@@ -3732,6 +3733,35 @@ final class PidgyCoreTests: XCTestCase {
             PreferencesResetPlan.pidgyDataDirectory(in: appSupport),
             appSupport.appendingPathComponent("Pidgy", isDirectory: true)
         )
+    }
+
+    /// Reset-path privacy regression: with the preference key ABSENT (fresh
+    /// install, or right after "Reset all local data" sweeps it), the crash
+    /// reporter must NOT attach the Telegram identity — opt-in means the
+    /// default is OFF, and a reset returns the install to that default.
+    /// (Tests are hosted in the real app, so the key is explicitly saved,
+    /// cleared, and restored around the assertions.)
+    func testCrashReportIdentityDefaultsToOff() {
+        let key = AppConstants.Preferences.diagnosticsIdentityEnabledKey
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let saved {
+                UserDefaults.standard.set(saved, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            PidgyTelemetry.identify(username: nil, firstName: nil)
+        }
+        PidgyTelemetry.identify(username: "grahamtest", firstName: "Graham")
+
+        UserDefaults.standard.removeObject(forKey: key)
+        let defaultUser = PidgyTelemetry.sanctionedUser()
+        XCTAssertNil(defaultUser.username, "absent key must mean opt-OUT — no identity on crash reports")
+        XCTAssertNil(defaultUser.name)
+
+        UserDefaults.standard.set(true, forKey: key)
+        let optedIn = PidgyTelemetry.sanctionedUser()
+        XCTAssertEqual(optedIn.username, "grahamtest", "explicit opt-in still attaches identity")
     }
 
     @MainActor

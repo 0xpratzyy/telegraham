@@ -1785,7 +1785,9 @@ struct DashboardPreferencesPage: View {
         includeBotsInAISearch = false
         showPigeonFlock = true
         contextLayerEnabled = true
-        diagnosticsIdentityEnabled = true
+        // Privacy default, NOT a feature default: identity on crash reports
+        // is opt-in, and a reset must never silently re-enable it.
+        diagnosticsIdentityEnabled = false
         usageOverview = .empty
         graphDebugSummary = .empty
         routingSnapshots = []

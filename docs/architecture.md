@@ -200,7 +200,7 @@ issue #61.)
 
 ## 8. Testing
 
-`Tests/PidgyCoreTests.swift` — 195 tests, offline (mock providers, temp
+`Tests/PidgyCoreTests.swift` — 196 tests, offline (mock providers, temp
 databases). The remaining skips are documented SummaryEngine scoring
 regressions gated on eval-validated fixes (issue #59). Injection defenses
 are code-level gates, tested (destructive AI routes never act on
