@@ -8,7 +8,9 @@ struct DashboardPreferencesPage: View {
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
     @AppStorage(AppConstants.Preferences.contextLayerEnabledKey) private var contextLayerEnabled = true
-    @AppStorage(AppConstants.Preferences.diagnosticsIdentityEnabledKey) private var diagnosticsIdentityEnabled = true
+    // Opt-in (matches PidgyTelemetry.sanctionedUser's default): identity
+    // only rides crash reports when the user turned this on themselves.
+    @AppStorage(AppConstants.Preferences.diagnosticsIdentityEnabledKey) private var diagnosticsIdentityEnabled = false
     @AppStorage(AppConstants.Preferences.chatOpenTargetKey)
     private var chatOpenTargetRaw: String = ChatOpenTarget.detectedDefault().rawValue
 

@@ -4,45 +4,25 @@
 import Foundation
 import GRDB
 
+/// Thrown by the throwing fact-store writes when the database handle is
+/// gone (closed mid-shutdown / reset) — callers must NOT advance cursors.
+struct FactStoreUnavailableError: Error {}
+
 extension DatabaseManager {
     // MARK: - Context layer (facts) — #48
 
     /// Upsert facts. A LIVE fact is unique on `fingerprint` (partial index where
     /// invalid_at IS NULL): re-seeing the same loop refreshes its evidence; if
     /// only an INVALIDATED copy exists, a fresh live row is inserted (the loop
-    /// re-opened). Fire-and-forget from the extraction pass.
+    /// re-opened). Fire-and-forget (backfills/tests) — the extraction pass
+    /// itself commits through applyExtractionWindow instead.
     func upsertFacts(_ drafts: [FactDraft]) async {
         guard !drafts.isEmpty, let pool = await ensureDatabase() else { return }
         let now = Date().timeIntervalSince1970
         do {
             try await pool.write { db in
                 for d in drafts {
-                    try db.execute(
-                        sql: """
-                            INSERT INTO facts
-                                (subject_entity, subject_person_id, predicate, object_text, action, loop_kind, object_entity,
-                                 confidence, valid_from, invalid_at, source_chat_id, source_chat_title,
-                                 source_message_id, source_text, sender_name, fingerprint,
-                                 created_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(fingerprint) WHERE invalid_at IS NULL DO UPDATE SET
-                                subject_entity = excluded.subject_entity,
-                                subject_person_id = excluded.subject_person_id,
-                                action = excluded.action,
-                                loop_kind = COALESCE(excluded.loop_kind, facts.loop_kind),
-                                source_chat_title = excluded.source_chat_title,
-                                source_message_id = excluded.source_message_id,
-                                source_text = excluded.source_text,
-                                confidence = MAX(facts.confidence, excluded.confidence),
-                                updated_at = excluded.updated_at
-                            """,
-                        arguments: [
-                            d.subjectEntity, d.subjectPersonId, d.predicate.rawValue, d.objectText, d.action, d.loopKind?.rawValue, d.objectEntity,
-                            d.confidence, d.validFrom.timeIntervalSince1970, d.sourceChatId, d.sourceChatTitle,
-                            d.sourceMessageId, d.sourceText, d.senderName, d.fingerprint,
-                            now, now
-                        ]
-                    )
+                    try Self.executeFactUpsert(db, draft: d, now: now)
                 }
             }
         } catch {
@@ -50,19 +30,103 @@ extension DatabaseManager {
         }
     }
 
+    /// Atomically commit ONE extraction window: loop closes, fact upserts,
+    /// chase bumps, and the cursor advance land in a single transaction — or
+    /// none of them do. THROWS on failure so the caller leaves the cursor
+    /// where it was and retries the whole window next pass. The old
+    /// fire-and-forget split (upsert swallowed its error, cursor advanced
+    /// anyway) let one transient DB hiccup permanently skip a window.
+    func applyExtractionWindow(
+        chatId: Int64,
+        closeFingerprints: [String],
+        upserts: [FactDraft],
+        chases: [ChasedLoopUpdate],
+        advanceCursorTo throughMessageId: Int64
+    ) async throws {
+        guard let pool = await ensureDatabase() else { throw FactStoreUnavailableError() }
+        let now = Date().timeIntervalSince1970
+        try await pool.write { db in
+            // Close BEFORE upserting — a re-ask in this window can carry the
+            // same fingerprint as the loop being closed; invalidating first
+            // lets the new draft insert as a fresh live row.
+            for fp in closeFingerprints {
+                try Self.executeFactInvalidate(db, fingerprint: fp, reason: .replied, ts: now)
+            }
+            for d in upserts {
+                try Self.executeFactUpsert(db, draft: d, now: now)
+            }
+            for u in chases {
+                try Self.executeChaseRefresh(db, update: u, now: now)
+            }
+            try db.execute(
+                sql: """
+                    INSERT INTO fact_extraction_state (chat_id, extracted_through_message_id, last_extracted_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        extracted_through_message_id = MAX(fact_extraction_state.extracted_through_message_id, excluded.extracted_through_message_id),
+                        last_extracted_at = excluded.last_extracted_at
+                    """,
+                arguments: [chatId, throughMessageId, now]
+            )
+        }
+    }
+
+    private static func executeFactUpsert(_ db: Database, draft d: FactDraft, now: Double) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO facts
+                    (subject_entity, subject_person_id, predicate, object_text, action, loop_kind, object_entity,
+                     confidence, valid_from, invalid_at, source_chat_id, source_chat_title,
+                     source_message_id, source_text, sender_name, fingerprint,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fingerprint) WHERE invalid_at IS NULL DO UPDATE SET
+                    subject_entity = excluded.subject_entity,
+                    subject_person_id = excluded.subject_person_id,
+                    action = excluded.action,
+                    loop_kind = COALESCE(excluded.loop_kind, facts.loop_kind),
+                    source_chat_title = excluded.source_chat_title,
+                    source_message_id = excluded.source_message_id,
+                    source_text = excluded.source_text,
+                    confidence = MAX(facts.confidence, excluded.confidence),
+                    updated_at = excluded.updated_at
+                """,
+            arguments: [
+                d.subjectEntity, d.subjectPersonId, d.predicate.rawValue, d.objectText, d.action, d.loopKind?.rawValue, d.objectEntity,
+                d.confidence, d.validFrom.timeIntervalSince1970, d.sourceChatId, d.sourceChatTitle,
+                d.sourceMessageId, d.sourceText, d.senderName, d.fingerprint,
+                now, now
+            ]
+        )
+    }
+
+    private static func executeFactInvalidate(_ db: Database, fingerprint: String, reason: FactCloseReason, ts: Double) throws {
+        try db.execute(
+            sql: "UPDATE facts SET invalid_at = ?, closed_reason = ?, updated_at = ? WHERE fingerprint = ? AND invalid_at IS NULL",
+            arguments: [ts, reason.rawValue, ts, fingerprint]
+        )
+    }
+
+    private static func executeChaseRefresh(_ db: Database, update u: ChasedLoopUpdate, now: Double) throws {
+        try db.execute(
+            sql: """
+                UPDATE facts
+                SET valid_from = ?, source_message_id = ?, source_text = ?, updated_at = ?
+                WHERE fingerprint = ? AND invalid_at IS NULL
+                """,
+            arguments: [u.date.timeIntervalSince1970, u.sourceMessageId, u.sourceText, now, u.fingerprint]
+        )
+    }
+
     /// Close open loops by fingerprint (bi-temporal: stamp invalid_at + WHY,
     /// keep the row). User-reason closes stay browsable in the Done tab.
     func invalidateFacts(fingerprints: [String], reason: FactCloseReason = .replied, at date: Date = Date()) async {
         guard !fingerprints.isEmpty, let pool = await ensureDatabase() else { return }
         let ts = date.timeIntervalSince1970
-        let reasonRaw = reason.rawValue
         do {
             try await pool.write { db in
                 for fp in fingerprints {
-                    try db.execute(
-                        sql: "UPDATE facts SET invalid_at = ?, closed_reason = ?, updated_at = ? WHERE fingerprint = ? AND invalid_at IS NULL",
-                        arguments: [ts, reasonRaw, ts, fp]
-                    )
+                    try Self.executeFactInvalidate(db, fingerprint: fp, reason: reason, ts: ts)
                 }
             }
         } catch {
@@ -116,14 +180,7 @@ extension DatabaseManager {
         do {
             try await pool.write { db in
                 for u in updates {
-                    try db.execute(
-                        sql: """
-                            UPDATE facts
-                            SET valid_from = ?, source_message_id = ?, source_text = ?, updated_at = ?
-                            WHERE fingerprint = ? AND invalid_at IS NULL
-                            """,
-                        arguments: [u.date.timeIntervalSince1970, u.sourceMessageId, u.sourceText, now, u.fingerprint]
-                    )
+                    try Self.executeChaseRefresh(db, update: u, now: now)
                 }
             }
         } catch {

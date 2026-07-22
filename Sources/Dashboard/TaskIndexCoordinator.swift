@@ -381,11 +381,15 @@ final class TaskIndexCoordinator: ObservableObject {
                 // publish guards drop this run. Crucially, do NOT blacklist:
                 // these chats are resolvable, the lookup was just cut short.
                 break
-            } catch let error as TDLibKit.Error where error.code == 400 || error.code == 404 {
+            } catch let error as TDLibKit.Error
+                where error.code == 404
+                    || (error.code == 400 && error.message.localizedCaseInsensitiveContains("not found")) {
                 // TDLib's DEFINITIVE not-found shapes ("Chat not found" /
                 // invalid id — the user left or the chat was deleted, but its
                 // facts outlive it). The only case worth a session blacklist,
-                // so the doomed lookup isn't retried on every reload.
+                // so the doomed lookup isn't retried on every reload. 400
+                // alone is NOT enough — TDLib uses it for plenty of transient
+                // parameter/state errors, so require the not-found message.
                 unresolvableChatIds.insert(chatId)
             } catch {
                 // Anything else (network / rate-limit / TDLib not ready) is

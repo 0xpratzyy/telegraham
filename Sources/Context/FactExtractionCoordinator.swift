@@ -63,6 +63,7 @@ final class FactExtractionCoordinator: ObservableObject {
     func start(telegramService: TelegramService, aiService: AIService) {
         guard ContextLayer.enabled else { return }
         stopped = false
+        PhotoOCRIndexer.shared.resume()
         // Arm the loader from launch so an empty surface shows the pigeon (not a
         // bare empty state) during the window before the first pass resolves.
         isCrawling = true
@@ -365,6 +366,11 @@ final class FactExtractionCoordinator: ObservableObject {
                         myUserId: myUserId,
                         myUser: myUser
                     )
+                    // The AI call is the LONG await — stop() can outlive its
+                    // bounded drain while we're suspended here. Recheck before
+                    // any write may land: after this guard the only writes are
+                    // the single atomic commit below.
+                    guard !Task.isCancelled, !stopped else { out.cancelled = true; break }
                     extractFailures[chat.id] = nil
                     // Structural gates for closing loops — never message content,
                     // so crafted text alone can't forge a closure:
@@ -407,44 +413,48 @@ final class FactExtractionCoordinator: ObservableObject {
                         return out <= d.sourceMessageId
                     }
 
-                    // Close BEFORE upserting: a legitimate re-ask in this same
-                    // window can carry the SAME fingerprint as the loop being
-                    // closed — invalidating first lets the new draft insert as a
-                    // fresh live row instead of being upserted into the old row
-                    // and then invalidated along with it.
-                    if !result.resolvedFingerprints.isEmpty {
-                        let resolvedSet = Set(result.resolvedFingerprints)
-                        let safe = openLoops
-                            .filter { f in
-                                guard resolvedSet.contains(f.fingerprint) else { return false }
-                                switch f.predicate {
-                                case .iOwe: return myOutgoingId != nil
-                                case .owesMe: return hasInbound
-                                default: return false
-                                }
+                    // Structural close gates (see above) applied to the model's
+                    // resolvedLoops. Close-before-upsert ordering lives inside
+                    // the atomic commit.
+                    let resolvedSet = Set(result.resolvedFingerprints)
+                    let safeCloses = openLoops
+                        .filter { f in
+                            guard resolvedSet.contains(f.fingerprint) else { return false }
+                            switch f.predicate {
+                            case .iOwe: return myOutgoingId != nil
+                            case .owesMe: return hasInbound
+                            default: return false
                             }
-                            .map(\.fingerprint)
-                        if !safe.isEmpty {
-                            await DatabaseManager.shared.invalidateFacts(fingerprints: safe, reason: .replied)
-                            out.closedLoops += safe.count
                         }
-                    }
-                    if !resolved.isEmpty {
-                        await DatabaseManager.shared.upsertFacts(resolved)
-                        out.newFacts += resolved.count
-                    }
-                    // Structural sweep: this window's outgoing messages answer
-                    // any older reply-kind loop of this chat, whether or not
-                    // the model emitted resolvedLoops for it.
-                    if myOutgoingId != nil {
-                        out.closedLoops += await DatabaseManager.shared.closeAnsweredReplyLoops(chatId: chat.id)
-                    }
+                        .map(\.fingerprint)
                     // Chases: a follow-up ping bumps the existing loop to the
                     // chase message (date + evidence), gated like owes_me closes
                     // on a genuine inbound message — [ME]'s own text can't bump.
-                    if !result.chasedLoops.isEmpty, hasInbound {
-                        await DatabaseManager.shared.refreshChasedLoops(result.chasedLoops)
-                        out.chasedLoops += result.chasedLoops.count
+                    let chases = hasInbound ? result.chasedLoops : []
+                    // ONE transaction: closes + upserts + chases + cursor
+                    // advance land together or not at all. A throw leaves the
+                    // cursor behind so the whole window retries next pass —
+                    // the old fire-and-forget writes let a transient DB error
+                    // skip a window forever.
+                    let windowMax = records.map(\.id).max() ?? cursor
+                    try await DatabaseManager.shared.applyExtractionWindow(
+                        chatId: chat.id,
+                        closeFingerprints: safeCloses,
+                        upserts: resolved,
+                        chases: chases,
+                        advanceCursorTo: windowMax
+                    )
+                    out.closedLoops += safeCloses.count
+                    out.newFacts += resolved.count
+                    out.chasedLoops += chases.count
+                    cursor = windowMax
+                    // Structural sweep: this window's outgoing messages answer
+                    // any older reply-kind loop of this chat, whether or not
+                    // the model emitted resolvedLoops for it. Outside the
+                    // transaction on purpose — it re-runs every pass, so a
+                    // failure here loses nothing.
+                    if myOutgoingId != nil {
+                        out.closedLoops += await DatabaseManager.shared.closeAnsweredReplyLoops(chatId: chat.id)
                     }
                 } catch {
                     logger.error("extractFacts failed for chat \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -469,8 +479,6 @@ final class FactExtractionCoordinator: ObservableObject {
                     break
                 }
 
-                cursor = records.map(\.id).max() ?? cursor
-                await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
                 windows += 1
                 out.scannedWindows += 1
                 if records.count < ContextLayer.extractionWindow { break } // caught up to now
@@ -515,6 +523,9 @@ final class FactExtractionCoordinator: ObservableObject {
                             myUserId: myUserId,
                             myUser: myUser
                         )
+                        // Same long-await rule as extraction: no write may
+                        // land once shutdown began during the AI call.
+                        guard !Task.isCancelled, !stopped else { return out }
                         await DatabaseManager.shared.saveChatSummary(
                             chatId: chat.id,
                             title: chat.title,

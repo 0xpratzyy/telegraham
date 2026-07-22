@@ -367,9 +367,11 @@ enum PidgyTelemetry {
     /// scrubEvent REPLACES event.user with this, it never passes one through.
     static func sanctionedUser() -> User {
         let user = User(userId: installId)
+        // Opt-IN: attaching the Telegram @username/name to crash reports
+        // only happens when the user explicitly enabled it in Preferences.
         let identifyEnabled = (UserDefaults.standard.object(
             forKey: AppConstants.Preferences.diagnosticsIdentityEnabledKey
-        ) as? Bool) ?? true
+        ) as? Bool) ?? false
         if identifyEnabled {
             identityLock.lock()
             user.username = identityUsername

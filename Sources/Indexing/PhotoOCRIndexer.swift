@@ -13,7 +13,9 @@ final class PhotoOCRIndexer {
     private var isRunning = false
     /// Flipped by stop() so an in-flight batch stops WRITING even if its
     /// task's cancellation flag never trips (e.g. it was started from an
-    /// unstructured context). Reset by the next runPass.
+    /// unstructured context). Re-armed ONLY by resume() (called from
+    /// FactExtractionCoordinator.start()) — runPass must NOT reset it, or a
+    /// pass resuming after stop() would un-latch shutdown by itself.
     private var stopped = false
 
     /// Halt the current batch at the next checkpoint. The critical property:
@@ -23,10 +25,15 @@ final class PhotoOCRIndexer {
         stopped = true
     }
 
-    func runPass(telegramService: TelegramService, limit: Int = 24) async {
-        guard !isRunning else { return }
-        isRunning = true
+    /// Re-arm after a previous stop(). Called only from the crawl
+    /// coordinator's start(), i.e. an explicit new lifecycle.
+    func resume() {
         stopped = false
+    }
+
+    func runPass(telegramService: TelegramService, limit: Int = 24) async {
+        guard !isRunning, !stopped else { return }
+        isRunning = true
         defer { isRunning = false }
 
         let pending = await DatabaseManager.shared.pendingPhotoOCRMessages(limit: limit)

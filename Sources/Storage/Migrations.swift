@@ -799,10 +799,26 @@ enum PidgyMigrations {
             // The pre-context-layer pipelines were retired (July 2026): the
             // pipeline-category cache and the dashboard-task sync cursor have
             // no readers or writers left. Drop them so stale rows stop
-            // shipping in every backup. dashboard_tasks/_sources stay — they
-            // hold historical extractions and are harmless.
+            // shipping in every backup. (dashboard_tasks/_sources survived
+            // until v34, which drops them too.)
             try db.execute(sql: "DROP TABLE IF EXISTS pipeline_cache")
             try db.execute(sql: "DROP TABLE IF EXISTS dashboard_task_sync_state")
+        }
+
+        migrator.registerMigration("v34_drop_dormant_fact_backups") { db in
+            // Dev-era safety copies (facts_backup_*) and the retired
+            // dashboard_tasks/_sources extractions have no readers left but
+            // still hold derived conversation content — drop them so stale
+            // personal data stops living in (and shipping with) the DB file.
+            let backupTables = try String.fetchAll(
+                db,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'facts\\_backup\\_%' ESCAPE '\\'"
+            )
+            for table in backupTables {
+                try db.execute(sql: "DROP TABLE IF EXISTS \"\(table)\"")
+            }
+            try db.execute(sql: "DROP TABLE IF EXISTS dashboard_task_sources")
+            try db.execute(sql: "DROP TABLE IF EXISTS dashboard_tasks")
         }
 
         return migrator

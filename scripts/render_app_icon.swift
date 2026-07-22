@@ -101,8 +101,10 @@ func renderAppIcon() throws {
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     }()
 
+    // Lives under scripts/assets/ (not Assets.xcassets) — it's a rendering
+    // input, not an app resource, so app-side asset cleanups can't break it.
     let mascotURL = projectRoot.appendingPathComponent(
-        "Sources/Resources/Assets.xcassets/PidgyMascotPhoto.imageset/pidgy-mascot.png"
+        "scripts/assets/pidgy-mascot.png"
     )
     guard let mascot = NSImage(contentsOf: mascotURL) else {
         FileHandle.standardError.write(Data("error: cannot read mascot at \(mascotURL.path)\n".utf8))

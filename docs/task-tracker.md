@@ -27,13 +27,14 @@ shipped baseline so the issues have context.
 - AI proxy (Cloudflare Worker, Gemini via Vertex) for the managed plan;
   per-stage request kinds + model routing; payments shipped dormant.
 - July 2026 architecture cleanup: legacy per-surface AI pipelines deleted
-  (~13.5k lines net), god files split, suite at 193 tests / 0 failures.
+  (~13.5k lines net), god files split, suite at 195 tests / 0 failures.
+- CI (`.github/workflows/ci.yml`): secret scan + full suite on every PR
+  and push to main.
 
 ## Open work
 
 | # | Issue |
 |---|---|
-| [#58](https://github.com/0xpratzyy/telegraham/issues/58) | CI: run the test suite on every push |
 | [#59](https://github.com/0xpratzyy/telegraham/issues/59) | Fix 5 skipped SummaryEngine retrieval regressions |
 | [#60](https://github.com/0xpratzyy/telegraham/issues/60) | Central AI scheduler |
 | [#61](https://github.com/0xpratzyy/telegraham/issues/61) | Retire idle polling loops |

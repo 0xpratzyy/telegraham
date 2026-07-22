@@ -7,7 +7,7 @@
 //  design into a flat 720×452 PNG used as the .dmg window background.
 //
 //  - Reads:
-//      Sources/Resources/Assets.xcassets/InstallWallpaper.imageset/install-wallpaper.png
+//      scripts/assets/install-wallpaper.png
 //  - Writes:
 //      dist/install-bg.png   (default — override via --output PATH)
 //
@@ -265,8 +265,11 @@ func renderInstallBackground() throws {
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     }()
 
+    // Lives under scripts/assets/ (not Assets.xcassets) — it's a packaging
+    // input, not an app resource, so app-side asset cleanups can't break
+    // the DMG build.
     let wallpaperURL = projectRoot.appendingPathComponent(
-        "Sources/Resources/Assets.xcassets/InstallWallpaper.imageset/install-wallpaper.png"
+        "scripts/assets/install-wallpaper.png"
     )
     guard let wallpaper = NSImage(contentsOf: wallpaperURL) else {
         FileHandle.standardError.write(Data("error: cannot read wallpaper at \(wallpaperURL.path)\n".utf8))

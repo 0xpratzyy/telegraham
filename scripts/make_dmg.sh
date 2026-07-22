@@ -138,6 +138,13 @@ if [ "$SIGN_IDENTITY" = "-" ]; then
   EXTRA_ARGS+=("OTHER_CODE_SIGN_FLAGS=")
 fi
 
+# Notarized (shipping) builds are the ONLY ones that upload dSYMs to
+# Sentry — the project.yml phase checks this flag, so plain local
+# Release builds never push artifacts as a side effect.
+if [ "$NOTARIZE" -eq 1 ]; then
+  export PIDGY_PUBLISH=1
+fi
+
 xcodebuild \
   -project Pidgy.xcodeproj \
   -scheme Pidgy \

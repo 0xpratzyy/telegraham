@@ -209,6 +209,10 @@ struct PreferencesResetService {
         if let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.cancelGraphBuildLoop()
         }
+        // Latch the debug trace recorder BEFORE the directory delete below —
+        // its fire-and-forget tasks would otherwise recreate the freshly
+        // wiped Pidgy dir with raw chat prompts inside.
+        await LocalAITraceRecorder.shared.stop()
         async let recentStop: Void = RecentSyncCoordinator.shared.stop()
         async let coverageStop: Void = MajorChatCoverageCoordinator.shared.stop()
         async let scheduleStop: Void = IndexScheduler.shared.stop()

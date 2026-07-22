@@ -89,9 +89,10 @@ Storage rules:
   is only the hot recent window.
 - `facts` + `entity_summaries` are the context layer's derived store —
   bi-temporal (invalidate, never overwrite), fingerprint-deduped.
-- `dashboard_topics` is user-curated. (`dashboard_tasks` remains only as
-  historical rows; nothing writes it. The legacy `pipeline_cache` and
-  `dashboard_task_sync_state` tables were dropped in migration v33.)
+- `dashboard_topics` is user-curated. (The legacy `pipeline_cache` +
+  `dashboard_task_sync_state` tables were dropped in migration v33;
+  `dashboard_tasks`/`_sources` and the dev-era `facts_backup_*` copies
+  in v34.)
 - Search-time networking is an anti-goal; the launcher searches local state.
 - `RateLimiter` is the only flood-safety boundary for TDLib calls, with a
   fast lane for user-facing downloads (avatars) over background work (OCR).
@@ -199,7 +200,7 @@ issue #61.)
 
 ## 8. Testing
 
-`Tests/PidgyCoreTests.swift` — 193 tests, offline (mock providers, temp
+`Tests/PidgyCoreTests.swift` — 195 tests, offline (mock providers, temp
 databases). The remaining skips are documented SummaryEngine scoring
 regressions gated on eval-validated fixes (issue #59). Injection defenses
 are code-level gates, tested (destructive AI routes never act on
@@ -207,16 +208,16 @@ uncorroborated model output).
 
 ## 9. Current Direction
 
-Tracked in GitHub issues:
+CI (`.github/workflows/ci.yml`) runs a secret scan + the full suite on
+every PR and push to main. Remaining work, tracked in GitHub issues:
 
-1. CI running the suite on every push (#58)
-2. SummaryEngine retrieval regressions (#59)
-3. Central AI scheduler — one queue/budget for all AI calls (#60)
-4. Retire remaining idle polling loops (#61)
-5. Constructor injection over `.shared` as a standing convention (#62)
-6. Release preflight assert for the bundled proxy URL (#63)
-7. Graceful reply-queue degraded mode when AI is off (#64)
-8. Auto-expiry decision for stale fact tasks (#65)
+1. SummaryEngine retrieval regressions (#59)
+2. Central AI scheduler — one queue/budget for all AI calls (#60)
+3. Retire remaining idle polling loops (#61)
+4. Constructor injection over `.shared` as a standing convention (#62)
+5. Release preflight assert for the bundled proxy URL (#63)
+6. Graceful reply-queue degraded mode when AI is off (#64)
+7. Auto-expiry decision for stale fact tasks (#65)
 
 ## 10. What Is Intentionally Not Core
 

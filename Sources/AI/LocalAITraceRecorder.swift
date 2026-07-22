@@ -31,6 +31,12 @@ actor LocalAITraceRecorder {
     static let rotationByteLimit: UInt64 = 20 * 1024 * 1024
 
     private var directoryOverride: URL?
+    /// Reset latch: "Reset all local data" deletes the whole Pidgy dir —
+    /// a fire-and-forget trace task landing AFTER the delete would
+    /// recreate it with raw chat content inside. persist() checks this,
+    /// and because it's actor-isolated, once stop() returns no queued or
+    /// future trace write can touch the disk.
+    private var stopped = false
 
     private init() {}
 
@@ -38,6 +44,13 @@ actor LocalAITraceRecorder {
     /// recorder would append to the developer's actual trace log.
     func configureForTesting(directoryOverride: URL?) {
         self.directoryOverride = directoryOverride
+        stopped = false
+    }
+
+    /// Permanently halt trace writes for this process (reset flow). The
+    /// app relaunches after reset, so there is no resume.
+    func stop() {
+        stopped = true
     }
 
     /// Records a complete LLM call. Fire-and-forget — errors are logged,
@@ -99,6 +112,7 @@ actor LocalAITraceRecorder {
         chatId: Int64?,
         extraTags: [String: String]
     ) {
+        guard !stopped else { return }
         let isoFormatter = ISO8601DateFormatter()
         isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 

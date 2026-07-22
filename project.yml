@@ -306,6 +306,13 @@ targets:
         basedOnDependencyAnalysis: false
         script: |
           set -eu
+          # Only the real release pipeline uploads: make_dmg.sh exports
+          # PIDGY_PUBLISH=1. Plain local Release builds must NOT push
+          # dSYMs + sources to Sentry as a side effect.
+          if [ "${PIDGY_PUBLISH:-0}" != "1" ]; then
+            echo "note: Sentry dSYM upload skipped (PIDGY_PUBLISH != 1)"
+            exit 0
+          fi
           # Skip silently when any Sentry value is empty. Source builds
           # without telemetry credentials must still succeed end-to-end.
           if [ -z "${PIDGY_SENTRY_AUTH_TOKEN:-}" ] \

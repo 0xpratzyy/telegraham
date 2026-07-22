@@ -6521,6 +6521,57 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertTrue(AnswerPrompt.systemPrompt.contains("list ONLY the REPLY items"))
     }
 
+    /// applyExtractionWindow (#48): ONE transaction carries loop closes,
+    /// fact upserts, chases, and the cursor advance. Verifies the success
+    /// contract — everything lands together, and close-before-upsert lets a
+    /// re-ask with the SAME fingerprint land as a fresh live row instead of
+    /// being merged into (and killed with) the old one. The old
+    /// fire-and-forget split could advance the cursor past a window whose
+    /// upsert silently failed, skipping those messages forever.
+    func testApplyExtractionWindowCommitsFactsAndCursorTogether() async throws {
+        try await withTempDatabase { _ in
+            let original = FactDraft(
+                subjectEntity: "Akhil B", predicate: .iOwe, objectText: "the beta invite",
+                action: "Send Akhil the beta invite", loopKind: .reply, objectEntity: nil,
+                confidence: 0.9, validFrom: Date(timeIntervalSince1970: 1_000),
+                sourceChatId: 7, sourceChatTitle: "Akhil B",
+                sourceMessageId: 100, sourceText: "beta invite bhejo", senderName: "Akhil B"
+            )
+            await DatabaseManager.shared.upsertFacts([original])
+
+            // One window commit: close the answered loop, re-open it from a
+            // re-ask (same fingerprint), add a brand-new loop, advance cursor.
+            var reAsk = original
+            reAsk.sourceMessageId = 210
+            reAsk.sourceText = "beta invite? phir se puch raha hoon"
+            let fresh = FactDraft(
+                subjectEntity: "Akhil B", predicate: .owesMe, objectText: "the figma link",
+                action: "Akhil owes the figma link", objectEntity: nil, confidence: 0.8,
+                validFrom: Date(timeIntervalSince1970: 2_000), sourceChatId: 7,
+                sourceChatTitle: "Akhil B", sourceMessageId: 220,
+                sourceText: "figma link bhejta hoon", senderName: "Akhil B"
+            )
+            try await DatabaseManager.shared.applyExtractionWindow(
+                chatId: 7,
+                closeFingerprints: [original.fingerprint],
+                upserts: [reAsk, fresh],
+                chases: [],
+                advanceCursorTo: 220
+            )
+
+            let open = await DatabaseManager.shared.loadOpenFacts(chatId: 7)
+            XCTAssertTrue(
+                open.contains { $0.fingerprint == original.fingerprint && $0.sourceMessageId == 210 },
+                "re-ask must survive as a fresh LIVE row anchored on the new message (close-before-upsert)"
+            )
+            XCTAssertTrue(open.contains { $0.fingerprint == fresh.fingerprint })
+            // The closed generation of the original loop is still there
+            // (bi-temporal), just invalidated.
+            let cursor = await DatabaseManager.shared.factExtractionCursor(chatId: 7)
+            XCTAssertEqual(cursor, 220, "cursor advance rides the same transaction as the facts")
+        }
+    }
+
     // MARK: - Facts search (two-tier, entity-anchored)
 
     /// A conversational query that NAMES someone must return only that
