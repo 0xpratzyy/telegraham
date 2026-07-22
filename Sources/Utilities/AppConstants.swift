@@ -33,10 +33,11 @@ enum AppConstants {
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
         static let defaultOpenAIModel = "gpt-5"
-        /// Managed (Pidgy AI) plan model + proxy path — Gemini 3.1 Flash-Lite
-        /// via the proxy's Vertex path. To switch to gpt-5, flip to "gpt-5" +
-        /// "/v1/chat/completions" (proxy + Vertex auth already wired).
-        static let managedModel = "google/gemini-3.1-flash-lite"
+        /// Managed (Pidgy AI) plan model + proxy path — Gemini 3.5 Flash-Lite
+        /// (released 2026-07-21) via the proxy's Vertex path. To switch to
+        /// gpt-5, flip to "gpt-5" + "/v1/chat/completions" (proxy + Vertex
+        /// auth already wired).
+        static let managedModel = "google/gemini-3.5-flash-lite"
 
         /// Per-stage model routing for the MANAGED plan only (BYOK users'
         /// chosen model is never overridden). Currently EVERYTHING runs on

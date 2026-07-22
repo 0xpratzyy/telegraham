@@ -202,11 +202,18 @@ enum AIUsagePricingCatalog {
                 outputUSDPerMillionTokens: 3.00
             )
         case (.openAI, "gemini-3.1-flash-lite"):
-            // Current managed model. Vertex list price (2026-06).
+            // Previous managed model. Vertex list price (2026-06).
             return AIModelPricing(
                 family: family,
                 inputUSDPerMillionTokens: 0.25,
                 outputUSDPerMillionTokens: 1.50
+            )
+        case (.openAI, "gemini-3.5-flash-lite"):
+            // Current managed model. List price at launch (2026-07-21).
+            return AIModelPricing(
+                family: family,
+                inputUSDPerMillionTokens: 0.30,
+                outputUSDPerMillionTokens: 2.50
             )
         case (.openAI, "gemini-3.5-flash"):
             // GA, top-quality fallback — roughly gpt-5 pricing.
@@ -240,6 +247,7 @@ enum AIUsagePricingCatalog {
             // under .openAI with a `google/gemini-*` model id. Check the more
             // specific variants first (3.1-flash-lite before 3-flash, etc).
             if normalized.contains("gemini-3.1-flash-lite") { return "gemini-3.1-flash-lite" }
+            if normalized.contains("gemini-3.5-flash-lite") { return "gemini-3.5-flash-lite" }
             if normalized.contains("gemini-3.5-flash") { return "gemini-3.5-flash" }
             if normalized.contains("gemini-3-flash") { return "gemini-3-flash" }
             if normalized.contains("gemini-2.5-flash") { return "gemini-2.5-flash" }
