@@ -71,6 +71,40 @@ extension DatabaseManager {
         }
     }
 
+    /// Chats whose LOCAL history is complete enough to extract: the coverage
+    /// coordinator verified the window (`oldest_covered_at <= cutoff`) or the
+    /// local messages already span back past the cutoff. Extraction must not
+    /// run ahead of backfill — its cursor is a high-water mark, and messages
+    /// backfilled BELOW an already-advanced cursor would never be read
+    /// (fresh-install bug: half the history silently skipped).
+    func syncReadyChatIdsForExtraction(chatIds: [Int64], cutoff: Date) async -> Set<Int64> {
+        guard !chatIds.isEmpty, let pool = await ensureDatabase() else { return [] }
+        let ts = cutoff.timeIntervalSince1970
+        let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ",")
+        do {
+            let ids = try await pool.read { db in
+                try Int64.fetchAll(
+                    db,
+                    sql: """
+                        SELECT m.chat_id
+                        FROM messages m
+                        LEFT JOIN chat_coverage_state c ON c.chat_id = m.chat_id
+                        WHERE m.chat_id IN (\(placeholders))
+                        GROUP BY m.chat_id
+                        HAVING MIN(m.date) <= ? OR COALESCE(MAX(c.oldest_covered_at), 9e18) <= ?
+                        """,
+                    arguments: StatementArguments(chatIds.map { $0 as DatabaseValueConvertible } + [ts, ts])
+                )
+            }
+            return Set(ids)
+        } catch {
+            print("[DatabaseManager] syncReadyChatIdsForExtraction failed: \(error)")
+            // Fail OPEN (all ready): a broken gate must degrade to the old
+            // behavior, not silently freeze extraction.
+            return Set(chatIds)
+        }
+    }
+
     private static func executeFactUpsert(_ db: Database, draft d: FactDraft, now: Double) throws {
         try db.execute(
             sql: """
@@ -531,6 +565,61 @@ extension DatabaseManager {
             }
         } catch {
             print("[DatabaseManager] updateFactExtractionCursor failed: \(error)")
+        }
+    }
+
+    /// Every chat the fact store holds rows for.
+    ///
+    /// Cleanup has to be driven from what was stored, not from what is
+    /// currently eligible to extract: a chat that has gone quiet, been
+    /// archived, or aged past the crawl window still has its old facts, and
+    /// scanning only the eligible set would leave those behind forever.
+    func factChatIds() async -> [Int64] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                try Int64.fetchAll(db, sql: "SELECT DISTINCT source_chat_id FROM facts")
+            }
+        } catch { return [] }
+    }
+
+    /// Remove every fact extracted from these chats, and forget how far
+    /// extraction had read them.
+    ///
+    /// This is a hard delete rather than the store's usual bi-temporal
+    /// invalidate, because these rows are not facts that stopped being true —
+    /// they should never have been written. Invalidating them would file a
+    /// bot's chatter under "resolved" and keep it in the history a user can
+    /// browse. `facts_ad` keeps `facts_fts` in step.
+    ///
+    /// The cursor reset is the load-bearing half: without it a chat whose
+    /// facts were purged is permanently stamped as read, so re-including it
+    /// later (the bots toggle) would extract nothing. Clearing the cursor
+    /// makes that toggle self-healing — the next pass re-reads the window.
+    func purgeFacts(chatIds: [Int64]) async -> Int {
+        guard !chatIds.isEmpty, let pool = await ensureDatabase() else { return 0 }
+        let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ",")
+        do {
+            return try await pool.write { db in
+                let doomed = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM facts WHERE source_chat_id IN (\(placeholders))",
+                    arguments: StatementArguments(chatIds)
+                ) ?? 0
+                guard doomed > 0 else { return 0 }
+                try db.execute(
+                    sql: "DELETE FROM facts WHERE source_chat_id IN (\(placeholders))",
+                    arguments: StatementArguments(chatIds)
+                )
+                try db.execute(
+                    sql: "DELETE FROM fact_extraction_state WHERE chat_id IN (\(placeholders))",
+                    arguments: StatementArguments(chatIds)
+                )
+                return doomed
+            }
+        } catch {
+            print("[DatabaseManager] purgeFacts failed: \(error)")
+            return 0
         }
     }
 
