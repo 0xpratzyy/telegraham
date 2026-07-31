@@ -31,7 +31,31 @@ actor RateLimiter {
     private var globalCooldownUntil: Date?
     private var methodCooldownUntil: [String: Date] = [:]
     private var historyCallsInFlight = 0
-    private static let maxHistoryCallsInFlight = 2
+    /// 8, raised from 2 in measured steps and capped there.
+    ///
+    /// This is the real width of the history lane — `maxBootstrapInFlight` in
+    /// the fact coordinator only queues against it. Two was chosen when a
+    /// stuck TDLib call could park a slot indefinitely with nothing to bound
+    /// it; at that width a single hang halved the lane and two hangs closed
+    /// it. The timeout doesn't cancel the underlying call (TDLibKit calls
+    /// aren't cancellable) but it does bound how long the coordinator waits,
+    /// and eight slots mean one parked call leaves seven working instead of
+    /// one.
+    ///
+    /// Why it matters: on a fresh install the download IS the bottleneck —
+    /// measured, coverage reached 20 of 159 chats in 11 minutes while AI
+    /// extraction sat idle at a 6.8s median per window. Rate is still capped
+    /// globally at `RateLimit.refillRate` (5/s), so this widens concurrency,
+    /// not throughput per second. 2 → 4 measured 1.8 → 2.6 chats/min of
+    /// coverage with zero FLOOD_WAIT; 4 → 8 took it to ~18/min, a 10× on
+    /// the original. 12 was then measured and was NOT better — 39 chats
+    /// covered at 2.5 min versus 45 at 8 — because by then the global bucket
+    /// was only ~50 of its 300 calls/min, so the binding constraint had
+    /// already moved off this cap. Don't raise it again without moving that
+    /// constraint first; more concurrency here buys nothing and widens the
+    /// flood-pattern surface. Telegram's detection is pattern-based, not
+    /// purely rate based.
+    static let maxHistoryCallsInFlight = 8
 
     /// Throttle log dedupe: only re-emit a given method's throttle line at most
     /// once every `logCoalesceWindow`. Without this, a deep queue (e.g. 163

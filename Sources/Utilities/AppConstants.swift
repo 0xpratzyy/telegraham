@@ -40,24 +40,54 @@ enum AppConstants {
         static let managedModel = "google/gemini-3.5-flash-lite"
 
         /// Per-stage model routing for the MANAGED plan only (BYOK users'
-        /// chosen model is never overridden). Currently EVERYTHING runs on
-        /// flash-lite — trialing whether the sharper 3.5-flash tier is worth
-        /// 6x on the user-facing synthesis stages. If deep-summary prose or
-        /// search ranking feels dumber, restore:
+        /// chosen model is never overridden). If deep-summary prose or
+        /// search ranking feels dumber on lite, restore:
         ///   case .summary: return "google/gemini-3.5-flash"
         static func managedModelOverride(for kind: AIRequestKind?) -> String? {
-            nil
+            switch kind {
+            case .factExtraction:
+                // 3.5-flash-lite regressed on the extraction prompt's
+                // direction rule (a speaker's own commitment repeatedly
+                // became [ME]'s task — 2026-07-23, reproduced even after
+                // worked examples were added to the prompt). 3.1 is the
+                // model this rule was validated on (#22/#24); keep
+                // extraction pinned there until a fixture re-eval passes.
+                return "google/gemini-3.1-flash-lite"
+            default:
+                return nil
+            }
         }
+
         static let managedProxyPath = "/v1/vertex/chat/completions"
+
         static let maxResponseTokens = 4096
         static let maxTokenBudgetChars = 16000
-        static let requestTimeoutSeconds: TimeInterval = 90
+        /// 45s, down from 90. Extraction's median call is 4.7s, so 90 was
+        /// 19× the median and the resource timeout (2×) let a single hung
+        /// request burn ~190s before the retry even started — measured at
+        /// 3 of 126 calls on one crawl, roughly 9 wasted minutes. A call
+        /// still unanswered at 45s is not coming back usefully; retrying is
+        /// cheaper than waiting. Responses are capped at 4096 tokens and deep
+        /// summaries are already chunked map-reduce, so no legitimate call
+        /// should approach this.
+        static let requestTimeoutSeconds: TimeInterval = 45
 
         enum SemanticSearch {
             static let ftsTopMessages = 50
             static let vectorTopMessages = 50
             static let fallbackTopMessages = 40
-            static let maxLocalChatsForRerank = 20
+
+            /// The 50-message caps above stay. Raising them was tried and
+            /// measured: it lifts the *reachable* set — the share of queries
+            /// where any retrieval arm surfaces the right chat at all — from
+            /// 63% to 69% at depth 400, and bought zero improvement in what
+            /// actually ranked into view, because the weighted scorer below
+            /// ranks the extra chats straight back out
+            /// (`RetrievalRecallEval.testCandidateDepthSweep`). Depth is dead
+            /// weight until that scorer is replaced by rank-based fusion,
+            /// which measured 62% vs 58%. Don't raise these without re-running
+            /// that sweep.
+
             static let maxRenderedSemanticResults = 24
             static let messagePreviewCharacterLimit = 180
             static let highRelevanceThreshold = 0.72
@@ -370,14 +400,22 @@ enum AppConstants {
         static let contextLayerEnabledKey = "contextLayerEnabled"
 
         /// Attach the user's Telegram @username to crash reports so the
-        /// developer can proactively reach out. Default: on (disclosed in
-        /// beta release notes); turning it off keeps reports anonymous
-        /// (random install id only).
+        /// developer can proactively reach out. OPT-IN — default off;
+        /// reports are anonymous (random install id only) until the user
+        /// enables it in Preferences.
         static let diagnosticsIdentityEnabledKey = "diagnosticsIdentityEnabled"
 
         /// Random per-install UUID attached to every crash report as the
         /// Sentry user id — groups events per install without any PII.
         static let installSupportIdKey = "installSupportId"
+
+        /// Invite gate + referrals (beta): local cache of this install's
+        /// registration, personal codes, and referral count. Server-side
+        /// state (keyed on the install id) is the source of truth —
+        /// these only exist so the UI renders offline.
+        static let inviteRegisteredKey = "inviteRegistered"
+        static let inviteCodesCacheKey = "inviteCodesCache"
+        static let inviteReferralsKey = "inviteReferrals"
 
         /// Where "Open in chat" lands: "desktop" (tg:// deep links) or
         /// "web" (web.telegram.org). Unset = auto-detect from whether a

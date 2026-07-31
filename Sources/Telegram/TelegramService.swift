@@ -25,6 +25,15 @@ class TelegramService: ObservableObject {
     private var botMetadataWarmTask: Task<Void, Never>?
     private var userCache: [Int64: TGUser] = [:]
     private var chatCache: [Int64: TGChat] = [:]
+    /// Chats whose member count TDLib could NOT resolve (channels, restricted
+    /// supergroups, transient failures). Without this, every caller re-asked
+    /// forever: RecentSync/IndexScheduler/coverage each call
+    /// resolvedMemberCount for every chat on every sweep, so ~1200 chats
+    /// produced 23k getSupergroupFullInfo calls in 20 minutes, draining the
+    /// GLOBAL rate-limit bucket and starving getChatHistory (18k yields) —
+    /// i.e. the member-count lookup was crowding out the actual work.
+    /// Session-scoped on purpose: a relaunch retries, a running app doesn't.
+    private var unresolvableMemberCountChatIds: Set<Int64> = []
 
     /// The underlying TDLibKit client for direct API calls
     private var client: TDLibKit.TDLibClient? {
@@ -165,16 +174,24 @@ class TelegramService: ObservableObject {
     private func discoverAdditionalMainListChats() async {
         var stagnantPasses = 0
         var lastVisibleCount = visibleChats.count
+        let discoveryStart = Date()
 
         while !Task.isCancelled && stagnantPasses < AppConstants.Fetch.maxStagnantBackgroundChatDiscoveryPasses {
             do {
+                let passStart = Date()
                 try await loadChats(
                     limit: AppConstants.Fetch.backgroundChatDiscoveryLimit,
                     priority: .background,
                     updatesLoadingState: false
                 )
+                #if DEBUG
+                print("[Meter] chatlist loadChats took \(String(format: "%.1f", Date().timeIntervalSince(passStart)))s · visible=\(visibleChats.count) mainList=\(visibleChats.filter(\.isInMainList).count) · t+\(Int(Date().timeIntervalSince(discoveryStart)))s")
+                #endif
             } catch let error as TDLibKit.Error {
                 if isMainChatListExhausted(error) {
+                    #if DEBUG
+                    print("[Meter] chatlist EXHAUSTED (404) · visible=\(visibleChats.count) mainList=\(visibleChats.filter(\.isInMainList).count)")
+                    #endif
                     return
                 }
 
@@ -227,6 +244,14 @@ class TelegramService: ObservableObject {
         if let cached = normalizedMemberCount(chat.memberCount) {
             return cached
         }
+        // Already asked and TDLib had no answer — don't ask again. This is
+        // the load-bearing half of the cache: the success path was cached
+        // but the failure path wasn't, so unresolvable chats were re-fetched
+        // on every sweep of every coordinator.
+        if unresolvableMemberCountChatIds.contains(chat.id) { return nil }
+        // A private chat's member count is a constant, not a lookup.
+        if case .privateChat = chat.chatType { return nil }
+        if case .secretChat = chat.chatType { return nil }
 
         let fetchedCount: Int?
         switch chat.chatType {
@@ -238,7 +263,10 @@ class TelegramService: ObservableObject {
             fetchedCount = nil
         }
 
-        guard let fetchedCount else { return nil }
+        guard let fetchedCount else {
+            unresolvableMemberCountChatIds.insert(chat.id)
+            return nil
+        }
         cacheMemberCount(fetchedCount, for: chat.id)
         return fetchedCount
     }
@@ -590,10 +618,19 @@ class TelegramService: ObservableObject {
     }
 
     private func fetchSupergroupMemberCount(supergroupId: Int64) async -> Int? {
-        if let fullInfo = try? await withRateLimitedCall(method: "getSupergroupFullInfo", operation: { client in
-            try await client.getSupergroupFullInfo(supergroupId: supergroupId)
-        }),
-           let memberCount = normalizedMemberCount(fullInfo.memberCount) {
+        // Background, not user: nothing on screen waits for a member count —
+        // it only decides whether a group is small enough to index. At user
+        // priority it dominated the shared bucket on a fresh install (92 of
+        // 212 throttled calls, 43%), and the call it was starving was
+        // `getChatHistory`, which is what feeds extraction. The download was
+        // the whole first-run bottleneck; this call was standing in its lane.
+        if let fullInfo = try? await withRateLimitedCall(
+            priority: .background,
+            method: "getSupergroupFullInfo",
+            operation: { client in
+                try await client.getSupergroupFullInfo(supergroupId: supergroupId)
+            }
+        ), let memberCount = normalizedMemberCount(fullInfo.memberCount) {
             return memberCount
         }
 
