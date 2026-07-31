@@ -130,24 +130,6 @@ final class AIService: ObservableObject {
         }
     }
 
-    func rerankSearchResults(
-        query: String,
-        candidates: [(chatId: Int64, chatTitle: String, bestMessage: String)]
-    ) async throws -> [Int64] {
-        try requireAIEntitlement()
-        guard !candidates.isEmpty else { return [] }
-        return try await provider.rerankResults(
-            query: query,
-            candidates: candidates.map { candidate in
-                (
-                    chatId: candidate.chatId,
-                    chatTitle: candidate.chatTitle,
-                    snippet: candidate.bestMessage
-                )
-            }
-        )
-    }
-
     /// Suggested-reply chips for the reply-queue detail pane.
     /// Returns up to 3 short reply options the user can copy or
     /// click-to-send. Uses the existing `summarize` provider entry

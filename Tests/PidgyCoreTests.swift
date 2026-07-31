@@ -148,15 +148,22 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     func testRateLimiterCapsConcurrentGetChatHistoryCalls() async throws {
-        // The rate limiter caps concurrent in-flight history calls at 2 — that
-        // gives the coordinator headroom to start the next chat while an
-        // abandoned (timed-out) TDLib call from the previous chat drains. A
-        // THIRD acquire must block until one of the first two releases.
-        let limiter = RateLimiter(maxTokens: 10, refillRate: 10)
+        // The rate limiter caps concurrent in-flight history calls — that gives
+        // the coordinator headroom to start the next chat while an abandoned
+        // (timed-out) TDLib call from the previous chat drains. One acquire
+        // BEYOND the cap must block until a slot releases.
+        //
+        // Reads the cap rather than hardcoding it: the constant moved 2 → 4
+        // when the download lane turned out to be the fresh-install
+        // bottleneck, and a test that pins the number fails on the change
+        // instead of on the behaviour it exists to protect.
+        let cap = RateLimiter.maxHistoryCallsInFlight
+        let limiter = RateLimiter(maxTokens: 100, refillRate: 100)
         let thirdCall = AsyncCompletionFlag()
 
-        try await limiter.acquireCall(priority: .background, method: "getChatHistory")
-        try await limiter.acquireCall(priority: .background, method: "getChatHistory")
+        for _ in 0..<cap {
+            try await limiter.acquireCall(priority: .background, method: "getChatHistory")
+        }
         let pending = Task {
             try? await limiter.acquireCall(priority: .background, method: "getChatHistory")
             await thirdCall.markCompleted()
@@ -171,7 +178,11 @@ final class PidgyCoreTests: XCTestCase {
         _ = await pending.value
         let completedAfterRelease = await thirdCall.isCompleted
         XCTAssertTrue(completedAfterRelease)
-        await limiter.releaseCall(method: "getChatHistory")
+        // Hand back every slot still held (cap acquires, minus the one already
+        // released above and the one `pending` released itself).
+        for _ in 0..<(cap - 1) {
+            await limiter.releaseCall(method: "getChatHistory")
+        }
     }
 
     func testOlderHistoryAppendDoesNotMoveRecentSyncStateBackward() async throws {
@@ -3721,6 +3732,9 @@ final class PidgyCoreTests: XCTestCase {
                 AppConstants.Preferences.chatOpenTargetKey,
                 AppConstants.Preferences.subscriptionStateKey,
                 AppConstants.Preferences.diagnosticsIdentityEnabledKey,
+                AppConstants.Preferences.inviteRegisteredKey,
+                AppConstants.Preferences.inviteCodesCacheKey,
+                AppConstants.Preferences.inviteReferralsKey,
                 // Legacy-pipeline keys swept as raw strings so old installs
                 // reset cleanly.
                 "dashboardTaskTriageContextVersion",
@@ -6602,6 +6616,68 @@ final class PidgyCoreTests: XCTestCase {
         }
     }
 
+    /// Evidence attribution is METADATA, not the model's opinion: a draft's
+    /// senderName must be the CITED message's real sender, even when the
+    /// loop's subject is someone else. Regression: [ME]'s own "will share
+    /// the proposal by eod" was stored with senderName "Aditya" (the
+    /// subject), so the evidence row read as if Aditya had written it.
+    func testDraftSenderNameComesFromCitedMessageNotSubject() throws {
+        let messages = [
+            MessageSnippet(
+                messageId: 900, senderFirstName: "Pratzyy",
+                text: "@adityakiteapp nice talking to you, will share the proposal by eod",
+                relativeTimestamp: "1h", chatId: 5, chatName: "First Dollar <> Kite"
+            )
+        ]
+        let response = """
+        {"facts": [{"subject": "Aditya", "predicate": "i_owe", "object": "the proposal",
+          "action": "Send the proposal to Aditya by EOD", "kind": "action",
+          "sourceMsg": 1, "confidence": 0.9,
+          "evidence": "@adityakiteapp nice talking to you, will share the proposal by eod"}]}
+        """
+        let result = try FactExtractionParser.parse(
+            response, chatId: 5, openLoops: [], validFrom: Date(), messages: messages
+        )
+        let draft = try XCTUnwrap(result.drafts.first)
+        XCTAssertEqual(draft.subjectEntity, "Aditya", "subject stays the person the loop is about")
+        XCTAssertEqual(draft.senderName, "Pratzyy", "sender must be the cited message's real author")
+        XCTAssertEqual(draft.sourceMessageId, 900)
+    }
+
+    /// A loop born AND settled inside one extraction batch can never close
+    /// later — resolvedLoops only addresses loops that pre-date the batch,
+    /// the structural close covers only i_owe/reply, and each message is
+    /// read exactly once. Measured 2026-07-25: 41 of 43 stale `owes_me`
+    /// loops were of exactly this shape. The prompt must therefore tell the
+    /// model not to birth them — AND must guard the opposite failure, since
+    /// over-applying it would silently swallow real obligations.
+    func testExtractionPromptRefusesLoopsSettledInSameTranscript() {
+        let prompt = FactExtractionPrompt.systemPrompt
+        XCTAssertTrue(prompt.contains("ALREADY SETTLED INSIDE THIS TRANSCRIPT"))
+        XCTAssertTrue(
+            prompt.contains("resolvedLoops can only close loops that existed BEFORE this batch"),
+            "the WHY must stay in the prompt — it is what makes the rule non-arbitrary"
+        )
+        XCTAssertTrue(
+            prompt.contains("do NOT over-apply it"),
+            "the anti-over-suppression half is as load-bearing as the rule itself"
+        )
+        XCTAssertTrue(prompt.contains("in any language or script"))
+    }
+
+    /// The direction rules must stay LANGUAGE-INDEPENDENT — a word/phrase
+    /// list would silently fail on Hinglish, native script, or mid-sentence
+    /// code-switching (and the project rule is: never add language word
+    /// lists). Locks the two-step test + the action/predicate consistency
+    /// check that catch the "@mention read as the actor" misfire.
+    func testExtractionPromptDirectionRulesAreLanguageIndependent() {
+        let prompt = FactExtractionPrompt.systemPrompt
+        XCTAssertTrue(prompt.contains("TWO-STEP DIRECTION TEST"))
+        XCTAssertTrue(prompt.contains("by MEANING, never by matching words"))
+        XCTAssertTrue(prompt.contains("WHO IS ADDRESSED is not WHO ACTS"))
+        XCTAssertTrue(prompt.contains("CONSISTENCY CHECK"))
+    }
+
     // MARK: - Facts search (two-tier, entity-anchored)
 
     /// A conversational query that NAMES someone must return only that
@@ -7159,12 +7235,6 @@ private struct StubAIProvider: AIProvider {
         throw AIError.providerNotConfigured
     }
 
-    func rerankResults(
-        query: String,
-        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
-    ) async throws -> [Int64] {
-        throw AIError.providerNotConfigured
-    }
 
     func extractPersonProfile(
         personName: String,

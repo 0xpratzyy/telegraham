@@ -122,3 +122,47 @@ extension DatabaseManager {
         )
     }
 }
+
+extension DatabaseManager {
+    /// Every chat's CURRENT rolling summary, for retrieval experiments.
+    /// These are the app's only genuinely document-shaped units — a single
+    /// chat message ("Ye kar sakte") carries almost no retrievable meaning,
+    /// while its chat's summary paragraph does.
+    func currentChatSummariesForEval() async -> [(chatId: Int64, text: String)] {
+        guard let pool = await ensureDatabase() else { return [] }
+        do {
+            return try await pool.read { db in
+                try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT entity_id, entity_title, summary
+                        FROM entity_summaries
+                        WHERE superseded_at IS NULL AND entity_kind = 'chat'
+                        """
+                ).map { row in
+                    let title: String = row["entity_title"] ?? ""
+                    let summary: String = row["summary"] ?? ""
+                    // Title carries real signal (chat names are topical) and
+                    // costs nothing to prepend.
+                    return (chatId: row["entity_id"], text: "\(title). \(summary)")
+                }
+            }
+        } catch {
+            return []
+        }
+    }
+
+    /// Size of the field a retrieval eval is ranking over. Recall@20 means
+    /// nothing without it: hitting 20 out of 30 candidates is a different
+    /// claim than 20 out of a thousand.
+    func chatCountWithMessagesForEval() async -> Int {
+        guard let pool = await ensureDatabase() else { return 0 }
+        do {
+            return try await pool.read { db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(DISTINCT chat_id) FROM messages") ?? 0
+            }
+        } catch {
+            return 0
+        }
+    }
+}

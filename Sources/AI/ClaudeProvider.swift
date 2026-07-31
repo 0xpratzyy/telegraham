@@ -60,22 +60,6 @@ final class ClaudeProvider: AIProvider {
         return try JSONExtractor.parseJSON(response)
     }
 
-    func rerankResults(
-        query: String,
-        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
-    ) async throws -> [Int64] {
-        guard !candidates.isEmpty else { return [] }
-        let response = try await RetryHelper.withRetry {
-            try await self.makeRequest(
-                systemPrompt: SearchRerankPrompt.systemPrompt,
-                userMessage: SearchRerankPrompt.userMessage(query: query, candidates: candidates),
-                requestKind: .semanticSearch
-            )
-        }
-        let dto: SearchRerankResultDTO = try JSONExtractor.parseJSON(response)
-        return dto.rankedChatIds
-    }
-
     func extractPersonProfile(
         personName: String,
         messages: [MessageSnippet]

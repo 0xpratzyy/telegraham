@@ -92,22 +92,6 @@ final class OpenAIProvider: AIProvider {
         }
     }
 
-    func rerankResults(
-        query: String,
-        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
-    ) async throws -> [Int64] {
-        guard !candidates.isEmpty else { return [] }
-        let response = try await RetryHelper.withRetry {
-            try await self.makeRequest(
-                systemPrompt: SearchRerankPrompt.systemPrompt,
-                userMessage: SearchRerankPrompt.userMessage(query: query, candidates: candidates),
-                requestKind: .semanticSearch
-            )
-        }
-        let dto: SearchRerankResultDTO = try JSONExtractor.parseJSON(response)
-        return dto.rankedChatIds
-    }
-
     func extractPersonProfile(
         personName: String,
         messages: [MessageSnippet]
@@ -133,6 +117,15 @@ final class OpenAIProvider: AIProvider {
 
     // MARK: - HTTP
 
+    /// Request kinds whose entire response is a JSON document, so the provider
+    /// can be told to emit nothing else. (Prose kinds — summary, answerEngine —
+    /// must stay free-form.)
+    private static let jsonOnlyKinds: Set<AIRequestKind> = [
+        .factExtraction, .queryPlanning, .pipelineTriage, .replyQueueTriage,
+        .dashboardTopicDiscovery, .dashboardTaskTriage, .dashboardTaskExtraction,
+        .semanticSearch, .personProfile
+    ]
+
     private func makeRequest(
         systemPrompt: String,
         userMessage: String,
@@ -150,14 +143,6 @@ final class OpenAIProvider: AIProvider {
         // PIDGY_BUNDLED_LANGSMITH_API_KEY is empty.
         let startedAt = Date()
 
-        var request = URLRequest(url: endpointURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        if let licenseKey, !licenseKey.isEmpty {
-            request.setValue(licenseKey, forHTTPHeaderField: "X-Pidgy-License")
-        }
-
         // Managed plan: user-facing synthesis stages route to a sharper model;
         // everything else keeps the provider's configured model. BYOK users'
         // explicit model choice is never overridden.
@@ -167,6 +152,14 @@ final class OpenAIProvider: AIProvider {
             effectiveModel = override
         } else {
             effectiveModel = model
+        }
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if let licenseKey, !licenseKey.isEmpty {
+            request.setValue(licenseKey, forHTTPHeaderField: "X-Pidgy-License")
         }
         var body: [String: Any] = [
             "model": effectiveModel,
@@ -202,6 +195,26 @@ final class OpenAIProvider: AIProvider {
         // on the hot triage path, low elsewhere.
         if effectiveModel.hasPrefix("gpt-5") || effectiveModel.contains("gemini") {
             body["reasoning_effort"] = requestKind == .pipelineTriage ? "minimal" : "low"
+        }
+        // DETERMINISM. Every Pidgy prompt is a factual/structured judgement —
+        // extraction, triage, routing, grounded answers — never creative
+        // writing. Left unset, the provider default (1.0 on Gemini) sampled a
+        // fresh answer each time: re-running the SAME window over the same
+        // messages swung the fact count 100→152 (±20%), which made prompt
+        // changes unmeasurable and made the product feel arbitrary
+        // (measured 2026-07-25). gpt-5 reasoning models reject any value but
+        // their default, so they keep it.
+        if !effectiveModel.hasPrefix("gpt-5") {
+            body["temperature"] = 0
+        }
+        // Guarantee syntactically valid JSON on the paths whose whole output
+        // IS JSON. Without it a stray prose preamble becomes
+        // `unparseableResponse`, which costs the extraction window 3 retries
+        // and can skip it entirely. json_object (not a strict schema): the
+        // Vertex OpenAI-compat layer's schema support is unverified, and the
+        // tolerant parsers already handle shape.
+        if responseFormat == nil, let requestKind, Self.jsonOnlyKinds.contains(requestKind) {
+            body["response_format"] = ["type": "json_object"]
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 

@@ -20,12 +20,6 @@ protocol AIProvider {
         deterministicSpec: QuerySpec
     ) async throws -> QueryPlannerResultDTO
 
-    /// Rerank already-retrieved local semantic candidates.
-    func rerankResults(
-        query: String,
-        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
-    ) async throws -> [Int64]
-
     /// Compiled-truth profile for a single contact: a short living
     /// paragraph describing who they are, what's been discussed, what
     /// loops are open, and the vibe. Source material is the supplied
@@ -78,70 +72,6 @@ struct SemanticSearchResultDTO: Codable {
         reason = try container.decode(String.self, forKey: .reason)
         relevance = try container.decode(String.self, forKey: .relevance)
         matchingMessages = try container.decodeIfPresent([String].self, forKey: .matchingMessages)
-    }
-}
-
-struct SearchRerankResultDTO: Codable {
-    let rankedChatIds: [Int64]
-
-    enum CodingKeys: String, CodingKey {
-        case rankedChatIds
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-
-        if let numericIds = try? container.decode([Int64].self, forKey: .rankedChatIds) {
-            rankedChatIds = numericIds
-            return
-        }
-
-        if let rawIds = try? container.decode([String].self, forKey: .rankedChatIds) {
-            rankedChatIds = rawIds.compactMap(Int64.init)
-            return
-        }
-
-        rankedChatIds = []
-    }
-}
-
-enum SearchRerankPrompt {
-    static let systemPrompt = """
-    You rerank Telegram chat search candidates.
-    The local search engine already found plausible chats. Your job is only to order them by relevance to the exact query.
-
-    Rules:
-    - Use only the provided candidates.
-    - Prefer candidates whose snippet directly answers the query intent.
-    - Prefer concrete topic matches over vague thematic overlap.
-    - Keep the ranking stable and practical for the user opening the next chat.
-    - Do not invent chat IDs.
-
-    Return exactly one JSON object:
-    {
-      "rankedChatIds": [123, 456, 789]
-    }
-    """
-
-    static func userMessage(
-        query: String,
-        candidates: [(chatId: Int64, chatTitle: String, snippet: String)]
-    ) -> String {
-        let renderedCandidates = candidates.map { candidate in
-            """
-            - chatId: \(candidate.chatId)
-              chatTitle: \(candidate.chatTitle)
-              snippet: \(candidate.snippet)
-            """
-        }.joined(separator: "\n")
-
-        return """
-        Query:
-        \(query)
-
-        Candidates:
-        \(renderedCandidates)
-        """
     }
 }
 
