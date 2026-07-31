@@ -114,7 +114,7 @@ final class OnboardingWindowController {
 // MARK: - Root flow view
 
 private enum OnboardingStep: Int, CaseIterable {
-    case welcome, tour, connect, qr, phone, code, password, plan, byokKey, done
+    case welcome, invite, tour, connect, qr, phone, code, password, plan, byokKey, done
 
     /// Position used for the top progress strip. Phone / code / password
     /// share the QR slot since they're alternative paths through the same
@@ -123,15 +123,16 @@ private enum OnboardingStep: Int, CaseIterable {
     var progressIndex: Int {
         switch self {
         case .welcome: return 0
-        case .tour: return 1
-        case .connect: return 2
-        case .qr, .phone, .code, .password: return 3
-        case .plan, .byokKey: return 4
-        case .done: return 5
+        case .invite: return 1
+        case .tour: return 2
+        case .connect: return 3
+        case .qr, .phone, .code, .password: return 4
+        case .plan, .byokKey: return 5
+        case .done: return 6
         }
     }
 
-    static var totalProgressSlots: Int { 5 }
+    static var totalProgressSlots: Int { 6 }
 }
 
 struct OnboardingFlow: View {
@@ -177,7 +178,12 @@ struct OnboardingFlow: View {
                     Group {
                         switch step {
                         case .welcome:
-                            WelcomeStep { advance(to: .tour) }
+                            WelcomeStep { advance(to: nextAfterWelcome) }
+                        case .invite:
+                            InviteStep(
+                                onRedeemed: { advance(to: .tour) },
+                                onBack: { advance(to: .welcome) }
+                            )
                         case .tour:
                             TourStep(
                                 onAdvance: { advance(to: .connect) },
@@ -282,6 +288,14 @@ struct OnboardingFlow: View {
     private func progressFillWidth(total: CGFloat) -> CGFloat {
         let pct = CGFloat(step.progressIndex) / CGFloat(OnboardingStep.totalProgressSlots)
         return total * pct
+    }
+
+    /// Hard invite gate between Welcome and the Tour — only for builds
+    /// that can validate a code (proxy bundled), and skipped once this
+    /// install is registered (also covers reset + re-onboard, since the
+    /// service heals its flag from the server keyed on the install id).
+    private var nextAfterWelcome: OnboardingStep {
+        (InviteService.gateRequired && !InviteService.shared.isRegistered) ? .invite : .tour
     }
 
     private func advance(to next: OnboardingStep) {

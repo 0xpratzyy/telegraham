@@ -4,6 +4,7 @@ import Foundation
 enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
     case account = "Account"
     case ai = "AI & Plan"
+    case invites = "Invites"
     case preferences = "Preferences"
     case indexing = "Indexing"
     case diagnostics = "Diagnostics"
@@ -18,6 +19,8 @@ enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
             return "person.crop.circle"
         case .ai:
             return "sparkles"
+        case .invites:
+            return "ticket"
         case .preferences:
             return "slider.horizontal.3"
         case .indexing:
@@ -37,6 +40,8 @@ enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
             return "Telegram connection and credentials"
         case .ai:
             return "Plan, AI provider, and usage"
+        case .invites:
+            return "Invite friends, earn rewards"
         case .preferences:
             return "Toggles for the small stuff"
         case .indexing:
@@ -159,6 +164,12 @@ enum PreferencesResetPlan {
         // default (identity never rides crash reports without a fresh
         // explicit enable).
         AppConstants.Preferences.diagnosticsIdentityEnabledKey,
+        // Invite cache — server state (keyed on the surviving install id)
+        // is the source of truth; a re-onboard redeems idempotently and
+        // gets the same codes back.
+        AppConstants.Preferences.inviteRegisteredKey,
+        AppConstants.Preferences.inviteCodesCacheKey,
+        AppConstants.Preferences.inviteReferralsKey,
         // Raw strings: keys written by retired pipelines — still swept so
         // old installs reset cleanly.
         "dashboardTaskTriageContextVersion",

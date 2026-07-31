@@ -19,6 +19,9 @@ struct DashboardPreferencesPage: View {
     let onRefreshUsage: () -> Void
 
     @State private var selectedPage: DashboardPreferencePage = .account
+    @ObservedObject private var inviteService = InviteService.shared
+    @State private var grandfatherCode = ""
+    @State private var grandfatherError: String?
     @State private var apiId = ""
     @State private var apiHash = ""
     @State private var telegramStatus: DashboardPreferenceStatus?
@@ -183,7 +186,7 @@ struct DashboardPreferencesPage: View {
     /// like account, reset, about.
     private var showsRefreshControl: Bool {
         switch selectedPage {
-        case .ai, .indexing, .diagnostics:
+        case .ai, .indexing, .diagnostics, .invites:
             return true
         case .account, .preferences, .reset, .about:
             return false
@@ -211,8 +214,16 @@ struct DashboardPreferencesPage: View {
     /// Diagnostics is debug-only — hidden from the user-facing rail. The
     /// underlying page is still rendered if `selectedPage` somehow lands
     /// there (defensive), but you can't navigate to it from the UI.
+    /// Invites hides on source builds that can't reach the invite server
+    /// (no bundled proxy) unless the install is already registered.
     private var visiblePreferencePages: [DashboardPreferencePage] {
-        DashboardPreferencePage.allCases.filter { $0 != .diagnostics }
+        DashboardPreferencePage.allCases.filter { page in
+            if page == .diagnostics { return false }
+            if page == .invites {
+                return InviteService.gateRequired || inviteService.isRegistered
+            }
+            return true
+        }
     }
 
     private var preferencesStatusStrip: some View {
@@ -236,6 +247,16 @@ struct DashboardPreferencesPage: View {
                 caption: showPigeonFlock ? "5 birds, drag the line to bounce" : "Plain divider under the title",
                 systemImage: "slider.horizontal.3",
                 tint: PidgyDashboardTheme.blue
+            )
+        case .invites:
+            return DashboardPreferenceStatusItem(
+                title: "Referrals",
+                value: "\(inviteService.referrals)",
+                caption: inviteService.isRegistered
+                    ? "Friends who joined with your codes"
+                    : "Redeem a code to join the program",
+                systemImage: "ticket",
+                tint: inviteService.referrals > 0 ? PidgyDashboardTheme.green : PidgyDashboardTheme.blue
             )
         case .indexing:
             return preferenceStatusItems[3]
@@ -306,6 +327,8 @@ struct DashboardPreferencesPage: View {
             accountPage
         case .ai:
             aiPage
+        case .invites:
+            invitesPage
         case .preferences:
             preferencesPage
         case .indexing:
@@ -316,6 +339,99 @@ struct DashboardPreferencesPage: View {
             resetPage
         case .about:
             aboutPage
+        }
+    }
+
+    /// Invite codes + referral standing. Registered installs see their
+    /// codes (click-to-copy) and referral count; a pre-invite-era install
+    /// ("grandfathered") can redeem a code here post-onboarding to join
+    /// the referral program — same server flow as the onboarding gate.
+    private var invitesPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PrefSection(topPadding: 0) {
+                PrefSectionHead(
+                    title: "Invites",
+                    subtitle: "Pidgy grows one friend at a time — each code lets one person in"
+                ) {
+                    if inviteService.isRegistered {
+                        PrefPill(
+                            text: "\(inviteService.referrals) joined",
+                            tone: inviteService.referrals > 0 ? .green : .mono
+                        )
+                    }
+                }
+
+                if inviteService.isRegistered {
+                    if inviteService.codes.isEmpty {
+                        Text("Fetching your codes…")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                    } else {
+                        // Flow the chips in rows of 3 — bonus codes from
+                        // referrals grow this list past the initial 3.
+                        let rows = inviteService.codes.chunked(into: 3)
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                HStack(spacing: 8) {
+                                    ForEach(row) { code in
+                                        InviteCodeChip(code: code)
+                                    }
+                                }
+                            }
+                        }
+                        Text("Every friend who joins earns you 2 more codes — and free Pro time when plans launch.")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Color.Pidgy.fg4)
+                            .padding(.top, 12)
+                    }
+                } else {
+                    PrefField(
+                        label: "Join the referral program",
+                        hint: "You onboarded before invites existed — redeem any invite code once to get your own 3 codes to share.",
+                        content: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 10) {
+                                    PrefMinInput(
+                                        text: $grandfatherCode,
+                                        placeholder: "PIDGY-ABC123",
+                                        monospaced: true
+                                    )
+                                    .frame(maxWidth: 180)
+                                    Button(inviteService.isRedeeming ? "Checking…" : "Redeem") {
+                                        redeemGrandfatherCode()
+                                    }
+                                    .buttonStyle(.pidgyPress)
+                                    .disabled(
+                                        grandfatherCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                            || inviteService.isRedeeming
+                                    )
+                                }
+                                if let grandfatherError {
+                                    Text(grandfatherError)
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(Color.Pidgy.danger)
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private func redeemGrandfatherCode() {
+        let candidate = grandfatherCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else { return }
+        grandfatherError = nil
+        Task { @MainActor in
+            do {
+                try await InviteService.shared.redeem(code: candidate)
+                grandfatherCode = ""
+            } catch let error as InviteService.RedeemError {
+                grandfatherError = error.errorDescription
+            } catch {
+                grandfatherError = InviteService.RedeemError.network.errorDescription
+            }
         }
     }
 
@@ -1817,6 +1933,8 @@ struct DashboardPreferencesPage: View {
         case .preferences:
             // Toggles are pure @AppStorage — nothing to fetch.
             break
+        case .invites:
+            Task { await InviteService.shared.refreshStatus() }
         case .indexing:
             onRefreshUsage()
         case .diagnostics:
@@ -1836,6 +1954,8 @@ struct DashboardPreferencesPage: View {
         switch page {
         case .ai:
             await refreshUsageOverview()
+        case .invites:
+            await InviteService.shared.refreshStatus()
         case .diagnostics:
             await refreshDiagnostics()
             await refreshRoutingDebug()

@@ -234,6 +234,7 @@ struct ByokKeyStep: View {
 struct DoneStep: View {
     let onFinish: () -> Void
 
+    @ObservedObject private var inviteService = InviteService.shared
     @State private var checkScale: CGFloat = 0.4
     @State private var checkOpacity: Double = 0
     /// Asked once, here, right after the user connected Telegram —
@@ -308,8 +309,28 @@ struct DoneStep: View {
             }
             .padding(.top, 24)
 
+            // Referral moment: the codes this install can hand out (beta is
+            // invite-only — see InviteService). Hidden when the gate is off
+            // (source builds) or the codes haven't landed yet.
+            if !inviteService.codes.isEmpty {
+                VStack(spacing: 8) {
+                    Text("Bring your people — \(inviteService.codes.count) invites to share")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.Pidgy.fg2)
+                    HStack(spacing: 8) {
+                        ForEach(inviteService.codes.prefix(3)) { code in
+                            InviteCodeChip(code: code)
+                        }
+                    }
+                    Text("Each friend who joins earns you 2 more invites. They're always in Preferences → Invites.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.Pidgy.fg4)
+                }
+                .padding(.top, 20)
+            }
+
             OnboardingPrimaryButton(title: "Open Pidgy", trailingChevron: true, action: onFinish)
-                .padding(.top, 28)
+                .padding(.top, 24)
         }
         .frame(maxWidth: 440)
         .onAppear {

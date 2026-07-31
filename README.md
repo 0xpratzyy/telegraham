@@ -89,6 +89,7 @@ You should have received a `Pidgy-<sha>.dmg` file. To install:
 | `api.openai.com/v1/chat/completions` | When AI features run (fact extraction, Ask Pidgy answers, semantic search, summaries, reply suggestions) and an OpenAI key is configured | Recent message snippets from the chat being analyzed + the prompt that drives that feature |
 | `api.anthropic.com/v1/messages` | Same as above, if a Claude key is configured instead | Same |
 | Pidgy AI proxy (Cloudflare Worker) | Same as above, on the managed plan (no BYO key) | Same snippets — the proxy forwards to the model provider (Gemini via Vertex) and holds the provider key server-side |
+| Pidgy AI proxy `/v1/invite/*` | Once at onboarding (invite-code redeem) and when you open Preferences → Invites | ONLY the invite code string + the random per-install id — never your Telegram account, never message content |
 | `*.ingest.us.sentry.io` (Sentry SDK) | If a Sentry DSN was bundled into the build — crashes only, plus the explicit `PidgyTelemetry.capture(error:)` non-fatal sites | Stack trace + device/OS metadata. Event bodies pass through `scrubEvent` (`Sources/App/PidgyTelemetry.swift`) before send, which strips raw Telegram message text, sender names, phone numbers, and API tokens. You can disable by building from source without `PIDGY_SENTRY_DSN` set |
 
 **Telemetry honesty:**

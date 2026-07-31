@@ -16,6 +16,15 @@ DAILY_REQUEST_CAP = "5000"
 binding = "RATE"
 id = "494a6795a9394d8f832c71db6dfcab0d"
 
+# Invite gate + referrals (codes and random install ids ONLY — no message
+# content, no Telegram identity). Created by:
+#   wrangler kv namespace create INVITES
+# Paste the generated id below, then set the admin secret:
+#   wrangler secret put INVITE_ADMIN_TOKEN
+[[kv_namespaces]]
+binding = "INVITES"
+id = "4aa187668dd04d64a172f63cb871f25a"
+
 # Privacy invariants (issue #26): bare Worker on purpose — NOT AI Gateway
 # (it logs prompts by default). Do not add tail consumers, Workers Logs,
 # Logpush, or analytics bindings to this Worker; request/response bodies

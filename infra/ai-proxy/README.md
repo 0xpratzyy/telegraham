@@ -68,6 +68,39 @@ curl -s "$PROXY/v1/chat/completions" \
 curl -s "$PROXY/v1/chat/completions" -H "Authorization: Bearer nope" -d '{}'
 ```
 
+## Invite gate + referrals
+
+Beta onboarding hard-gates on an invite code; every onboarded install gets
+3 personal codes, and each successful referral pays the referrer +2 bonus
+codes and a counted referral (redeemed as free Pro months at billing
+cutover). KV stores codes + random install ids ONLY — no message content,
+no Telegram identity.
+
+One-time setup:
+
+```bash
+wrangler kv namespace create INVITES
+#    → paste the printed id into wrangler.toml (INVITES binding)
+openssl rand -hex 32
+wrangler secret put INVITE_ADMIN_TOKEN   # paste — admin-only, never in the app
+wrangler deploy
+```
+
+Minting root codes to hand out (admin token, count ≤ 50):
+
+```bash
+curl -s "$PROXY/v1/invite/mint" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"count":10}'
+```
+
+App-facing routes (shared gate token): `POST /v1/invite/redeem`
+`{code, installId}` → `{ok, codes[], referrals}` (409 = code already used,
+404 = unknown code, 429 = attempt throttle) and `POST /v1/invite/status`
+`{installId}` → `{registered, codes[{code,redeemed}], referrals}`.
+Redeem is idempotent per install — a reset + re-onboard returns the same
+registration instead of burning a second code.
+
 ## Point the app at it
 
 In `Config/BetaSecrets.local.xcconfig` (gitignored):
