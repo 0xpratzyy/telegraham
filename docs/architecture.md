@@ -149,7 +149,7 @@ deterministic parse and the router's planner merge both consume it.
 | Family | Engine | Surface |
 |---|---|---|
 | `exact_lookup` | `PatternSearchEngine` | literal/artifact rows |
-| `topic_search` | local semantic (FTS variants + vectors, RRF-fused, optional rerank) | ranked chats |
+| `topic_search` | local semantic (FTS variants + vectors, RRF-fused) — **no AI in the path**, results are local and instant | ranked chats |
 | `reply_queue` | local semantic **+ Ask Pidgy chat auto-open** | answer from REPLY loops |
 | `summary` (person question) | local semantic **+ Ask Pidgy chat auto-open** | answer card is the summary |
 | `summary` (chat recap) | `SummaryEngine` | deep map-reduce recap |
@@ -177,7 +177,16 @@ dashboard entry), `LauncherSupport` (preview resolver, onboarding handoff),
 engines, not the view).
 
 Onboarding: `Sources/Onboarding/` — flow container + `WelcomeTour`,
-`AuthSteps`, `ConnectSteps`, `PlanSteps`.
+`InviteStep`, `AuthSteps`, `ConnectSteps`, `PlanSteps`.
+
+**Invite gate + referrals**: beta builds hard-gate onboarding on an
+invite code (`InviteService` → the AI proxy's `/v1/invite/*` routes,
+KV-backed). Every onboarded install gets 3 personal codes; each
+successful referral pays +2 bonus codes now and a counted referral
+(free Pro months at billing cutover). Only the random install id and
+the code string leave the machine. Source builds without a bundled
+proxy skip the gate. Preferences → Invites shows codes/referrals and
+lets pre-invite installs redeem once post-onboarding.
 
 ## 6. Graph Foundation
 
@@ -200,7 +209,7 @@ issue #61.)
 
 ## 8. Testing
 
-`Tests/PidgyCoreTests.swift` — 196 tests, offline (mock providers, temp
+`Tests/PidgyCoreTests.swift` — 198 tests, offline (mock providers, temp
 databases). The remaining skips are documented SummaryEngine scoring
 regressions gated on eval-validated fixes (issue #59). Injection defenses
 are code-level gates, tested (destructive AI routes never act on

@@ -19,7 +19,7 @@ shipped baseline so the issues have context.
   and reply-queue questions; grounded in facts + summaries, with
   `pidgy://chat` backlinks and follow-up history).
 - Local-first search: exact lookup (`PatternSearchEngine`), fused FTS+vector
-  topic search with optional rerank, deep recap (`SummaryEngine`).
+  topic search (local only, no rerank), deep recap (`SummaryEngine`).
 - Dashboard: Home blended feed, Reply queue, Tasks, editorial Topics
   catch-me-up with click-to-explore, People (RelationGraph), dashboard-native
   Preferences.
@@ -27,9 +27,14 @@ shipped baseline so the issues have context.
 - AI proxy (Cloudflare Worker, Gemini via Vertex) for the managed plan;
   per-stage request kinds + model routing; payments shipped dormant.
 - July 2026 architecture cleanup: legacy per-surface AI pipelines deleted
-  (~13.5k lines net), god files split, suite at 196 tests / 0 failures.
+  (~13.5k lines net), god files split, suite at 198 tests / 0 failures.
 - CI (`.github/workflows/ci.yml`): secret scan + full suite on every PR
   and push to main.
+- Invite gate + referrals: onboarding hard-gates on a code
+  (`InviteService` → proxy `/v1/invite/*`, KV-backed); 3 personal codes
+  per install, +2 bonus per referral, referral counts reserved for free
+  Pro months at cutover. Needs one-time Worker setup (INVITES KV +
+  INVITE_ADMIN_TOKEN + deploy — see infra/ai-proxy/README).
 
 ## Open work
 

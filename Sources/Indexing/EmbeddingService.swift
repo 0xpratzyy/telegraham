@@ -16,6 +16,10 @@ actor EmbeddingService {
     private let legacyProvider = AppleSentenceEmbeddingProvider()
     private let contextualProvider = AppleContextualEmbeddingProvider()
     private let e5Provider = E5EmbeddingProvider()
+    /// Candidate under evaluation, not an active choice: reachable only by
+    /// asking for its version explicitly, so the bake-off can embed a second
+    /// copy of the corpus and score both without disturbing live search.
+    private let staticProvider = StaticMultilingualEmbeddingProvider()
     private var e5Ready: Bool?
 
     static var legacyModelVersion: String { "apple-sentence-v1" }
@@ -59,6 +63,9 @@ actor EmbeddingService {
             return await contextualProvider.embed(text: normalized, isQuery: isQuery)
         case legacyProvider.modelVersion:
             return await legacyProvider.embed(text: normalized, isQuery: isQuery)
+        case staticProvider.modelVersion:
+            guard await staticProvider.prepare() else { return nil }
+            return await staticProvider.embed(text: normalized, isQuery: isQuery)
         default:
             return nil
         }

@@ -25,6 +25,9 @@ enum ContextLayer {
     }()
 
     /// How many of the newest unprocessed messages to feed one extraction call.
+    /// Measured 2026-07-23: 80 cut the AI-call count (320 → 234) and ~1 min of
+    /// catch-up, but found 27% FEWER facts (137 → 100) — recall degrades over
+    /// the longer transcript. Speed is not worth missed loops; 40 stays.
     static let extractionWindow = 40
     /// Don't extract chats older than this (matches the reply/triage recency).
     static let maxChatAgeSeconds: TimeInterval = 30 * 86_400
@@ -34,7 +37,7 @@ enum ContextLayer {
     /// Windows crawled per chat per pass. Cold start walks forward from the
     /// 30-day boundary this many windows at a time, so a deep chat catches up
     /// over a few passes rather than being read all at once.
-    static let maxWindowsPerChatPerPass = 3
+    static let maxWindowsPerChatPerPass = 6
 }
 
 /// The predicate vocabulary. Starts tiny — the open-loop predicates that power

@@ -79,7 +79,7 @@ Expected behavior:
 - chat-first results
 - supporting snippets underneath
 - local-first retrieval from FTS + vector signals
-- rerank only when it meaningfully improves ordering
+- no AI in the search path: measured at +2 points end-to-end, not worth the latency
 
 ### 3. Reply Queue
 

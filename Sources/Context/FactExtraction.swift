@@ -163,6 +163,16 @@ enum FactExtractionPrompt {
       When in doubt in a group, emit NOTHING. subject = the person [ME] owes it to.
     - owes_me = someone still needs to get back to the user.        subject = that person.
     - WHO ACTS decides the direction — never who benefits. A message where the SENDER commits to do something ("Will check with Deeksha", "creating this", "I'll send it tomorrow") is THEIR commitment → owes_me (subject = sender), NEVER i_owe. i_owe requires [ME] to be the actor: either the message asks [ME] to do it, or [ME] committed in [ME]'s own message ("I'll…", "lemme see", "will do"). A joint "we should / we will have to…" with no explicit owner is NOT [ME]'s task — skip it unless [ME] explicitly takes it (and if the OTHER person takes it, it's owes_me).
+      TWO-STEP DIRECTION TEST — apply it to every loop, and apply it by MEANING, never by matching words. These chats are English, Hindi, Hinglish, romanised or native script, and switch language mid-sentence; the two steps below decide every case in every language, so never rely on a particular phrase.
+        Step 1 — WHO IS ADDRESSED is not WHO ACTS. A name or @handle at the START of a message marks the person being SPOKEN TO. In a message of the form "@X <undertaking>" sent by [ME], the actor is [ME]; X is only the audience.
+        Step 2 — PROMISE or REQUEST? If the sender undertakes the work themselves (in any language, with or without an explicit "I"), it is the SENDER's commitment. If the sender asks the other side to do the work, the obligation sits on that other side.
+        Combine: [ME] promises → i_owe. [ME] asks them → owes_me. THEY promise → owes_me. THEY ask [ME] → i_owe.
+      Worked examples (illustrations of the two steps, NOT a phrase list):
+      * wisprflow: "Hmm lemme think and research" → owes_me, subject = wisprflow (the SPEAKER took the work; it is never [ME]'s task just because [ME] is in the chat).
+      * tempchiyo: "Codepen pe daalke dede" → i_owe, subject = tempchiyo (the sender asked [ME] to act).
+      * [ME]: "@aditya nice talking to you, will share the proposal by eod" → i_owe, subject = Aditya ([ME] promised; the @handle is only who [ME] addressed).
+      * [ME]: "@daya check dm whenever you can" → owes_me, subject = Daya ([ME] asked THEM to act).
+      CONSISTENCY CHECK, run it before emitting each loop: "action" and "predicate" must agree. If "action" reads as an instruction for [ME] to carry out ("Send the proposal…"), the predicate MUST be i_owe. If "action" reads as waiting on or chasing someone else ("Wait for Daya to…"), it MUST be owes_me. A mismatch means the direction is wrong — redo the two steps.
     - works_at / prefers / fact = durable background facts about a person (subject = that person). Emit sparingly.
     - writes_in = a fact about how the USER writes (subject = "me"). Emit rarely.
 
@@ -175,10 +185,22 @@ enum FactExtractionPrompt {
     - NEVER INVENT what is owed — the object must come from the message itself. If the message doesn't say WHAT is owed, do NOT emit a loop: a bare "give access", "access plz", "send it", "do the needful", "let's do it" with no stated object is too vague to be a task — skip it. (Never turn "give access" into "access to the resource", or a reaction to a shared link into a task.)
     - CLOSING LOOPS: an OPEN LOOP closes only when a NEW message from [ME] actually ADDRESSES that specific loop — answers that exact question, sends that exact thing, gives that exact update. Put its number in resolvedLoops and do NOT re-emit it. A [ME] message about something else does NOT close it — match the reply to the loop; never close on unrelated chatter.
     - NEVER RE-EMIT AN OPEN LOOP: the "facts" array is ONLY for loops that ORIGINATE in the NEW numbered messages below. The OPEN LOOPS list is context so you can CLOSE loops (resolvedLoops) — it is NOT a to-do list to copy back into "facts". If a loop is already in OPEN LOOPS and these new messages neither close it nor add a genuinely new ask, output NOTHING for it: do not re-list it, and never re-anchor an old loop onto one of these unrelated messages. Only a NEW request/commitment first appearing in these numbered messages becomes a new fact.
+    - ALREADY SETTLED INSIDE THIS TRANSCRIPT — run this check before emitting ANY open loop. Having found the ask/commitment at [N], read the messages AFTER [N] in this same transcript. If a later message VISIBLY does the thing — the link/file/detail/amount is actually present there, or the person plainly states they did it — the loop was already settled here: emit NOTHING for it. This matters because resolvedLoops can only close loops that existed BEFORE this batch; a loop born and settled inside these same messages has no other way to ever close, so it would stay open forever.
+      PARTIAL delivery is NOT delivery: when the ask has more than one part and only some parts were done, the loop stays OPEN for what is still missing — narrow the object to the missing part rather than dropping the loop ("support personally AND from FD" + "did from personal" → the FD part is still owed).
+      Both halves of this rule are equally binding — do NOT over-apply it: the conversation merely CONTINUING is not fulfilment. Acknowledgements ("ok", "thanks", "cool"), small talk, a new unrelated topic, or the person going quiet all leave the loop OPEN. Skip a loop only when the delivery is actually visible in these messages.
+      Judge what the later messages DO, in any language or script — never particular words.
+      * [2] THEM "will share my calendar link shortly" … [4] THEM "https://calendar.app.google/…" → the link IS in [4]: emit nothing.
+      * [2] THEM "will share the deck tomorrow" … [4] THEM "btw did you see the news" → nothing was delivered: emit the owes_me loop.
     - CHASED LOOPS: when a NEW message from the OTHER person follows up on / nudges something [ME] owes THEM (an "you owe" OPEN LOOP) without closing it — "any update?", "wen free tonight?", asking the same thing again — do NOT re-emit the loop; report it in "chasedLoops": {"loop": its OPEN LOOPS number, "sourceMsg": the follow-up message's transcript [N]}. This bumps the existing item to the latest ping instead of duplicating it. Only report a chase when the connection to a SPECIFIC loop is clear from the conversation (in a DM, a bare "free tonight?"/"around?" ping usually chases the latest thing [ME] owes them); if it is genuinely ambiguous WHICH loop is being chased, report nothing. A chase never targets a loop where THEY owe [ME].
     - Prefer a few high-confidence facts over many guesses. Empty arrays are perfectly fine.
     - "action" must read like a to-do you wrote yourself (imperative, natural, specific) — NEVER a template like "Owe X: Y". Keep "object" as the short stable noun phrase; "action" is the human phrasing.
     - For every i_owe loop, set "kind": "reply" when a quick message closes it, "action" when it needs work or time before you can respond. This is what separates the user's Reply queue (quick replies) from their Tasks (take work). owes_me and durable facts: omit "kind".
+
+    BEFORE YOU OUTPUT — run this checklist on EVERY open loop you are about to emit. These four are where mistakes actually happen, so they are repeated here deliberately; a loop that fails any of them must be corrected or dropped.
+      1. ACTOR: who does the work? [ME] → "i_owe". The other person → "owes_me". A name or @handle at the start of a message is only who is being ADDRESSED — never assume it is the actor.
+      2. AGREEMENT: does "action" match "predicate"? An instruction for [ME] to carry out ("Send…", "Reply…", "Review…") ⇒ i_owe. A wait or chase on someone else ("Wait for X to…", "Chase X for…") ⇒ owes_me. If the two disagree, redo step 1.
+      3. STILL PENDING: the DEFAULT is that the loop is OPEN — emit it. Drop it ONLY when a later message in this transcript literally contains the delivery (the link, the file, the number, the explicit "done"). Partial delivery leaves the rest open: when the ask names two or more things ("X and Y", "personally and from the company", "the deck and the numbers"), doing only one keeps the OTHER one open — emit the loop for the remainder. Acknowledgements, emoji, "ok/thanks", small talk, a new topic, adding people to the chat, and silence are NOT delivery. When unsure, EMIT the loop — a missed obligation costs the user far more than a stale one.
+      4. KIND (i_owe only): can one message close it → "reply". Does it need real work, a file, money, or time first → "action".
     - Output ONLY the JSON object.
     """
 
@@ -337,7 +359,12 @@ enum FactExtractionParser {
                 sourceChatId: chatId,
                 sourceMessageId: snip.messageId,
                 sourceText: snip.text,
-                senderName: subject
+                // The CITED MESSAGE's real sender — metadata, not the model's
+                // opinion. This used to be `subject` (the person the loop is
+                // about), which mislabelled evidence whenever the two differ:
+                // [ME]'s own "will share the proposal by eod" was shown as if
+                // Aditya had written it.
+                senderName: snip.senderFirstName
             )
         }
 

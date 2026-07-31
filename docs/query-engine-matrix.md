@@ -13,7 +13,7 @@ deterministic parse is the fallback.
 | Family | Engine | Example queries | Runtime behavior |
 | --- | --- | --- | --- |
 | `exact_lookup` | `message_lookup` | `where I shared wallet address`, `where did I send this link` | `PatternSearchEngine` over the durable `messages` table |
-| `topic_search` | `semantic_retrieval` | `first dollar`, `partnership discussions` | Local FTS variants + vectors, RRF-fused, optional AI rerank |
+| `topic_search` | `semantic_retrieval` | `first dollar`, `partnership discussions` | Local FTS variants + vectors, RRF-fused. **No AI call** — an LLM reranker was measured at +2 points end-to-end and removed, so search is instant and literal |
 | `reply_queue` | `semantic_retrieval` | `who do I need to reply to`, `who is waiting on me` | **Ask Pidgy chat auto-opens** and answers from REPLY-kind open loops in the fact store; semantic ranking surfaces relevant chats underneath |
 | `summary` — person question | `semantic_retrieval` | `what's the latest with Akhil?`, `akhil ke saath kya chal rha` | **Ask Pidgy chat auto-opens**; the fact-grounded answer card IS the summary (rolling summaries + open loops, ~1.5s) |
 | `summary` — chat/topic recap | `summarize` | `summarize my chats with Akhil from last week`, `what did we decide` | `SummaryEngine` deep map-reduce recap |

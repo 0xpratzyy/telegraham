@@ -297,6 +297,17 @@ actor RecentSyncCoordinator {
     private func sync(chats: [TGChat], using telegramService: TelegramService) async -> Set<Int64> {
         let batches = batchChats(chats, size: AppConstants.RecentSync.maxConcurrentChatFetches)
         var refreshedChatIds: Set<Int64> = []
+        #if DEBUG
+        let sweepStart = Date()
+        if !chats.isEmpty {
+            print("[Meter] recentSync sweep start: \(chats.count) chats in \(batches.count) batches")
+        }
+        defer {
+            if !chats.isEmpty {
+                print("[Meter] recentSync sweep end: \(refreshedChatIds.count)/\(chats.count) refreshed in \(String(format: "%.1f", Date().timeIntervalSince(sweepStart)))s")
+            }
+        }
+        #endif
 
         for batch in batches {
             let batchOutcomes = await withTaskGroup(of: RecentSyncOutcome.self) { group in
