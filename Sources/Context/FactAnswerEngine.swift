@@ -2,11 +2,20 @@
 //  FactAnswerEngine.swift
 //  Pidgy — #48 context layer
 //
-//  The fact-grounded answer engine for search. Validated offline against 55
-//  questions in 4 languages (English / Hinglish / Hindi / Spanish): 98% good,
-//  100% grounded, 100% language-matched, ~$0.0015/query on Gemini-Flash-lite.
-//  The model answers ONLY from the user's facts — sharp, concise, in the
-//  question's language, no hallucination.
+//  The fact-grounded answer engine for search. The model answers ONLY from the
+//  user's facts, in the question's language, with no hallucination.
+//
+//  Voice: prose, like a colleague who has read the material — not a dashboard.
+//  It used to be the opposite: hard-capped at 5 bullets with "…+N more", each
+//  under ~8 words, on the theory that an answer is a glance. In practice that
+//  turned real answers into stubs and truncated the tail silently, so a
+//  question with twelve relevant things reported five and hid the rest.
+//  Length now follows the question instead of a constant.
+//
+//  The 55-question offline validation (4 languages, 98% good / 100% grounded /
+//  100% language-matched, ~$0.0015/query on Gemini-Flash-lite) predates that
+//  rewrite — grounding and language rules are unchanged, but the voice numbers
+//  are stale until it is re-run.
 //
 
 import Foundation
@@ -18,8 +27,11 @@ enum AnswerPrompt {
     RULES:
     - Reply in the SAME language as the QUESTION (English->English, हिंदी->हिंदी, español->español, Hinglish->Hinglish). Match the question, not the data.
     - ANSWER THE SPECIFIC QUESTION. Pick ONLY the relevant items — filter by the who / what / topic / type / time the question asks. Do NOT dump everything.
-    - KEEP IT SHORT — this is a glance, not a report. Lead with a one-line answer. Then list AT MOST 5 items, most urgent / overdue / largest first. If more remain, end with a single line like "…+4 more" — never list them all.
-    - Each item on its own line: "• [**Name**](pidgy://chat/ID) — short what" (keep the part after the dash under ~8 words). The link's ID comes from that item's [id:...] tag in the data — clicking it opens that chat. Copy ids EXACTLY, never invent one; if an item has no [id:...], just bold the name without a link. Never show a raw id as visible text. Brevity beats completeness.
+    - WRITE LIKE A SHARP COLLEAGUE, NOT A DASHBOARD. Answer in prose, and be brief — usually 2-4 sentences. Lead with the direct answer, then only what changes what the user does next: what is urgent, what has been sitting too long, what is blocked on someone else.
+    - SELECT, don't survey. Name the few things that actually matter and leave the rest out — "a handful of smaller things with Rahul" is a better sentence than five more names. Never cram every item into one long paragraph: a wall of names is as unreadable as a wall of bullets, and the user will ask you to cut it.
+    - Use a list only when the answer genuinely is a set of parallel things the user will act on one by one. Then let each line carry real substance, not an 8-word stub. Never truncate at a fixed count or trail off with "…+N more" — decide what belongs, say it, and stop.
+    - Naming a person or chat: "[**Name**](pidgy://chat/ID)", inline in the sentence — link them the first time they come up, not every mention. The ID comes from that item's [id:...] tag in the data; clicking it opens that chat. Copy ids EXACTLY, never invent one; if an item has no [id:...], just bold the name without a link. Never show a raw id as visible text.
+    - Do not pad. No preamble, no restating the question, no "here's what I found", no closing offer to help. Every sentence should carry information the user didn't have.
     - Direction: "I OWE" = the user must act/pay; "OWES ME" = someone owes the user. Use it when the question is about who-owes-whom; otherwise answer naturally.
     - Loop kinds: "I OWE · REPLY" = closable by just sending a message now; "I OWE · TASK" = needs real work first. When the question asks who to REPLY/respond to (any language: "kisko reply karna hai", "who do I owe replies"), list ONLY the REPLY items. When it asks about tasks / pending work, prefer the TASK items. Broad "what do I owe" questions may mix both.
     - Use ONLY the data below. If it's thin or doesn't cover the question, say so in one line — don't invent.

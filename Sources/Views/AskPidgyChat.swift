@@ -217,22 +217,35 @@ struct AskPidgyThreadView: View {
 
     // Background hugs the TEXT, never the row — a short answer must not
     // stretch into a full-width bar.
+    //
+    // Set for READING, not for a one-line glance. The answer is prose now,
+    // sometimes several sentences, and at 13pt with 2.5 line spacing that came
+    // out as a wall: ~15.5pt of line height under 13pt text, running the full
+    // width of the card. Body copy wants roughly 1.5× leading, and a measure
+    // that stops around 70 characters — past that the eye loses the line on
+    // the return sweep, which is most of why it "looked bad" rather than the
+    // typeface.
     private func pidgyBubble(_ turn: AskPidgyChatModel.Turn) -> some View {
         HStack {
             RevealingAnswerText(turn: turn)
-                .font(.custom("Inter", size: 13))
+                .font(.custom("Inter", size: 13.5))
                 .foregroundStyle(turn.isError ? Color.Pidgy.warning : Color.Pidgy.fg1)
                 .fixedSize(horizontal: false, vertical: true)
-                .lineSpacing(2.5)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .lineSpacing(6)
+                .frame(maxWidth: Self.answerMeasure, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
                 .background(
                     RoundedRectangle(cornerRadius: 13)
                         .fill(Color.Pidgy.bg3)
                 )
-            Spacer(minLength: 60)
+            Spacer(minLength: 24)
         }
     }
+
+    /// ~70 characters at 13.5pt Inter. The bubble still hugs shorter answers;
+    /// this only stops a long one from spanning the whole panel.
+    private static let answerMeasure: CGFloat = 460
 
     private var thinkingBubble: some View {
         HStack {
@@ -256,12 +269,31 @@ struct AskPidgyThreadView: View {
     /// line breaks; falls back to plain text if parsing fails.
     static func renderAnswerMarkdown(_ s: String) -> AttributedString {
         (try? AttributedString(
-            markdown: s,
+            markdown: normalizedBullets(s),
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace,
                 failurePolicy: .returnPartiallyParsedIfPossible
             )
         )) ?? AttributedString(s)
+    }
+
+    /// `inlineOnly` parsing keeps newlines but never builds list blocks, so a
+    /// model-emitted `* item` renders as a literal asterisk. Rewrite the
+    /// leading marker to a real bullet so a list reads as one.
+    ///
+    /// Purely presentational — it touches the marker character and nothing
+    /// else. Answer CONTENT is the prompt's job (`AnswerPrompt`), never a
+    /// regex here.
+    private static func normalizedBullets(_ s: String) -> String {
+        s.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> Substring in
+                let trimmed = line.drop { $0 == " " }
+                guard trimmed.count > 2,
+                      trimmed.first == "*" || trimmed.first == "-",
+                      trimmed.dropFirst().first == " " else { return line }
+                return Substring("•" + trimmed.dropFirst())
+            }
+            .joined(separator: "\n")
     }
 }
 
