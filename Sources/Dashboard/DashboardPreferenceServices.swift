@@ -65,15 +65,23 @@ struct QueryRoutingDebugSnapshot: Identifiable {
 }
 
 enum DashboardDiagnosticsService {
+    /// Probes for the routing table — one per query family, so the
+    /// diagnostics page shows which engine each shape hits.
+    ///
+    /// Deliberately free of real names and real projects: this page ships to
+    /// every install, and it used to carry a developer's contact ("summarize
+    /// my chats with Akhil") and company ("first dollar"), which read as
+    /// another user's data leaking into the UI. The routing only cares about
+    /// the SHAPE of the query, so a placeholder name probes it identically.
     static let routingSampleQueries: [String] = [
         "where I shared wallet address",
         "find message with contract address",
-        "first dollar",
+        "pricing",
         "partnership discussions",
         "who do I need to reply to",
         "who haven't I replied to from last week",
         "stale investors",
-        "summarize my chats with Akhil"
+        "summarize my chats with Alex"
     ]
 
     @MainActor

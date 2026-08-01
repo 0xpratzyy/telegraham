@@ -1015,6 +1015,48 @@ struct LauncherView: View {
         return trimmedPreferred.isEmpty ? "Chat \(chatId)" : trimmedPreferred
     }
 
+    /// Example prompts for the empty Ask chat.
+    ///
+    /// The third one names a real person from THIS user's chats. It used to be
+    /// hardcoded to a contact of the developer's, which every other install
+    /// would have seen — a stranger's name as your example question. Deriving
+    /// it also makes the example worth tapping: the answer is about someone
+    /// the user actually talks to.
+    ///
+    /// Falls back to a person-free prompt when no DM qualifies yet (a fresh
+    /// install mid-first-sync), so the row is never a dangling "with ".
+    private var askChatExamples: [String] {
+        var examples = ["What should I reply to first?", "Who owes me something right now?"]
+        if let name = mostRecentDMFirstName {
+            examples.append("what's the latest with \(name)")
+        } else {
+            examples.append("what did I miss this week?")
+        }
+        return examples
+    }
+
+    /// First name of the most recently active one-on-one chat. First name
+    /// only — it reads like how the user would actually type the question,
+    /// and full names in this corpus carry handles and emoji.
+    private var mostRecentDMFirstName: String? {
+        telegramService.visibleChats
+            .filter { chat in
+                guard case .privateChat = chat.chatType, chat.isInMainList else { return false }
+                return !chat.title.trimmingCharacters(in: .whitespaces).isEmpty
+            }
+            .max { ($0.lastMessage?.date ?? .distantPast) < ($1.lastMessage?.date ?? .distantPast) }
+            .flatMap { chat in
+                chat.title
+                    .split(separator: " ")
+                    .first
+                    .map(String.init)
+                    .flatMap { first in
+                        let cleaned = first.filter { $0.isLetter || $0.isNumber }
+                        return cleaned.count >= 2 ? cleaned : nil
+                    }
+            }
+    }
+
     /// Empty chat (opened via "Ask anything…"): tappable example prompts
     /// instead of a blank thread.
     private var askChatEmptyState: some View {
@@ -1023,9 +1065,7 @@ struct LauncherView: View {
                 .font(Font.Pidgy.monoSm)
                 .foregroundStyle(Color.Pidgy.accent)
                 .padding(.bottom, 2)
-            ForEach(["What should I reply to first?",
-                     "Who owes me something right now?",
-                     "whats up with akhil"], id: \.self) { example in
+            ForEach(askChatExamples, id: \.self) { example in
                 Button {
                     askChat.start(with: example, aiService: aiService)
                 } label: {
