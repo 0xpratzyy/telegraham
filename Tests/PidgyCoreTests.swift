@@ -3689,10 +3689,24 @@ final class PidgyCoreTests: XCTestCase {
 
         XCTAssertEqual(store.selectedPage, .preferences)
         XCTAssertEqual(PreferencesRouting.authoritativePage, .preferences)
-        // Pricing was merged into the AI page (plan + provider + usage).
-        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.ai))
-        XCTAssertFalse(DashboardPreferencePage.allCases.contains(where: { $0.rawValue == "Pricing" }))
+        // Settings are organised by user intent, not by subsystem: the old
+        // AI/Pricing/Preferences/Indexing/Reset/Invites split collapsed into
+        // five pages, each answering one question.
+        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.plan))
+        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.memory))
+        XCTAssertTrue(DashboardPreferencePage.allCases.contains(.data))
+        for retired in ["Pricing", "AI & Plan", "Preferences", "Indexing", "Reset", "Invites"] {
+            XCTAssertFalse(
+                DashboardPreferencePage.allCases.contains(where: { $0.rawValue == retired }),
+                "\(retired) should have been folded into an intent-named page"
+            )
+        }
+        // Diagnostics still exists but is an inspector, not a user setting —
+        // it must never appear in the rail outside DEBUG.
         XCTAssertTrue(DashboardPreferencePage.allCases.contains(.diagnostics))
+        #if !DEBUG
+        XCTAssertFalse(DashboardPreferencePage.visibleCases.contains(.diagnostics))
+        #endif
     }
 
     func testDashboardChromePolicyFocusesPreferencesOnly() {

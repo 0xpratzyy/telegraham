@@ -34,6 +34,11 @@ struct DashboardPreferencesPage: View {
     @State private var isTestingConnection = false
     @State private var testConnectionStatus: DashboardPreferenceStatus?
     @State private var usageOverview: AIUsageOverview = .empty
+    /// Live counts for the Memory page headline (facts / open loops / chats
+    /// read). Loaded when the page opens; nil until then so tiles render 0
+    /// rather than stale numbers.
+    @State private var memoryStats: (total: Int, openLoops: Int, resolved: Int, chats: Int)?
+    @State private var memoryLastPassAt: Date?
     @State private var isLoadingUsage = false
     @State private var dailyRangeDays = 14
     @State private var hoveredDay: Date?
@@ -181,14 +186,15 @@ struct DashboardPreferencesPage: View {
         }
     }
 
-    /// Refresh only meaningful when the page actually has freshness data
-    /// to pull (pricing usage, indexing). Hides the button on static pages
-    /// like account, reset, about.
+    /// Refresh only appears where the page has something live to re-pull —
+    /// usage and cost, sync coverage, the graph inspector, and About (which
+    /// now carries invite codes). Account and Memory are settings you set,
+    /// not readings you refresh.
     private var showsRefreshControl: Bool {
         switch selectedPage {
-        case .ai, .indexing, .diagnostics, .invites:
+        case .plan, .data, .diagnostics, .about:
             return true
-        case .account, .preferences, .reset, .about:
+        case .account, .memory:
             return false
         }
     }
@@ -211,19 +217,21 @@ struct DashboardPreferencesPage: View {
         .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// Diagnostics is debug-only — hidden from the user-facing rail. The
-    /// underlying page is still rendered if `selectedPage` somehow lands
-    /// there (defensive), but you can't navigate to it from the UI.
-    /// Invites hides on source builds that can't reach the invite server
-    /// (no bundled proxy) unless the install is already registered.
+    /// The rail. `visibleCases` already drops Diagnostics outside DEBUG; the
+    /// page still renders if `selectedPage` somehow lands there, it just
+    /// isn't reachable by clicking.
+    ///
+    /// Invites is no longer its own page — it lives inside About, so a build
+    /// that can't reach the invite server simply omits that section rather
+    /// than a whole nav entry.
     private var visiblePreferencePages: [DashboardPreferencePage] {
-        DashboardPreferencePage.allCases.filter { page in
-            if page == .diagnostics { return false }
-            if page == .invites {
-                return InviteService.gateRequired || inviteService.isRegistered
-            }
-            return true
-        }
+        DashboardPreferencePage.visibleCases
+    }
+
+    /// Invites only render on builds that can reach the invite server (a
+    /// bundled proxy), or on an install already registered with one.
+    private var showsInviteSection: Bool {
+        InviteService.gateRequired || inviteService.isRegistered
     }
 
     private var preferencesStatusStrip: some View {
@@ -238,27 +246,23 @@ struct DashboardPreferencesPage: View {
         switch selectedPage {
         case .account:
             return preferenceStatusItems[0]
-        case .ai:
+        case .plan:
             return preferenceStatusItems[1]
-        case .preferences:
+        case .memory:
+            // The kill switch, not the animation toggle. The old Preferences
+            // page led with "Pigeon flock" — a cosmetic setting as the
+            // headline for the page that also holds whether Pidgy builds a
+            // memory of your chats at all.
             return DashboardPreferenceStatusItem(
-                title: "Pigeon flock",
-                value: showPigeonFlock ? "On" : "Off",
-                caption: showPigeonFlock ? "5 birds, drag the line to bounce" : "Plain divider under the title",
-                systemImage: "slider.horizontal.3",
-                tint: PidgyDashboardTheme.blue
+                title: "Memory engine",
+                value: contextLayerEnabled ? "On" : "Off",
+                caption: contextLayerEnabled
+                    ? "Reading chats into tasks, replies, and answers"
+                    : "Frozen — existing memory kept, nothing new extracted",
+                systemImage: "brain",
+                tint: contextLayerEnabled ? PidgyDashboardTheme.green : PidgyDashboardTheme.yellow
             )
-        case .invites:
-            return DashboardPreferenceStatusItem(
-                title: "Referrals",
-                value: "\(inviteService.referrals)",
-                caption: inviteService.isRegistered
-                    ? "Friends who joined with your codes"
-                    : "Redeem a code to join the program",
-                systemImage: "ticket",
-                tint: inviteService.referrals > 0 ? PidgyDashboardTheme.green : PidgyDashboardTheme.blue
-            )
-        case .indexing:
+        case .data:
             return preferenceStatusItems[3]
         case .diagnostics:
             return DashboardPreferenceStatusItem(
@@ -267,14 +271,6 @@ struct DashboardPreferencesPage: View {
                 caption: graphDebugSummary.isComplete ? "\(integerString(graphDebugSummary.nodeCounts.reduce(0) { $0 + $1.count })) nodes" : "Open Diagnostics to load",
                 systemImage: "point.3.connected.trianglepath.dotted",
                 tint: graphDebugSummary.isComplete ? PidgyDashboardTheme.green : PidgyDashboardTheme.yellow
-            )
-        case .reset:
-            return DashboardPreferenceStatusItem(
-                title: "Local reset",
-                value: "Manual",
-                caption: "Deletes only this Mac's Pidgy data",
-                systemImage: "trash",
-                tint: PidgyDashboardTheme.red
             )
         case .about:
             return DashboardPreferenceStatusItem(
@@ -325,20 +321,75 @@ struct DashboardPreferencesPage: View {
         switch selectedPage {
         case .account:
             accountPage
-        case .ai:
-            aiPage
-        case .invites:
-            invitesPage
-        case .preferences:
-            preferencesPage
-        case .indexing:
-            indexingPage
-        case .diagnostics:
-            diagnosticsPage
-        case .reset:
-            resetPage
+        case .plan:
+            planPage
+        case .memory:
+            memoryPage
+        case .data:
+            dataPage
         case .about:
             aboutPage
+        case .diagnostics:
+            diagnosticsPage
+        }
+    }
+
+    /// Plan, provider, and cost — everything about what you're paying for and
+    /// what the AI is spending. Was "AI & Plan" plus the cost/usage sections
+    /// that had drifted into the old Preferences bucket.
+    @ViewBuilder
+    private var planPage: some View {
+        aiPage
+    }
+
+    /// What Pidgy reads, remembers, and sends to a model.
+    ///
+    /// This is the page the old structure never had, and the reason the
+    /// rethink was worth doing: the memory kill switch, the bots toggle, the
+    /// "what AI sees" disclosure, archived chats, and voice style were spread
+    /// across three pages even though they answer one question. A user
+    /// deciding how much of their Telegram to hand over should not have to
+    /// find that answer in four places.
+    @ViewBuilder
+    private var memoryPage: some View {
+        preferencesPage
+    }
+
+    /// Freshness, coverage, and starting over — the old Indexing and Reset
+    /// pages. "Is my data current" and "wipe it and re-pull" are the same
+    /// concern from opposite ends, and splitting them meant the reset button
+    /// lived nowhere near the state it resets.
+    @ViewBuilder
+    private var dataPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            // The first crawl is the one time this page is opened in
+            // confusion rather than curiosity — surfaces look empty and the
+            // user wants to know why. Say so here, plainly, while it runs.
+            if FactExtractionCoordinator.shared.isCrawling {
+                HStack(alignment: .center, spacing: 12) {
+                    PidgyLoader(size: 17)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reading your chats")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        Text("Tasks and replies fill in as each chat is read — a first full read takes a few minutes.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.Pidgy.bg2)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.Pidgy.border1)
+                        )
+                )
+            }
+            indexingPage
+            resetPage
         }
     }
 
@@ -625,25 +676,67 @@ struct DashboardPreferencesPage: View {
     /// toggle since the two are related (toggling bots changes what
     /// goes to AI, the disclosure explains what AI receives in
     /// general).
+    /// "Last read 4m ago" for the Chats-read tile — the freshness half of
+    /// the headline. Says "not started yet" instead of a dash on a fresh
+    /// install, because an empty memory with no explanation reads as broken.
+    private var memoryLastReadLabel: String {
+        if let at = memoryLastPassAt {
+            return "Last read \(relativeTimeString(at))"
+        }
+        return FactExtractionCoordinator.shared.isCrawling
+            ? "First read in progress…"
+            : "Not started yet"
+    }
+
+    /// The Memory page. Order is deliberate: the page leads with what the
+    /// memory IS — live counts of what Pidgy has read and remembered, with
+    /// the kill switch beside them — because "what does this app know about
+    /// me" is the question that brings a user here. Controls that shape the
+    /// memory (bots, privacy disclosure) follow; cosmetics come last. The
+    /// old page led with the pigeon-animation toggle.
     private var preferencesPage: some View {
         VStack(alignment: .leading, spacing: 0) {
             PrefSection {
                 PrefSectionHead(
-                    title: "Quirks",
-                    subtitle: "Little bits of Pidgy you can turn on or off"
+                    title: "Memory",
+                    subtitle: "What Pidgy has read and remembered from your chats"
                 )
-                PrefField(
-                    label: "Pigeons on the squiggle",
-                    hint: "Show the animated flock under the page title. Drag the line to bounce them; click any to shoo.",
-                    right: {
-                        PrefToggle(isOn: $showPigeonFlock)
-                    }
-                )
+                HStack(alignment: .top, spacing: 24) {
+                    PrefStatTile(
+                        eyebrow: "Facts",
+                        value: integerString(memoryStats?.total ?? 0),
+                        hint: "Commitments, asks, and durable notes",
+                        dot: .blue
+                    )
+                    PrefStatTile(
+                        eyebrow: "Open loops",
+                        value: integerString(memoryStats?.openLoops ?? 0),
+                        hint: "Feed the Reply queue and Tasks",
+                        dot: .amber
+                    )
+                    PrefStatTile(
+                        eyebrow: "Chats read",
+                        value: integerString(memoryStats?.chats ?? 0),
+                        hint: memoryLastReadLabel,
+                        dot: .green
+                    )
+                }
                 PrefField(
                     label: "Memory engine (beta)",
-                    hint: "Tasks and the reply queue come from Pidgy's fact memory. Turn off to pause fact extraction (no AI usage) — both views freeze at their last-known state. Takes effect after you quit and reopen Pidgy.",
+                    hint: "Turn off to pause reading (no AI usage). Tasks, the Reply queue, and Ask Pidgy freeze at their last-known state. Takes effect after you quit and reopen Pidgy.",
                     right: {
                         PrefToggle(isOn: $contextLayerEnabled)
+                    }
+                )
+            }
+
+            PrefSection {
+                PrefSectionHead(title: "Privacy", subtitle: "What leaves this Mac, and what never does")
+                PrefField(
+                    label: "Include bot chats",
+                    hint: "Off keeps bots out of memory entirely — their stored facts are removed and no AI is spent reading them. Turning on takes effect on the next read, not instantly.",
+                    right: {
+                        PrefToggle(isOn: $includeBotsInAISearch)
                     }
                 )
                 PrefField(
@@ -652,6 +745,54 @@ struct DashboardPreferencesPage: View {
                     right: {
                         PrefToggle(isOn: $diagnosticsIdentityEnabled)
                     }
+                )
+
+                // The disclosure that earns the page its trust: a checklist,
+                // not a paragraph — sent vs never-sent should be scannable.
+                HStack(alignment: .top, spacing: 12) {
+                    Capsule()
+                        .fill(Color.Pidgy.accentFg.opacity(0.50))
+                        .frame(width: 4)
+                    HStack(alignment: .top, spacing: 28) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sent to your AI provider")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(Color.Pidgy.fg1)
+                            ForEach(["Message text", "Sender first names", "Relative timestamps", "Chat names + numeric ids"], id: \.self) { item in
+                                Text("✓ " + item)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.Pidgy.fg3)
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Never sent")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(Color.Pidgy.fg1)
+                            ForEach(["Phone numbers", "User ids + session tokens", "Media, stickers, voice"], id: \.self) { item in
+                                Text("✗ " + item)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.Pidgy.fg3)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.Pidgy.bg2)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.Pidgy.border1)
+                        )
+                )
+                .padding(.top, 14)
+            }
+
+            PrefSection {
+                PrefSectionHead(
+                    title: "Quirks",
+                    subtitle: "Little bits of Pidgy you can turn on or off"
                 )
                 PrefField(
                     label: "Open chats in",
@@ -666,44 +807,13 @@ struct DashboardPreferencesPage: View {
                         )
                     }
                 )
-            }
-
-            PrefSection {
-                PrefSectionHead(title: "Privacy", subtitle: "Keep the AI surface explicit")
                 PrefField(
-                    label: "Include bot chats",
-                    hint: "Hide Telegram bots from AI search and agentic ranking when off",
+                    label: "Pigeons on the squiggle",
+                    hint: "Show the animated flock under the page title. Drag the line to bounce them; click any to shoo.",
                     right: {
-                        PrefToggle(isOn: $includeBotsInAISearch)
+                        PrefToggle(isOn: $showPigeonFlock)
                     }
                 )
-
-                // Inline note panel — accent-tinted left rail + bg-2 background.
-                HStack(alignment: .top, spacing: 12) {
-                    Capsule()
-                        .fill(Color.Pidgy.accentFg.opacity(0.50))
-                        .frame(width: 4)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("What AI sees")
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(Color.Pidgy.fg1)
-                        Text("Message text, sender first names, relative timestamps, chat names, and numeric chat IDs. It does not send phone numbers, user IDs, session tokens, media files, stickers, or voice messages.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.Pidgy.fg3)
-                            .lineSpacing(2)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.Pidgy.bg2)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color.Pidgy.border1)
-                        )
-                )
-                .padding(.top, 14)
             }
 
             voiceSection
@@ -1628,8 +1738,17 @@ struct DashboardPreferencesPage: View {
         }
     }
 
+    /// App identity, privacy, and invites.
+    ///
+    /// Invites moved here from their own nav entry: three codes to hand out
+    /// is not a settings *category*, and on builds without an invite server
+    /// the page was hidden entirely — a nav item that sometimes isn't there
+    /// is worse than a section that sometimes isn't there.
     private var aboutPage: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if showsInviteSection {
+                invitesPage
+            }
             PrefSection(topPadding: 0) {
                 HStack(alignment: .center, spacing: 18) {
                     PidgyMascotMark(size: 64)
@@ -1927,34 +2046,34 @@ struct DashboardPreferencesPage: View {
         case .account:
             loadCredentials()
             onRefreshDashboard()
-        case .ai:
+        case .plan:
             loadAIConfig()
             Task { await refreshUsageOverview() }
-        case .preferences:
+        case .memory:
             // Toggles are pure @AppStorage — nothing to fetch.
             break
-        case .invites:
-            Task { await InviteService.shared.refreshStatus() }
-        case .indexing:
+        case .data:
             onRefreshUsage()
+            onRefreshDashboard()
         case .diagnostics:
             Task {
                 await refreshDiagnostics()
                 await refreshRoutingDebug()
             }
-        case .reset, .about:
-            loadCredentials()
-            loadAIConfig()
-            onRefreshDashboard()
+        case .about:
+            Task { await InviteService.shared.refreshStatus() }
         }
     }
 
     @MainActor
     private func refreshDataIfNeeded(for page: DashboardPreferencePage) async {
         switch page {
-        case .ai:
+        case .memory:
+            memoryStats = await DatabaseManager.shared.factStoreStats()
+            memoryLastPassAt = FactExtractionCoordinator.shared.lastPassAt
+        case .plan:
             await refreshUsageOverview()
-        case .invites:
+        case .about:
             await InviteService.shared.refreshStatus()
         case .diagnostics:
             await refreshDiagnostics()
@@ -2010,7 +2129,7 @@ struct DashboardPreferencesPage: View {
 
     private var isCurrentPageRefreshing: Bool {
         switch selectedPage {
-        case .ai:
+        case .plan:
             return isLoadingUsage
         case .diagnostics:
             return isLoadingDiagnostics || isLoadingRoutingDebug

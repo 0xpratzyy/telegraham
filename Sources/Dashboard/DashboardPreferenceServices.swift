@@ -1,36 +1,59 @@
 import AppKit
 import Foundation
 
+/// Settings navigation, organised by what the user is trying to do.
+///
+/// The previous eight pages were named after the implementation — "Indexing",
+/// "Diagnostics", "Preferences" — and the consequences showed. Nobody opens
+/// settings wanting to "configure indexing"; they want to know whether their
+/// data is current. And "Preferences" inside Preferences had become the
+/// leftover bucket: a third of the whole file, with a cosmetic animation
+/// toggle sitting next to the memory-engine kill switch.
+///
+/// Five pages now, each answering one question:
+///   Account   — am I connected?
+///   Plan & AI — what am I on, and what is it costing?
+///   Memory    — what does Pidgy read and remember about me?
+///   Data      — is it current, and how do I start over?
+///   About     — what is this, and who else can I bring?
+///
+/// `diagnostics` survives for the graph/routing inspector but is no longer a
+/// peer of these: it is developer tooling and is hidden outside DEBUG.
 enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
     case account = "Account"
-    case ai = "AI & Plan"
-    case invites = "Invites"
-    case preferences = "Preferences"
-    case indexing = "Indexing"
-    case diagnostics = "Diagnostics"
-    case reset = "Reset"
+    case plan = "Plan & AI"
+    case memory = "Memory"
+    case data = "Data"
     case about = "About"
+    case diagnostics = "Diagnostics"
 
     var id: String { rawValue }
+
+    /// What the sidebar offers. Diagnostics is a debug build only — shipping
+    /// a "Rebuild graph" button and node/edge breakdowns to end users puts an
+    /// inspector in a consumer surface.
+    static var visibleCases: [DashboardPreferencePage] {
+        #if DEBUG
+        return allCases
+        #else
+        return allCases.filter { $0 != .diagnostics }
+        #endif
+    }
 
     var systemImage: String {
         switch self {
         case .account:
             return "person.crop.circle"
-        case .ai:
+        case .plan:
             return "sparkles"
-        case .invites:
-            return "ticket"
-        case .preferences:
-            return "slider.horizontal.3"
-        case .indexing:
+        case .memory:
+            return "brain"
+        case .data:
             return "externaldrive.connected.to.line.below"
-        case .diagnostics:
-            return "waveform.path.ecg"
-        case .reset:
-            return "trash"
         case .about:
             return "info.circle"
+        case .diagnostics:
+            return "waveform.path.ecg"
         }
     }
 
@@ -38,20 +61,16 @@ enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .account:
             return "Telegram connection and credentials"
-        case .ai:
-            return "Plan, AI provider, and usage"
-        case .invites:
-            return "Invite friends, earn rewards"
-        case .preferences:
-            return "Toggles for the small stuff"
-        case .indexing:
-            return "Search freshness and local coverage"
+        case .plan:
+            return "Your plan, AI provider, and what it costs"
+        case .memory:
+            return "What Pidgy reads, remembers, and sends to AI"
+        case .data:
+            return "Freshness, coverage, and starting over"
+        case .about:
+            return "App, privacy, and invites"
         case .diagnostics:
             return "Graph health and query routing"
-        case .reset:
-            return "Local data cleanup"
-        case .about:
-            return "App identity and shortcuts"
         }
     }
 }
