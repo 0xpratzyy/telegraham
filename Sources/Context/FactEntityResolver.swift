@@ -67,7 +67,18 @@ struct FactContactDirectory: Sendable {
         let lower = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !lower.isEmpty else { return nil }
         if let id = fullNameToId[lower] { return (id, idToName[id] ?? name) }
-        if let first = lower.split(whereSeparator: \.isWhitespace).first,
+        // First-name fallback ONLY for single-token subjects. A multi-token
+        // subject that missed the full-name lookup is usually a DESCRIPTOR,
+        // not a name — "the beta tester" first-token-matched the one contact
+        // starting with "The" and welded a loop to a stranger, which then
+        // could never close (the model rightly refuses to close a loop whose
+        // named subject never delivered). Losing the occasional
+        // "First Last"-variant merge is the cheaper error: an unresolved
+        // subject keeps the model's name and still works; a mis-resolved one
+        // is wrong forever.
+        let tokens = lower.split(whereSeparator: \.isWhitespace)
+        if tokens.count == 1,
+           let first = tokens.first,
            let ids = firstNameToIds[String(first)], ids.count == 1, let id = ids.first {
             return (id, idToName[id] ?? name)
         }

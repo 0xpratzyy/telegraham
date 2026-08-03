@@ -253,9 +253,13 @@ final class FactExtractionCoordinator: ObservableObject {
             directory = cached
         } else {
             let rows = await DatabaseManager.shared.loadContactDirectory()
-            let dmContacts: [(id: Int64, name: String)] = telegramService.visibleChats.compactMap { chat in
-                if case .privateChat(let uid) = chat.chatType, uid != myUserId { return (uid, chat.title) }
-                return nil
+            // Bot DMs stay out of the directory for the same reason bot
+            // chats stay out of extraction: a fact's subject must be a person.
+            var dmContacts: [(id: Int64, name: String)] = []
+            for chat in telegramService.visibleChats {
+                guard case .privateChat(let uid) = chat.chatType, uid != myUserId else { continue }
+                guard !(await telegramService.isBotChat(chat)) else { continue }
+                dmContacts.append((uid, chat.title))
             }
             directory = FactContactDirectory.build(rows: rows, dmContacts: dmContacts)
             contactDirectory = directory

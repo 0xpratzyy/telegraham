@@ -403,13 +403,21 @@ extension DatabaseManager {
         guard let pool = await ensureDatabase() else { return [] }
         do {
             return try await pool.read { db in
+                // Bots are excluded from the directory outright: a fact's
+                // subject must be a person. Found live — a loop's subject
+                // ("the beta tester") first-name-matched the only directory
+                // name starting with "The", which was a bot ("The Wolf Of
+                // LEGION.CC street"), and a loop owned by the wrong subject
+                // can never be closed by the person actually delivering.
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT sender_user_id AS id, sender_name AS name, COUNT(*) AS c
-                        FROM messages
-                        WHERE sender_user_id IS NOT NULL AND sender_name IS NOT NULL AND sender_name <> ''
-                        GROUP BY sender_user_id, sender_name
+                        SELECT m.sender_user_id AS id, m.sender_name AS name, COUNT(*) AS c
+                        FROM messages m
+                        LEFT JOIN nodes n ON n.entity_id = m.sender_user_id
+                        WHERE m.sender_user_id IS NOT NULL AND m.sender_name IS NOT NULL AND m.sender_name <> ''
+                          AND COALESCE(n.metadata, '') NOT LIKE '%"isBot":true%'
+                        GROUP BY m.sender_user_id, m.sender_name
                         """
                 )
                 return rows.map { row in
