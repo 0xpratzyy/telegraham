@@ -107,7 +107,8 @@ final class OpenAIProvider: AIProvider {
                 requestKind: .personProfile
             )
         }
-        return response.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AIService.unwrapProse(response)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func testConnection() async throws -> Bool {
@@ -120,10 +121,16 @@ final class OpenAIProvider: AIProvider {
     /// Request kinds whose entire response is a JSON document, so the provider
     /// can be told to emit nothing else. (Prose kinds — summary, answerEngine —
     /// must stay free-form.)
+    /// Kinds whose ENTIRE output is parsed as JSON. Membership must follow
+    /// the parser, not the feature: `.personProfile` sat in this set while its
+    /// prompt asked for plain prose, so the model — forced into json_object
+    /// mode — invented a {"profile": "…"} wrapper that the UI then displayed
+    /// verbatim, braces and \n escapes included. Prose kinds (profile, the
+    /// summary fold, answers) must never appear here.
     private static let jsonOnlyKinds: Set<AIRequestKind> = [
         .factExtraction, .queryPlanning, .pipelineTriage, .replyQueueTriage,
         .dashboardTopicDiscovery, .dashboardTaskTriage, .dashboardTaskExtraction,
-        .semanticSearch, .personProfile
+        .semanticSearch
     ]
 
     private func makeRequest(

@@ -260,7 +260,7 @@ final class AIService: ObservableObject {
             .map { "\($0.senderFirstName): \(PromptSafety.fence($0.text))" }
             .joined(separator: "\n")
         let system = SummaryFoldPrompt.systemPrompt + PromptSafety.untrustedContentClause
-        return try await provider.answer(
+        let folded = try await provider.answer(
             systemPrompt: system,
             userMessage: SummaryFoldPrompt.userMessage(
                 chatTitle: chat.title,
@@ -269,8 +269,45 @@ final class AIService: ObservableObject {
                 oldSummary: oldSummary,
                 transcript: transcript
             ),
-            kind: .factExtraction
+            // .summary, NOT .factExtraction: the fold returns prose, and
+            // .factExtraction membership in jsonOnlyKinds forced json_object
+            // mode onto it — the model then emitted a JSON array of lines,
+            // which was stored raw and rendered raw ("[ \"…\", \"…\" ]" in
+            // the chat detail panel). The kind was only borrowed for its
+            // model routing; metering as summary is also more honest. Note
+            // this moves folds from the 3.1 extraction pin to the managed
+            // default (3.5-flash-lite) — acceptable per the routing comment,
+            // which already contemplates summaries on lite.
+            kind: .summary
         )
+        return Self.unwrapProse(folded)
+    }
+
+    /// Deterministic format normalization for prose endpoints. Even with
+    /// json_object mode off, a model occasionally volunteers a JSON wrapper
+    /// around prose — {"summary": "…"} and a bare array of lines have both
+    /// shipped to screen verbatim. Unwrapping a wrapper is parsing, not a
+    /// post-AI judgment: it never alters words, only sheds packaging.
+    nonisolated static func unwrapProse(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("["),
+              let data = trimmed.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) else { return raw }
+        if let array = parsed as? [String] {
+            let joined = array.map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            return joined.isEmpty ? raw : joined
+        }
+        if let object = parsed as? [String: Any] {
+            // Single string value (any key: "summary", "profile", "text").
+            let strings = object.values.compactMap { $0 as? String }
+            if strings.count == 1, let only = strings.first,
+               !only.trimmingCharacters(in: .whitespaces).isEmpty {
+                return only.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return raw
     }
 
     /// Fact-grounded answer engine (#48 search). Retrieves the user's open-loop
