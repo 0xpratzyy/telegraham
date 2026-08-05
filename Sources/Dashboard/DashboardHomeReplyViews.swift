@@ -1034,7 +1034,7 @@ struct DashboardReplyDetail: View {
 }
 
 struct DashboardFeedRow: View {
-    @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
 
     let item: DashboardFeedItem
 
@@ -1089,8 +1089,7 @@ struct DashboardFeedRow: View {
         case .reply(let reply):
             return reply.chat
         case .task(let task):
-            return telegramService.visibleChats.first { $0.id == task.chatId }
-                ?? telegramService.chats.first { $0.id == task.chatId }
+            return sourceRegistry.chat(id: task.chatId)
         }
     }
 }

@@ -51,7 +51,13 @@ final class OpenAIProvider: AIProvider {
     }
 
     func answer(systemPrompt: String, userMessage: String, kind: AIRequestKind) async throws -> String {
-        try await RetryHelper.withRetry {
+        // Fact extraction owns retries at the crawl level, where all chats can
+        // share one pressure-aware cooldown and no cursor advances on failure.
+        // Retrying a 30–45s transport hang three times inside this one request
+        // monopolizes a managed quota slot and turns a small Slack update into
+        // minutes of invisible lag.
+        let maxAttempts = kind == .factExtraction ? 1 : 3
+        return try await RetryHelper.withRetry(maxAttempts: maxAttempts) {
             try await self.makeRequest(
                 systemPrompt: systemPrompt,
                 userMessage: userMessage,
@@ -163,6 +169,9 @@ final class OpenAIProvider: AIProvider {
 
         var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
+        if requestKind == .factExtraction {
+            request.timeoutInterval = AppConstants.AI.factExtractionTimeoutSeconds
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         if let licenseKey, !licenseKey.isEmpty {
@@ -228,6 +237,11 @@ final class OpenAIProvider: AIProvider {
         var data: Data
         var response: URLResponse
         var rateLimitAttempt = 0
+        // Fact extraction coordinates rate-limit recovery across the whole
+        // crawl. Retrying each chat independently here would still multiply a
+        // shared 429 into several sleeping/retrying requests before the global
+        // cooldown can engage.
+        let maxRateLimitRetries = requestKind == .factExtraction ? 0 : Self.maxRateLimitRetries
         while true {
             do {
                 (data, response) = try await session.data(for: request)
@@ -263,7 +277,7 @@ final class OpenAIProvider: AIProvider {
             // Honor Retry-After when the server sends it.
             if let http = response as? HTTPURLResponse,
                http.statusCode == 429 || http.statusCode == 503,
-               rateLimitAttempt < Self.maxRateLimitRetries {
+               rateLimitAttempt < maxRateLimitRetries {
                 rateLimitAttempt += 1
                 let delay = Self.rateLimitBackoffSeconds(attempt: rateLimitAttempt, response: http)
                 // `try` (not `try?`) so a superseding refresh cancelling this

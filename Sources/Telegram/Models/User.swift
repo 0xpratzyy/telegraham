@@ -7,6 +7,7 @@ struct TGUser: Identifiable, Equatable, Sendable {
     let username: String?
     let phoneNumber: String?
     let smallPhotoFileId: Int?
+    let avatarURL: String?
     let isBot: Bool
 
     init(
@@ -16,7 +17,8 @@ struct TGUser: Identifiable, Equatable, Sendable {
         username: String?,
         phoneNumber: String?,
         isBot: Bool,
-        smallPhotoFileId: Int? = nil
+        smallPhotoFileId: Int? = nil,
+        avatarURL: String? = nil
     ) {
         self.id = id
         self.firstName = firstName
@@ -25,6 +27,7 @@ struct TGUser: Identifiable, Equatable, Sendable {
         self.phoneNumber = phoneNumber
         self.isBot = isBot
         self.smallPhotoFileId = smallPhotoFileId
+        self.avatarURL = avatarURL
     }
 
     var displayName: String {

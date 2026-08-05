@@ -10,6 +10,43 @@ struct TGMessage: Identifiable, Equatable, Sendable {
     let isOutgoing: Bool
     let chatTitle: String?
     let senderName: String?
+    let source: SourceID
+    let threadRootId: Int64?
+
+    init(
+        id: Int64,
+        chatId: Int64,
+        senderId: MessageSenderId,
+        date: Date,
+        textContent: String?,
+        mediaType: MediaType?,
+        isOutgoing: Bool,
+        chatTitle: String?,
+        senderName: String?,
+        source: SourceID = .telegram,
+        threadRootId: Int64? = nil
+    ) {
+        self.id = id
+        self.chatId = chatId
+        self.senderId = senderId
+        self.date = date
+        self.textContent = textContent
+        self.mediaType = mediaType
+        self.isOutgoing = isOutgoing
+        self.chatTitle = chatTitle
+        self.senderName = senderName
+        self.source = source
+        self.threadRootId = threadRootId
+    }
+
+    func updating(textContent: String?) -> TGMessage {
+        TGMessage(
+            id: id, chatId: chatId, senderId: senderId, date: date,
+            textContent: textContent, mediaType: mediaType, isOutgoing: isOutgoing,
+            chatTitle: chatTitle, senderName: senderName, source: source,
+            threadRootId: threadRootId
+        )
+    }
 
     enum MessageSenderId: Equatable, Sendable {
         case user(Int64)

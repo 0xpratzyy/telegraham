@@ -27,6 +27,11 @@ enum BundledSecrets {
     /// include one — the AI Settings page falls back to BYO key.
     static let openAIApiKey: String? = stringValue(forKey: "PidgyBundledOpenAIApiKey")
 
+    /// Public Slack OAuth Client ID. PKCE means no client secret ships.
+    static let slackClientId: String? = stringValue(forKey: "PidgyBundledSlackClientId")
+    static let googleClientId: String? = stringValue(forKey: "PidgyBundledGoogleClientId")
+    static let googleClientSecret: String? = stringValue(forKey: "PidgyBundledGoogleClientSecret")
+
     /// AI proxy endpoint (`PIDGY_AI_PROXY_URL`) — the deployed
     /// infra/ai-proxy Worker's chat-completions URL. When present together
     /// with `aiProxyToken`, the zero-setup flow routes OpenAI requests
@@ -141,6 +146,9 @@ enum BundledSecrets {
     static var hasBundledOpenAIKey: Bool {
         openAIApiKey?.isEmpty == false
     }
+
+    static var hasSlackClientId: Bool { slackClientId?.isEmpty == false }
+    static var hasGoogleClientId: Bool { googleClientId?.isEmpty == false }
 
     private static func stringValue(forKey key: String) -> String? {
         guard let raw = Bundle.main.object(forInfoDictionaryKey: key) as? String else {

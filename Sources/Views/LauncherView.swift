@@ -5,6 +5,7 @@ import TDLibKit
 struct LauncherView: View {
     @EnvironmentObject var telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
+    @EnvironmentObject var registry: SourceRegistry
     @ObservedObject var photoManager = ChatPhotoManager.shared
     @StateObject private var searchCoordinator = SearchCoordinator()
     @StateObject private var attentionStore = AttentionStore.shared
@@ -35,6 +36,7 @@ struct LauncherView: View {
     }
 
     @State private var activeFilter: Filter = .all
+    @State private var activeSource: MessageSourceKind?
 
     // Opacity that pulses between 1.0 and ~0.55 while an AI search is
     // in flight. Lights up the search input so the user has a visible
@@ -78,20 +80,23 @@ struct LauncherView: View {
             Set(followUpItems.filter { $0.category == subFilter }.map(\.chat.id))
         }
 
-        return LauncherVisibleChatsFilter.filterChats(
-            from: telegramService.visibleChats,
+        let filtered = LauncherVisibleChatsFilter.filterChats(
+            from: registry.visibleChats.filter { activeSource == nil || $0.source.kind == activeSource },
             scope: queryScope(for: activeFilter),
             pipelineMatchingIds: pipelineMatchingIds,
             searchText: searchText,
             searchResultChatIds: searchResultChatIds,
             includeBots: includeBotsInAISearch,
-            isLikelyBot: { telegramService.isLikelyBotChat($0) }
+            isLikelyBot: { registry.isLikelyBot(chat: $0) }
         )
+        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return filtered }
+        return filtered.sorted { ($0.lastActivityDate ?? .distantPast) > ($1.lastActivityDate ?? .distantPast) }
     }
 
     private var aiSearchSourceChats: [TGChat] {
-        telegramService.visibleChats.filter { chat in
-            includeBotsInAISearch || !telegramService.isLikelyBotChat(chat)
+        registry.visibleChats.filter { chat in
+            (activeSource == nil || chat.source.kind == activeSource)
+                && (includeBotsInAISearch || !registry.isLikelyBot(chat: chat))
         }
     }
 
@@ -508,10 +513,35 @@ struct LauncherView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                Divider().frame(height: 16).padding(.horizontal, 5)
+
+                Menu {
+                    Button("All sources") { activeSource = nil }
+                    ForEach(availableSources) { source in
+                        Button(source.displayName) { activeSource = source }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: activeSource?.systemImage ?? "square.stack.3d.up")
+                        Text(activeSource?.displayName ?? "Sources")
+                    }
+                    .font(.custom("Inter", size: 12).weight(.medium))
+                    .foregroundStyle(Color.Pidgy.fg2)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.Pidgy.bg3, in: Capsule())
+                }
+                .menuStyle(.borderlessButton)
             }
             .padding(.horizontal, PidgySpace.s2)
             .padding(.vertical, 2)
         }
+    }
+
+    private var availableSources: [MessageSourceKind] {
+        let connected = Set(registry.sources.map(\.kind))
+        return MessageSourceKind.allCases.filter { connected.contains($0) }
     }
 
     // MARK: - AI Mode Banner
@@ -993,7 +1023,7 @@ struct LauncherView: View {
     }
 
     private func chatForSemanticResult(_ result: SemanticSearchResult) -> TGChat? {
-        telegramService.chats.first(where: { $0.id == result.chatId })
+        registry.chats.first(where: { $0.id == result.chatId })
     }
 
     private func resolvedChatTitle(chatId: Int64, preferredTitle: String, linkedChat: TGChat?) -> String {
@@ -1039,7 +1069,7 @@ struct LauncherView: View {
     /// only — it reads like how the user would actually type the question,
     /// and full names in this corpus carry handles and emoji.
     private var mostRecentDMFirstName: String? {
-        telegramService.visibleChats
+        registry.visibleChats
             .filter { chat in
                 guard case .privateChat = chat.chatType, chat.isInMainList else { return false }
                 return !chat.title.trimmingCharacters(in: .whitespaces).isEmpty
@@ -1184,9 +1214,10 @@ struct LauncherView: View {
                 photo: photoManager.photos[chat.id]
             )
             .onAppear {
-                if let fileId = chat.smallPhotoFileId {
-                    photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
-                }
+                requestPhoto(for: chat)
+            }
+            .onChange(of: chat.avatarURL) {
+                requestPhoto(for: chat)
             }
         } else {
             // Fallback: generate initials from title
@@ -1200,6 +1231,14 @@ struct LauncherView: View {
                 return "?"
             }()
             AvatarView(initials: initials, colorIndex: abs(fallbackTitle.hashValue % 8), size: 26)
+        }
+    }
+
+    private func requestPhoto(for chat: TGChat) {
+        if let fileId = chat.smallPhotoFileId {
+            photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
+        } else if let avatarURL = chat.avatarURL {
+            photoManager.requestPhoto(chatId: chat.id, avatarURL: avatarURL)
         }
     }
 
@@ -1437,6 +1476,11 @@ struct LauncherView: View {
 
     private func openChat(_ chat: TGChat) {
         Task { @MainActor in
+            if chat.source.kind != .telegram {
+                _ = await DeepLinkGenerator.openExternalChat(chat)
+                NSApp.keyWindow?.orderOut(nil)
+                return
+            }
             ChatOpenState.shared.openingChatId = chat.id
             defer { ChatOpenState.shared.openingChatId = nil }
             Task {

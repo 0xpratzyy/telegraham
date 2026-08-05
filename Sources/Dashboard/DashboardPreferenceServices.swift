@@ -11,7 +11,7 @@ import Foundation
 /// toggle sitting next to the memory-engine kill switch.
 ///
 /// Five pages now, each answering one question:
-///   Account   — am I connected?
+///   Connections — which message sources are connected?
 ///   Plan & AI — what am I on, and what is it costing?
 ///   Memory    — what does Pidgy read and remember about me?
 ///   Data      — is it current, and how do I start over?
@@ -20,7 +20,7 @@ import Foundation
 /// `diagnostics` survives for the graph/routing inspector but is no longer a
 /// peer of these: it is developer tooling and is hidden outside DEBUG.
 enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
-    case account = "Account"
+    case account = "Connections"
     case plan = "Plan & AI"
     case memory = "Memory"
     case data = "Data"
@@ -43,7 +43,7 @@ enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
     var systemImage: String {
         switch self {
         case .account:
-            return "person.crop.circle"
+            return "link"
         case .plan:
             return "sparkles"
         case .memory:
@@ -60,7 +60,7 @@ enum DashboardPreferencePage: String, CaseIterable, Identifiable, Hashable {
     var subtitle: String {
         switch self {
         case .account:
-            return "Telegram connection and credentials"
+            return "Telegram, Gmail, Slack, and WhatsApp imports"
         case .plan:
             return "Your plan, AI provider, and what it costs"
         case .memory:
@@ -177,7 +177,17 @@ enum PreferencesResetPlan {
         .aiModelOpenAI,
         .aiModelClaude,
         .aiApiKey,
-        .aiModel
+        .aiModel,
+        .gmailAccessToken,
+        .gmailRefreshToken,
+        .gmailTokenExpiry,
+        .gmailAccountEmail,
+        .slackAccessToken,
+        .slackRefreshToken,
+        .slackTeamId,
+        .slackTeamName,
+        .slackAuthedUserId,
+        .slackTokenExpiry
     ]
 
     static let userDefaultsKeysToDelete: [String] = [

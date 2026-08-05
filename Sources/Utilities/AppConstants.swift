@@ -71,6 +71,10 @@ enum AppConstants {
         /// summaries are already chunked map-reduce, so no legitimate call
         /// should approach this.
         static let requestTimeoutSeconds: TimeInterval = 45
+        /// Fact extraction is coordinator-retried with a cursor-safe cooldown.
+        /// Give a stalled managed request 30s, then release its shared quota
+        /// slot instead of stacking three 45s transport retries in one chat.
+        static let factExtractionTimeoutSeconds: TimeInterval = 30
 
         enum SemanticSearch {
             static let ftsTopMessages = 50

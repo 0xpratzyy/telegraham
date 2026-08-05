@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct DashboardTaskRow: View {
-    @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
 
     let task: DashboardTask
     let isSelected: Bool
@@ -46,8 +46,7 @@ struct DashboardTaskRow: View {
     }
 
     private var chat: TGChat? {
-        telegramService.visibleChats.first { $0.id == task.chatId }
-            ?? telegramService.chats.first { $0.id == task.chatId }
+        sourceRegistry.chat(id: task.chatId)
     }
 
     private var avatarLabel: String {
@@ -60,7 +59,7 @@ struct DashboardTaskRow: View {
 }
 
 struct DashboardPersonRow: View {
-    @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
 
     let signal: DashboardPersonSignal
     let isSelected: Bool
@@ -111,11 +110,7 @@ struct DashboardPersonRow: View {
     }
 
     private var privateChat: TGChat? {
-        let allChats = telegramService.visibleChats + telegramService.chats
-        return allChats.first { chat in
-            guard case .privateChat(let userId) = chat.chatType else { return false }
-            return userId == contact.entityId
-        }
+        sourceRegistry.privateChat(userId: contact.entityId)
     }
 
     /// "active now" / "last active 2d ago" for recent dates; beyond a week

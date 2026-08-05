@@ -54,7 +54,7 @@ extension DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE chat_id = ?
                         ORDER BY date DESC, id DESC
@@ -66,6 +66,46 @@ extension DatabaseManager {
             }
         } catch {
             print("[DatabaseManager] Failed to load messages for chat \(chatId): \(error)")
+            return []
+        }
+    }
+
+    /// A local, newest-to-oldest page matching `MessageSource.chatHistory`.
+    /// The cursor is resolved to its stored date first because synthetic source
+    /// ids are stable identifiers, not a guarantee of chronological ordering.
+    func loadMessageHistoryPage(chatId: Int64, beforeMessageId: Int64, limit: Int) async -> [MessageRecord] {
+        guard limit > 0, let pool = await ensureDatabase() else { return [] }
+
+        do {
+            return try await pool.read { db in
+                var arguments: StatementArguments = [chatId]
+                var cursorClause = ""
+                if beforeMessageId != 0 {
+                    guard let anchor = try Row.fetchOne(
+                        db,
+                        sql: "SELECT date FROM messages WHERE chat_id = ? AND id = ?",
+                        arguments: [chatId, beforeMessageId]
+                    ), let anchorDate: Double = anchor["date"] else { return [] }
+                    cursorClause = "AND (date < ? OR (date = ? AND id < ?))"
+                    arguments += [anchorDate, anchorDate, beforeMessageId]
+                }
+                arguments += [limit]
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
+                        FROM messages
+                        WHERE chat_id = ?
+                          \(cursorClause)
+                        ORDER BY date DESC, id DESC
+                        LIMIT ?
+                        """,
+                    arguments: arguments
+                )
+                return rows.map(Self.messageRecord(from:))
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load message history page for chat \(chatId): \(error)")
             return []
         }
     }
@@ -110,7 +150,7 @@ extension DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE chat_id = ? AND id > ? AND date >= ?
                         ORDER BY id ASC
@@ -136,7 +176,7 @@ extension DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE chat_id = ? AND id <= ?
                         ORDER BY id DESC
@@ -165,7 +205,7 @@ extension DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE chat_id = ?
                           AND (? IS NULL OR date >= ?)
@@ -227,7 +267,7 @@ extension DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE (\(senderClauses))
                               AND (? IS NULL OR date >= ?)
@@ -243,7 +283,7 @@ extension DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE (\(senderClauses))
                               AND (? IS NULL OR date >= ?)
@@ -404,7 +444,7 @@ extension DatabaseManager {
                     guard let row = try Row.fetchOne(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE id = ? AND chat_id = ?
                             LIMIT 1

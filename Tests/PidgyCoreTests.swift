@@ -30,6 +30,111 @@ final class PidgyCoreTests: XCTestCase {
         try await super.tearDown()
     }
 
+    func testFactExtractionManagedAIUsesBoundedConcurrency() {
+        XCTAssertEqual(FactExtractionRuntimePolicy.maxConcurrentChats(isManagedAI: true), 1)
+        XCTAssertEqual(FactExtractionRuntimePolicy.maxConcurrentChats(isManagedAI: false), 10)
+    }
+
+    func testFactExtractionProviderRetryBacksOffAndCaps() {
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.retryDelay(
+                consecutiveFailedPasses: 1,
+                failure: .timedOut
+            ),
+            30
+        )
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.retryDelay(
+                consecutiveFailedPasses: 3,
+                failure: .offline
+            ),
+            120
+        )
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.retryDelay(
+                consecutiveFailedPasses: 99,
+                failure: .unavailable
+            ),
+            300
+        )
+    }
+
+    func testFactExtractionProviderRetryHonorsRetryAfterWithinCap() {
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.retryDelay(
+                consecutiveFailedPasses: 1,
+                failure: .rateLimited(retryAfter: 90)
+            ),
+            90
+        )
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.retryDelay(
+                consecutiveFailedPasses: 1,
+                failure: .rateLimited(retryAfter: 900)
+            ),
+            300
+        )
+    }
+
+    func testFactExtractionProviderFailureClassification() {
+        XCTAssertEqual(
+            FactExtractionProviderFailure.classify(URLError(.timedOut)),
+            .timedOut
+        )
+        XCTAssertEqual(
+            FactExtractionProviderFailure.classify(URLError(.notConnectedToInternet)),
+            .offline
+        )
+        XCTAssertEqual(
+            FactExtractionProviderFailure.classify(AIError.rateLimited(retryAfter: 42)),
+            .rateLimited(retryAfter: 42)
+        )
+        XCTAssertNil(
+            FactExtractionProviderFailure.classify(FactExtractionError.unparseableResponse)
+        )
+    }
+
+    func testFactExtractionStopsLaunchingChatsAfterProviderFailure() {
+        XCTAssertTrue(
+            FactExtractionRuntimePolicy.shouldLaunchMoreChats(
+                afterProviderFailures: []
+            )
+        )
+        XCTAssertFalse(
+            FactExtractionRuntimePolicy.shouldLaunchMoreChats(
+                afterProviderFailures: [.timedOut]
+            )
+        )
+    }
+
+    func testFactExtractionShrinksRepeatedTimeoutWindowsWithoutSkipping() {
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.extractionWindowLimit(base: 40, consecutiveTimeouts: 0),
+            40
+        )
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.extractionWindowLimit(base: 40, consecutiveTimeouts: 1),
+            20
+        )
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.extractionWindowLimit(base: 40, consecutiveTimeouts: 2),
+            10
+        )
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.extractionWindowLimit(base: 12, consecutiveTimeouts: 9),
+            5
+        )
+    }
+
+    func testFactExtractionPrimaryFailurePrioritizesRateLimit() {
+        XCTAssertEqual(
+            FactExtractionRuntimePolicy.primaryFailure(
+                from: [.timedOut, .offline, .rateLimited(retryAfter: 12)]
+            ),
+            .rateLimited(retryAfter: 12)
+        )
+    }
+
     func testPidgyDesignSystemBridgeUsesBundledFontsAndSharedTokens() {
         XCTAssertEqual(PidgyFontRegistrar.fontsSubdirectory, "Fonts")
         XCTAssertEqual(
@@ -3733,7 +3838,17 @@ final class PidgyCoreTests: XCTestCase {
                 .aiModelOpenAI,
                 .aiModelClaude,
                 .aiApiKey,
-                .aiModel
+                .aiModel,
+                .gmailAccessToken,
+                .gmailRefreshToken,
+                .gmailTokenExpiry,
+                .gmailAccountEmail,
+                .slackAccessToken,
+                .slackRefreshToken,
+                .slackTeamId,
+                .slackTeamName,
+                .slackAuthedUserId,
+                .slackTokenExpiry
             ])
         )
         XCTAssertEqual(
@@ -6690,6 +6805,14 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertTrue(prompt.contains("by MEANING, never by matching words"))
         XCTAssertTrue(prompt.contains("WHO IS ADDRESSED is not WHO ACTS"))
         XCTAssertTrue(prompt.contains("CONSISTENCY CHECK"))
+    }
+
+    func testExtractionPromptKeepsInvestigateAndReportCommitmentsOpen() {
+        let prompt = FactExtractionPrompt.systemPrompt
+        XCTAssertTrue(prompt.contains("INVESTIGATE-AND-REPORT"))
+        XCTAssertTrue(prompt.contains("Are the Armoriq graphics ready?"))
+        XCTAssertTrue(prompt.contains("a later [ME] \"ok thanks\" only acknowledges"))
+        XCTAssertTrue(prompt.contains("only the actual status/answer does"))
     }
 
     // MARK: - Facts search (two-tier, entity-anchored)

@@ -47,6 +47,32 @@ enum ChatOpenTarget: String, CaseIterable, Identifiable {
 }
 
 enum DeepLinkGenerator {
+    @MainActor @discardableResult
+    static func openExternalChat(_ chat: TGChat) async -> Bool {
+        guard let native = try? await DatabaseManager.shared.nativeId(source: chat.source, intId: chat.id) else {
+            return false
+        }
+        let urls: [URL]
+        switch chat.source.kind {
+        case .telegram:
+            return false
+        case .slack:
+            let team = chat.source.account
+            urls = [
+                URL(string: "slack://channel?team=\(team)&id=\(native)"),
+                URL(string: "https://app.slack.com/client/\(team)/\(native)")
+            ].compactMap { $0 }
+        case .gmail:
+            let account = chat.source.account.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "0"
+            urls = [URL(string: "https://mail.google.com/mail/u/\(account)/#all/\(native)")].compactMap { $0 }
+        case .whatsapp:
+            urls = [URL(string: "whatsapp://")].compactMap { $0 }
+        }
+        for url in urls where NSWorkspace.shared.open(url) {
+            return true
+        }
+        return false
+    }
     /// TDLib message ids are MTProto server ids shifted left 20 bits.
     /// Telegram's link formats (t.me/c/…, privatepost, openmessage)
     /// expect the SERVER id — passing the raw TDLib id navigates to a

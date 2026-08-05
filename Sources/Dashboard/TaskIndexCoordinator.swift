@@ -248,7 +248,7 @@ final class TaskIndexCoordinator: ObservableObject {
         let chatTitles: [Int64: String]
         if let telegramService {
             chatTitles = Dictionary(
-                telegramService.visibleChats.map { ($0.id, $0.title) },
+                SourceRegistry.shared.visibleChats.map { ($0.id, $0.title) },
                 uniquingKeysWith: { a, _ in a }
             )
         } else {
@@ -292,13 +292,14 @@ final class TaskIndexCoordinator: ObservableObject {
         didPublish = true
     }
 
-    /// Reload the projection. Extraction is FactExtractionCoordinator's job —
-    /// this only re-reads the store (the refresh button's contract is "show me
-    /// the latest known state now").
+    /// Reload the projection. Background refreshes only re-read the store;
+    /// dashboard user refreshes may first await one cursor-safe extraction pass
+    /// via `extractLatest` so "Refresh" really includes the newest messages.
     func refreshNow(
         telegramService: TelegramService,
         includeBotsInAISearch: Bool? = nil,
-        userInitiated: Bool = false
+        userInitiated: Bool = false,
+        extractLatest: Bool = false
     ) async {
         // Generation-owned spinner: each user click takes a ticket; only the
         // newest clears the flag, so overlapping clicks can't stop the
@@ -313,6 +314,11 @@ final class TaskIndexCoordinator: ObservableObject {
             if userInitiated, myUserGeneration == userRefreshGeneration {
                 isUserInitiatedRefreshing = false
             }
+        }
+        if extractLatest {
+            await FactExtractionCoordinator.shared.runPassNow(
+                bypassProviderCooldown: true
+            )
         }
         await loadFromStore(
             telegramService: telegramService,
@@ -365,7 +371,7 @@ final class TaskIndexCoordinator: ObservableObject {
     ) async -> [DashboardTask] {
         guard let telegramService else { return loadedTasks }
         let taskChatIds = Set(loadedTasks.map(\.chatId))
-        var relevantChats = telegramService.visibleChats.filter { taskChatIds.contains($0.id) }
+        var relevantChats = SourceRegistry.shared.visibleChats.filter { taskChatIds.contains($0.id) }
         var resolvedChatIds = Set(relevantChats.map(\.id))
 
         for chatId in taskChatIds.subtracting(resolvedChatIds) where !unresolvableChatIds.contains(chatId) {
@@ -415,8 +421,14 @@ final class TaskIndexCoordinator: ObservableObject {
         guard !includeBotsInAISearch else { return [] }
 
         var excludedChatIds = Set<Int64>()
-        for chat in chats where await telegramService.isBotChat(chat) {
-            excludedChatIds.insert(chat.id)
+        for chat in chats {
+            let isBot: Bool
+            if chat.source.kind == .telegram {
+                isBot = await telegramService.isBotChat(chat)
+            } else {
+                isBot = SourceRegistry.shared.isLikelyBot(chat: chat)
+            }
+            if isBot { excludedChatIds.insert(chat.id) }
         }
         return excludedChatIds
     }

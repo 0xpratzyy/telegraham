@@ -7,6 +7,7 @@ struct DashboardTopicsPage: View {
     let topics: [DashboardTopic]
     let tasks: [DashboardTask]
     let followUpItems: [FollowUpItem]
+    let sourceChats: [TGChat]
     @Binding var selectedTopicId: Int64?
     let onOpenTask: (DashboardTask) -> Void
     let onOpenReply: (FollowUpItem) -> Void
@@ -715,7 +716,7 @@ struct DashboardTopicsPage: View {
 
     private var allChats: [TGChat] {
         var seen = Set<Int64>()
-        return (telegramService.visibleChats + telegramService.chats).filter {
+        return sourceChats.filter {
             seen.insert($0.id).inserted
         }
     }

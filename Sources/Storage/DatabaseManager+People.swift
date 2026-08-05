@@ -102,7 +102,7 @@ extension DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE is_outgoing = 1
                           AND text_content IS NOT NULL
@@ -129,7 +129,7 @@ extension DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
                         WHERE sender_user_id = ?
                         ORDER BY date DESC, id DESC

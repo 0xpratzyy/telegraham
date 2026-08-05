@@ -334,6 +334,7 @@ struct DashboardEvidenceContextRow: View {
 
 struct DashboardPersonDetail: View {
     @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
     @EnvironmentObject private var aiService: AIService
     @ObservedObject private var profileService = PersonProfileService.shared
 
@@ -479,12 +480,8 @@ struct DashboardPersonDetail: View {
     private func loadAIProfile(for contact: RelationGraph.Node?) async {
         guard let contact, aiService.isConfigured else { return }
         let myUserId = telegramService.currentUser?.id ?? 0
-        let chatTitleResolver: (Int64) -> String = { [weak telegramService] chatId in
-            guard let telegramService else { return "" }
-            if let chat = (telegramService.visibleChats + telegramService.chats).first(where: { $0.id == chatId }) {
-                return chat.title
-            }
-            return ""
+        let chatTitleResolver: (Int64) -> String = { chatId in
+            sourceRegistry.chat(id: chatId)?.title ?? ""
         }
         _ = await profileService.loadProfile(
             userId: contact.entityId,
@@ -506,14 +503,11 @@ struct DashboardPersonDetail: View {
     }
 
     private func privateChat(for contact: RelationGraph.Node) -> TGChat? {
-        allChats.first { chat in
-            guard case .privateChat(let userId) = chat.chatType else { return false }
-            return userId == contact.entityId
-        }
+        sourceRegistry.privateChat(userId: contact.entityId)
     }
 
     private var allChats: [TGChat] {
-        let allChats = telegramService.visibleChats + telegramService.chats
+        let allChats = sourceRegistry.visibleChats + sourceRegistry.chats
         var seen = Set<Int64>()
         return allChats.filter { seen.insert($0.id).inserted }
     }

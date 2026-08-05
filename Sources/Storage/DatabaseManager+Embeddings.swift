@@ -132,7 +132,7 @@ extension DatabaseManager {
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing
+                        SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source, m.thread_root_id
                         FROM messages AS m
                         LEFT JOIN embeddings AS e
                           ON e.message_id = m.id

@@ -112,6 +112,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // is bundled — source builds make zero network calls.
         PidgyTelemetry.start()
 
+        SourceRegistry.shared.register(telegramService)
+        SlackConnectionManager.shared.restore()
+        Task { await GmailConnectionManager.shared.restore() }
+
         // Grandfather this install if it's running a pre-paywall build, so
         // existing testers keep AI for free once enforcement is switched on.
         // No-op once BillingGate.enforce flips true (new installs must subscribe).
@@ -733,6 +737,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let dashboardView = DashboardView()
             .environmentObject(telegramService)
             .environmentObject(aiService)
+            .environmentObject(SourceRegistry.shared)
 
         let hostingView = NSHostingView(rootView: dashboardView)
 

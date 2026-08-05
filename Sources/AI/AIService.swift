@@ -18,6 +18,18 @@ final class AIService: ObservableObject {
     /// re-reads the bundle each launch, mirroring the bundled-key flow).
     private(set) var configuredOpenAIEndpointURL: URL?
 
+    /// True only for Pidgy's bundled shared-quota proxy. A BYOK OpenAI-
+    /// compatible base URL is also stored in `configuredOpenAIEndpointURL`, so
+    /// non-nil alone is not enough to choose managed-service throttling.
+    var isUsingManagedAIService: Bool {
+        guard providerType == .openai,
+              let configuredHost = configuredOpenAIEndpointURL?.host,
+              let bundledHost = BundledSecrets.aiProxyURL?.host else {
+            return false
+        }
+        return configuredHost.caseInsensitiveCompare(bundledHost) == .orderedSame
+    }
+
     init() {
         self.queryRouter = QueryRouter(aiProvider: NoAIProvider())
         loadConfiguration()

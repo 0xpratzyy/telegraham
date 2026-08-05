@@ -11,6 +11,9 @@ class ChatPhotoManager: ObservableObject {
 
     /// Set of file IDs currently being downloaded (to avoid duplicate requests)
     private var downloading: Set<Int> = []
+    private var downloadingRemote: Set<Int64> = []
+    private var pendingRemotePhotos: [Int64: NSImage] = [:]
+    private var remotePublishTask: Task<Void, Never>?
 
     private init() {}
 
@@ -41,6 +44,53 @@ class ChatPhotoManager: ObservableObject {
             }
         }
     }
+
+    /// Fetch a source-provided HTTPS avatar (Slack DMs use `image_72`). The
+    /// same in-memory cache feeds every existing avatar surface, so dashboard,
+    /// launcher and detail rows update together when the image arrives.
+    func requestPhoto(chatId: Int64, avatarURL: String) {
+        guard photos[chatId] == nil, !downloadingRemote.contains(chatId),
+              let url = Self.safeRemoteURL(avatarURL) else { return }
+        downloadingRemote.insert(chatId)
+
+        Task {
+            defer { downloadingRemote.remove(chatId) }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      data.count <= 5_000_000,
+                      let image = NSImage(data: data) else { return }
+                enqueueRemotePhoto(image, chatId: chatId)
+            } catch {
+                print("[ChatPhotoManager] Failed to download remote photo for chat \(chatId): \(error)")
+            }
+        }
+    }
+
+    private static func safeRemoteURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw), url.scheme?.lowercased() == "https",
+              url.host != nil else { return nil }
+        return url
+    }
+
+    /// Slack avatars finish in a burst when a tab appears. Publish the whole
+    /// burst once instead of invalidating every visible row per image.
+    private func enqueueRemotePhoto(_ image: NSImage, chatId: Int64) {
+        pendingRemotePhotos[chatId] = image
+        guard remotePublishTask == nil else { return }
+        remotePublishTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard let self else { return }
+            let batch = self.pendingRemotePhotos
+            self.pendingRemotePhotos.removeAll(keepingCapacity: true)
+            self.remotePublishTask = nil
+            guard !batch.isEmpty else { return }
+            var merged = self.photos
+            for (id, image) in batch { merged[id] = image }
+            self.photos = merged
+        }
+    }
 }
 
 /// Manages downloading and caching Telegram user profile photos.
@@ -52,6 +102,9 @@ final class UserPhotoManager: ObservableObject {
     @Published private(set) var photos: [Int64: NSImage] = [:]
 
     private var downloading: Set<Int> = []
+    private var downloadingRemote: Set<Int64> = []
+    private var pendingRemotePhotos: [Int64: NSImage] = [:]
+    private var remotePublishTask: Task<Void, Never>?
 
     private init() {}
 
@@ -76,6 +129,46 @@ final class UserPhotoManager: ObservableObject {
                 downloading.remove(fileId)
                 print("[UserPhotoManager] Failed to download photo for user \(userId): \(error)")
             }
+        }
+    }
+
+    func requestPhoto(userId: Int64, avatarURL: String) {
+        guard photos[userId] == nil, !downloadingRemote.contains(userId),
+              let url = URL(string: avatarURL), url.scheme?.lowercased() == "https",
+              url.host != nil else { return }
+        downloadingRemote.insert(userId)
+
+        Task {
+            defer { downloadingRemote.remove(userId) }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      data.count <= 5_000_000,
+                      let image = NSImage(data: data) else { return }
+                enqueueRemotePhoto(
+                    Self.circularThumbnail(from: image, side: Self.accountMenuThumbnailSide),
+                    userId: userId
+                )
+            } catch {
+                print("[UserPhotoManager] Failed to download remote photo for user \(userId): \(error)")
+            }
+        }
+    }
+
+    private func enqueueRemotePhoto(_ image: NSImage, userId: Int64) {
+        pendingRemotePhotos[userId] = image
+        guard remotePublishTask == nil else { return }
+        remotePublishTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard let self else { return }
+            let batch = self.pendingRemotePhotos
+            self.pendingRemotePhotos.removeAll(keepingCapacity: true)
+            self.remotePublishTask = nil
+            guard !batch.isEmpty else { return }
+            var merged = self.photos
+            for (id, image) in batch { merged[id] = image }
+            self.photos = merged
         }
     }
 

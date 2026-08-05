@@ -544,9 +544,19 @@ private struct PigeonBirdView: View {
             guard lifecycle == .arriving else { return }
             lifecycle = .perched
             stopWingFlap()
-            startBob()
-            startIdle()
-            startChirpNote()
+            // Keep the perched flock still until the user interacts with it.
+            // Five perpetual bob/head/chirp animations forced SwiftUI to
+            // rebuild this already-large dashboard every frame; on a Slack
+            // account with 100+ feed rows that held the otherwise-idle app at
+            // 20-30% CPU and made scrolling feel sticky. Arrival, drag, jump,
+            // feather and shoo animations remain intact, so the flock keeps
+            // its personality without becoming a permanent render loop.
+            bobOffset = 0
+            headDipY = 0
+            headRotDeg = 0
+            noteOpacity = 0
+            noteOffsetX = 0
+            noteOffsetY = 0
         }
     }
 

@@ -244,6 +244,7 @@ class TelegramService: ObservableObject {
         if let cached = normalizedMemberCount(chat.memberCount) {
             return cached
         }
+        guard chat.source.kind == .telegram else { return nil }
         // Already asked and TDLib had no answer — don't ask again. This is
         // the load-bearing half of the cache: the success path was cached
         // but the failure path wasn't, so unresolvable chats were re-fetched

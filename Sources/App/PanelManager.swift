@@ -170,6 +170,7 @@ final class PanelManager {
             rootView: LauncherView()
                 .environmentObject(telegramService)
                 .environmentObject(aiService)
+                .environmentObject(SourceRegistry.shared)
         )
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         // The panel is a fixed 640×480 — never let SwiftUI's ideal size drive

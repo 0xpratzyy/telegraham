@@ -357,6 +357,9 @@ struct DashboardTelegramAvatar: View {
             shape: (chat?.chatType.isOneOnOne ?? true) ? .circle : .squircle
         )
         .onAppear(perform: requestPhotoIfNeeded)
+        .onChange(of: chat?.avatarURL) {
+            requestPhotoIfNeeded()
+        }
     }
 
     private var fallbackInitials: String {
@@ -368,8 +371,12 @@ struct DashboardTelegramAvatar: View {
     }
 
     private func requestPhotoIfNeeded() {
-        guard let chat, let fileId = chat.smallPhotoFileId else { return }
-        photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
+        guard let chat else { return }
+        if let fileId = chat.smallPhotoFileId {
+            photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
+        } else if let avatarURL = chat.avatarURL {
+            photoManager.requestPhoto(chatId: chat.id, avatarURL: avatarURL)
+        }
     }
 }
 
@@ -395,6 +402,9 @@ struct DashboardTelegramUserAvatar: View {
         .onChange(of: user?.smallPhotoFileId) {
             requestPhotoIfNeeded()
         }
+        .onChange(of: user?.avatarURL) {
+            requestPhotoIfNeeded()
+        }
     }
 
     private var colorIndex: Int {
@@ -415,8 +425,12 @@ struct DashboardTelegramUserAvatar: View {
     }
 
     private func requestPhotoIfNeeded() {
-        guard let user, let fileId = user.smallPhotoFileId else { return }
-        photoManager.requestPhoto(userId: user.id, fileId: fileId, telegramService: telegramService)
+        guard let user else { return }
+        if let fileId = user.smallPhotoFileId {
+            photoManager.requestPhoto(userId: user.id, fileId: fileId, telegramService: telegramService)
+        } else if let avatarURL = user.avatarURL {
+            photoManager.requestPhoto(userId: user.id, avatarURL: avatarURL)
+        }
     }
 }
 

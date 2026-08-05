@@ -29,6 +29,11 @@ actor DatabaseManager {
         let textContent: String?
         let mediaTypeRaw: String?
         let isOutgoing: Bool
+        var source: SourceID = .telegram
+        var sourceAccountId: String? = nil
+        var conversationId: String? = nil
+        var externalId: String? = nil
+        var threadRootId: Int64? = nil
     }
 
     struct ScoredMessageRecord: Sendable, Equatable {
@@ -326,7 +331,8 @@ actor DatabaseManager {
             let existing = try Row.fetchOne(
                 db,
                 sql: """
-                    SELECT text_content, media_type, sender_user_id, sender_name, is_outgoing
+                    SELECT text_content, media_type, sender_user_id, sender_name, is_outgoing,
+                           source, source_account_id, conversation_id, external_id, thread_root_id
                     FROM messages
                     WHERE chat_id = ? AND id = ?
                     """,
@@ -345,7 +351,12 @@ actor DatabaseManager {
                 let sameSender = (existing["sender_user_id"] as Int64?) == record.senderUserId
                     && ((record.senderName == nil) || (existing["sender_name"] as String?) == record.senderName)
                 let sameDirection = (((existing["is_outgoing"] as Int64?) ?? 0) == 1) == record.isOutgoing
-                if sameSender && sameDirection { continue }
+                let sameSource = (existing["source"] as String? ?? "telegram") == record.source.rawValue
+                let sameProvenance = (existing["source_account_id"] as String?) == record.sourceAccountId
+                    && (existing["conversation_id"] as String?) == record.conversationId
+                    && (existing["external_id"] as String?) == record.externalId
+                    && (existing["thread_root_id"] as Int64?) == record.threadRootId
+                if sameSender && sameDirection && sameSource && sameProvenance { continue }
 
                 // Sender/direction enrichment on UNCHANGED content: update
                 // metadata only. The full upsert below would write the raw
@@ -358,7 +369,12 @@ actor DatabaseManager {
                             sender_user_id = ?,
                             sender_name = COALESCE(?, sender_name),
                             date = ?,
-                            is_outgoing = ?
+                            is_outgoing = ?,
+                            source = ?,
+                            source_account_id = COALESCE(?, source_account_id),
+                            conversation_id = COALESCE(?, conversation_id),
+                            external_id = COALESCE(?, external_id),
+                            thread_root_id = COALESCE(?, thread_root_id)
                         WHERE chat_id = ? AND id = ?
                         """,
                     arguments: [
@@ -366,6 +382,11 @@ actor DatabaseManager {
                         record.senderName,
                         record.date.timeIntervalSince1970,
                         record.isOutgoing ? 1 : 0,
+                        record.source.rawValue,
+                        record.sourceAccountId,
+                        record.conversationId,
+                        record.externalId,
+                        record.threadRootId,
                         record.chatId,
                         record.id
                     ]
@@ -380,8 +401,9 @@ actor DatabaseManager {
             try db.execute(
                 sql: """
                     INSERT INTO messages
-                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing,
+                     source, source_account_id, conversation_id, external_id, thread_root_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id, chat_id) DO UPDATE SET
                         sender_user_id = excluded.sender_user_id,
                         sender_name = COALESCE(excluded.sender_name, sender_name),
@@ -389,6 +411,11 @@ actor DatabaseManager {
                         text_content = excluded.text_content,
                         media_type = excluded.media_type,
                         is_outgoing = excluded.is_outgoing,
+                        source = excluded.source,
+                        source_account_id = COALESCE(excluded.source_account_id, source_account_id),
+                        conversation_id = COALESCE(excluded.conversation_id, conversation_id),
+                        external_id = COALESCE(excluded.external_id, external_id),
+                        thread_root_id = COALESCE(excluded.thread_root_id, thread_root_id),
                         ocr_state = CASE WHEN excluded.text_content IS NOT text_content THEN 0 ELSE ocr_state END
                     """,
                 arguments: [
@@ -399,7 +426,12 @@ actor DatabaseManager {
                     record.date.timeIntervalSince1970,
                     record.textContent,
                     record.mediaTypeRaw,
-                    record.isOutgoing ? 1 : 0
+                    record.isOutgoing ? 1 : 0,
+                    record.source.rawValue,
+                    record.sourceAccountId,
+                    record.conversationId,
+                    record.externalId,
+                    record.threadRootId
                 ]
             )
             if contentChanged {
@@ -415,8 +447,9 @@ actor DatabaseManager {
             try db.execute(
                 sql: """
                     INSERT INTO messages
-                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing,
+                     source, source_account_id, conversation_id, external_id, thread_root_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id, chat_id) DO NOTHING
                     """,
                 arguments: [
@@ -427,7 +460,12 @@ actor DatabaseManager {
                     record.date.timeIntervalSince1970,
                     record.textContent,
                     record.mediaTypeRaw,
-                    record.isOutgoing ? 1 : 0
+                    record.isOutgoing ? 1 : 0,
+                    record.source.rawValue,
+                    record.sourceAccountId,
+                    record.conversationId,
+                    record.externalId,
+                    record.threadRootId
                 ]
             )
         }
@@ -703,6 +741,8 @@ actor DatabaseManager {
     static func messageRecord(from row: Row) -> MessageRecord {
         let timestamp: Double = row["date"]
         let isOutgoingValue: Int64 = row["is_outgoing"]
+        let columns = Set(row.columnNames)
+        let sourceRaw: String = columns.contains("source") ? (row["source"] ?? "telegram") : "telegram"
 
         return MessageRecord(
             id: row["id"],
@@ -712,7 +752,46 @@ actor DatabaseManager {
             date: Date(timeIntervalSince1970: timestamp),
             textContent: row["text_content"],
             mediaTypeRaw: row["media_type"],
-            isOutgoing: isOutgoingValue != 0
+            isOutgoing: isOutgoingValue != 0,
+            source: SourceID(rawValue: sourceRaw) ?? .telegram,
+            sourceAccountId: columns.contains("source_account_id") ? row["source_account_id"] : nil,
+            conversationId: columns.contains("conversation_id") ? row["conversation_id"] : nil,
+            externalId: columns.contains("external_id") ? row["external_id"] : nil,
+            threadRootId: columns.contains("thread_root_id") ? row["thread_root_id"] : nil
         )
+    }
+
+    // MARK: - Source-neutral ID mapping
+
+    static let idMapReservedBandFloor: Int64 = 9_000_000_000_000_000_000
+
+    func mintId(source: SourceID, nativeId: String) async throws -> Int64 {
+        try await write { db in
+            if let existing = try Int64.fetchOne(
+                db,
+                sql: "SELECT int_id FROM id_map WHERE source = ? AND native_id = ?",
+                arguments: [source.rawValue, nativeId]
+            ) {
+                return existing
+            }
+            let currentMax = try Int64.fetchOne(db, sql: "SELECT MAX(int_id) FROM id_map")
+                ?? (Self.idMapReservedBandFloor - 1)
+            let nextId = max(currentMax, Self.idMapReservedBandFloor - 1) + 1
+            try db.execute(
+                sql: "INSERT INTO id_map (int_id, source, native_id) VALUES (?, ?, ?)",
+                arguments: [nextId, source.rawValue, nativeId]
+            )
+            return nextId
+        }
+    }
+
+    func nativeId(source: SourceID, intId: Int64) async throws -> String? {
+        try await read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT native_id FROM id_map WHERE source = ? AND int_id = ?",
+                arguments: [source.rawValue, intId]
+            )
+        }
     }
 }

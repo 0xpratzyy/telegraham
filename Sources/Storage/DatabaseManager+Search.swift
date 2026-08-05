@@ -32,7 +32,7 @@ extension DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source, m.thread_root_id,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -47,7 +47,7 @@ extension DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing,
+                            SELECT m.id, m.chat_id, m.sender_user_id, m.sender_name, m.date, m.text_content, m.media_type, m.is_outgoing, m.source, m.thread_root_id,
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
@@ -101,7 +101,7 @@ extension DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0
@@ -117,7 +117,7 @@ extension DatabaseManager {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                             FROM messages
                             WHERE text_content IS NOT NULL
                               AND length(trim(text_content)) > 0

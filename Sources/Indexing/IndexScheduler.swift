@@ -303,7 +303,10 @@ actor IndexScheduler {
 
     private func snapshot(using telegramService: TelegramService) async -> (currentUserId: Int64?, chats: [TGChat]) {
         let snapshot = await MainActor.run {
-            (telegramService.currentUser?.id, telegramService.visibleChats)
+            var seen = Set<Int64>()
+            let chats = (SourceRegistry.shared.visibleChats + telegramService.visibleChats)
+                .filter { seen.insert($0.id).inserted }
+            return (SourceRegistry.shared.currentUser(for: .telegram)?.id ?? telegramService.currentUser?.id, chats)
         }
         let resolvedChats = await resolveMemberCountsIfNeeded(
             in: snapshot.1,
@@ -332,6 +335,7 @@ actor IndexScheduler {
     }
 
     nonisolated private static func needsMemberCountResolution(_ chat: TGChat) -> Bool {
+        guard chat.source.kind == .telegram else { return false }
         guard chat.memberCount == nil else { return false }
         if case .supergroup(_, let isChannel) = chat.chatType {
             return !isChannel
@@ -349,7 +353,12 @@ actor IndexScheduler {
 
         case .supergroup(_, let isChannel):
             guard !isChannel else { return false }
-            guard let memberCount = chat.memberCount else { return false }
+            // Non-Telegram sources may not expose a reliable member count.
+            // Their own API already controls which conversations are visible,
+            // so do not drop them behind a Telegram-only metadata gate.
+            guard let memberCount = chat.memberCount else {
+                return chat.source.kind != .telegram
+            }
             return memberCount <= AppConstants.Indexing.maxIndexedGroupMembers
 
         case .secretChat:
@@ -403,13 +412,22 @@ actor IndexScheduler {
         var indexedMessageCount = 0
 
         do {
-            let batch = try await telegramService.getChatHistory(
-                chatId: chat.id,
-                fromMessageId: cursor,
-                limit: AppConstants.Indexing.batchSize,
-                onlyLocal: false,
-                priority: .background
-            )
+            let batch: [TGMessage]
+            if chat.source.kind == .telegram {
+                batch = try await telegramService.getChatHistory(
+                    chatId: chat.id,
+                    fromMessageId: cursor,
+                    limit: AppConstants.Indexing.batchSize,
+                    onlyLocal: false,
+                    priority: .background
+                )
+            } else {
+                batch = try await SourceRegistry.shared.chatHistory(
+                    for: chat,
+                    fromMessageId: cursor,
+                    limit: AppConstants.Indexing.batchSize
+                )
+            }
 
             let oldestBatchMessageId = batch.min { lhs, rhs in
                 if lhs.date != rhs.date {
@@ -427,7 +445,8 @@ actor IndexScheduler {
                     date: message.date,
                     textContent: message.textContent,
                     mediaTypeRaw: message.mediaType?.rawValue,
-                    isOutgoing: message.isOutgoing
+                    isOutgoing: message.isOutgoing,
+                    source: message.source
                 )
             }
 
@@ -444,7 +463,10 @@ actor IndexScheduler {
                 )
 
                 try await updateEmbeddings(for: batch)
-                await ingestIntoGraph(messages: batch, chat: chat, currentUserId: currentUserId)
+                let sourceCurrentUserId = await MainActor.run {
+                    SourceRegistry.shared.currentUser(forAccount: chat.source)?.id ?? currentUserId
+                }
+                await ingestIntoGraph(messages: batch, chat: chat, currentUserId: sourceCurrentUserId)
                 indexedMessageCount = batchRecords.count
                 reachedHistoryStart = candidateReachedHistoryStart
             } else if candidateReachedHistoryStart {

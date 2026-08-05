@@ -34,10 +34,16 @@
 	<string>$(PIDGY_DODO_CHECKOUT_BUNDLED)</string>
 	<key>PidgyBundledDodoPortalURL</key>
 	<string>$(PIDGY_DODO_PORTAL_URL)</string>
+	<key>PidgyBundledGoogleClientId</key>
+	<string>$(PIDGY_GOOGLE_CLIENT_ID)</string>
+	<key>PidgyBundledGoogleClientSecret</key>
+	<string>$(PIDGY_GOOGLE_CLIENT_SECRET)</string>
 	<key>PidgyBundledOpenAIApiKey</key>
 	<string>$(PIDGY_BUNDLED_OPENAI_API_KEY)</string>
 	<key>PidgyBundledSentryDsn</key>
 	<string>$(PIDGY_SENTRY_DSN)</string>
+	<key>PidgyBundledSlackClientId</key>
+	<string>$(PIDGY_SLACK_CLIENT_ID)</string>
 	<key>PidgyBundledTelegramApiHash</key>
 	<string>$(PIDGY_TG_API_HASH)</string>
 	<key>PidgyBundledTelegramApiId</key>

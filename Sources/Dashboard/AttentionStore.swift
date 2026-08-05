@@ -146,7 +146,7 @@ final class AttentionStore: ObservableObject {
         // flashes an empty state and then assembles row by row (the exact
         // flicker this flag exists to prevent). Once Telegram is ready, even a
         // genuinely-empty account settles.
-        if !candidates.isEmpty || telegramService.authState == .ready {
+        if !candidates.isEmpty || SourceRegistry.shared.anyReady || telegramService.authState == .ready {
             if !hasLoadedFactReplies { hasLoadedFactReplies = true }
         }
         // Signature includes the loop anchor + ask date: a projection whose only
@@ -233,13 +233,13 @@ final class AttentionStore: ObservableObject {
         includeBots: Bool
     ) -> [TGChat] {
         let base = SearchChatEligibilityFilter.collectCandidateChats(
-            from: telegramService.visibleChats,
+            from: SourceRegistry.shared.visibleChats,
             scope: .all
         )
         return SearchChatEligibilityFilter.applyingLikelyBotFilter(
             to: base,
             includeBots: includeBots,
-            isLikelyBot: { telegramService.isLikelyBotChat($0) }
+            isLikelyBot: { SourceRegistry.shared.isLikelyBot(chat: $0) }
         ).included
     }
 

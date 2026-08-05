@@ -821,6 +821,120 @@ enum PidgyMigrations {
             try db.execute(sql: "DROP TABLE IF EXISTS dashboard_tasks")
         }
 
+        migrator.registerMigration("v35_multi_source_foundation") { db in
+            // Compatibility bridge: Telegram keeps its integer primary keys,
+            // while every row also gains stable source-neutral provenance.
+            // New adapters can therefore reuse the existing FTS, embeddings,
+            // and fact pipeline before the remaining UI is fully de-coupled
+            // from TGChat/TGMessage.
+            let existingMessageColumns = Set(try db.columns(in: "messages").map(\.name))
+            if !existingMessageColumns.contains("source") {
+                try db.execute(sql: "ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram'")
+            }
+            if !existingMessageColumns.contains("source_account_id") {
+                try db.execute(sql: "ALTER TABLE messages ADD COLUMN source_account_id TEXT")
+            }
+            if !existingMessageColumns.contains("conversation_id") {
+                try db.execute(sql: "ALTER TABLE messages ADD COLUMN conversation_id TEXT")
+            }
+            if !existingMessageColumns.contains("external_id") {
+                try db.execute(sql: "ALTER TABLE messages ADD COLUMN external_id TEXT")
+            }
+            if !existingMessageColumns.contains("thread_root_id") {
+                try db.execute(sql: "ALTER TABLE messages ADD COLUMN thread_root_id INTEGER")
+            }
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS id_map (
+                    int_id INTEGER PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    native_id TEXT NOT NULL,
+                    UNIQUE(source, native_id)
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_id_map_source ON id_map(source)")
+
+            try db.execute(sql: """
+                UPDATE messages
+                SET conversation_id = 'telegram:conversation:' || CAST(chat_id AS TEXT),
+                    external_id = CAST(id AS TEXT)
+                WHERE conversation_id IS NULL OR external_id IS NULL
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS source_accounts (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    email TEXT,
+                    connected_at REAL NOT NULL,
+                    last_synced_at REAL,
+                    UNIQUE(source, external_id)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS source_conversations (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES source_accounts(id) ON DELETE CASCADE,
+                    source TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    updated_at REAL,
+                    UNIQUE(account_id, external_id)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS source_handles (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    display_name TEXT,
+                    email TEXT,
+                    phone TEXT,
+                    UNIQUE(source, external_id)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS people (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS person_handles (
+                    person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+                    handle_id TEXT NOT NULL REFERENCES source_handles(id) ON DELETE CASCADE,
+                    confidence REAL NOT NULL DEFAULT 1,
+                    evidence TEXT NOT NULL DEFAULT '',
+                    confirmed_by_user INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(person_id, handle_id)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS source_sync_state (
+                    account_id TEXT PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+                    conversation_cursor TEXT,
+                    last_synced_at REAL,
+                    last_error TEXT
+                )
+                """)
+
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_messages_source_date ON messages(source, date DESC)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_messages_conversation_date ON messages(conversation_id, date DESC)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_source_conversations_account ON source_conversations(account_id, updated_at DESC)")
+        }
+
+        migrator.registerMigration("v36_source_conversation_unread_count") { db in
+            let columns = Set(try db.columns(in: "source_conversations").map(\.name))
+            if !columns.contains("unread_count") {
+                try db.execute(sql: "ALTER TABLE source_conversations ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         return migrator
     }
 }

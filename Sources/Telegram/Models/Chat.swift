@@ -10,6 +10,34 @@ struct TGChat: Identifiable, Equatable, Sendable {
     let order: Int64
     let isInMainList: Bool
     let smallPhotoFileId: Int?
+    let source: SourceID
+    let avatarURL: String?
+
+    init(
+        id: Int64,
+        title: String,
+        chatType: ChatType,
+        unreadCount: Int,
+        lastMessage: TGMessage?,
+        memberCount: Int?,
+        order: Int64,
+        isInMainList: Bool,
+        smallPhotoFileId: Int?,
+        source: SourceID = .telegram,
+        avatarURL: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.chatType = chatType
+        self.unreadCount = unreadCount
+        self.lastMessage = lastMessage
+        self.memberCount = memberCount
+        self.order = order
+        self.isInMainList = isInMainList
+        self.smallPhotoFileId = smallPhotoFileId
+        self.source = source
+        self.avatarURL = avatarURL
+    }
 
     enum ChatType: Equatable, Sendable {
         case privateChat(userId: Int64)
@@ -85,7 +113,25 @@ struct TGChat: Identifiable, Equatable, Sendable {
             memberCount: memberCount,
             order: order,
             isInMainList: isInMainList,
-            smallPhotoFileId: smallPhotoFileId
+            smallPhotoFileId: smallPhotoFileId,
+            source: source,
+            avatarURL: avatarURL
+        )
+    }
+
+    func updating(lastMessage: TGMessage?) -> TGChat {
+        TGChat(
+            id: id,
+            title: title,
+            chatType: chatType,
+            unreadCount: unreadCount,
+            lastMessage: lastMessage,
+            memberCount: memberCount,
+            order: order,
+            isInMainList: isInMainList,
+            smallPhotoFileId: smallPhotoFileId,
+            source: source,
+            avatarURL: avatarURL
         )
     }
 }

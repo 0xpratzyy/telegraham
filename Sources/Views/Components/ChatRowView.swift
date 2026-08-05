@@ -22,9 +22,10 @@ struct ChatRowView: View {
                     photo: photoManager.photos[chat.id]
                 )
                 .onAppear {
-                    if let fileId = chat.smallPhotoFileId {
-                        photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
-                    }
+                    requestPhotoIfNeeded()
+                }
+                .onChange(of: chat.avatarURL) {
+                    requestPhotoIfNeeded()
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -34,6 +35,13 @@ struct ChatRowView: View {
                             .font(Font.Pidgy.bodyMd)
                             .foregroundStyle(Color.Pidgy.fg1)
                             .lineLimit(1)
+
+                        if chat.source.kind != .telegram {
+                            Label(chat.source.kind.displayName, systemImage: chat.source.kind.systemImage)
+                                .font(Font.Pidgy.monoSm)
+                                .foregroundStyle(Color.Pidgy.accent)
+                                .labelStyle(.titleAndIcon)
+                        }
 
                         if let status = pipelineStatus {
                             Text(status.rawValue)
@@ -103,5 +111,13 @@ struct ChatRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func requestPhotoIfNeeded() {
+        if let fileId = chat.smallPhotoFileId {
+            photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
+        } else if let avatarURL = chat.avatarURL {
+            photoManager.requestPhoto(chatId: chat.id, avatarURL: avatarURL)
+        }
     }
 }

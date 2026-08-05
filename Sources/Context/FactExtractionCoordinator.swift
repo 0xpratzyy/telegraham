@@ -15,6 +15,104 @@ import Combine
 import Foundation
 import OSLog
 
+/// Provider failures that should pause the incremental fact crawl without
+/// advancing its per-chat cursor. Kept value-only so the task-group workers can
+/// report failures back to the coordinator without carrying an arbitrary Error
+/// across concurrency boundaries.
+enum FactExtractionProviderFailure: Equatable, Sendable {
+    case rateLimited(retryAfter: TimeInterval?)
+    case timedOut
+    case offline
+    case unavailable
+
+    static func classify(_ error: Error) -> Self? {
+        if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+            return nil
+        }
+        if let aiError = error as? AIError {
+            switch aiError {
+            case .rateLimited(let retryAfter): return .rateLimited(retryAfter: retryAfter)
+            case .networkError(let underlying): return classify(underlying) ?? .unavailable
+            case .noAPIKey, .providerNotConfigured: return .unavailable
+            case .invalidResponse, .httpError: return .unavailable
+            case .parsingError: return nil
+            }
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut: return .timedOut
+            case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost,
+                 .cannotConnectToHost, .dnsLookupFailed:
+                return .offline
+            case .cancelled: return nil
+            default: return .unavailable
+            }
+        }
+        return nil
+    }
+
+    var userFacingDescription: String {
+        switch self {
+        case .rateLimited: return "Managed AI is busy. Pidgy will retry automatically."
+        case .timedOut: return "AI extraction timed out. Pidgy will retry automatically."
+        case .offline: return "The network was unavailable. Pidgy will retry automatically."
+        case .unavailable: return "AI extraction is temporarily unavailable. Pidgy will retry automatically."
+        }
+    }
+}
+
+/// Pure scheduling policy, split out so request pressure and retry timing stay
+/// regression-testable without launching the whole coordinator.
+enum FactExtractionRuntimePolicy {
+    static func maxConcurrentChats(isManagedAI: Bool) -> Int {
+        // The managed Vertex quota is shared. Live Slack verification showed
+        // even two simultaneous extraction calls repeatedly split into one
+        // timeout plus one 429/success. Keep managed extraction single-flight;
+        // BYOK retains the old throughput because its quota belongs to the user.
+        isManagedAI ? 1 : 10
+    }
+
+    static func retryDelay(
+        consecutiveFailedPasses: Int,
+        failure: FactExtractionProviderFailure
+    ) -> TimeInterval {
+        let schedule: [TimeInterval] = [30, 60, 120, 300]
+        let index = min(max(consecutiveFailedPasses - 1, 0), schedule.count - 1)
+        var delay = schedule[index]
+        if case .rateLimited(let retryAfter) = failure, let retryAfter {
+            delay = max(delay, retryAfter)
+        }
+        return min(max(delay, 5), 300)
+    }
+
+    static func primaryFailure(
+        from failures: [FactExtractionProviderFailure]
+    ) -> FactExtractionProviderFailure? {
+        if let rateLimited = failures.first(where: {
+            if case .rateLimited = $0 { return true }
+            return false
+        }) { return rateLimited }
+        if failures.contains(.offline) { return .offline }
+        if failures.contains(.timedOut) { return .timedOut }
+        return failures.first
+    }
+
+    static func shouldLaunchMoreChats(
+        afterProviderFailures failures: [FactExtractionProviderFailure]
+    ) -> Bool {
+        failures.isEmpty
+    }
+
+    static func extractionWindowLimit(
+        base: Int,
+        consecutiveTimeouts: Int
+    ) -> Int {
+        guard consecutiveTimeouts > 0 else { return base }
+        if consecutiveTimeouts == 1 { return max(10, base / 2) }
+        return max(5, base / 4)
+    }
+}
+
 @MainActor
 final class FactExtractionCoordinator: ObservableObject {
     static let shared = FactExtractionCoordinator()
@@ -32,14 +130,30 @@ final class FactExtractionCoordinator: ObservableObject {
     /// passTask, so passTask.cancel() never reaches it).
     nonisolated(unsafe) private var stopped = false
     private var timer: Timer?
-    private var chatListCancellable: AnyCancellable?
+    private var sourceListCancellable: AnyCancellable?
     private var contactDirectory: FactContactDirectory?
     private var directoryBuiltAt: Date?
-    private var isRunning = false
+    @Published private(set) var isRunning = false
+    /// Source updates can arrive while a pass is in flight (Slack commonly
+    /// restores just after Telegram). Remember one coalesced rerun instead of
+    /// dropping that signal and making the new source wait for the 8-minute
+    /// timer.
+    private var rerunRequested = false
+    /// A user-initiated refresh may request that the coalesced rerun bypass the
+    /// current provider cooldown exactly once.
+    private var rerunShouldBypassCooldown = false
+    private var consecutiveProviderFailurePasses = 0
+    @Published private(set) var lastProviderFailure: String?
+    @Published private(set) var nextProviderRetryAt: Date?
     private var didBackfillLoopKinds = false
     /// Consecutive unparseable-reply failures per chat at a given cursor — after
     /// 3 the poison window is skipped so one bad window can't wedge the crawl.
     private var extractFailures: [Int64: (cursor: Int64, count: Int)] = [:]
+    /// Timeouts can be prompt-size sensitive. Retry the same cursor with a
+    /// smaller window instead of sending the identical 40-message request
+    /// forever. This is intentionally separate from poison-window failures:
+    /// provider trouble must never skip or advance the cursor.
+    private var providerTimeoutFailures: [Int64: (cursor: Int64, count: Int)] = [:]
 
     @Published private(set) var lastPassAt: Date?
     @Published private(set) var lastPassNewFacts = 0
@@ -70,12 +184,17 @@ final class FactExtractionCoordinator: ObservableObject {
         self.telegramService = telegramService
         self.aiService = aiService
 
-        // Re-run as TDLib streams the chat list in over time (debounced), so
-        // coverage grows from the first few chats to the full active set.
-        chatListCancellable = telegramService.$chats
+        // Re-run as any connected source streams its chat list or new cached
+        // messages (debounced), so Slack and future sources join the same
+        // incremental extraction pipeline as Telegram.
+        sourceListCancellable = SourceRegistry.shared.objectWillChange
             .debounce(for: .seconds(8), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
-                Task { @MainActor in self?.triggerPass() }
+                Task { @MainActor in
+                    self?.contactDirectory = nil
+                    self?.directoryBuiltAt = nil
+                    self?.triggerPass()
+                }
             }
 
         passTask?.cancel()
@@ -87,13 +206,13 @@ final class FactExtractionCoordinator: ObservableObject {
             // empty states.
             for _ in 0..<300 {
                 guard !Task.isCancelled else { return }
-                if let ts = self?.telegramService, ts.authState == .ready, !ts.visibleChats.isEmpty { break }
+                if SourceRegistry.shared.anyReady, !SourceRegistry.shared.visibleChats.isEmpty { break }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
             guard !Task.isCancelled else { return }
             // Auth never arrived: yield the loader to the real empty state
             // instead of a pigeon that can never finish.
-            if let self, self.telegramService?.authState != .ready, self.isCrawling {
+            if let self, !SourceRegistry.shared.anyReady, self.isCrawling {
                 self.isCrawling = false
             }
             await self?.runPass()
@@ -120,7 +239,12 @@ final class FactExtractionCoordinator: ObservableObject {
         ocrDrainTask = nil
         timer?.invalidate()
         timer = nil
-        chatListCancellable = nil
+        sourceListCancellable = nil
+        rerunRequested = false
+        rerunShouldBypassCooldown = false
+        consecutiveProviderFailurePasses = 0
+        lastProviderFailure = nil
+        nextProviderRetryAt = nil
         PhotoOCRIndexer.shared.stop()
         // AWAIT the in-flight pass draining out through its stopped/cancelled
         // checkpoints — reset closes and deletes SQLite right after this, so
@@ -133,33 +257,61 @@ final class FactExtractionCoordinator: ObservableObject {
     }
 
     /// Kick a pass if one isn't already running (used by the timer + any manual refresh).
-    func triggerPass() {
-        guard ContextLayer.enabled, !stopped, !isRunning else { return }
+    func triggerPass(bypassProviderCooldown: Bool = false) {
+        guard ContextLayer.enabled, !stopped else { return }
+        if isRunning {
+            rerunRequested = true
+            rerunShouldBypassCooldown = rerunShouldBypassCooldown || bypassProviderCooldown
+            return
+        }
         passTask?.cancel()
-        passTask = Task { @MainActor [weak self] in await self?.runPass() }
+        passTask = Task { @MainActor [weak self] in
+            await self?.runPass(bypassProviderCooldown: bypassProviderCooldown)
+        }
     }
 
     /// Run a pass and return when it finishes — lets the inspector's "Run pass
     /// now" reload on real completion instead of guessing a delay. No-op if a
     /// pass is already in flight (runPass self-guards on isRunning).
-    func runPassNow() async {
+    func runPassNow(bypassProviderCooldown: Bool = false) async {
         guard ContextLayer.enabled, !stopped else { return }
-        await runPass()
+        if isRunning {
+            // Don't overlap two cursor-owning crawls. Queue one coalesced pass;
+            // facts publish as soon as the in-flight pass writes, and the
+            // queued pass picks up anything it missed.
+            rerunRequested = true
+            rerunShouldBypassCooldown = rerunShouldBypassCooldown || bypassProviderCooldown
+            return
+        }
+        await runPass(bypassProviderCooldown: bypassProviderCooldown)
     }
 
-    private func runPass() async {
+    private func runPass(bypassProviderCooldown: Bool = false) async {
         guard ContextLayer.enabled, !stopped, !isRunning, let telegramService, let aiService else { return }
-        guard telegramService.authState == .ready else {
-            // Can't crawl without Telegram (session revoked / signed out): drop
-            // the loader so surfaces settle to their real states; the next
-            // successful pass re-arms it if backlog remains.
+        if !bypassProviderCooldown,
+           let retryAt = nextProviderRetryAt,
+           retryAt > Date() {
+            scheduleNextPass(after: retryAt.timeIntervalSinceNow)
+            return
+        }
+        guard SourceRegistry.shared.anyReady else {
+            // No connected source can currently be crawled: drop the loader so
+            // surfaces settle to their real states.
             if isCrawling { isCrawling = false }
             return
         }
         guard !Task.isCancelled else { return }
         if firstAuthReadyAt == nil { firstAuthReadyAt = Date() }
         isRunning = true
-        defer { isRunning = false }
+        defer {
+            isRunning = false
+            if rerunRequested, !stopped {
+                let bypassCooldown = rerunShouldBypassCooldown
+                rerunRequested = false
+                rerunShouldBypassCooldown = false
+                triggerPass(bypassProviderCooldown: bypassCooldown)
+            }
+        }
 
         // Belt for the wait-loop cap above: the FIRST real pass of the
         // session re-arms the loader in case the auth wait dropped it (an
@@ -167,14 +319,12 @@ final class FactExtractionCoordinator: ObservableObject {
         // so a caught-up account clears it right back.
         if lastPassAt == nil, !isCrawling { isCrawling = true }
 
-        let myUserId = telegramService.currentUser?.id ?? 0
-        let myUser = telegramService.currentUser
         let archived = ArchivedChatsStore.archivedIds()
         let cutoff = Date().addingTimeInterval(-ContextLayer.maxChatAgeSeconds)
 
         // Same eligibility as the task/reply surfaces: in the main list, not a
         // channel, not archived, small enough, and active within the window.
-        let visibleEligible = telegramService.visibleChats
+        let visibleEligible = SourceRegistry.shared.visibleChats
             .filter { chat in
                 guard chat.isInMainList, !chat.chatType.isChannel, !archived.contains(chat.id) else { return false }
                 if let members = chat.memberCount, members > AppConstants.Indexing.maxIndexedGroupMembers { return false }
@@ -203,11 +353,11 @@ final class FactExtractionCoordinator: ObservableObject {
             eligible = visibleEligible
         } else {
             var kept: [TGChat] = []
-            for chat in visibleEligible where !(await telegramService.isBotChat(chat)) {
+            for chat in visibleEligible where !SourceRegistry.shared.isLikelyBot(chat: chat) {
                 kept.append(chat)
             }
             eligible = kept
-            await purgeStoredBotFacts(telegramService: telegramService)
+            await purgeStoredBotFacts()
         }
         // No prefix — iterate newest-active first and cap on chats actually
         // worked (those with fresh messages), so the backlog is covered across
@@ -221,9 +371,14 @@ final class FactExtractionCoordinator: ObservableObject {
         // own window from TDLib inside crawlChat (legacy-pipeline speed:
         // first results in minutes instead of waiting hours on the general
         // backfill), and only extracts once the window is COMPLETE.
-        let readyIds = await DatabaseManager.shared.syncReadyChatIdsForExtraction(
+        var readyIds = await DatabaseManager.shared.syncReadyChatIdsForExtraction(
             chatIds: eligible.map(\.id), cutoff: cutoff
         )
+        // Non-Telegram sources own their deliberately paced remote backfill.
+        // Extraction consumes whatever is currently persisted and advances as
+        // later pages arrive, rather than blocking on a Telegram-only coverage
+        // gate or initiating another remote request.
+        readyIds.formUnion(eligible.lazy.filter { $0.source.kind != .telegram }.map(\.id))
         var syncGateSkipped = 0
         // Crawl order: READY chats first (extraction is pure AI speed), then
         // the not-ready ones with DMs before groups and small before large —
@@ -256,9 +411,10 @@ final class FactExtractionCoordinator: ObservableObject {
             // Bot DMs stay out of the directory for the same reason bot
             // chats stay out of extraction: a fact's subject must be a person.
             var dmContacts: [(id: Int64, name: String)] = []
-            for chat in telegramService.visibleChats {
-                guard case .privateChat(let uid) = chat.chatType, uid != myUserId else { continue }
-                guard !(await telegramService.isBotChat(chat)) else { continue }
+            for chat in SourceRegistry.shared.visibleChats {
+                let sourceUserId = SourceRegistry.shared.currentUser(forAccount: chat.source)?.id ?? 0
+                guard case .privateChat(let uid) = chat.chatType, uid != sourceUserId else { continue }
+                guard !SourceRegistry.shared.isLikelyBot(chat: chat) else { continue }
                 dmContacts.append((uid, chat.title))
             }
             directory = FactContactDirectory.build(rows: rows, dmContacts: dmContacts)
@@ -271,6 +427,8 @@ final class FactExtractionCoordinator: ObservableObject {
         var chasedLoops = 0
         var scannedWindows = 0
         var workedChats = 0
+        var successfulAIWindows = 0
+        var providerFailures: [FactExtractionProviderFailure] = []
         // Structural sweep (#48): reply-kind loops with an outgoing message
         // after their ask are answered pings — close them without depending
         // on the model emitting resolvedLoops. One global sweep per pass also
@@ -302,11 +460,16 @@ final class FactExtractionCoordinator: ObservableObject {
         // no cross-chat state). Five chats in flight overlap their AI calls,
         // which is where all the time goes; the @MainActor hops between
         // awaits are negligible. Newest-active chats still start first.
-        // AI extraction runs far below provider capacity — 10 concurrent
-        // chats keeps the model busy while the (much slower) TDLib fetch
-        // side stays capped separately at maxBootstrapInFlight.
-        let maxConcurrentChats = 10
+        // Keep BYOK throughput high, but bound Pidgy's shared managed quota so
+        // one account cannot fan a brief provider slowdown across ten chats.
+        // TDLib bootstrap fetches remain capped independently.
+        let maxConcurrentChats = FactExtractionRuntimePolicy.maxConcurrentChats(
+            isManagedAI: aiService.isUsingManagedAIService
+        )
         var chatIterator = eligibleOrdered.makeIterator()
+        let sourceUsers = Dictionary(uniqueKeysWithValues: SourceRegistry.shared.sources.compactMap { source in
+            source.currentUser.map { (source.sourceID, $0) }
+        })
         var ranOutOfChats = false
         await withTaskGroup(of: ChatCrawlOutcome.self) { group in
             var inFlight = 0
@@ -317,13 +480,14 @@ final class FactExtractionCoordinator: ObservableObject {
                     ranOutOfChats = true
                     return false
                 }
+                let sourceUser = sourceUsers[chat.source]
                 group.addTask {
                     await self.crawlChat(
                         chat,
                         syncReady: readyIds.contains(chat.id),
                         cutoff: cutoff,
-                        myUserId: myUserId,
-                        myUser: myUser,
+                        myUserId: sourceUser?.id ?? 0,
+                        myUser: sourceUser,
                         directory: directory,
                         aiService: aiService,
                         telegramService: telegramService
@@ -339,10 +503,22 @@ final class FactExtractionCoordinator: ObservableObject {
                 closedLoops += outcome.closedLoops
                 chasedLoops += outcome.chasedLoops
                 scannedWindows += outcome.scannedWindows
+                successfulAIWindows += outcome.successfulAIWindows
+                if let failure = outcome.providerFailure {
+                    providerFailures.append(failure)
+                }
                 if outcome.didWork { workedChats += 1 }
                 if outcome.hitWindowCap || outcome.cancelled { backlogRemains = true }
                 if outcome.waitingOnSync { syncGateSkipped += 1; backlogRemains = true }
-                while inFlight < maxConcurrentChats, launchNext() {}
+                // Once any in-flight chat proves the provider is unhealthy,
+                // drain only the requests already in flight. Launching fresh
+                // chats here would turn one 30s outage into a long two-wide
+                // conveyor belt before the pass-level cooldown can engage.
+                while inFlight < maxConcurrentChats,
+                      FactExtractionRuntimePolicy.shouldLaunchMoreChats(
+                          afterProviderFailures: providerFailures
+                      ),
+                      launchNext() {}
             }
         }
         // Stopped on budget/cancel with chats unvisited → backlog remains
@@ -350,6 +526,30 @@ final class FactExtractionCoordinator: ObservableObject {
         // sync-coverage gate are backlog too — the loader must not clear
         // while their history is still downloading.
         if !ranOutOfChats || syncGateSkipped > 0 { backlogRemains = true }
+        var providerRetryDelay: TimeInterval?
+        if let failure = FactExtractionRuntimePolicy.primaryFailure(from: providerFailures) {
+            if successfulAIWindows == 0 {
+                consecutiveProviderFailurePasses += 1
+            } else {
+                // Partial recovery: failed windows still need a retry, but do
+                // not carry an old outage's exponential penalty forward.
+                consecutiveProviderFailurePasses = 1
+            }
+            let delay = FactExtractionRuntimePolicy.retryDelay(
+                consecutiveFailedPasses: consecutiveProviderFailurePasses,
+                failure: failure
+            )
+            providerRetryDelay = delay
+            lastProviderFailure = failure.userFacingDescription
+            nextProviderRetryAt = Date().addingTimeInterval(delay)
+            backlogRemains = true
+            logger.error("provider pause: \(failure.userFacingDescription, privacy: .public) retrying in \(Int(delay), privacy: .public)s")
+        } else if successfulAIWindows > 0 {
+            consecutiveProviderFailurePasses = 0
+            lastProviderFailure = nil
+            nextProviderRetryAt = nil
+        }
+
         // "Not ready yet" is not "nothing to do". The first pass after launch
         // fires before TDLib has published the chat list, so it sees zero
         // eligible chats, concludes there is no backlog, and both drops the
@@ -357,7 +557,7 @@ final class FactExtractionCoordinator: ObservableObject {
         // much still working — and stops chaining the next pass, leaving the
         // crawl idle until the periodic timer happens to fire. An empty chat
         // list is the tell: a genuinely caught-up account still HAS chats.
-        if telegramService.visibleChats.isEmpty { backlogRemains = true }
+        if SourceRegistry.shared.visibleChats.isEmpty { backlogRemains = true }
         if syncGateSkipped > 0 {
             logger.info("sync gate: \(syncGateSkipped, privacy: .public) chats waiting on 30-day backfill")
         }
@@ -401,12 +601,16 @@ final class FactExtractionCoordinator: ObservableObject {
         // limiter (not this delay) is the real pacing for TDLib. When
         // nothing remains, backlogRemains goes false and the chain stops.
         if backlogRemains, !stopped {
-            backlogTask?.cancel()
-            backlogTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let self, !Task.isCancelled, !self.stopped else { return }
-                self.triggerPass()
-            }
+            scheduleNextPass(after: providerRetryDelay ?? 2)
+        }
+    }
+
+    private func scheduleNextPass(after delay: TimeInterval) {
+        backlogTask?.cancel()
+        backlogTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(max(delay, 0.25)))
+            guard let self, !Task.isCancelled, !self.stopped else { return }
+            self.triggerPass()
         }
     }
 
@@ -654,6 +858,8 @@ final class FactExtractionCoordinator: ObservableObject {
         var closedLoops = 0
         var chasedLoops = 0
         var scannedWindows = 0
+        var successfulAIWindows = 0
+        var providerFailure: FactExtractionProviderFailure?
         var didWork = false
         var hitWindowCap = false
         var cancelled = false
@@ -694,11 +900,21 @@ final class FactExtractionCoordinator: ObservableObject {
                 // cancellation can't reach — no window may start, and no
                 // write below may land, once shutdown began.
                 guard !Task.isCancelled, !stopped else { out.cancelled = true; break }
+                let timeoutCount: Int
+                if let timeout = providerTimeoutFailures[chat.id], timeout.cursor == cursor {
+                    timeoutCount = timeout.count
+                } else {
+                    timeoutCount = 0
+                }
+                let windowLimit = FactExtractionRuntimePolicy.extractionWindowLimit(
+                    base: ContextLayer.extractionWindow,
+                    consecutiveTimeouts: timeoutCount
+                )
                 let records = await DatabaseManager.shared.loadMessagesForward(
                     chatId: chat.id,
                     afterMessageId: cursor,
                     since: cutoff,
-                    limit: ContextLayer.extractionWindow
+                    limit: windowLimit
                 )
                 guard !records.isEmpty else { break }
                 didWork = true
@@ -735,6 +951,7 @@ final class FactExtractionCoordinator: ObservableObject {
                     // the single atomic commit below.
                     guard !Task.isCancelled, !stopped else { out.cancelled = true; break }
                     extractFailures[chat.id] = nil
+                    providerTimeoutFailures[chat.id] = nil
                     // Structural gates for closing loops — never message content,
                     // so crafted text alone can't forge a closure:
                     //  - i_owe closes only when a genuine outgoing/[ME] message
@@ -810,6 +1027,7 @@ final class FactExtractionCoordinator: ObservableObject {
                     out.closedLoops += safeCloses.count
                     out.newFacts += resolved.count
                     out.chasedLoops += chases.count
+                    out.successfulAIWindows += 1
                     cursor = windowMax
                     // Structural sweep: this window's outgoing messages answer
                     // any older reply-kind loop of this chat, whether or not
@@ -842,13 +1060,21 @@ final class FactExtractionCoordinator: ObservableObject {
                             await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
                             extractFailures[chat.id] = nil
                         }
+                    } else if let failure = FactExtractionProviderFailure.classify(error) {
+                        if failure == .timedOut {
+                            var entry = providerTimeoutFailures[chat.id] ?? (cursor: cursor, count: 0)
+                            if entry.cursor != cursor { entry = (cursor: cursor, count: 0) }
+                            entry.count += 1
+                            providerTimeoutFailures[chat.id] = entry
+                        }
+                        out.providerFailure = failure
                     }
                     break
                 }
 
                 windows += 1
                 out.scannedWindows += 1
-                if records.count < ContextLayer.extractionWindow { break } // caught up to now
+                if records.count < windowLimit { break } // caught up to now
             }
             // Exited on the per-chat window cap (not the caught-up break) →
             // this chat still has unread backlog.
@@ -921,12 +1147,12 @@ final class FactExtractionCoordinator: ObservableObject {
     /// notice. Chats the client can't currently see are left alone: an
     /// unresolvable id is far more likely to be a chat TDLib hasn't loaded yet
     /// than a bot, and deleting on that guess is unrecoverable.
-    private func purgeStoredBotFacts(telegramService: TelegramService) async {
+    private func purgeStoredBotFacts() async {
         let storedIds = Set(await DatabaseManager.shared.factChatIds())
         guard !storedIds.isEmpty else { return }
         var botChatIds: [Int64] = []
-        for chat in telegramService.visibleChats where storedIds.contains(chat.id) {
-            if await telegramService.isBotChat(chat) { botChatIds.append(chat.id) }
+        for chat in SourceRegistry.shared.visibleChats where storedIds.contains(chat.id) {
+            if SourceRegistry.shared.isLikelyBot(chat: chat) { botChatIds.append(chat.id) }
         }
         let purged = await DatabaseManager.shared.purgeFacts(chatIds: botChatIds)
         guard purged > 0 else { return }

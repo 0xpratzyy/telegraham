@@ -8,18 +8,67 @@ enum DashboardReplyQueueMetrics {
     }
 }
 
+/// Dashboard-wide provider scope shared by every dashboard page in the window.
+enum DashboardSourceScope: String, CaseIterable, Identifiable, Hashable {
+    case all
+    case telegram
+    case gmail
+    case slack
+    case whatsapp
+
+    var id: String { rawValue }
+
+    init(kind: MessageSourceKind) {
+        switch kind {
+        case .telegram: self = .telegram
+        case .gmail: self = .gmail
+        case .slack: self = .slack
+        case .whatsapp: self = .whatsapp
+        }
+    }
+
+    var kind: MessageSourceKind? {
+        switch self {
+        case .all: return nil
+        case .telegram: return .telegram
+        case .gmail: return .gmail
+        case .slack: return .slack
+        case .whatsapp: return .whatsapp
+        }
+    }
+
+    var displayName: String {
+        kind?.displayName ?? "All"
+    }
+
+    func includes(_ chat: TGChat) -> Bool {
+        kind == nil || chat.source.kind == kind
+    }
+
+    static func available(for connectedKinds: [MessageSourceKind]) -> [DashboardSourceScope] {
+        let connected = Set(connectedKinds)
+        return [.all] + MessageSourceKind.allCases
+            .filter { connected.contains($0) }
+            .map(DashboardSourceScope.init(kind:))
+    }
+}
+
 struct DashboardView: View {
     @EnvironmentObject private var telegramService: TelegramService
     @EnvironmentObject private var aiService: AIService
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
     @StateObject private var attentionStore = AttentionStore.shared
     @StateObject private var taskIndex = TaskIndexCoordinator.shared
+    @StateObject private var factExtraction = FactExtractionCoordinator.shared
     @StateObject private var navigation = DashboardNavigationStore.shared
     @StateObject private var archivedChatsStore = ArchivedChatsStore.shared
+    @ObservedObject private var gmail = GmailConnectionManager.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     /// Sidebar collapse — Granola-style. When true the sidebar is
     /// fully hidden (not icon-only) and the main content fills the
     /// width. Toggled by the header button or ⌘S. Persisted.
     @AppStorage("pidgySidebarCollapsed") private var isSidebarCollapsed = false
+    @State private var selectedSourceScope = DashboardSourceScope.all
 
     @State private var selectedTaskId: Int64?
     @State private var selectedReplyChatId: Int64?
@@ -49,14 +98,17 @@ struct DashboardView: View {
                     selection: $navigation.selectedPage,
                     selectedTopicId: $selectedTopicId,
                     topicItems: sidebarTopicItems,
-                    replyCount: DashboardReplyQueueMetrics.sidebarCount(for: attentionStore.followUpItems),
+                    replyCount: DashboardReplyQueueMetrics.sidebarCount(for: scopedFollowUpItems),
+                    inboxCount: gmailInboxCount,
                     openTaskCount: myOpenTaskCount,
-                    peopleCount: allContacts.count,
-                    visibleChatCount: telegramService.visibleChats.count,
+                    peopleCount: scopedAllContacts.count,
+                    visibleChatCount: scopedVisibleChats.count,
                     lastRefreshAt: taskIndex.lastRefreshAt,
                     accountUser: telegramService.currentUser,
                     accountName: telegramService.currentUser?.displayName ?? "You",
                     canLogOut: telegramService.currentUser != nil,
+                    availableSources: availableSourceScopes,
+                    selectedSource: $selectedSourceScope,
                     onAddTopic: { isAddingTopic = true },
                     onRemoveTopic: { topicId in
                         Task {
@@ -90,13 +142,11 @@ struct DashboardView: View {
                     // refreshes the user actually asked for.
                     DashboardTopBar(
                         page: currentPage,
-                        lastRefreshAt: currentPage == .replyQueue
-                            ? attentionStore.lastFollowUpsRefreshAt
-                            : taskIndex.lastRefreshAt,
-                        isRefreshing: currentPage == .replyQueue
-                            ? (!attentionStore.hasLoadedFactReplies || attentionStore.isProjecting)
-                            : taskIndex.isUserInitiatedRefreshing,
-                        onRefresh: refreshDashboard,
+                        lastRefreshAt: topBarRefreshDate(for: currentPage),
+                        isRefreshing: topBarIsRefreshing(for: currentPage),
+                        extractionFailure: factExtraction.lastProviderFailure,
+                        extractionRetryAt: factExtraction.nextProviderRetryAt,
+                        onRefresh: { refresh(page: currentPage) },
                         // When the sidebar is collapsed the top bar
                         // shifts to the window's left edge, where the
                         // titlebar's traffic lights + sidebar-toggle
@@ -288,10 +338,109 @@ struct DashboardView: View {
                 )
             }
         }
+        .onChange(of: selectedSourceScope) { _, scope in
+            sourceScopeDidChange(scope)
+        }
+        .onChange(of: navigation.selectedPage) { _, page in
+            selectedPageDidChange(page)
+        }
+        .onChange(of: availableSourceScopeIDs) { _, scopeIDs in
+            availableSourceScopesDidChange(scopeIDs)
+        }
     }
 
-    private var visibleChatIDs: [Int64] {
-        telegramService.visibleChats.map(\.id).sorted()
+    private func sourceScopeDidChange(_ scope: DashboardSourceScope) {
+        selectedTaskId = nil
+        selectedReplyChatId = nil
+        selectedPersonId = nil
+        selectedTopicId = nil
+        if scope == .gmail {
+            navigation.selectedPage = .inbox
+        } else if navigation.selectedPage == .inbox {
+            navigation.selectedPage = .dashboard
+        }
+        Task { await rebuildSidebarTopicItems() }
+    }
+
+    private func selectedPageDidChange(_ page: DashboardPage?) {
+        guard page == .inbox, availableSourceScopes.contains(.gmail) else { return }
+        selectedSourceScope = .gmail
+    }
+
+    private func availableSourceScopesDidChange(_ scopeIDs: [String]) {
+        guard scopeIDs.contains(selectedSourceScope.rawValue) else {
+            selectedSourceScope = .all
+            return
+        }
+    }
+
+    private var availableSourceScopes: [DashboardSourceScope] {
+        DashboardSourceScope.available(for: sourceRegistry.sources.map(\.kind))
+    }
+
+    private var availableSourceScopeIDs: [String] {
+        availableSourceScopes.map(\.rawValue)
+    }
+
+    private var scopedVisibleChats: [TGChat] {
+        sourceRegistry.visibleChats.filter(selectedSourceScope.includes)
+    }
+
+    private var gmailInboxCount: Int {
+        sourceRegistry.visibleChats.filter { $0.source.kind == .gmail }.count
+    }
+
+    private var scopedAllChats: [TGChat] {
+        sourceRegistry.chats.filter(selectedSourceScope.includes)
+    }
+
+    private var scopedChatIds: Set<Int64> {
+        Set((scopedVisibleChats + scopedAllChats).map(\.id))
+    }
+
+    private var scopedFollowUpItems: [FollowUpItem] {
+        guard selectedSourceScope != .all else { return attentionStore.followUpItems }
+        let chatIds = scopedChatIds
+        return attentionStore.followUpItems.filter { chatIds.contains($0.chat.id) }
+    }
+
+    private var scopedContactIds: Set<Int64> {
+        Set(scopedAllChats.compactMap { chat in
+            guard case .privateChat(let userId) = chat.chatType else { return nil }
+            return userId
+        })
+    }
+
+    private var scopedTopContacts: [RelationGraph.Node] {
+        guard selectedSourceScope != .all else { return topContacts }
+        let contactIds = scopedContactIds
+        return topContacts.filter { contactIds.contains($0.entityId) }
+    }
+
+    private var scopedStaleContacts: [RelationGraph.Node] {
+        guard selectedSourceScope != .all else { return staleContacts }
+        let contactIds = scopedContactIds
+        return staleContacts.filter { contactIds.contains($0.entityId) }
+    }
+
+    private var scopedAllContacts: [RelationGraph.Node] {
+        guard selectedSourceScope != .all else { return allContacts }
+        // `scopedContactIds` scans the source's full chat collection. Resolve
+        // it once per projection rather than once for every contact; the old
+        // nested computed-property access made Slack scope O(contacts × chats)
+        // on every SwiftUI body update and could pin the main thread at 100%.
+        let contactIds = scopedContactIds
+        return allContacts.filter { contactIds.contains($0.entityId) }
+    }
+
+    private var scopedCurrentUser: TGUser? {
+        selectedSourceScope.kind.flatMap(sourceRegistry.currentUser(for:)) ?? telegramService.currentUser
+    }
+
+    private var visibleChatIDs: [String] {
+        sourceRegistry.visibleChats
+            .map { "\($0.source.rawValue):\($0.id)" }
+            .sorted()
     }
 
     /// `taskIndex.tasks` minus any chats the user has archived.
@@ -302,15 +451,18 @@ struct DashboardView: View {
     /// (page, home, counts) respects the archive.
     private var activeTasks: [DashboardTask] {
         let archived = archivedChatsStore.ids
-        guard !archived.isEmpty else { return taskIndex.tasks }
-        return taskIndex.tasks.filter { !archived.contains($0.chatId) }
+        let chatIds = selectedSourceScope == .all ? nil : scopedChatIds
+        return taskIndex.tasks.filter { task in
+            !archived.contains(task.chatId)
+                && (chatIds == nil || chatIds?.contains(task.chatId) == true)
+        }
     }
 
     private var myTasks: [DashboardTask] {
         DashboardTaskFilter.apply(
             activeTasks,
             ownerFilter: .mine,
-            currentUser: telegramService.currentUser
+            currentUser: scopedCurrentUser
         )
     }
 
@@ -330,15 +482,15 @@ struct DashboardView: View {
         // update when chats are added/removed or renamed; the preview-text
         // contribution to topic matching is a minor signal not worth the
         // CPU cost of recomputing on every inbound message.
-        let chatKey = telegramService.visibleChats
-            .map { "\($0.id):\($0.title)" }
+        let chatKey = scopedVisibleChats
+            .map { "\($0.source.rawValue):\($0.id):\($0.title)" }
             .joined(separator: "|")
         return "\(topicKey)#\(chatKey)"
     }
 
     private var addTopicSuggestions: [DashboardTopicSuggestion] {
         var suggestionsByName: [String: (name: String, count: Int, score: Double, seed: Int64)] = [:]
-        let groupChatIds = Set((telegramService.visibleChats + telegramService.chats).compactMap { chat -> Int64? in
+        let groupChatIds = Set((scopedVisibleChats + scopedAllChats).compactMap { chat -> Int64? in
             if case .privateChat = chat.chatType { return nil }
             return chat.id
         })
@@ -430,7 +582,7 @@ struct DashboardView: View {
         case .dashboard:
             DashboardHomePage(
                 tasks: myTasks,
-                followUpItems: attentionStore.followUpItems,
+                followUpItems: scopedFollowUpItems,
                 isLoading: !attentionStore.hasLoadedFactReplies || taskIndex.isRefreshing,
                 aiConfigured: aiService.isConfigured,
                 onOpenTask: { task in
@@ -443,9 +595,12 @@ struct DashboardView: View {
                 }
             )
 
+        case .inbox:
+            GmailInboxPage()
+
         case .replyQueue:
             DashboardReplyQueuePage(
-                items: attentionStore.followUpItems,
+                items: scopedFollowUpItems,
                 isLoading: !attentionStore.hasLoadedFactReplies,
                 selectedChatId: $selectedReplyChatId,
                 // Single Refresh entry point — top bar only. Re-projects the
@@ -464,8 +619,8 @@ struct DashboardView: View {
             DashboardTasksPage(
                 tasks: activeTasks,
                 evidenceByTaskId: taskIndex.evidenceByTaskId,
-                ownerPeople: allContacts,
-                currentUser: telegramService.currentUser,
+                ownerPeople: scopedAllContacts,
+                currentUser: scopedCurrentUser,
                 // User-initiated only — see top-bar binding above.
                 isRefreshing: taskIndex.isUserInitiatedRefreshing,
                 aiConfigured: aiService.isConfigured,
@@ -486,7 +641,8 @@ struct DashboardView: View {
             DashboardTopicsPage(
                 topics: taskIndex.topics,
                 tasks: activeTasks,
-                followUpItems: attentionStore.followUpItems,
+                followUpItems: scopedFollowUpItems,
+                sourceChats: scopedAllChats,
                 selectedTopicId: $selectedTopicId,
                 onOpenTask: { task in
                     navigation.selectedPage = .tasks
@@ -501,11 +657,11 @@ struct DashboardView: View {
 
         case .people:
             DashboardPeoplePage(
-                topContacts: topContacts,
-                staleContacts: staleContacts,
-                allContacts: allContacts,
+                topContacts: scopedTopContacts,
+                staleContacts: scopedStaleContacts,
+                allContacts: scopedAllContacts,
                 tasks: activeTasks,
-                followUpItems: attentionStore.followUpItems,
+                followUpItems: scopedFollowUpItems,
                 selectedPersonId: $selectedPersonId,
                 onOpenTask: { task in
                     navigation.selectedPage = .tasks
@@ -536,6 +692,37 @@ struct DashboardView: View {
         guard let prefill = FeedbackPrefillStore.shared.consume() else { return }
         feedbackPrefillText = prefill
         isShowingFeedbackSheet = true
+    }
+
+    private func topBarRefreshDate(for page: DashboardPage) -> Date? {
+        switch page {
+        case .replyQueue:
+            return attentionStore.lastFollowUpsRefreshAt
+        case .inbox:
+            return nil
+        default:
+            return taskIndex.lastRefreshAt
+        }
+    }
+
+    private func topBarIsRefreshing(for page: DashboardPage) -> Bool {
+        switch page {
+        case .replyQueue:
+            return taskIndex.isUserInitiatedRefreshing || !attentionStore.hasLoadedFactReplies || attentionStore.isProjecting
+        case .inbox:
+            if case .syncing = gmail.state { return true }
+            return false
+        default:
+            return taskIndex.isUserInitiatedRefreshing
+        }
+    }
+
+    private func refresh(page: DashboardPage) {
+        if page == .inbox {
+            Task { await gmail.sync() }
+        } else {
+            refreshDashboard()
+        }
     }
 
     private func addTopic(_ name: String) {
@@ -579,7 +766,7 @@ struct DashboardView: View {
 
     private func rebuildSidebarTopicItems() async {
         let topics = taskIndex.topics
-        let snapshots = telegramService.visibleChats.map {
+        let snapshots = scopedVisibleChats.map {
             DashboardTopicMatcher.ChatSnapshot(
                 id: $0.id,
                 title: $0.title,
@@ -620,30 +807,28 @@ struct DashboardView: View {
 
     private func refreshDashboard() {
         // The ONE refresh entry point. Bound to the top-bar button and the
-        // burger menu's "Refresh dashboard". Re-projects both views from the
-        // current fact store (extraction itself runs on its own schedule in
-        // FactExtractionCoordinator). Marked user-initiated so the top-bar
-        // button shows the "Refreshing" spinner only for refreshes the user
-        // actually asked for.
-        attentionStore.loadFollowUps(
-            telegramService: telegramService,
-            includeBots: includeBotsInAISearch
-        )
-
+        // burger menu's "Refresh dashboard". A user refresh means "include my
+        // latest messages", so run one cursor-safe extraction pass before
+        // re-projecting Tasks/Reply Queue. This also bypasses a stale provider
+        // cooldown once; a fresh failure installs a new controlled cooldown.
         Task {
             async let peopleRefresh: Void = loadPeople()
             await taskIndex.refreshNow(
                 telegramService: telegramService,
                 includeBotsInAISearch: includeBotsInAISearch,
-                userInitiated: true
+                userInitiated: true,
+                extractLatest: true
+            )
+            attentionStore.loadFollowUps(
+                telegramService: telegramService,
+                includeBots: includeBotsInAISearch
             )
             await peopleRefresh
         }
     }
 
     private func openChat(chatId: Int64) {
-        guard let chat = (telegramService.visibleChats.first { $0.id == chatId }
-            ?? telegramService.chats.first { $0.id == chatId }) else {
+        guard let chat = sourceRegistry.chat(id: chatId) else {
             return
         }
         openChat(chat)
@@ -656,6 +841,10 @@ struct DashboardView: View {
             Task {
                 await IndexScheduler.shared.prioritize(chatId: chat.id)
                 await RecentSyncCoordinator.shared.prioritize(chatId: chat.id)
+            }
+            if chat.source.kind != .telegram {
+                _ = await DeepLinkGenerator.openExternalChat(chat)
+                return
             }
             let hints = await telegramService.getDeepLinkHints(for: chat)
             let opened = DeepLinkGenerator.openChat(
@@ -685,6 +874,7 @@ final class DashboardNavigationStore: ObservableObject {
 
 enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
     case dashboard = "Home"
+    case inbox = "Inbox"
     case replyQueue = "Reply queue"
     case tasks = "Tasks"
     case topics = "Topics"
@@ -697,6 +887,8 @@ enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard:
             return "house"
+        case .inbox:
+            return "envelope"
         case .replyQueue:
             return "tray"
         case .tasks:
@@ -714,6 +906,8 @@ enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard:
             return "What to do now"
+        case .inbox:
+            return "Read-only Gmail"
         case .replyQueue:
             return "Chats that need attention"
         case .tasks:
@@ -749,6 +943,8 @@ struct DashboardTopBar: View {
     let page: DashboardPage
     let lastRefreshAt: Date?
     let isRefreshing: Bool
+    let extractionFailure: String?
+    let extractionRetryAt: Date?
     let onRefresh: () -> Void
     /// Extra leading space for the breadcrumb when the sidebar is
     /// collapsed, so it clears the titlebar's traffic lights +
@@ -769,6 +965,14 @@ struct DashboardTopBar: View {
             .padding(.leading, leadingInset)
 
             Spacer()
+
+            if let extractionFailure {
+                Label("AI retrying", systemImage: "exclamationmark.triangle.fill")
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .foregroundStyle(Color.Pidgy.warning)
+                    .lineLimit(1)
+                    .help(extractionFailureHelp(extractionFailure))
+            }
 
             if let lastRefreshAt {
                 Text(refreshTimestampLabel(for: lastRefreshAt))
@@ -819,6 +1023,11 @@ struct DashboardTopBar: View {
         return "Refresh dashboard"
     }
 
+    private func extractionFailureHelp(_ message: String) -> String {
+        guard let extractionRetryAt else { return message }
+        return "\(message) Next attempt around \(extractionRetryAt.formatted(date: .omitted, time: .shortened))."
+    }
+
     private func refreshTimestampLabel(for date: Date) -> String {
         let compact = DateFormatting.compactRelativeTime(from: date)
         // "now" → "Updated just now" (avoids the grammatical "now ago").
@@ -835,6 +1044,7 @@ struct DashboardSidebar: View {
     @Binding var selectedTopicId: Int64?
     let topicItems: [DashboardSidebarTopicSummary]
     let replyCount: Int
+    let inboxCount: Int
     let openTaskCount: Int
     let peopleCount: Int
     let visibleChatCount: Int
@@ -842,6 +1052,8 @@ struct DashboardSidebar: View {
     let accountUser: TGUser?
     let accountName: String
     let canLogOut: Bool
+    let availableSources: [DashboardSourceScope]
+    @Binding var selectedSource: DashboardSourceScope
     let onAddTopic: () -> Void
     let onRemoveTopic: (Int64) -> Void
     let onOpenPreferences: () -> Void
@@ -917,13 +1129,53 @@ struct DashboardSidebar: View {
                     .tracking(-0.4)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                     .lineLimit(1)
-                Text(PidgyBranding.dashboardTagline)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    .lineLimit(1)
+                sourceMenu
             }
             Spacer(minLength: 0)
         }
+    }
+
+    @ViewBuilder
+    private var sourceMenu: some View {
+        if availableSources.count > 1 {
+            Menu {
+                ForEach(availableSources) { source in
+                    Button {
+                        selectedSource = source
+                    } label: {
+                        if selectedSource == source {
+                            Label(sourceMenuTitle(source), systemImage: "checkmark")
+                        } else {
+                            Text(sourceMenuTitle(source))
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Text(sourceMenuTitle(selectedSource))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7.5, weight: .semibold))
+                }
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(PidgyDashboardTheme.tertiary)
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Filter dashboard by source")
+            .accessibilityLabel("Dashboard source: \(sourceMenuTitle(selectedSource))")
+        } else {
+            Text(availableSources.first.map(sourceMenuTitle) ?? PidgyBranding.dashboardTagline)
+                .font(.system(size: 10.5))
+                .foregroundStyle(PidgyDashboardTheme.tertiary)
+                .lineLimit(1)
+        }
+    }
+
+    private func sourceMenuTitle(_ source: DashboardSourceScope) -> String {
+        source == .all ? "All sources" : source.displayName
     }
 
     private var sidebarLauncherShortcut: some View {
@@ -1153,6 +1405,8 @@ struct DashboardSidebar: View {
         switch page {
         case .dashboard:
             return nil
+        case .inbox:
+            return inboxCount
         case .replyQueue:
             return replyCount
         case .tasks:

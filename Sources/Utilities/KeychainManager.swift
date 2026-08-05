@@ -24,6 +24,20 @@ enum KeychainManager {
         // Dodo license-key subscription (CleanShot-style activation).
         case dodoLicenseKey = "com.pidgy.dodoLicenseKey"
         case dodoLicenseInstanceID = "com.pidgy.dodoLicenseInstanceID"
+        case gmailAccessToken = "com.pidgy.integrations.gmail.accessToken"
+        case gmailRefreshToken = "com.pidgy.integrations.gmail.refreshToken"
+        case gmailTokenExpiry = "com.pidgy.integrations.gmail.tokenExpiry"
+        case gmailAccountEmail = "com.pidgy.integrations.gmail.accountEmail"
+        // OAuth client IDs are public configuration, not secrets. Keeping a
+        // per-install override lets source builds connect without rebuilding
+        // an xcconfig; managed builds still prefer the bundled client ID.
+        case gmailClientId = "com.pidgy.integrations.gmail.clientId"
+        case slackAccessToken = "com.pidgy.integrations.slack.accessToken"
+        case slackRefreshToken = "com.pidgy.slack.refreshToken"
+        case slackTeamId = "com.pidgy.slack.teamId"
+        case slackTeamName = "com.pidgy.slack.teamName"
+        case slackAuthedUserId = "com.pidgy.slack.authedUserId"
+        case slackTokenExpiry = "com.pidgy.slack.tokenExpiry"
     }
 
     enum KeychainError: Error, LocalizedError {
@@ -57,7 +71,11 @@ enum KeychainManager {
         .apiHash,
         .aiApiKey,
         .aiApiKeyOpenAI,
-        .aiApiKeyClaude
+        .aiApiKeyClaude,
+        .gmailAccessToken,
+        .gmailRefreshToken,
+        .slackAccessToken,
+        .slackRefreshToken
     ]
 
     private static var storageDirOverride: URL?
