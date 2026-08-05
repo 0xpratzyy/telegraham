@@ -935,6 +935,10 @@ enum PidgyMigrations {
             }
         }
 
+        // Compatibility ledger: early Gmail inbox builds created this local
+        // triage table. Gmail now flows exclusively through the shared reply
+        // queue and tasks, but retaining the registered migration keeps
+        // already-migrated local databases forward-compatible.
         migrator.registerMigration("v37_gmail_local_triage") { db in
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS gmail_thread_triage (

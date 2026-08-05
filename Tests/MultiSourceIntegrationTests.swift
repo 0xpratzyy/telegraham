@@ -35,36 +35,6 @@ final class MultiSourceIntegrationTests: XCTestCase {
         }
     }
 
-    func testGmailLocalTriageStatesRoundTrip() throws {
-        for state in GmailTriageState.allCases {
-            let data = try JSONEncoder().encode(state)
-            XCTAssertEqual(try JSONDecoder().decode(GmailTriageState.self, from: data), state)
-        }
-    }
-
-    func testGmailNewsletterClassifierUsesSenderSubjectAndBodySignals() {
-        XCTAssertTrue(GmailInboxClassifier.isNewsletter(
-            sender: "Product Updates <updates@example.com>",
-            subject: "Your account",
-            body: "Hello"
-        ))
-        XCTAssertTrue(GmailInboxClassifier.isNewsletter(
-            sender: "Founder <founder@example.com>",
-            subject: "Weekly digest",
-            body: "Hello"
-        ))
-        XCTAssertTrue(GmailInboxClassifier.isNewsletter(
-            sender: "Founder <founder@example.com>",
-            subject: "Quick question",
-            body: "You can unsubscribe here"
-        ))
-        XCTAssertFalse(GmailInboxClassifier.isNewsletter(
-            sender: "Alice <alice@example.com>",
-            subject: "Can we meet tomorrow?",
-            body: "Are you free around 3pm?"
-        ))
-    }
-
     func testGmailSyncProgressReportsStableFraction() {
         XCTAssertNil(GmailSyncProgress(title: "Discovering", completed: 0, total: 0).fraction)
         XCTAssertEqual(GmailSyncProgress(title: "Reading", completed: 25, total: 100).fraction, 0.25)
@@ -175,8 +145,25 @@ final class MultiSourceIntegrationTests: XCTestCase {
             DashboardSourceScope.available(for: [.slack, .telegram]),
             [.all, .telegram, .slack]
         )
+        XCTAssertEqual(
+            DashboardSourceScope.available(for: [.gmail]),
+            [.all, .gmail]
+        )
         XCTAssertEqual(DashboardSourceScope(kind: .slack).kind, .slack)
         XCTAssertNil(DashboardSourceScope.all.kind)
+    }
+
+    func testGmailIsAQueueAndTaskScopeWithoutItsOwnDashboardPage() {
+        let gmailChat = Self.chat(
+            id: 301,
+            userId: 401,
+            title: "Gmail thread",
+            source: .gmail
+        )
+
+        XCTAssertTrue(DashboardSourceScope.gmail.includes(gmailChat))
+        XCTAssertFalse(DashboardSourceScope.telegram.includes(gmailChat))
+        XCTAssertFalse(DashboardPage.allCases.map(\.rawValue).contains("Inbox"))
     }
 
     func testWhatsAppParserHandlesMultilineAndOutgoingIdentity() throws {
@@ -217,7 +204,12 @@ final class MultiSourceIntegrationTests: XCTestCase {
         registry.unregister(source)
     }
 
-    private static func chat(id: Int64, userId: Int64, title: String) -> TGChat {
+    private static func chat(
+        id: Int64,
+        userId: Int64,
+        title: String,
+        source: MessageSourceKind = .slack
+    ) -> TGChat {
         TGChat(
             id: id,
             title: title,
@@ -228,7 +220,7 @@ final class MultiSourceIntegrationTests: XCTestCase {
             order: 0,
             isInMainList: true,
             smallPhotoFileId: nil,
-            source: SourceID(kind: .slack, account: "test")
+            source: SourceID(kind: source, account: "test")
         )
     }
 

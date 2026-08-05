@@ -62,7 +62,6 @@ struct DashboardView: View {
     @StateObject private var factExtraction = FactExtractionCoordinator.shared
     @StateObject private var navigation = DashboardNavigationStore.shared
     @StateObject private var archivedChatsStore = ArchivedChatsStore.shared
-    @ObservedObject private var gmail = GmailConnectionManager.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     /// Sidebar collapse — Granola-style. When true the sidebar is
     /// fully hidden (not icon-only) and the main content fills the
@@ -99,7 +98,6 @@ struct DashboardView: View {
                     selectedTopicId: $selectedTopicId,
                     topicItems: sidebarTopicItems,
                     replyCount: DashboardReplyQueueMetrics.sidebarCount(for: scopedFollowUpItems),
-                    inboxCount: gmailInboxCount,
                     openTaskCount: myOpenTaskCount,
                     peopleCount: scopedAllContacts.count,
                     visibleChatCount: scopedVisibleChats.count,
@@ -341,9 +339,6 @@ struct DashboardView: View {
         .onChange(of: selectedSourceScope) { _, scope in
             sourceScopeDidChange(scope)
         }
-        .onChange(of: navigation.selectedPage) { _, page in
-            selectedPageDidChange(page)
-        }
         .onChange(of: availableSourceScopeIDs) { _, scopeIDs in
             availableSourceScopesDidChange(scopeIDs)
         }
@@ -354,17 +349,7 @@ struct DashboardView: View {
         selectedReplyChatId = nil
         selectedPersonId = nil
         selectedTopicId = nil
-        if scope == .gmail {
-            navigation.selectedPage = .inbox
-        } else if navigation.selectedPage == .inbox {
-            navigation.selectedPage = .dashboard
-        }
         Task { await rebuildSidebarTopicItems() }
-    }
-
-    private func selectedPageDidChange(_ page: DashboardPage?) {
-        guard page == .inbox, availableSourceScopes.contains(.gmail) else { return }
-        selectedSourceScope = .gmail
     }
 
     private func availableSourceScopesDidChange(_ scopeIDs: [String]) {
@@ -384,10 +369,6 @@ struct DashboardView: View {
 
     private var scopedVisibleChats: [TGChat] {
         sourceRegistry.visibleChats.filter(selectedSourceScope.includes)
-    }
-
-    private var gmailInboxCount: Int {
-        sourceRegistry.visibleChats.filter { $0.source.kind == .gmail }.count
     }
 
     private var scopedAllChats: [TGChat] {
@@ -595,9 +576,6 @@ struct DashboardView: View {
                 }
             )
 
-        case .inbox:
-            GmailInboxPage()
-
         case .replyQueue:
             DashboardReplyQueuePage(
                 items: scopedFollowUpItems,
@@ -698,8 +676,6 @@ struct DashboardView: View {
         switch page {
         case .replyQueue:
             return attentionStore.lastFollowUpsRefreshAt
-        case .inbox:
-            return nil
         default:
             return taskIndex.lastRefreshAt
         }
@@ -709,20 +685,13 @@ struct DashboardView: View {
         switch page {
         case .replyQueue:
             return taskIndex.isUserInitiatedRefreshing || !attentionStore.hasLoadedFactReplies || attentionStore.isProjecting
-        case .inbox:
-            if case .syncing = gmail.state { return true }
-            return false
         default:
             return taskIndex.isUserInitiatedRefreshing
         }
     }
 
     private func refresh(page: DashboardPage) {
-        if page == .inbox {
-            Task { await gmail.sync() }
-        } else {
-            refreshDashboard()
-        }
+        refreshDashboard()
     }
 
     private func addTopic(_ name: String) {
@@ -874,7 +843,6 @@ final class DashboardNavigationStore: ObservableObject {
 
 enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
     case dashboard = "Home"
-    case inbox = "Inbox"
     case replyQueue = "Reply queue"
     case tasks = "Tasks"
     case topics = "Topics"
@@ -887,8 +855,6 @@ enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard:
             return "house"
-        case .inbox:
-            return "envelope"
         case .replyQueue:
             return "tray"
         case .tasks:
@@ -906,8 +872,6 @@ enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard:
             return "What to do now"
-        case .inbox:
-            return "Read-only Gmail"
         case .replyQueue:
             return "Chats that need attention"
         case .tasks:
@@ -1044,7 +1008,6 @@ struct DashboardSidebar: View {
     @Binding var selectedTopicId: Int64?
     let topicItems: [DashboardSidebarTopicSummary]
     let replyCount: Int
-    let inboxCount: Int
     let openTaskCount: Int
     let peopleCount: Int
     let visibleChatCount: Int
@@ -1405,8 +1368,6 @@ struct DashboardSidebar: View {
         switch page {
         case .dashboard:
             return nil
-        case .inbox:
-            return inboxCount
         case .replyQueue:
             return replyCount
         case .tasks:

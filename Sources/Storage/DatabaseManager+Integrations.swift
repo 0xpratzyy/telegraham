@@ -2,55 +2,6 @@ import Foundation
 import GRDB
 
 extension DatabaseManager {
-    func loadGmailThreadTriage() async -> [Int64: GmailThreadTriage] {
-        do {
-            return try await read { db in
-                let rows = try Row.fetchAll(db, sql: "SELECT * FROM gmail_thread_triage")
-                return Dictionary(
-                    rows.compactMap { row -> (Int64, GmailThreadTriage)? in
-                        guard let state = GmailTriageState(rawValue: row["state"]) else { return nil }
-                        let chatID: Int64 = row["chat_id"]
-                        let snoozed: Double? = row["snoozed_until"]
-                        let updated: Double = row["updated_at"]
-                        return (
-                            chatID,
-                            GmailThreadTriage(
-                                chatID: chatID,
-                                state: state,
-                                snoozedUntil: snoozed.map(Date.init(timeIntervalSince1970:)),
-                                updatedAt: Date(timeIntervalSince1970: updated)
-                            )
-                        )
-                    },
-                    uniquingKeysWith: { _, newest in newest }
-                )
-            }
-        } catch {
-            return [:]
-        }
-    }
-
-    func saveGmailThreadTriage(_ triage: GmailThreadTriage) async throws {
-        try await write { db in
-            try db.execute(
-                sql: """
-                    INSERT INTO gmail_thread_triage (chat_id, state, snoozed_until, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(chat_id) DO UPDATE SET
-                        state = excluded.state,
-                        snoozed_until = excluded.snoozed_until,
-                        updated_at = excluded.updated_at
-                    """,
-                arguments: [
-                    triage.chatID,
-                    triage.state.rawValue,
-                    triage.snoozedUntil?.timeIntervalSince1970,
-                    triage.updatedAt.timeIntervalSince1970
-                ]
-            )
-        }
-    }
-
     func loadSourceConversations(accountID: String) async -> [CanonicalConversation] {
         do {
             return try await read { db in

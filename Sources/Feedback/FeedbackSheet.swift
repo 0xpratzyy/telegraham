@@ -536,7 +536,6 @@ extension DashboardPage {
     var feedbackLabel: String {
         switch self {
         case .dashboard: return "Dashboard › What to do now"
-        case .inbox: return "Dashboard › Gmail inbox"
         case .replyQueue: return "Reply queue"
         case .tasks: return "Tasks"
         case .people: return "People"

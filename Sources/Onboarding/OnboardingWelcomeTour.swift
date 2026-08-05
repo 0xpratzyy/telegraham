@@ -76,8 +76,8 @@ private enum TourArtKind { case inbox, search, local }
 private let tourSlides: [TourSlide] = [
     TourSlide(
         eyebrow: "Triage",
-        title: "Your inbox, finally on your side",
-        body: "Pidgy reads every chat in the background and decides what actually needs you. Replies, tasks, mentions — surfaced. Group spam — gone.",
+        title: "Know exactly what needs you",
+        body: "Pidgy reads every source in the background and routes what matters into your reply queue and tasks. Everything else stays out of the way.",
         kind: .inbox
     ),
     TourSlide(
