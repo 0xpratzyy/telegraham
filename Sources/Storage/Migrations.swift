@@ -935,6 +935,18 @@ enum PidgyMigrations {
             }
         }
 
+        migrator.registerMigration("v37_gmail_local_triage") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS gmail_thread_triage (
+                    chat_id INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL DEFAULT 'inbox',
+                    snoozed_until REAL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_gmail_triage_state ON gmail_thread_triage(state, updated_at DESC)")
+        }
+
         return migrator
     }
 }

@@ -35,6 +35,42 @@ final class MultiSourceIntegrationTests: XCTestCase {
         }
     }
 
+    func testGmailLocalTriageStatesRoundTrip() throws {
+        for state in GmailTriageState.allCases {
+            let data = try JSONEncoder().encode(state)
+            XCTAssertEqual(try JSONDecoder().decode(GmailTriageState.self, from: data), state)
+        }
+    }
+
+    func testGmailNewsletterClassifierUsesSenderSubjectAndBodySignals() {
+        XCTAssertTrue(GmailInboxClassifier.isNewsletter(
+            sender: "Product Updates <updates@example.com>",
+            subject: "Your account",
+            body: "Hello"
+        ))
+        XCTAssertTrue(GmailInboxClassifier.isNewsletter(
+            sender: "Founder <founder@example.com>",
+            subject: "Weekly digest",
+            body: "Hello"
+        ))
+        XCTAssertTrue(GmailInboxClassifier.isNewsletter(
+            sender: "Founder <founder@example.com>",
+            subject: "Quick question",
+            body: "You can unsubscribe here"
+        ))
+        XCTAssertFalse(GmailInboxClassifier.isNewsletter(
+            sender: "Alice <alice@example.com>",
+            subject: "Can we meet tomorrow?",
+            body: "Are you free around 3pm?"
+        ))
+    }
+
+    func testGmailSyncProgressReportsStableFraction() {
+        XCTAssertNil(GmailSyncProgress(title: "Discovering", completed: 0, total: 0).fraction)
+        XCTAssertEqual(GmailSyncProgress(title: "Reading", completed: 25, total: 100).fraction, 0.25)
+        XCTAssertEqual(GmailSyncProgress(title: "Reading", completed: 120, total: 100).fraction, 1)
+    }
+
     func testGmailParserPrefersPlainTextAndPreservesUnreadState() throws {
         let plainText = "The plain-text answer is ready."
         let payload: [String: Any] = [

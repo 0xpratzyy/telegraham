@@ -1,5 +1,16 @@
 import Foundation
 
+struct GmailSyncProgress: Equatable, Sendable {
+    let title: String
+    let completed: Int
+    let total: Int
+
+    var fraction: Double? {
+        guard total > 0 else { return nil }
+        return min(1, max(0, Double(completed) / Double(total)))
+    }
+}
+
 @MainActor
 final class GmailConnectionManager: ObservableObject {
     enum State: Equatable {
@@ -13,9 +24,11 @@ final class GmailConnectionManager: ObservableObject {
 
     static let shared = GmailConnectionManager()
     @Published private(set) var state: State
+    @Published private(set) var syncProgress: GmailSyncProgress?
 
     private init() {
         state = Self.resolveCredentials() == nil ? .unavailable : .disconnected
+        syncProgress = nil
     }
 
     var configuredClientId: String? {
@@ -51,6 +64,7 @@ final class GmailConnectionManager: ObservableObject {
     func connect() async {
         guard let credentials = Self.resolveCredentials() else { state = .unavailable; return }
         state = .connecting
+        syncProgress = nil
         do {
             let token = try await GmailOAuth.connect(
                 clientId: credentials.clientId,
@@ -60,11 +74,12 @@ final class GmailConnectionManager: ObservableObject {
             let adapter = try GmailSourceAdapter(accessToken: token.accessToken)
             let external = try await adapter.currentAccount()
             try KeychainManager.save(external.externalID, for: .gmailAccountEmail)
-            state = .syncing("Reading Gmail…")
-            let result = try await SourceSyncCoordinator.shared.sync(adapter: adapter)
+            let result = try await runSync(adapter: adapter)
             await IntegrationConnectionStore.shared.load()
             state = .connected("\(external.displayName) · \(result.messages) messages")
+            syncProgress = nil
         } catch {
+            syncProgress = nil
             state = .failed(error.localizedDescription)
         }
     }
@@ -72,12 +87,13 @@ final class GmailConnectionManager: ObservableObject {
     func sync() async {
         do {
             let token = try await validAccessToken()
-            state = .syncing("Reading Gmail…")
-            let result = try await SourceSyncCoordinator.shared.sync(adapter: GmailSourceAdapter(accessToken: token))
+            let result = try await runSync(adapter: GmailSourceAdapter(accessToken: token))
             await IntegrationConnectionStore.shared.load()
             let email = (try? KeychainManager.retrieve(for: .gmailAccountEmail)) ?? "Gmail"
             state = .connected("\(email) · \(result.messages) messages")
+            syncProgress = nil
         } catch {
+            syncProgress = nil
             state = .failed(error.localizedDescription)
         }
     }
@@ -87,6 +103,38 @@ final class GmailConnectionManager: ObservableObject {
             try? KeychainManager.delete(for: key)
         }
         state = .disconnected
+        syncProgress = nil
+    }
+
+    private func runSync(adapter: GmailSourceAdapter) async throws -> SourceSyncCoordinator.Result {
+        state = .syncing("Preparing your inbox…")
+        return try await SourceSyncCoordinator.shared.sync(
+            adapter: adapter,
+            maxConversations: 200,
+            progress: { progress in
+                await MainActor.run {
+                    GmailConnectionManager.shared.apply(progress)
+                }
+            }
+        )
+    }
+
+    private func apply(_ progress: SourceSyncCoordinator.Progress) {
+        let title: String
+        switch progress.phase {
+        case .discovering:
+            title = "Finding recent inbox threads"
+        case .reading:
+            title = progress.total > 0
+                ? "Reading \(progress.completed) of \(progress.total) threads"
+                : "Reading Gmail"
+        case .saving:
+            title = progress.total > 0
+                ? "Preparing \(progress.completed) of \(progress.total) threads"
+                : "Preparing your inbox"
+        }
+        syncProgress = GmailSyncProgress(title: title, completed: progress.completed, total: progress.total)
+        state = .syncing(title)
     }
 
     private func validAccessToken() async throws -> String {

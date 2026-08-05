@@ -15,13 +15,27 @@ actor SourceSyncCoordinator {
         let messages: Int
     }
 
+    struct Progress: Sendable, Equatable {
+        enum Phase: Sendable, Equatable {
+            case discovering
+            case reading
+            case saving
+        }
+
+        let phase: Phase
+        let completed: Int
+        let total: Int
+    }
+
     func sync(
         adapter: any SourceAdapter,
         conversationLimit: Int = 100,
         messageLimit: Int = 100,
         maxConversations: Int = 120,
-        fetchConcurrency: Int = 8
+        fetchConcurrency: Int = 8,
+        progress: (@Sendable (Progress) async -> Void)? = nil
     ) async throws -> Result {
+        await progress?(Progress(phase: .discovering, completed: 0, total: 0))
         let external = try await adapter.currentAccount()
         let now = Date()
         let account = SourceAccount(
@@ -47,6 +61,8 @@ actor SourceSyncCoordinator {
             conversations.append(contentsOf: page.conversations.prefix(remaining))
             conversationCursor = conversations.count >= maxConversations ? nil : page.nextCursor
         } while conversationCursor != nil
+
+        await progress?(Progress(phase: .reading, completed: 0, total: conversations.count))
 
         // Thread detail requests are independent. Fetching them serially made
         // a first Gmail connect feel frozen; a small bounded fan-out keeps the
@@ -84,6 +100,7 @@ actor SourceSyncCoordinator {
             var results: [ConversationFetch] = []
             while let result = await group.next() {
                 results.append(result)
+                await progress?(Progress(phase: .reading, completed: results.count, total: conversations.count))
                 if nextIndex < conversations.count {
                     enqueue(nextIndex)
                     nextIndex += 1
@@ -93,7 +110,8 @@ actor SourceSyncCoordinator {
         }
 
         var importedMessages = 0
-        for fetch in fetched {
+        for (index, fetch) in fetched.enumerated() {
+            await progress?(Progress(phase: .saving, completed: index + 1, total: fetched.count))
             guard let messagePage = fetch.page else { continue }
             let conversation = fetch.conversation
             guard !messagePage.messages.isEmpty else { continue }
