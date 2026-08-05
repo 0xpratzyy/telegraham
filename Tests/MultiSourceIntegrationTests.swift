@@ -41,6 +41,28 @@ final class MultiSourceIntegrationTests: XCTestCase {
         XCTAssertEqual(GmailSyncProgress(title: "Reading", completed: 120, total: 100).fraction, 1)
     }
 
+    func testGmailPresentationCleansTransportFormattingForDashboardRows() {
+        XCTAssertEqual(
+            GmailPresentation.senderName(from: "Google <no-reply@accounts.google.com>"),
+            "Google"
+        )
+        XCTAssertEqual(
+            GmailPresentation.senderName(from: "\"notifications@app.impact.com\" <notifications@app.impact.com>"),
+            "Impact"
+        )
+        XCTAssertEqual(
+            GmailPresentation.senderName(from: "\"Amazon.ae\" <shipment-tracking@amazon.ae>"),
+            "Amazon"
+        )
+        XCTAssertEqual(
+            GmailPresentation.preview(
+                subject: "Security alert for pratyush@pidgy.chat",
+                messageText: "Security alert for pratyush@pidgy.chat\n\nThis is a copy of a security alert."
+            ),
+            "This is a copy of a security alert."
+        )
+    }
+
     func testGmailParserPrefersPlainTextAndPreservesUnreadState() throws {
         let plainText = "The plain-text answer is ready."
         let payload: [String: Any] = [

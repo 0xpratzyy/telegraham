@@ -475,7 +475,7 @@ struct DashboardReplyDetail: View {
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 8) {
-                        Text(item.chat.chatType.displayName)
+                        Text(sourceLabel(for: item.chat))
                         Text("·")
                         // Age of the ASK (loop date), not the chat's last message.
                         Text(DateFormatting.compactRelativeTime(from: item.loopDate ?? item.lastMessage.date))
@@ -520,12 +520,16 @@ struct DashboardReplyDetail: View {
                         } else {
                             ForEach(evidenceItems) { row in
                                 Button {
-                                    Task { await telegramService.openMessageInTelegram(chatId: item.chat.id, messageId: row.id) }
+                                    if item.chat.source.kind == .telegram {
+                                        Task { await telegramService.openMessageInTelegram(chatId: item.chat.id, messageId: row.id) }
+                                    } else {
+                                        onOpenChat(item.chat)
+                                    }
                                 } label: {
                                     DashboardEvidenceContextRow(item: row)
                                 }
                                 .buttonStyle(.pidgyPress)
-                                .help("Open this message in Telegram")
+                                .help(openLabel(for: item.chat))
                             }
                         }
                     }
@@ -546,11 +550,15 @@ struct DashboardReplyDetail: View {
                     if let item, chatOpenState.openingChatId == nil { onOpenChat(item.chat) }
                 } label: {
                     Group {
-                        if let item, chatOpenState.openingChatId == item.chat.id {
-                            ProgressView()
-                                .controlSize(.small)
+                        if let item {
+                            if chatOpenState.openingChatId == item.chat.id {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Label(openLabel(for: item.chat), systemImage: openIcon(for: item.chat))
+                            }
                         } else {
-                            Label("Open in chat", systemImage: "paperplane")
+                            Label("Open", systemImage: "arrow.up.forward.app")
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -560,7 +568,7 @@ struct DashboardReplyDetail: View {
                 .buttonStyle(.pidgyPress)
                 .foregroundStyle(PidgyDashboardTheme.primary)
                 .pidgyCapsuleBackground()
-                .disabled(item.map { chatOpenState.openingChatId == $0.chat.id } ?? false)
+                .disabled(item == nil || item.map { chatOpenState.openingChatId == $0.chat.id } ?? false)
 
                 if let item {
                     Button {
@@ -966,12 +974,15 @@ struct DashboardReplyDetail: View {
                 isSource: true
             )
         } else {
+            let fallbackText = item.chat.source.kind == .gmail
+                ? GmailPresentation.preview(subject: item.chat.title, messageText: item.lastMessage.displayText)
+                : item.lastMessage.displayText
             source = EvidenceContextItem(
                 id: sourceId,
                 date: item.lastMessage.date,
                 senderName: sourceSenderLabel(for: item),
                 isOutgoing: item.lastMessage.isOutgoing,
-                text: item.lastMessage.displayText,
+                text: fallbackText.isEmpty ? item.chat.title : fallbackText,
                 isSource: true
             )
         }
@@ -982,7 +993,11 @@ struct DashboardReplyDetail: View {
     private func senderLabel(for record: DatabaseManager.MessageRecord) -> String {
         if record.isOutgoing { return "You" }
         let trimmed = record.senderName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmed.isEmpty { return trimmed }
+        if !trimmed.isEmpty {
+            return item?.chat.source.kind == .gmail
+                ? GmailPresentation.senderName(from: trimmed)
+                : trimmed
+        }
         // Fall back to a name we resolved on-demand for group
         // messages whose cached senderName was nil.
         if let userId = record.senderUserId, let resolved = resolvedSenderNames[userId] {
@@ -999,7 +1014,11 @@ struct DashboardReplyDetail: View {
     private func sourceSenderLabel(for item: FollowUpItem) -> String {
         if item.lastMessage.isOutgoing { return "You" }
         let trimmed = item.lastMessage.senderName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmed.isEmpty { return trimmed }
+        if !trimmed.isEmpty {
+            return item.chat.source.kind == .gmail
+                ? GmailPresentation.senderName(from: trimmed)
+                : trimmed
+        }
         if let userId = item.lastMessage.senderUserId, let resolved = resolvedSenderNames[userId] {
             return resolved
         }
@@ -1018,7 +1037,13 @@ struct DashboardReplyDetail: View {
 
     private func nonEmptyDisplayText(for record: DatabaseManager.MessageRecord) -> String {
         let trimmed = record.textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmed.isEmpty { return trimmed }
+        if !trimmed.isEmpty {
+            if let item, item.chat.source.kind == .gmail {
+                let preview = GmailPresentation.preview(subject: item.chat.title, messageText: trimmed)
+                return preview.isEmpty ? item.chat.title : preview
+            }
+            return trimmed
+        }
         if let media = record.mediaTypeRaw, !media.isEmpty {
             return "[\(media)]"
         }
@@ -1031,6 +1056,23 @@ struct DashboardReplyDetail: View {
         if contextCount == 0 { return "1 source" }
         return "1 source · \(contextCount) context"
     }
+
+    private func sourceLabel(for chat: TGChat) -> String {
+        chat.source.kind == .telegram ? chat.chatType.displayName : chat.source.kind.displayName
+    }
+
+    private func openLabel(for chat: TGChat) -> String {
+        chat.source.kind == .telegram ? "Open in chat" : "Open in \(chat.source.kind.displayName)"
+    }
+
+    private func openIcon(for chat: TGChat) -> String {
+        switch chat.source.kind {
+        case .telegram: return "paperplane"
+        case .gmail: return "envelope"
+        case .slack: return "number"
+        case .whatsapp: return "bubble.left.and.bubble.right"
+        }
+    }
 }
 
 struct DashboardFeedRow: View {
@@ -1040,11 +1082,15 @@ struct DashboardFeedRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            DashboardTelegramAvatar(
-                chat: chat,
-                fallbackTitle: item.avatarLabel,
-                size: PidgyDashboardTheme.rowAvatarSize
-            )
+            if chat?.source.kind == .gmail {
+                DashboardInitialsAvatar(label: item.avatarLabel, size: PidgyDashboardTheme.rowAvatarSize)
+            } else {
+                DashboardTelegramAvatar(
+                    chat: chat,
+                    fallbackTitle: item.avatarLabel,
+                    size: PidgyDashboardTheme.rowAvatarSize
+                )
+            }
 
             // Title at regular weight (design spec: fontSize 14, no
             // explicit weight → 400 regular). Metadata collapsed onto a
@@ -1100,34 +1146,22 @@ struct DashboardAttentionRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            DashboardTelegramAvatar(
-                chat: item.chat,
-                fallbackTitle: personName,
-                size: PidgyDashboardTheme.rowAvatarSize
-            )
+            if isGmail {
+                DashboardInitialsAvatar(label: personName, size: PidgyDashboardTheme.rowAvatarSize)
+            } else {
+                DashboardTelegramAvatar(
+                    chat: item.chat,
+                    fallbackTitle: personName,
+                    size: PidgyDashboardTheme.rowAvatarSize
+                )
+            }
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(personName)
-                        .font(PidgyDashboardTheme.rowEmphasisFont)
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                        .lineLimit(1)
-                    Text("·")
-                        .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    Text(item.chat.title)
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                    Text("· \(item.chat.chatType.displayName)")
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
+                if isGmail {
+                    gmailContent
+                } else {
+                    conversationContent
                 }
-
-                Text(item.suggestedAction ?? item.lastMessage.displayText)
-                    .font(PidgyDashboardTheme.detailBodyFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .lineLimit(1)
             }
 
             Spacer(minLength: 12)
@@ -1143,7 +1177,79 @@ struct DashboardAttentionRow: View {
     }
 
     private var personName: String {
-        item.chat.chatType.isPrivate ? item.chat.title : (item.lastMessage.senderName ?? item.chat.title)
+        if isGmail {
+            return GmailPresentation.senderName(from: item.lastMessage.senderName)
+        }
+        return item.chat.chatType.isPrivate ? item.chat.title : (item.lastMessage.senderName ?? item.chat.title)
+    }
+
+    private var isGmail: Bool { item.chat.source.kind == .gmail }
+
+    private var gmailPreview: String {
+        GmailPresentation.preview(subject: item.chat.title, messageText: item.lastMessage.displayText)
+    }
+
+    private var gmailContent: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Text(personName)
+                    .font(PidgyDashboardTheme.rowEmphasisFont)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    .lineLimit(1)
+                Label("Gmail", systemImage: "envelope.fill")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+                    .padding(.horizontal, 6)
+                    .frame(height: 18)
+                    .background(PidgyDashboardTheme.raised, in: Capsule())
+                if item.chat.unreadCount > 0 {
+                    Circle()
+                        .fill(PidgyDashboardTheme.brand)
+                        .frame(width: 5, height: 5)
+                        .accessibilityLabel("Unread")
+                }
+            }
+
+            HStack(spacing: 5) {
+                Text(item.chat.title)
+                    .font(PidgyDashboardTheme.detailBodyFont.weight(.medium))
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if !gmailPreview.isEmpty {
+                    Text("— \(gmailPreview)")
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.tertiary)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private var conversationContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(personName)
+                    .font(PidgyDashboardTheme.rowEmphasisFont)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    .lineLimit(1)
+                Text("·")
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+                Text(item.chat.title)
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .lineLimit(1)
+                Text("· \(item.chat.chatType.displayName)")
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .lineLimit(1)
+            }
+
+            Text(item.suggestedAction ?? item.lastMessage.displayText)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+                .lineLimit(1)
+        }
     }
 }
 
@@ -1208,17 +1314,20 @@ struct DashboardFeedItem: Identifiable {
     }
 
     static func reply(_ item: FollowUpItem) -> DashboardFeedItem {
+        let isGmail = item.chat.source.kind == .gmail
         let isPrivate = item.chat.chatType.isPrivate
-        let person = isPrivate ? item.chat.title : item.lastMessage.senderName ?? item.chat.title
+        let person = isGmail
+            ? GmailPresentation.senderName(from: item.lastMessage.senderName)
+            : (isPrivate ? item.chat.title : item.lastMessage.senderName ?? item.chat.title)
         // For DMs the person column already names the contact, so the
         // chat slot shows the type tag ("DM") for context. For groups /
         // supergroups / channels, show the actual chat title — the
         // generic "Group" / "Supergroup" word was uninformative when
         // multiple group chats stacked in the feed.
-        let chatLabel = isPrivate ? item.chat.chatType.displayName : item.chat.title
+        let chatLabel = isGmail ? "Gmail" : (isPrivate ? item.chat.chatType.displayName : item.chat.title)
         return DashboardFeedItem(
             id: "reply-\(item.chat.id)",
-            title: item.suggestedAction ?? item.lastMessage.displayText,
+            title: item.suggestedAction ?? (isGmail ? item.chat.title : item.lastMessage.displayText),
             person: person,
             chat: chatLabel,
             topic: nil,
