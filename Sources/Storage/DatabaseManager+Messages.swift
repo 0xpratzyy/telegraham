@@ -70,6 +70,44 @@ extension DatabaseManager {
         }
     }
 
+    /// Latest message per conversation in one SQLite read. Connected sources
+    /// can expose hundreds of threads; loading them one-by-one delayed Gmail
+    /// registration (and therefore extraction) behind a long actor queue.
+    func loadLatestMessages(chatIds: [Int64]) async -> [Int64: MessageRecord] {
+        guard !chatIds.isEmpty, let pool = await ensureDatabase() else { return [:] }
+        let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ",")
+        do {
+            return try await pool.read { db in
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, chat_id, sender_user_id, sender_name, date, text_content,
+                               media_type, is_outgoing, source, thread_root_id
+                        FROM (
+                            SELECT id, chat_id, sender_user_id, sender_name, date, text_content,
+                                   media_type, is_outgoing, source, thread_root_id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY chat_id
+                                       ORDER BY date DESC, id DESC
+                                   ) AS row_rank
+                            FROM messages
+                            WHERE chat_id IN (\(placeholders))
+                        )
+                        WHERE row_rank = 1
+                        """,
+                    arguments: StatementArguments(chatIds)
+                )
+                return Dictionary(
+                    rows.map(Self.messageRecord(from:)).map { ($0.chatId, $0) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+            }
+        } catch {
+            print("[DatabaseManager] Failed to load latest messages: \(error)")
+            return [:]
+        }
+    }
+
     /// A local, newest-to-oldest page matching `MessageSource.chatHistory`.
     /// The cursor is resolved to its stored date first because synthetic source
     /// ids are stable identifiers, not a guarantee of chronological ordering.
@@ -110,7 +148,7 @@ extension DatabaseManager {
         }
     }
 
-    /// Messages surrounding a source message (a few before and after, by id) —
+    /// Messages surrounding a source message (a few before and after) —
     /// the conversation around where a fact was extracted. Task Evidence uses
     /// this so it shows the RELEVANT lead-up, not the chat's latest unrelated
     /// chatter (the bug where an old task showed today's banter as "context").
@@ -119,16 +157,22 @@ extension DatabaseManager {
         let cols = "id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing"
         do {
             return try await pool.read { db in
+                guard let anchor = try Row.fetchOne(
+                    db,
+                    sql: "SELECT date FROM messages WHERE chat_id = ? AND id = ?",
+                    arguments: [chatId, messageId]
+                ),
+                let anchorDate: Double = anchor["date"] else { return [] }
                 // The source + `window` messages before it, and `window` after.
                 let before = try Row.fetchAll(
                     db,
-                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND id <= ? ORDER BY id DESC LIMIT ?",
-                    arguments: [chatId, messageId, window + 1]
+                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND (date < ? OR (date = ? AND id <= ?)) ORDER BY date DESC, id DESC LIMIT ?",
+                    arguments: [chatId, anchorDate, anchorDate, messageId, window + 1]
                 )
                 let after = try Row.fetchAll(
                     db,
-                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
-                    arguments: [chatId, messageId, window]
+                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND (date > ? OR (date = ? AND id > ?)) ORDER BY date ASC, id ASC LIMIT ?",
+                    arguments: [chatId, anchorDate, anchorDate, messageId, window]
                 )
                 return (before + after).map(Self.messageRecord(from:))
             }
@@ -138,25 +182,42 @@ extension DatabaseManager {
         }
     }
 
-    /// Messages with id > afterMessageId AND date >= since, OLDEST first — the
-    /// forward crawl the fact extractor walks across passes (cursor =
-    /// extracted_through_message_id). id ASC keeps the transcript chronological
-    /// and the cursor monotonic, so on cold start it starts at the oldest
-    /// message inside the window and walks forward to now.
+    /// Messages after the cursor and within the date window, oldest first. The
+    /// cursor stores a stable message ID, but ordering follows its stored date:
+    /// Gmail and other canonical providers use non-monotonic hashed IDs.
     func loadMessagesForward(chatId: Int64, afterMessageId: Int64, since: Date, limit: Int) async -> [MessageRecord] {
         guard let pool = await ensureDatabase() else { return [] }
         do {
             return try await pool.read { db in
+                var cursorClause = ""
+                var arguments: StatementArguments = [chatId]
+                if afterMessageId != 0,
+                   let anchor = try Row.fetchOne(
+                       db,
+                       sql: "SELECT date FROM messages WHERE chat_id = ? AND id = ?",
+                       arguments: [chatId, afterMessageId]
+                   ),
+                   let anchorDate: Double = anchor["date"] {
+                    // Canonical providers use stable hashed IDs (Gmail IDs are
+                    // negative and deliberately non-monotonic). The cursor is
+                    // still a message ID, but progression must follow the
+                    // anchor's chronology rather than numeric ID ordering.
+                    cursorClause = "AND (date > ? OR (date = ? AND id > ?))"
+                    arguments += [anchorDate, anchorDate, afterMessageId]
+                }
+                arguments += [since.timeIntervalSince1970, limit]
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
                         SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
-                        WHERE chat_id = ? AND id > ? AND date >= ?
-                        ORDER BY id ASC
+                        WHERE chat_id = ?
+                          \(cursorClause)
+                          AND date >= ?
+                        ORDER BY date ASC, id ASC
                         LIMIT ?
                         """,
-                    arguments: [chatId, afterMessageId, since.timeIntervalSince1970, limit]
+                    arguments: arguments
                 )
                 return rows.map(Self.messageRecord(from:))
             }
@@ -173,16 +234,29 @@ extension DatabaseManager {
         guard let pool = await ensureDatabase() else { return [] }
         do {
             return try await pool.read { db in
+                var cursorClause = "AND id <= ?"
+                var arguments: StatementArguments = [chatId, throughMessageId]
+                if let anchor = try Row.fetchOne(
+                    db,
+                    sql: "SELECT date FROM messages WHERE chat_id = ? AND id = ?",
+                    arguments: [chatId, throughMessageId]
+                ),
+                   let anchorDate: Double = anchor["date"] {
+                    cursorClause = "AND (date < ? OR (date = ? AND id <= ?))"
+                    arguments = [chatId, anchorDate, anchorDate, throughMessageId]
+                }
+                arguments += [limit]
                 let rows = try Row.fetchAll(
                     db,
                     sql: """
                         SELECT id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, thread_root_id
                         FROM messages
-                        WHERE chat_id = ? AND id <= ?
-                        ORDER BY id DESC
+                        WHERE chat_id = ?
+                          \(cursorClause)
+                        ORDER BY date DESC, id DESC
                         LIMIT ?
                         """,
-                    arguments: [chatId, throughMessageId, limit]
+                    arguments: arguments
                 )
                 return rows.map(Self.messageRecord(from:)).reversed()
             }

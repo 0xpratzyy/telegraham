@@ -35,6 +35,33 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(FactExtractionRuntimePolicy.maxConcurrentChats(isManagedAI: false), 10)
     }
 
+    func testFactExtractionPrioritizesNewlyConnectedGmailBeforeTrackedChats() {
+        let now = Date()
+        let telegram = makeChat(
+            id: 1,
+            title: "Existing Telegram DM",
+            chatType: .privateChat(userId: 11),
+            unreadCount: 0,
+            lastMessageDate: now
+        )
+        let gmail = makeChat(
+            id: -2,
+            title: "New Gmail thread",
+            chatType: .supergroup(supergroupId: -2, isChannel: false),
+            unreadCount: 1,
+            lastMessageDate: now.addingTimeInterval(-60),
+            source: SourceID(kind: .gmail, account: "test@example.com")
+        )
+
+        let ordered = FactExtractionCandidateOrder.ordered(
+            [telegram, gmail],
+            readyChatIds: [telegram.id, gmail.id],
+            trackedChatIds: [telegram.id]
+        )
+
+        XCTAssertEqual(ordered.map(\.id), [gmail.id, telegram.id])
+    }
+
     func testFactExtractionProviderRetryBacksOffAndCaps() {
         XCTAssertEqual(
             FactExtractionRuntimePolicy.retryDelay(
@@ -3427,7 +3454,9 @@ final class PidgyCoreTests: XCTestCase {
         telegramService.chats = [smallSupergroup, largeSupergroup, channel]
 
         let indexableChats = await IndexScheduler().indexableChatsForTesting(using: telegramService)
+            .filter { $0.source.kind == .telegram }
         let recentSyncChats = await RecentSyncCoordinator().indexableChatsForTesting(using: telegramService)
+            .filter { $0.source.kind == .telegram }
 
         XCTAssertEqual(indexableChats.map(\.id), [smallSupergroup.id])
         XCTAssertEqual(indexableChats.first?.memberCount, 12)
@@ -6815,6 +6844,120 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertTrue(prompt.contains("only the actual status/answer does"))
     }
 
+    func testExtractionPromptTreatsGmailAsEmailInsteadOfSupergroup() {
+        let prompt = FactExtractionPrompt.contextBlock(
+            myName: "Pratyush",
+            myUsername: "pratzyy",
+            chatTitle: "Renewal reminder",
+            chatType: FactExtractionPrompt.chatTypeLabel(
+                sourceKind: .gmail,
+                fallback: "Supergroup"
+            ),
+            sourceKind: .gmail,
+            openLoops: []
+        )
+
+        XCTAssertTrue(prompt.contains("Source: Gmail"))
+        XCTAssertTrue(prompt.contains("EMAIL THREAD"))
+        XCTAssertTrue(prompt.contains("Automated mail does not create reply debt"))
+        XCTAssertTrue(prompt.contains("concrete real-world action"))
+        XCTAssertFalse(prompt.contains("Telegram username"))
+        XCTAssertFalse(prompt.contains("Supergroup"))
+    }
+
+    func testGmailActionFallbackCapturesExplicitWorkButNotVerificationNoise() {
+        let source = SourceID(kind: .gmail, account: "test@example.com")
+        let chat = makeChat(
+            id: -2,
+            title: "Base grant",
+            chatType: .supergroup(supergroupId: -2, isChannel: false),
+            unreadCount: 1,
+            lastMessageDate: Date(),
+            source: source
+        )
+        let action = TGMessage(
+            id: -20,
+            chatId: chat.id,
+            senderId: .chat(chat.id),
+            date: Date(),
+            textContent: """
+            Congratulations, You've Been Selected for a Base Grant!
+
+            Action Required: How to Claim Your Grant
+            Please complete the Ironclad form within 10 business days.
+            """,
+            mediaType: nil,
+            isOutgoing: false,
+            chatTitle: chat.title,
+            senderName: "Base Grants <grants@example.com>"
+        )
+        let verification = TGMessage(
+            id: -21,
+            chatId: chat.id,
+            senderId: .chat(chat.id),
+            date: Date(),
+            textContent: "Action Required: your verification code is 123456",
+            mediaType: nil,
+            isOutgoing: false,
+            chatTitle: chat.title,
+            senderName: "No Reply <noreply@example.com>"
+        )
+
+        let drafts = GmailActionFallback.drafts(messages: [action, verification], chat: chat)
+
+        XCTAssertEqual(drafts.count, 1)
+        XCTAssertEqual(drafts.first?.predicate, .iOwe)
+        XCTAssertEqual(drafts.first?.loopKind, .action)
+        XCTAssertEqual(drafts.first?.action, "Claim Your Grant")
+        XCTAssertEqual(drafts.first?.subjectEntity, "Base Grants")
+        XCTAssertEqual(drafts.first?.sourceMessageId, action.id)
+    }
+
+    func testExtractionCursorUsesChronologyForNegativeCanonicalMessageIDs() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = -77
+            let base = Date(timeIntervalSince1970: 10_000)
+            let records = [
+                makeRecord(id: -10, chatId: chatId, text: "first", date: base.addingTimeInterval(1)),
+                makeRecord(id: -900, chatId: chatId, text: "second", date: base.addingTimeInterval(2)),
+                makeRecord(id: -50, chatId: chatId, text: "third", date: base.addingTimeInterval(3))
+            ]
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: records,
+                updateRecentSyncState: false
+            )
+
+            let initial = await DatabaseManager.shared.loadMessagesForward(
+                chatId: chatId,
+                afterMessageId: 0,
+                since: base,
+                limit: 10
+            )
+            XCTAssertEqual(initial.map(\.id), [-10, -900, -50])
+
+            let remaining = await DatabaseManager.shared.loadMessagesForward(
+                chatId: chatId,
+                afterMessageId: -10,
+                since: base,
+                limit: 10
+            )
+            XCTAssertEqual(remaining.map(\.id), [-900, -50])
+
+            let context = await DatabaseManager.shared.loadMessagesBefore(
+                chatId: chatId,
+                throughMessageId: -900,
+                limit: 10
+            )
+            XCTAssertEqual(context.map(\.id), [-10, -900])
+
+            await DatabaseManager.shared.updateFactExtractionCursor(chatId: chatId, throughMessageId: -10)
+            await DatabaseManager.shared.updateFactExtractionCursor(chatId: chatId, throughMessageId: -900)
+            let storedCursor = await DatabaseManager.shared.factExtractionCursor(chatId: chatId)
+            XCTAssertEqual(storedCursor, -900)
+        }
+    }
+
     // MARK: - Facts search (two-tier, entity-anchored)
 
     /// A conversational query that NAMES someone must return only that
@@ -7047,7 +7190,8 @@ final class PidgyCoreTests: XCTestCase {
         chatType: TGChat.ChatType,
         unreadCount: Int,
         lastMessageDate: Date,
-        memberCount: Int? = nil
+        memberCount: Int? = nil,
+        source: SourceID = .telegram
     ) -> TGChat {
         TGChat(
             id: id,
@@ -7063,7 +7207,8 @@ final class PidgyCoreTests: XCTestCase {
             memberCount: memberCount,
             order: id,
             isInMainList: true,
-            smallPhotoFileId: nil
+            smallPhotoFileId: nil,
+            source: source
         )
     }
 

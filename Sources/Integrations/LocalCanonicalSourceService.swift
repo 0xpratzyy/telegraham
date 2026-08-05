@@ -30,13 +30,23 @@ final class LocalCanonicalSourceService: ObservableObject, MessageSource {
 
     func refresh() async {
         let conversations = await DatabaseManager.shared.loadSourceConversations(accountID: account.id)
-        var mapped: [TGChat] = []
-        for conversation in conversations {
-            let chatID = CanonicalID.legacyInt64(sourceID.rawValue + "|" + conversation.externalID)
-            let latest = await DatabaseManager.shared.loadMessages(chatId: chatID, limit: 1).first
+        let conversationChatIds = Dictionary(
+            uniqueKeysWithValues: conversations.map { conversation in
+                (
+                    conversation.id,
+                    CanonicalID.legacyInt64(sourceID.rawValue + "|" + conversation.externalID)
+                )
+            }
+        )
+        let latestByChat = await DatabaseManager.shared.loadLatestMessages(
+            chatIds: Array(conversationChatIds.values)
+        )
+        let mapped = conversations.compactMap { conversation -> TGChat? in
+            guard let chatID = conversationChatIds[conversation.id] else { return nil }
+            let latest = latestByChat[chatID]
                 .map(MessageCacheService.CachedMessage.from)
                 .map { $0.toTGMessage() }
-            mapped.append(TGChat(
+            return TGChat(
                 id: chatID,
                 title: conversation.title,
                 chatType: Self.chatType(for: conversation.kind, id: chatID),
@@ -47,7 +57,7 @@ final class LocalCanonicalSourceService: ObservableObject, MessageSource {
                 isInMainList: true,
                 smallPhotoFileId: nil,
                 source: sourceID
-            ))
+            )
         }
         chats = mapped.sorted { ($0.lastActivityDate ?? .distantPast) > ($1.lastActivityDate ?? .distantPast) }
         isReady = true

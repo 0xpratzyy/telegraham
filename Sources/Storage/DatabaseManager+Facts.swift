@@ -63,7 +63,7 @@ extension DatabaseManager {
                     INSERT INTO fact_extraction_state (chat_id, extracted_through_message_id, last_extracted_at)
                     VALUES (?, ?, ?)
                     ON CONFLICT(chat_id) DO UPDATE SET
-                        extracted_through_message_id = MAX(fact_extraction_state.extracted_through_message_id, excluded.extracted_through_message_id),
+                        extracted_through_message_id = excluded.extracted_through_message_id,
                         last_extracted_at = excluded.last_extracted_at
                     """,
                 arguments: [chatId, throughMessageId, now]
@@ -184,10 +184,29 @@ extension DatabaseManager {
                     UPDATE facts SET invalid_at = ?, closed_reason = 'replied', updated_at = ?
                     WHERE invalid_at IS NULL AND predicate = 'i_owe' AND loop_kind = 'reply'
                       AND EXISTS (
-                          SELECT 1 FROM messages m
+                          SELECT 1
+                          FROM messages m
                           WHERE m.chat_id = facts.source_chat_id
-                            AND m.id > facts.source_message_id
                             AND m.is_outgoing = 1
+                            AND (
+                                EXISTS (
+                                    SELECT 1 FROM messages source
+                                    WHERE source.chat_id = facts.source_chat_id
+                                      AND source.id = facts.source_message_id
+                                      AND (
+                                          m.date > source.date
+                                          OR (m.date = source.date AND m.id > source.id)
+                                      )
+                                )
+                                OR (
+                                    NOT EXISTS (
+                                        SELECT 1 FROM messages source
+                                        WHERE source.chat_id = facts.source_chat_id
+                                          AND source.id = facts.source_message_id
+                                    )
+                                    AND m.id > facts.source_message_id
+                                )
+                            )
                       )
                     """
                 var arguments: [DatabaseValueConvertible] = [now, now]
@@ -556,6 +575,25 @@ extension DatabaseManager {
         } catch { return 0 }
     }
 
+    /// Chats with an established chronological extraction cursor. Kept as one
+    /// bulk read so a newly connected provider can be scheduled fairly without
+    /// issuing one SQLite query per conversation.
+    func factExtractionTrackedChatIds(chatIds: [Int64]) async -> Set<Int64> {
+        guard !chatIds.isEmpty, let pool = await ensureDatabase() else { return [] }
+        let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ",")
+        do {
+            return try await pool.read { db in
+                Set(try Int64.fetchAll(
+                    db,
+                    sql: "SELECT chat_id FROM fact_extraction_state WHERE chat_id IN (\(placeholders))",
+                    arguments: StatementArguments(chatIds)
+                ))
+            }
+        } catch {
+            return []
+        }
+    }
+
     func updateFactExtractionCursor(chatId: Int64, throughMessageId: Int64, at date: Date = Date()) async {
         guard let pool = await ensureDatabase() else { return }
         do {
@@ -565,7 +603,7 @@ extension DatabaseManager {
                         INSERT INTO fact_extraction_state (chat_id, extracted_through_message_id, last_extracted_at)
                         VALUES (?, ?, ?)
                         ON CONFLICT(chat_id) DO UPDATE SET
-                            extracted_through_message_id = MAX(fact_extraction_state.extracted_through_message_id, excluded.extracted_through_message_id),
+                            extracted_through_message_id = excluded.extracted_through_message_id,
                             last_extracted_at = excluded.last_extracted_at
                         """,
                     arguments: [chatId, throughMessageId, date.timeIntervalSince1970]

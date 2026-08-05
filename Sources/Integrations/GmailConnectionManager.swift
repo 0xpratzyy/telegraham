@@ -36,6 +36,11 @@ final class GmailConnectionManager: ObservableObject {
     }
 
     func restore() async {
+        // Cached Gmail is useful even when this particular build no longer has
+        // OAuth credentials (or the refresh token was removed). Register the
+        // local read-only source first; connection state only controls future
+        // remote syncs.
+        await IntegrationConnectionStore.shared.load()
         guard Self.resolveCredentials() != nil else { state = .unavailable; return }
         guard (try? KeychainManager.retrieve(for: .gmailRefreshToken)) != nil,
               let email = try? KeychainManager.retrieve(for: .gmailAccountEmail) else {
@@ -43,7 +48,7 @@ final class GmailConnectionManager: ObservableObject {
             return
         }
         state = .connected(email)
-        await IntegrationConnectionStore.shared.load()
+        FactExtractionCoordinator.shared.triggerPass()
     }
 
     func configureAndConnect(clientId rawClientId: String) async {
@@ -76,6 +81,7 @@ final class GmailConnectionManager: ObservableObject {
             try KeychainManager.save(external.externalID, for: .gmailAccountEmail)
             let result = try await runSync(adapter: adapter)
             await IntegrationConnectionStore.shared.load()
+            FactExtractionCoordinator.shared.triggerPass(bypassProviderCooldown: true)
             state = .connected("\(external.displayName) · \(result.messages) messages")
             syncProgress = nil
         } catch {
@@ -89,6 +95,7 @@ final class GmailConnectionManager: ObservableObject {
             let token = try await validAccessToken()
             let result = try await runSync(adapter: GmailSourceAdapter(accessToken: token))
             await IntegrationConnectionStore.shared.load()
+            FactExtractionCoordinator.shared.triggerPass(bypassProviderCooldown: true)
             let email = (try? KeychainManager.retrieve(for: .gmailAccountEmail)) ?? "Gmail"
             state = .connected("\(email) · \(result.messages) messages")
             syncProgress = nil

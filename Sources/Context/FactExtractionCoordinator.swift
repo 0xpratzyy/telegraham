@@ -113,6 +113,56 @@ enum FactExtractionRuntimePolicy {
     }
 }
 
+/// Fair, source-aware crawl ordering. A newly connected provider must get its
+/// first extraction window before already-tracked Telegram chats can consume a
+/// pass (or hit a provider timeout and stop the tail). Once chats are tracked,
+/// the existing DM/value-first ordering and recency rules take over.
+enum FactExtractionCandidateOrder {
+    static func ordered(
+        _ chats: [TGChat],
+        readyChatIds: Set<Int64>,
+        trackedChatIds: Set<Int64>
+    ) -> [TGChat] {
+        chats.sorted { a, b in
+            let aReady = readyChatIds.contains(a.id)
+            let bReady = readyChatIds.contains(b.id)
+            if aReady != bReady { return aReady }
+
+            let aUntracked = !trackedChatIds.contains(a.id)
+            let bUntracked = !trackedChatIds.contains(b.id)
+            if aUntracked != bUntracked { return aUntracked }
+
+            if aUntracked, bUntracked {
+                let aSource = sourcePriority(a.source.kind)
+                let bSource = sourcePriority(b.source.kind)
+                if aSource != bSource { return aSource < bSource }
+            }
+
+            let aDM = isDM(a)
+            let bDM = isDM(b)
+            if aDM != bDM { return aDM }
+            let aSize = a.memberCount ?? 2
+            let bSize = b.memberCount ?? 2
+            if aSize != bSize { return aSize < bSize }
+            return (a.lastActivityDate ?? .distantPast) > (b.lastActivityDate ?? .distantPast)
+        }
+    }
+
+    private static func isDM(_ chat: TGChat) -> Bool {
+        if case .privateChat = chat.chatType { return true }
+        return false
+    }
+
+    private static func sourcePriority(_ kind: MessageSourceKind) -> Int {
+        switch kind {
+        case .gmail: return 0
+        case .slack: return 1
+        case .whatsapp: return 2
+        case .telegram: return 3
+        }
+    }
+}
+
 @MainActor
 final class FactExtractionCoordinator: ObservableObject {
     static let shared = FactExtractionCoordinator()
@@ -379,6 +429,9 @@ final class FactExtractionCoordinator: ObservableObject {
         // later pages arrive, rather than blocking on a Telegram-only coverage
         // gate or initiating another remote request.
         readyIds.formUnion(eligible.lazy.filter { $0.source.kind != .telegram }.map(\.id))
+        let trackedIds = await DatabaseManager.shared.factExtractionTrackedChatIds(
+            chatIds: eligible.map(\.id)
+        )
         var syncGateSkipped = 0
         // Crawl order: READY chats first (extraction is pure AI speed), then
         // the not-ready ones with DMs before groups and small before large —
@@ -388,18 +441,11 @@ final class FactExtractionCoordinator: ObservableObject {
         #if DEBUG
         print("[FactCrawl] pass start: eligible=\(eligible.count) ready=\(readyIds.count)")
         #endif
-        func isDM(_ chat: TGChat) -> Bool {
-            if case .privateChat = chat.chatType { return true }
-            return false
-        }
-        let eligibleOrdered = eligible.sorted { a, b in
-            let aReady = readyIds.contains(a.id), bReady = readyIds.contains(b.id)
-            if aReady != bReady { return aReady }
-            if isDM(a) != isDM(b) { return isDM(a) }
-            let aSize = a.memberCount ?? 2, bSize = b.memberCount ?? 2
-            if aSize != bSize { return aSize < bSize }
-            return (a.lastMessage?.date ?? .distantPast) > (b.lastMessage?.date ?? .distantPast)
-        }
+        let eligibleOrdered = FactExtractionCandidateOrder.ordered(
+            eligible,
+            readyChatIds: readyIds,
+            trackedChatIds: trackedIds
+        )
 
         // Global contact directory (cached ~5 min): lets the resolver reach
         // people only MENTIONED in a chat + unify the same person across chats.
@@ -919,12 +965,14 @@ final class FactExtractionCoordinator: ObservableObject {
                 guard !records.isEmpty else { break }
                 didWork = true
 
-                // Records are id ASC (chronological); extractFacts re-sorts by date too.
+                // Records are chronological. Canonical provider IDs may be
+                // negative hashes, so chronology must never be inferred from
+                // their numeric value.
                 let tgMessages = records.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
                 // Trailing context: the last few ALREADY-processed messages, so a
                 // tiny window (one terse ping after a long thread) isn't judged
                 // blind — that produced invented connections and re-emissions.
-                let contextRecords = cursor > 0
+                let contextRecords = cursor != 0
                     ? await DatabaseManager.shared.loadMessagesBefore(chatId: chat.id, throughMessageId: cursor, limit: 8)
                     : []
                 let contextMessages = contextRecords.map { Self.tgMessage(from: $0, chatTitle: chat.title) }
@@ -962,9 +1010,10 @@ final class FactExtractionCoordinator: ObservableObject {
                     //    what THEY owe, never the user's own tasks.
                     // The model is the targeting check on top: resolvedLoops must
                     // name the specific loop the new messages addressed.
-                    let myOutgoingId = records
-                        .filter { $0.isOutgoing || (myUserId > 0 && $0.senderUserId == myUserId) }
-                        .map(\.id).max()
+                    let lastOutgoingIndex = records.lastIndex {
+                        $0.isOutgoing || (myUserId > 0 && $0.senderUserId == myUserId)
+                    }
+                    let hasOutgoing = lastOutgoingIndex != nil
                     let hasInbound = records.contains {
                         !$0.isOutgoing && !(myUserId > 0 && $0.senderUserId == myUserId)
                     }
@@ -989,8 +1038,11 @@ final class FactExtractionCoordinator: ObservableObject {
                     }
                     .filter { d in
                         guard d.predicate == .iOwe, d.loopKind == .reply,
-                              let out = myOutgoingId else { return true }
-                        return out <= d.sourceMessageId
+                              let outgoingIndex = lastOutgoingIndex,
+                              let sourceIndex = records.firstIndex(where: { $0.id == d.sourceMessageId }) else {
+                            return true
+                        }
+                        return outgoingIndex <= sourceIndex
                     }
 
                     // Structural close gates (see above) applied to the model's
@@ -1001,7 +1053,7 @@ final class FactExtractionCoordinator: ObservableObject {
                         .filter { f in
                             guard resolvedSet.contains(f.fingerprint) else { return false }
                             switch f.predicate {
-                            case .iOwe: return myOutgoingId != nil
+                            case .iOwe: return hasOutgoing
                             case .owesMe: return hasInbound
                             default: return false
                             }
@@ -1016,25 +1068,25 @@ final class FactExtractionCoordinator: ObservableObject {
                     // cursor behind so the whole window retries next pass —
                     // the old fire-and-forget writes let a transient DB error
                     // skip a window forever.
-                    let windowMax = records.map(\.id).max() ?? cursor
+                    let windowCursor = records.last?.id ?? cursor
                     try await DatabaseManager.shared.applyExtractionWindow(
                         chatId: chat.id,
                         closeFingerprints: safeCloses,
                         upserts: resolved,
                         chases: chases,
-                        advanceCursorTo: windowMax
+                        advanceCursorTo: windowCursor
                     )
                     out.closedLoops += safeCloses.count
                     out.newFacts += resolved.count
                     out.chasedLoops += chases.count
                     out.successfulAIWindows += 1
-                    cursor = windowMax
+                    cursor = windowCursor
                     // Structural sweep: this window's outgoing messages answer
                     // any older reply-kind loop of this chat, whether or not
                     // the model emitted resolvedLoops for it. Outside the
                     // transaction on purpose — it re-runs every pass, so a
                     // failure here loses nothing.
-                    if myOutgoingId != nil {
+                    if hasOutgoing {
                         out.closedLoops += await DatabaseManager.shared.closeAnsweredReplyLoops(chatId: chat.id)
                     }
                 } catch {
@@ -1045,7 +1097,7 @@ final class FactExtractionCoordinator: ObservableObject {
                     // skip past the poison window. Transient provider/network
                     // errors don't count — they retry indefinitely and self-heal.
                     if case FactExtractionError.unparseableResponse = error {
-                        let windowMax = records.map(\.id).max() ?? cursor
+                        let windowCursor = records.last?.id ?? cursor
                         var entry = extractFailures[chat.id] ?? (cursor: cursor, count: 0)
                         if entry.cursor != cursor { entry = (cursor: cursor, count: 0) }
                         entry.count += 1
@@ -1056,7 +1108,7 @@ final class FactExtractionCoordinator: ObservableObject {
                         // the poison window just skips on a later pass.
                         if entry.count >= 3, !Task.isCancelled, !stopped {
                             logger.error("skipping poison window for chat \(chat.id, privacy: .public) after \(entry.count, privacy: .public) unparseable replies")
-                            cursor = windowMax
+                            cursor = windowCursor
                             await DatabaseManager.shared.updateFactExtractionCursor(chatId: chat.id, throughMessageId: cursor)
                             extractFailures[chat.id] = nil
                         }

@@ -225,7 +225,11 @@ final class AIService: ObservableObject {
             myName: myUser?.firstName ?? "Me",
             myUsername: myUser?.username,
             chatTitle: chat.title,
-            chatType: chat.chatType.displayName,
+            chatType: FactExtractionPrompt.chatTypeLabel(
+                sourceKind: chat.source.kind,
+                fallback: chat.chatType.displayName
+            ),
+            sourceKind: chat.source.kind,
             openLoops: openLoops
         ) + PromptSafety.untrustedContentClause
         // Numbered transcript so the model cites each loop's source by [N] (exact
@@ -248,6 +252,14 @@ final class AIService: ObservableObject {
         // live chat list being fully loaded (which showed "Chat <id>").
         let chatTitle = chat.title
         result.drafts = result.drafts.map { var d = $0; d.sourceChatTitle = chatTitle; return d }
+        if chat.source.kind == .gmail {
+            let existingSources = Set(result.drafts
+                .filter { $0.predicate == .iOwe && $0.loopKind == .action }
+                .map(\.sourceMessageId))
+            result.drafts.append(contentsOf: GmailActionFallback
+                .drafts(messages: newMessages, chat: chat)
+                .filter { !existingSources.contains($0.sourceMessageId) })
+        }
         return result
     }
 

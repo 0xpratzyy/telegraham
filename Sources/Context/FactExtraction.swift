@@ -104,6 +104,90 @@ struct FactExtractionResult: Sendable {
     var chasedLoops: [ChasedLoopUpdate] = []
 }
 
+/// Narrow deterministic safety net for email obligations the model occasionally
+/// drops despite explicit task language. This intentionally does not attempt
+/// broad semantic classification: it only accepts strong action markers and
+/// keeps verification codes and similar transactional noise out.
+enum GmailActionFallback {
+    static func drafts(messages: [TGMessage], chat: TGChat) -> [FactDraft] {
+        messages.compactMap { message in
+            guard !message.isOutgoing,
+                  let rawText = message.textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawText.isEmpty,
+                  isExplicitAction(rawText) else { return nil }
+
+            let subjectLine = rawText
+                .split(whereSeparator: \Character.isNewline)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty } ?? chat.title
+            let action = actionTitle(in: rawText, fallbackSubject: subjectLine)
+            let sender = cleanSender(message.senderName ?? chat.title)
+
+            return FactDraft(
+                subjectEntity: sender,
+                predicate: .iOwe,
+                objectText: action,
+                action: action,
+                loopKind: .action,
+                objectEntity: nil,
+                confidence: 0.94,
+                validFrom: message.date,
+                sourceChatId: chat.id,
+                sourceChatTitle: chat.title,
+                sourceMessageId: message.id,
+                sourceText: rawText,
+                senderName: sender
+            )
+        }
+    }
+
+    private static func isExplicitAction(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let hardNoise = [
+            "verification code", "one-time password", "one time password",
+            "your otp", "login code", "authentication code"
+        ]
+        guard !hardNoise.contains(where: lower.contains) else { return false }
+
+        let strongPatterns = [
+            #"\baction\s+required\b"#,
+            #"\b(your\s+action\s+is|required\s+action\s+is)\s+required\b"#,
+            #"\bplease\s+(complete|submit|sign|review|approve|pay|provide|upload|fill\s+out)\b[^\n]{0,180}\b(within|by|before|deadline|required)\b"#,
+            #"\b(you\s+must|required\s+to)\s+(complete|submit|sign|review|approve|pay|provide|upload|fill\s+out)\b"#
+        ]
+        return strongPatterns.contains {
+            lower.range(of: $0, options: .regularExpression) != nil
+        }
+    }
+
+    private static func actionTitle(in text: String, fallbackSubject: String) -> String {
+        for rawLine in text.split(whereSeparator: \Character.isNewline) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let marker = line.range(of: "action required", options: [.caseInsensitive]) else { continue }
+            var suffix = String(line[marker.upperBound...])
+                .trimmingCharacters(in: CharacterSet(charactersIn: ":-–— "))
+            if suffix.lowercased().hasPrefix("how to ") {
+                suffix.removeFirst("how to ".count)
+            }
+            if !suffix.isEmpty { return String(suffix.prefix(120)) }
+        }
+
+        var subject = fallbackSubject
+        if let marker = subject.range(of: "action required", options: [.caseInsensitive]) {
+            subject.removeSubrange(marker)
+            subject = subject.trimmingCharacters(in: CharacterSet(charactersIn: "[]():-–— "))
+        }
+        if subject.isEmpty { return "Complete the required action" }
+        return "Complete required action: \(subject.prefix(96))"
+    }
+
+    private static func cleanSender(_ raw: String) -> String {
+        let display = raw.split(separator: "<", maxSplits: 1).first.map(String.init) ?? raw
+        let cleaned = display.trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
+        return cleaned.isEmpty ? "Email sender" : cleaned
+    }
+}
+
 /// Wire DTO for the one-time loop_kind backfill (classify existing i_owe loops).
 struct LoopKindClassificationDTO: Codable {
     struct Item: Codable {
@@ -135,7 +219,7 @@ enum FactExtractionError: Error, Equatable {
 
 enum FactExtractionPrompt {
     static let systemPrompt = """
-    You maintain a running FACT MEMORY for one Telegram user. You read NEW messages from a single chat and update the memory of OPEN LOOPS (things still owed) plus a few durable background facts.
+    You maintain a running FACT MEMORY for one user across connected messaging and email sources. You read NEW messages from one conversation and update the memory of OPEN LOOPS (things still owed) plus a few durable background facts.
 
     Return EXACTLY one JSON object, nothing else:
     {
@@ -181,7 +265,7 @@ enum FactExtractionPrompt {
     - Only emit an open loop (i_owe/owes_me) when something is GENUINELY pending on someone. "ok", "thanks", "got it", banter = NO loop.
     - INVESTIGATE-AND-REPORT: when [ME] asks for a concrete status/answer and the other person says they are checking or asking a third person, the other person has accepted the follow-up and still owes [ME] the result. Emit owes_me even when their acceptance is terse, typo-filled, or leaves "I am" implicit. A later acknowledgement from [ME] does not settle it; only the actual status/answer does.
     - Be STRICT about i_owe in group/supergroup chats: jokes, reactions, side-chatter, and questions thrown to the whole room are NOT [ME]'s loops. If you can't tell that [ME] SPECIFICALLY must respond, do not emit i_owe.
-    - DM ONLY — A DROPPED CONVERSATION IS A REPLY [ME] OWES. GATE FIRST: this rule applies ONLY when the VERY LAST message in the transcript is from the other person. If the last message is from [ME], STOP — this rule is off, and the normal direction rules alone decide. ([ME] having answered is exactly what "not dropped" means; a [ME] reply that also asks them for something is an ordinary ask, not a dropped thread.)
+    - DM OR PERSON-AUTHORED EMAIL ONLY — A DROPPED CONVERSATION IS A REPLY [ME] OWES. GATE FIRST: this rule applies ONLY when the VERY LAST message in the transcript is from the other person. For email, it applies only to a human conversation—not newsletters, receipts, OTPs, security alerts, marketing, automated notifications, or no-reply senders. If the last message is from [ME], STOP — this rule is off, and the normal direction rules alone decide. ([ME] having answered is exactly what "not dropped" means; a [ME] reply that also asks them for something is an ordinary ask, not a dropped thread.)
       When the gate passes: in a one-on-one chat an ask is not required. A trail of their messages with no answer from [ME] is a conversation [ME] left hanging — emit i_owe with kind "reply", subject = that person, object = the substance of what they sent. Someone telling you what they are working on, sharing a link or a piece of work, or thinking out loud at you expects a human response even with no question mark in sight.
       This rule NEVER applies to a group or supergroup — there, an unanswered message is usually not addressed to [ME] at all, and the strict rule above still governs.
       It also does not apply when their last messages are closers, not openers: "ok", "thanks", "cool", "got it", "haha", a lone emoji or sticker. Those end a conversation rather than leave one open — no loop.
@@ -248,6 +332,7 @@ enum FactExtractionPrompt {
         myUsername: String?,
         chatTitle: String,
         chatType: String,
+        sourceKind: MessageSourceKind = .telegram,
         openLoops: [Fact]
     ) -> String {
         let loopList: String
@@ -265,17 +350,41 @@ enum FactExtractionPrompt {
         }
         // The username is what group @-mentions actually address — without it
         // the model can't tell "@rrspace07 pls finalise" is someone ELSE's job.
-        let handle = (myUsername?.isEmpty == false) ? " Telegram username: @\(myUsername!) — an @-mention of any OTHER handle is NOT [ME]." : ""
+        let handle = sourceKind == .telegram && myUsername?.isEmpty == false
+            ? " Telegram username: @\(myUsername!) — an @-mention of any OTHER handle is NOT [ME]."
+            : ""
+        let sourceGuidance: String
+        switch sourceKind {
+        case .gmail:
+            sourceGuidance = """
+            Source: Gmail. This is an EMAIL THREAD delivered to [ME]'s mailbox, not a group chat. Do not require an @-mention or the user's name before recognizing an explicit request addressed to the recipient. Automated mail does not create reply debt merely because it is unread: newsletters, receipts, OTPs, security alerts, marketing, system notifications, and no-reply messages are never dropped conversations. They may create an i_owe/action task only when the email states a concrete real-world action [ME] still needs to take (for example pay, review, approve, submit, renew, or send something). A person-authored email that genuinely expects an answer may create i_owe/reply.
+            """
+        case .slack:
+            sourceGuidance = "Source: Slack. Apply DM versus group/channel addressing rules using the conversation type below."
+        case .whatsapp:
+            sourceGuidance = "Source: WhatsApp. Apply one-to-one versus group addressing rules using the conversation type below."
+        case .telegram:
+            sourceGuidance = "Source: Telegram."
+        }
         return """
 
         ---
-        The user is [ME] (name: \(myName)).\(handle) Chat: \(chatTitle) (\(chatType)).
+        The user is [ME] (name: \(myName)).\(handle) Conversation: \(chatTitle) (\(chatType)).
+        \(sourceGuidance)
 
         OPEN LOOPS already tracked in this chat:
         \(loopList)
 
         The NEW messages to read follow as the transcript below.
         """
+    }
+
+    static func chatTypeLabel(sourceKind: MessageSourceKind, fallback: String) -> String {
+        switch sourceKind {
+        case .gmail: return "Email thread"
+        case .whatsapp: return "WhatsApp conversation"
+        case .telegram, .slack: return fallback
+        }
     }
 }
 
