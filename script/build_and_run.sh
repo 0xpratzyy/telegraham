@@ -11,12 +11,17 @@ APP_BUNDLE="$DERIVED_DATA/Build/Products/Debug/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 build_app() {
-  local package_args=()
   if [[ -n "${PIDGY_CLONED_SOURCE_PACKAGES:-}" ]]; then
-    package_args+=(
-      -clonedSourcePackagesDirPath "$PIDGY_CLONED_SOURCE_PACKAGES"
-      -disableAutomaticPackageResolution
-    )
+    xcodebuild \
+      -project "$ROOT_DIR/Pidgy.xcodeproj" \
+      -scheme "$APP_NAME" \
+      -configuration Debug \
+      -destination 'platform=macOS' \
+      -derivedDataPath "$DERIVED_DATA" \
+      -clonedSourcePackagesDirPath "$PIDGY_CLONED_SOURCE_PACKAGES" \
+      -disableAutomaticPackageResolution \
+      build
+    return
   fi
 
   xcodebuild \
@@ -25,7 +30,6 @@ build_app() {
     -configuration Debug \
     -destination 'platform=macOS' \
     -derivedDataPath "$DERIVED_DATA" \
-    "${package_args[@]}" \
     build
 }
 

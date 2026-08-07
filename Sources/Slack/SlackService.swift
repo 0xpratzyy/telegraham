@@ -35,6 +35,19 @@ final class SlackService: ObservableObject, MessageSource {
     /// Thread roots already hydrated this session (keyed by native id) so each
     /// thread costs at most one `conversations.replies` paging pass per launch.
     private var hydratedThreadRoots: Set<String> = []
+    /// A single background worker owns proactive thread paging. Keeping this a
+    /// bounded queue is important: Slack allows roughly one replies call per
+    /// minute, and spawning one sleeping task per root would reserve minutes of
+    /// future limiter slots and make an interactive thread open feel frozen.
+    private struct ThreadHydrationRequest: Equatable {
+        let rootId: Int64
+        let priority: Int
+        let enqueuedAt: Date
+    }
+    private var threadHydrationQueue: [ThreadHydrationRequest] = []
+    private var queuedThreadRoots: Set<Int64> = []
+    private var threadHydrationInFlight: Set<Int64> = []
+    private var threadHydrationWorker: Task<Void, Never>?
     /// Dedupes concurrent token refreshes. Slack rotates the refresh token on
     /// every use, so two refreshes racing would each invalidate the other's
     /// token and lock the workspace out until a full re-OAuth.
@@ -59,6 +72,8 @@ final class SlackService: ObservableObject, MessageSource {
     private static let maxWarmedUsers = 2_000
     private static let maxIdCacheEntries = 20_000
     private static let maxHydratedThreadRoots = 1_000
+    private static let maxQueuedThreadRoots = 24
+    private static let maxStartupOpenFactThreads = 12
     /// Replies are rate-limited (~1/min); cap on-demand thread paging so a
     /// giant thread can't stall the panel for many minutes.
     private static let maxReplyPages = 4
@@ -122,7 +137,67 @@ final class SlackService: ObservableObject, MessageSource {
         await warmUserCache()
         await loadConversations()
         await reformatCachedSlackText()
+        await reconcilePersistedFactLifecycle()
+        await backfillRecentDirectCommitments()
+        await enqueueOpenFactThreadsForReconciliation()
         startRefreshLoop()
+    }
+
+    /// Deterministic lifecycle repairs belong to source startup, not only the
+    /// AI crawl. The extraction coordinator can legitimately still be waiting
+    /// for another source (Telegram bootstrap/provider cooldown) while Slack's
+    /// cached facts are already visible in Reply queue and Tasks. Repairing
+    /// here makes an upgraded Slack connection self-heal immediately and also
+    /// prevents expired standup work from wasting a scarce thread-hydration
+    /// slot below.
+    private func reconcilePersistedFactLifecycle() async {
+        let repaired = await db.repairSlackQuestionLoopKinds()
+        let expired = await db.closeExpiredEphemeralSlackTasks()
+        let answered = await db.closeAnsweredReplyLoops()
+        let completed = await db.closeCompletedSlackThreadTasks()
+        guard repaired + expired + answered + completed > 0 else { return }
+        NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
+    }
+
+    /// Heal explicit commitments that older extraction cursors already passed.
+    /// This is intentionally DM-only and recent: in a direct conversation the
+    /// inbound request is addressed to the user, while a group would require
+    /// mention-aware ownership. Full fact history is checked before inserting,
+    /// so completed/dismissed work can never be reopened on another launch.
+    private func backfillRecentDirectCommitments() async {
+        let cutoff = Date().addingTimeInterval(-2 * 24 * 60 * 60)
+        let directChats = chats
+            .filter {
+                if case .privateChat = $0.chatType { return true }
+                return false
+            }
+            .sorted { ($0.lastActivityDate ?? .distantPast) > ($1.lastActivityDate ?? .distantPast) }
+            .prefix(40)
+
+        var inserted = false
+        for chat in directChats {
+            let records = await db.loadMessageHistoryPage(chatId: chat.id, beforeMessageId: 0, limit: 120)
+            let recent = records
+                .filter { $0.date >= cutoff }
+                .reversed()
+                .map { MessageCacheService.CachedMessage.from($0).toTGMessage() }
+            guard !recent.isEmpty else { continue }
+
+            let candidates = SlackTriagePolicy.enhancedDrafts([], messages: Array(recent), chat: chat)
+            guard !candidates.isEmpty else { continue }
+            let seen = await db.existingFactSourceMessageIDs(
+                chatId: chat.id,
+                messageIds: candidates.map(\.sourceMessageId)
+            )
+            let newDrafts = candidates.filter { !seen.contains($0.sourceMessageId) }
+            guard !newDrafts.isEmpty else { continue }
+            await db.upsertFacts(newDrafts)
+            inserted = true
+        }
+
+        if inserted {
+            NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
+        }
     }
 
     /// Bulk-load workspace members once so message-mention decoding resolves
@@ -254,6 +329,11 @@ final class SlackService: ObservableObject, MessageSource {
               let (channelNative, rootTs) = Self.parseMessageNative(rootNative) else { return [] }
         // Skip only if we already paged this thread to completion this session.
         guard !hydratedThreadRoots.contains(rootNative) else { return [] }
+        // Main-actor isolation makes this set a single-flight latch even across
+        // suspension points in the network call below.
+        guard !threadHydrationInFlight.contains(rootId) else { return [] }
+        threadHydrationInFlight.insert(rootId)
+        defer { threadHydrationInFlight.remove(rootId) }
         guard let channelId = await mintId(channelNative) else { return [] }
 
         // Page through replies (each page is rate-limited ~1/min) up to a cap so
@@ -283,10 +363,119 @@ final class SlackService: ObservableObject, MessageSource {
             hydratedThreadRoots.insert(rootNative)
         }
         guard !mapped.isEmpty else { return [] }
+        let existingIDs = await db.existingMessageIDs(
+            chatId: channelId,
+            messageIds: mapped.map(\.id)
+        )
+        let newReplies = mapped.filter {
+            $0.threadRootId != nil && !existingIDs.contains($0.id)
+        }
         // Merge (append: true) so we add the thread to the channel's cache
         // instead of clobbering its already-cached history with just replies.
         await MessageCacheService.shared.cacheMessages(chatId: channelId, messages: mapped, append: true)
+        postLocalUpdate(chatId: channelId, count: newReplies.count)
+
+        // Thread delivery is structural evidence; reflect it immediately even
+        // if the managed extraction provider is cooling down or backlogged.
+        if !newReplies.isEmpty,
+           await db.closeCompletedSlackThreadTasks(chatId: channelId) > 0 {
+            NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
+        }
+
+        // Extraction cursors are chronological high-water marks. Replies can be
+        // older than today's cursor, so merely caching them would leave them
+        // invisible forever. Rewind only when genuinely-new replies landed,
+        // then let the normal extraction pipeline reconcile open loops using
+        // the parent + reply context. Semantic upserts keep this idempotent.
+        if let earliestReply = newReplies.min(by: { $0.date < $1.date }),
+           await db.rewindFactExtractionCursorIfNeeded(
+               chatId: channelId,
+               before: earliestReply.date
+           ) {
+            FactExtractionCoordinator.shared.triggerPass()
+        }
         return mapped
+    }
+
+    /// Queue the most relevant existing Slack tasks once at startup so an app
+    /// upgrade can heal already-stuck loops. Direct mentions and DMs lead;
+    /// the cap prevents a large workspace from booking the replies limiter for
+    /// hours. Newly-fetched history adds precise `reply_count > 0` roots below.
+    private func enqueueOpenFactThreadsForReconciliation() async {
+        let slackChatsByID = Dictionary(uniqueKeysWithValues: chats.map { ($0.id, $0) })
+        guard !slackChatsByID.isEmpty else { return }
+        let openFacts = await db.loadOpenFacts(limit: 500)
+        let myName = currentUser?.displayName.lowercased()
+        let candidates = openFacts
+            // Startup reconciliation is for stale concrete work. Reply loops
+            // are handled by the flat-message close sweep; newly observed
+            // threaded questions enter through reply_count in fetchHistory.
+            // Spending the 1/min replies lane on every open reply would delay
+            // old completed Tasks for hours.
+            .filter {
+                slackChatsByID[$0.sourceChatId] != nil
+                    && $0.predicate == .iOwe
+                    && $0.loopKind == .action
+            }
+            .map { fact -> (fact: Fact, priority: Int) in
+                let chat = slackChatsByID[fact.sourceChatId]
+                let isDM: Bool
+                if let chat, case .privateChat = chat.chatType { isDM = true } else { isDM = false }
+                let directlyMentionsMe = myName.map {
+                    fact.sourceText.lowercased().contains("@\($0)")
+                } ?? false
+                let action = fact.action.lowercased()
+                // Cheap state mutations are especially prone to lingering
+                // after somebody replies "done" in a thread. Reconcile them
+                // first, then tagged work, DMs, and ambient channel tasks.
+                let isQuickMutation = action.hasPrefix("add ") || action.hasPrefix("invite ")
+                let hasMention = fact.sourceText.contains("@")
+                let priority = isQuickMutation ? 600
+                    : ((directlyMentionsMe || hasMention) ? 500 : (isDM ? 300 : 100))
+                return (fact, priority)
+            }
+            .sorted {
+                if $0.priority != $1.priority { return $0.priority > $1.priority }
+                // This is a repair queue, so oldest unresolved work leads.
+                return $0.fact.validFrom < $1.fact.validFrom
+            }
+            .prefix(Self.maxStartupOpenFactThreads)
+
+        for candidate in candidates {
+            enqueueThreadHydration(rootId: candidate.fact.sourceMessageId, priority: candidate.priority)
+        }
+    }
+
+    private func enqueueThreadHydration(rootId: Int64, priority: Int) {
+        guard !queuedThreadRoots.contains(rootId),
+              !threadHydrationInFlight.contains(rootId),
+              threadHydrationQueue.count < Self.maxQueuedThreadRoots else { return }
+        queuedThreadRoots.insert(rootId)
+        threadHydrationQueue.append(
+            ThreadHydrationRequest(rootId: rootId, priority: priority, enqueuedAt: Date())
+        )
+        threadHydrationQueue.sort {
+            if $0.priority != $1.priority { return $0.priority > $1.priority }
+            return $0.enqueuedAt < $1.enqueuedAt
+        }
+        startThreadHydrationWorkerIfNeeded()
+    }
+
+    private func startThreadHydrationWorkerIfNeeded() {
+        guard threadHydrationWorker == nil, !threadHydrationQueue.isEmpty else { return }
+        threadHydrationWorker = Task { [weak self] in
+            await self?.drainThreadHydrationQueue()
+        }
+    }
+
+    private func drainThreadHydrationQueue() async {
+        while !Task.isCancelled, !threadHydrationQueue.isEmpty {
+            let request = threadHydrationQueue.removeFirst()
+            queuedThreadRoots.remove(request.rootId)
+            _ = await hydrateThread(messageId: request.rootId, threadRootId: nil)
+        }
+        threadHydrationWorker = nil
+        if !threadHydrationQueue.isEmpty { startThreadHydrationWorkerIfNeeded() }
     }
 
     /// "msg:<channel>:<ts>" → (channel, ts). Slack channel ids and message
@@ -380,6 +569,10 @@ final class SlackService: ObservableObject, MessageSource {
     func shutdown() {
         refreshLoopTask?.cancel()
         refreshLoopTask = nil
+        threadHydrationWorker?.cancel()
+        threadHydrationWorker = nil
+        threadHydrationQueue.removeAll()
+        queuedThreadRoots.removeAll()
     }
 
     private func refreshLoop() async {
@@ -546,9 +739,22 @@ final class SlackService: ObservableObject, MessageSource {
             limit: Self.slackPageSize
         )
         var mapped: [TGMessage] = []
+        let openFactMessageIDs = Set(await db.loadOpenFacts(chatId: chat.id).map(\.sourceMessageId))
         for message in history.messages ?? [] {
             if let tg = await mapMessage(message, channelNative: channelNative, channelId: chat.id, channelTitle: nil) {
                 mapped.append(tg)
+                guard (message.replyCount ?? 0) > 0,
+                      message.threadTs == nil || message.threadTs == message.ts else { continue }
+                let mentionsMe = message.text?.contains("<@\(authedUserNativeId)>") == true
+                let isDM: Bool
+                if case .privateChat = chat.chatType { isDM = true } else { isDM = false }
+                let priority = openFactMessageIDs.contains(tg.id) ? 500
+                    : (mentionsMe ? 400 : (message.user == authedUserNativeId ? 300 : (isDM ? 200 : 50)))
+                // Low-priority ambient channel threads stay local-history only;
+                // Pidgy spends its scarce replies budget on work involving me.
+                if priority >= 200 {
+                    enqueueThreadHydration(rootId: tg.id, priority: priority)
+                }
             }
         }
         return mapped

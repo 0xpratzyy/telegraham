@@ -475,6 +475,7 @@ final class FactExtractionCoordinator: ObservableObject {
         var workedChats = 0
         var successfulAIWindows = 0
         var providerFailures: [FactExtractionProviderFailure] = []
+        let repairedSlackQuestionKinds = await DatabaseManager.shared.repairSlackQuestionLoopKinds()
         // Structural sweep (#48): reply-kind loops with an outgoing message
         // after their ask are answered pings — close them without depending
         // on the model emitting resolvedLoops. One global sweep per pass also
@@ -483,6 +484,7 @@ final class FactExtractionCoordinator: ObservableObject {
         // wasn't in the OPEN LOOPS list yet, and later passes never see the
         // ask+reply together again).
         closedLoops += await DatabaseManager.shared.closeAnsweredReplyLoops()
+        closedLoops += await DatabaseManager.shared.closeExpiredEphemeralSlackTasks()
 
         // On-device OCR batch runs CONCURRENTLY with the crawl. It used to
         // run BEFORE the windows so a payment screenshot could close its
@@ -638,7 +640,7 @@ final class FactExtractionCoordinator: ObservableObject {
         // Tell the Tasks + Reply queue views to re-project now (closed loops,
         // new loops, chases, reclassified kinds) instead of waiting for the
         // next tick.
-        if newFacts > 0 || closedLoops > 0 || chasedLoops > 0 || backfillUpdated {
+        if newFacts > 0 || closedLoops > 0 || chasedLoops > 0 || backfillUpdated || repairedSlackQuestionKinds > 0 {
             NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
         }
 
@@ -1038,11 +1040,17 @@ final class FactExtractionCoordinator: ObservableObject {
                     }
                     .filter { d in
                         guard d.predicate == .iOwe, d.loopKind == .reply,
-                              let outgoingIndex = lastOutgoingIndex,
-                              let sourceIndex = records.firstIndex(where: { $0.id == d.sourceMessageId }) else {
-                            return true
-                        }
-                        return outgoingIndex <= sourceIndex
+                              let sourceIndex = records.firstIndex(where: { $0.id == d.sourceMessageId }),
+                              let firstOutgoingIndex = records.indices.first(where: { index in
+                                  index > sourceIndex && (
+                                      records[index].isOutgoing
+                                      || (myUserId > 0 && records[index].senderUserId == myUserId)
+                                  )
+                              }) else { return true }
+                        // A promise to check is not an answer. Keep the ping in
+                        // Reply queue and let a later substantive response or
+                        // model lifecycle resolution close it.
+                        return SlackTriagePolicy.isDeferredReply(records[firstOutgoingIndex].textContent)
                     }
 
                     // Structural close gates (see above) applied to the model's

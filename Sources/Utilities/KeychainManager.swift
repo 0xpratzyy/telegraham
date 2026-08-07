@@ -28,6 +28,10 @@ enum KeychainManager {
         case gmailRefreshToken = "com.pidgy.integrations.gmail.refreshToken"
         case gmailTokenExpiry = "com.pidgy.integrations.gmail.tokenExpiry"
         case gmailAccountEmail = "com.pidgy.integrations.gmail.accountEmail"
+        /// Versioned JSON vault containing one OAuth token set per Gmail
+        /// address. Stored as a single Keychain item so account discovery can
+        /// remain local without creating dynamic Key enum cases.
+        case gmailAccounts = "com.pidgy.integrations.gmail.accounts.v1"
         // OAuth client IDs are public configuration, not secrets. Keeping a
         // per-install override lets source builds connect without rebuilding
         // an xcconfig; managed builds still prefer the bundled client ID.
@@ -74,6 +78,7 @@ enum KeychainManager {
         .aiApiKeyClaude,
         .gmailAccessToken,
         .gmailRefreshToken,
+        .gmailAccounts,
         .slackAccessToken,
         .slackRefreshToken
     ]

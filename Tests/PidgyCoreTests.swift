@@ -3872,6 +3872,7 @@ final class PidgyCoreTests: XCTestCase {
                 .gmailRefreshToken,
                 .gmailTokenExpiry,
                 .gmailAccountEmail,
+                .gmailAccounts,
                 .slackAccessToken,
                 .slackRefreshToken,
                 .slackTeamId,
@@ -3905,6 +3906,65 @@ final class PidgyCoreTests: XCTestCase {
             PreferencesResetPlan.pidgyDataDirectory(in: appSupport),
             appSupport.appendingPathComponent("Pidgy", isDirectory: true)
         )
+    }
+
+    func testGmailCredentialVaultStoresAndRemovesAccountsIndependently() throws {
+        try GmailCredentialVault.upsert(
+            GmailStoredAccountCredential(
+                email: "Work@Example.com",
+                accessToken: "work-access",
+                refreshToken: "work-refresh",
+                expiresAt: 100
+            )
+        )
+        try GmailCredentialVault.upsert(
+            GmailStoredAccountCredential(
+                email: "personal@example.com",
+                accessToken: "personal-access",
+                refreshToken: "personal-refresh",
+                expiresAt: 200
+            )
+        )
+
+        XCTAssertEqual(
+            try GmailCredentialVault.load().map(\.email),
+            ["personal@example.com", "work@example.com"]
+        )
+        XCTAssertEqual(
+            try GmailCredentialVault.credential(for: "WORK@example.com")?.refreshToken,
+            "work-refresh"
+        )
+
+        let remaining = try GmailCredentialVault.remove(email: "work@example.com")
+        XCTAssertEqual(remaining.map(\.email), ["personal@example.com"])
+        XCTAssertEqual(
+            try GmailCredentialVault.credential(for: "personal@example.com")?.accessToken,
+            "personal-access"
+        )
+    }
+
+    func testGmailCredentialVaultMigratesLegacySingleAccountWithoutLosingTokens() throws {
+        try KeychainManager.save("Legacy@Example.com", for: .gmailAccountEmail)
+        try KeychainManager.save("legacy-access", for: .gmailAccessToken)
+        try KeychainManager.save("legacy-refresh", for: .gmailRefreshToken)
+        try KeychainManager.save("12345", for: .gmailTokenExpiry)
+
+        let migrated = try GmailCredentialVault.loadMigratingLegacy()
+
+        XCTAssertEqual(
+            migrated,
+            [
+                GmailStoredAccountCredential(
+                    email: "legacy@example.com",
+                    accessToken: "legacy-access",
+                    refreshToken: "legacy-refresh",
+                    expiresAt: 12345
+                )
+            ]
+        )
+        XCTAssertNil(try KeychainManager.retrieve(for: .gmailAccountEmail))
+        XCTAssertNil(try KeychainManager.retrieve(for: .gmailAccessToken))
+        XCTAssertEqual(try GmailCredentialVault.load(), migrated)
     }
 
     /// Reset-path privacy regression: with the preference key ABSENT (fresh
@@ -4282,6 +4342,7 @@ final class PidgyCoreTests: XCTestCase {
 
     func testKeychainManagerTreatsTelegramAPIHashAsProductionNativeSecret() {
         XCTAssertTrue(KeychainManager.usesNativeKeychainInProductionForTesting(.apiHash))
+        XCTAssertTrue(KeychainManager.usesNativeKeychainInProductionForTesting(.gmailAccounts))
     }
 
     @MainActor
@@ -6865,6 +6926,182 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertFalse(prompt.contains("Supergroup"))
     }
 
+    func testGmailCompactBodyRemovesTransportNoiseWithoutChangingMeaning() {
+        let body = GmailPresentation.compactBody(
+            subject: "Security alert",
+            messageText: """
+            Security alert
+            [image: Google] A new sign-in was detected on a Mac.
+            If this was you, no action is needed. Check activity <https://accounts.google.com/example>.
+            You received this email to let you know about important changes. © 2026 Google LLC
+            """
+        )
+
+        XCTAssertEqual(
+            body,
+            "A new sign-in was detected on a Mac. If this was you, no action is needed. Check activity."
+        )
+        XCTAssertFalse(body.contains("https://"))
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("you received this email"))
+    }
+
+    func testGmailCompactBodyIsBoundedOnAWordBoundary() {
+        let body = GmailPresentation.compactBody(
+            subject: "Long update",
+            messageText: "Long update one two three four five six seven",
+            maxCharacters: 18
+        )
+
+        XCTAssertEqual(body, "one two three four…")
+    }
+
+    func testGmailEligibilityRejectsAuthenticationAndMarketingNoise() {
+        XCTAssertTrue(GmailSourceAdapter.proactiveInboxQuery.contains("-category:promotions"))
+        XCTAssertTrue(GmailSourceAdapter.proactiveInboxQuery.contains("-category:social"))
+        XCTAssertTrue(GmailSourceAdapter.proactiveInboxQuery.contains("-category:forums"))
+        XCTAssertTrue(GmailEligibilityPolicy.isHardNoise(
+            subject: "Security alert",
+            sender: "Google <no-reply@accounts.google.com>",
+            body: "A new sign-in on Mac was detected. Confirm it's you."
+        ))
+        XCTAssertTrue(GmailEligibilityPolicy.isHardNoise(
+            subject: "Your weekly newsletter",
+            sender: "Growth <newsletter@example.com>",
+            body: "View in browser. Shop now. Unsubscribe or manage preferences."
+        ))
+        XCTAssertTrue(GmailEligibilityPolicy.isHardNoise(
+            subject: "Verification",
+            sender: "notifications@example.com",
+            body: "Your verification code is 323707 and will expire in 10 minutes."
+        ))
+    }
+
+    func testGmailEligibilityKeepsRealReplyAndTaskMail() {
+        XCTAssertFalse(GmailEligibilityPolicy.isHardNoise(
+            subject: "Base grant agreement",
+            sender: "Aditi <aditi@example.com>",
+            body: "Please sign and submit the agreement by Friday. Manage preferences. Unsubscribe."
+        ))
+        XCTAssertTrue(GmailEligibilityPolicy.shouldSurface(
+            subject: "Can you review the proposal?",
+            sender: "Aditi <aditi@example.com>",
+            body: "Could you reply with feedback by Friday?",
+            hasActionableLoop: true
+        ))
+        XCTAssertFalse(GmailEligibilityPolicy.shouldSurface(
+            subject: "FYI",
+            sender: "Aditi <aditi@example.com>",
+            body: "Sharing this for your records.",
+            hasActionableLoop: false
+        ))
+    }
+
+    @MainActor
+    func testEmailSummaryUsesDedicatedProviderPath() async throws {
+        let service = AIService(
+            testingProvider: StubAIProvider(
+                summaryResult: "Aditi needs the grant agreement reviewed and signed by Friday."
+            )
+        )
+        let message = makeTGMessage(
+            id: 71,
+            chatId: -71,
+            text: "Please review and sign the attached grant agreement by Friday.",
+            date: Date(),
+            senderUserId: 9,
+            senderName: "Aditi"
+        )
+
+        let summary = try await service.emailSummary(
+            subject: "Grant agreement",
+            sender: "Aditi",
+            messages: [message],
+            myUserId: 1
+        )
+
+        XCTAssertEqual(
+            summary,
+            "Aditi needs the grant agreement reviewed and signed by Friday."
+        )
+    }
+
+    func testTaskMetadataIsSourceAwareAndRemovesDuplicatePerson() {
+        let task = DashboardTask.mock(
+            id: 9,
+            title: "Send the gym page data",
+            status: .open,
+            topicId: nil,
+            topicName: nil,
+            chatId: -9,
+            personName: "Tushar Pasi"
+        )
+
+        XCTAssertEqual(
+            DashboardTaskPresentation.metadataLine(task: task, source: .gmail),
+            "Tushar Pasi  ·  Gmail"
+        )
+    }
+
+    func testDashboardTaskTitlesCompressEmailBoilerplate() {
+        let cases: [(String, String)] = [
+            (
+                "Complete the Ironclad form, tax form, and agreement for the Base grant",
+                "Complete Base grant forms"
+            ),
+            (
+                "Your Framer site at nitrate.trade is about to go offline",
+                "Renew nitrate.trade on Framer"
+            ),
+            (
+                "Reactivate the Framer subscription for innercircle.so",
+                "Renew innercircle.so on Framer"
+            ),
+            (
+                "Pay the ICICI credit card bill of ₹10,975.98 due on Aug 08, 2026",
+                "Pay ICICI card · ₹10,975.98"
+            ),
+            (
+                "Approve the BYTEPLUS transaction in the ADCB Mobile Banking App",
+                "Approve BYTEPLUS transaction"
+            ),
+            (
+                "Upload the valid unexpired Emirates ID to the Stripe Dashboard for Sketch Labs L.L.C-FZ",
+                "Upload Emirates ID to Stripe"
+            ),
+            (
+                "Pay the invoice for USD 2,000.00 to 1811",
+                "Pay 1811 invoice · USD 2,000.00"
+            )
+        ]
+
+        for (input, expected) in cases {
+            XCTAssertEqual(DashboardTaskTitle.compact(input), expected, input)
+        }
+    }
+
+    func testExtractionPromptRequiresCompactTaskTitles() {
+        XCTAssertTrue(FactExtractionPrompt.systemPrompt.contains("target 4-9 words"))
+        XCTAssertTrue(FactExtractionPrompt.systemPrompt.contains("NEVER more than 12"))
+    }
+
+    func testTaskMetadataKeepsDistinctWorkspaceContext() {
+        let task = DashboardTask.mock(
+            id: 10,
+            title: "Review the newspaper draft",
+            status: .open,
+            topicId: nil,
+            topicName: nil,
+            chatId: -10,
+            personName: "Ohm",
+            chatTitle: "research"
+        )
+
+        XCTAssertEqual(
+            DashboardTaskPresentation.metadataLine(task: task, source: .slack),
+            "Ohm  ·  research  ·  Slack"
+        )
+    }
+
     func testGmailActionFallbackCapturesExplicitWorkButNotVerificationNoise() {
         let source = SourceID(kind: .gmail, account: "test@example.com")
         let chat = makeChat(
@@ -6913,6 +7150,391 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(drafts.first?.sourceMessageId, action.id)
     }
 
+    func testGmailActionFallbackCapturesExpiredIdentityDocument() {
+        let source = SourceID(kind: .gmail, account: "test@example.com")
+        let chat = makeChat(
+            id: -3,
+            title: "[Binance] Your ID Document has Expired - 2026-08-06",
+            chatType: .supergroup(supergroupId: -3, isChannel: false),
+            unreadCount: 1,
+            lastMessageDate: Date(),
+            source: source
+        )
+        let message = TGMessage(
+            id: -30,
+            chatId: chat.id,
+            senderId: .chat(chat.id),
+            date: Date(),
+            textContent: """
+            [Binance] Your ID Document has Expired - 2026-08-06
+
+            Your identity document has expired. Please upload a renewed document.
+            """,
+            mediaType: nil,
+            isOutgoing: false,
+            chatTitle: chat.title,
+            senderName: "Binance <do-not-reply@example.com>"
+        )
+
+        let drafts = GmailActionFallback.drafts(messages: [message], chat: chat)
+
+        XCTAssertEqual(drafts.count, 1)
+        XCTAssertEqual(drafts.first?.action, "Upload renewed identity document to Binance")
+        XCTAssertEqual(drafts.first?.loopKind, .action)
+    }
+
+    func testSlackTriageMovesAnswerableCheckQuestionToReplyLane() {
+        let chat = makeChat(
+            id: -5,
+            title: "Rajanshee",
+            chatType: .privateChat(userId: 44),
+            unreadCount: 1,
+            lastMessageDate: Date(),
+            source: SourceID(kind: .slack, account: "T_TEST")
+        )
+        let draft = FactDraft(
+            subjectEntity: "Rajanshee",
+            predicate: .iOwe,
+            objectText: "whether the right corner is blank",
+            action: "Check if the right corner is blank",
+            loopKind: .action,
+            objectEntity: nil,
+            confidence: 0.9,
+            validFrom: Date(),
+            sourceChatId: chat.id,
+            sourceChatTitle: chat.title,
+            sourceMessageId: -50,
+            sourceText: "also isme right corner wala blank h kya?",
+            senderName: "Rajanshee"
+        )
+
+        let enhanced = SlackTriagePolicy.enhancedDrafts([draft], messages: [], chat: chat)
+
+        XCTAssertEqual(enhanced.first?.loopKind, .reply)
+    }
+
+    func testSlackTriageTurnsExplicitUserCommitmentIntoAnchoredTask() {
+        let source = SourceID(kind: .slack, account: "T_TEST")
+        let chat = makeChat(
+            id: -6,
+            title: "Rajanshee",
+            chatType: .privateChat(userId: 45),
+            unreadCount: 1,
+            lastMessageDate: Date(),
+            source: source
+        )
+        let now = Date()
+        let request = TGMessage(
+            id: -60, chatId: chat.id, senderId: .user(45), date: now,
+            textContent: "can add here", mediaType: nil, isOutgoing: false,
+            chatTitle: chat.title, senderName: "Rajanshee", source: source
+        )
+        let commitment = TGMessage(
+            id: -61, chatId: chat.id, senderId: .user(1), date: now.addingTimeInterval(1),
+            textContent: "give I will add", mediaType: nil, isOutgoing: true,
+            chatTitle: chat.title, senderName: "Pratzyy", source: source
+        )
+        let detail = TGMessage(
+            id: -62, chatId: chat.id, senderId: .user(45), date: now.addingTimeInterval(2),
+            textContent: "• Recap: Clip together all the highlight moments", mediaType: nil, isOutgoing: false,
+            chatTitle: chat.title, senderName: "Rajanshee", source: source
+        )
+
+        let enhanced = SlackTriagePolicy.enhancedDrafts(
+            [], messages: [request, commitment, detail], chat: chat
+        )
+
+        XCTAssertEqual(enhanced.count, 1)
+        XCTAssertEqual(enhanced.first?.sourceMessageId, request.id)
+        XCTAssertEqual(enhanced.first?.loopKind, .action)
+        XCTAssertEqual(enhanced.first?.action, "Add recap to the page")
+    }
+
+    func testExpiredSlackStandupTaskClosesWithoutTouchingDurableOrRecentWork() async throws {
+        try await withTempDatabase { _ in
+            let now = Date(timeIntervalSince1970: 30_000)
+            let oldDate = now.addingTimeInterval(-3 * 86_400)
+            var oldSlackMessage = makeRecord(id: -701, chatId: -70, text: "lead standup today", date: oldDate)
+            oldSlackMessage.source = SourceID(kind: .slack, account: "T_TEST")
+            var recentSlackMessage = makeRecord(id: -702, chatId: -70, text: "lead standup today", date: now)
+            recentSlackMessage.source = SourceID(kind: .slack, account: "T_TEST")
+            let telegramMessage = makeRecord(id: -703, chatId: -71, text: "lead standup today", date: oldDate)
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: -70,
+                messages: [oldSlackMessage, recentSlackMessage],
+                updateRecentSyncState: false
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: -71,
+                messages: [telegramMessage],
+                updateRecentSyncState: false
+            )
+
+            func standupDraft(chatId: Int64, messageId: Int64, date: Date, object: String) -> FactDraft {
+                FactDraft(
+                    subjectEntity: "Team", predicate: .iOwe, objectText: object,
+                    action: "Lead the standup and get updates", loopKind: .action,
+                    objectEntity: nil, confidence: 0.9, validFrom: date,
+                    sourceChatId: chatId, sourceChatTitle: "Team", sourceMessageId: messageId,
+                    sourceText: "lead standup today", senderName: "Team"
+                )
+            }
+            await DatabaseManager.shared.upsertFacts([
+                standupDraft(chatId: -70, messageId: -701, date: oldDate, object: "old standup"),
+                standupDraft(chatId: -70, messageId: -702, date: now, object: "today standup"),
+                standupDraft(chatId: -71, messageId: -703, date: oldDate, object: "telegram standup")
+            ])
+
+            let closed = await DatabaseManager.shared.closeExpiredEphemeralSlackTasks(referenceDate: now)
+
+            XCTAssertEqual(closed, 1)
+            let open = await DatabaseManager.shared.loadOpenFacts()
+            XCTAssertFalse(open.contains { $0.sourceMessageId == -701 })
+            XCTAssertTrue(open.contains { $0.sourceMessageId == -702 })
+            XCTAssertTrue(open.contains { $0.sourceMessageId == -703 })
+            let history = await DatabaseManager.shared.loadRecentFacts()
+            XCTAssertEqual(history.first { $0.sourceMessageId == -701 }?.closeReason, .expired)
+        }
+    }
+
+    func testSlackThreadDeliveryClosesTaskButPromiseAndAcknowledgementDoNot() async throws {
+        try await withTempDatabase { _ in
+            let source = SourceID(kind: .slack, account: "T_TEST")
+            let base = Date(timeIntervalSince1970: 50_000)
+            let chatId: Int64 = -90
+
+            func slackRecord(
+                id: Int64, text: String, offset: TimeInterval,
+                outgoing: Bool = false, root: Int64? = nil
+            ) -> DatabaseManager.MessageRecord {
+                var record = makeRecord(
+                    id: id, chatId: chatId, text: text,
+                    date: base.addingTimeInterval(offset), isOutgoing: outgoing
+                )
+                record.source = source
+                record.threadRootId = root
+                return record
+            }
+
+            let explicitRoot: Int64 = -901
+            let shareRoot: Int64 = -902
+            let promiseRoot: Int64 = -903
+            let ackRoot: Int64 = -904
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: [
+                    slackRecord(id: explicitRoot, text: "Any update on the tool?", offset: 0),
+                    slackRecord(id: shareRoot, text: "Share your founder call slots", offset: 10),
+                    slackRecord(id: promiseRoot, text: "Share the final deck", offset: 20),
+                    slackRecord(id: ackRoot, text: "Publish the campaign", offset: 30),
+                    slackRecord(id: -911, text: "Yes already done", offset: 40, outgoing: true, root: explicitRoot),
+                    slackRecord(id: -912, text: "Tuesday 3pm or Wednesday 11am", offset: 50, outgoing: true, root: shareRoot),
+                    slackRecord(id: -913, text: "will share tomorrow", offset: 60, outgoing: true, root: promiseRoot),
+                    slackRecord(id: -914, text: "yes", offset: 70, outgoing: true, root: ackRoot)
+                ],
+                updateRecentSyncState: false
+            )
+
+            func draft(id: Int64, action: String) -> FactDraft {
+                FactDraft(
+                    subjectEntity: "me", predicate: .iOwe, objectText: action,
+                    action: action, loopKind: .action, objectEntity: nil,
+                    confidence: 0.9, validFrom: base,
+                    sourceChatId: chatId, sourceChatTitle: "Slack", sourceMessageId: id,
+                    sourceText: "request", senderName: "Teammate"
+                )
+            }
+            await DatabaseManager.shared.upsertFacts([
+                draft(id: explicitRoot, action: "Update the office tool"),
+                draft(id: shareRoot, action: "Share founder call slots"),
+                draft(id: promiseRoot, action: "Share the final deck"),
+                draft(id: ackRoot, action: "Publish the campaign")
+            ])
+
+            let closed = await DatabaseManager.shared.closeCompletedSlackThreadTasks(chatId: chatId)
+
+            XCTAssertEqual(closed, 2)
+            let openActions = Set(await DatabaseManager.shared.loadOpenFacts(chatId: chatId).map(\.action))
+            XCTAssertFalse(openActions.contains("Update the office tool"))
+            XCTAssertFalse(openActions.contains("Share founder call slots"))
+            XCTAssertTrue(openActions.contains("Share the final deck"))
+            XCTAssertTrue(openActions.contains("Publish the campaign"))
+        }
+    }
+
+    func testFactUpsertMovesSemanticLoopProvenanceTogether() async throws {
+        try await withTempDatabase { _ in
+            let oldChatId: Int64 = -40
+            let newChatId: Int64 = -41
+            let oldMessageId: Int64 = -400
+            let newMessageId: Int64 = -401
+            let date = Date(timeIntervalSince1970: 4_000)
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: oldChatId,
+                messages: [makeRecord(id: oldMessageId, chatId: oldChatId, text: "Renew Framer", date: date)],
+                updateRecentSyncState: false
+            )
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: newChatId,
+                messages: [makeRecord(id: newMessageId, chatId: newChatId, text: "Renew Framer", date: date)],
+                updateRecentSyncState: false
+            )
+
+            var draft = FactDraft(
+                subjectEntity: "Framer",
+                predicate: .iOwe,
+                objectText: "Renew nitrate.trade",
+                action: "Renew nitrate.trade on Framer",
+                loopKind: .action,
+                objectEntity: nil,
+                confidence: 0.9,
+                validFrom: date,
+                sourceChatId: oldChatId,
+                sourceChatTitle: "Old reminder",
+                sourceMessageId: oldMessageId,
+                sourceText: "Renew Framer",
+                senderName: "Framer"
+            )
+            await DatabaseManager.shared.upsertFacts([draft])
+            draft.sourceChatId = newChatId
+            draft.sourceChatTitle = "New reminder"
+            draft.sourceMessageId = newMessageId
+            await DatabaseManager.shared.upsertFacts([draft])
+
+            let oldFacts = await DatabaseManager.shared.loadOpenFacts(chatId: oldChatId)
+            XCTAssertTrue(oldFacts.isEmpty)
+            let moved = await DatabaseManager.shared.loadOpenFacts(chatId: newChatId)
+            XCTAssertEqual(moved.count, 1)
+            XCTAssertEqual(moved.first?.sourceMessageId, newMessageId)
+            XCTAssertEqual(moved.first?.sourceChatTitle, "New reminder")
+        }
+    }
+
+    func testGmailTaskCanonicalizationKeepsRicherDraftForOneSourceMessage() {
+        let date = Date(timeIntervalSince1970: 1_000)
+        let copiedSubject = FactDraft(
+            subjectEntity: "Framer",
+            predicate: .iOwe,
+            objectText: "Your Framer site at nitrate.trade is about to go offline",
+            action: "Your Framer site at nitrate.trade is about to go offline",
+            loopKind: .action,
+            objectEntity: nil,
+            confidence: 0.99,
+            validFrom: date,
+            sourceChatId: -20,
+            sourceChatTitle: "Action Required",
+            sourceMessageId: -200,
+            sourceText: "Your site is about to go offline.",
+            senderName: "Framer"
+        )
+        var usefulTask = copiedSubject
+        usefulTask.objectText = "nitrate.trade subscription"
+        usefulTask.action = "Reactivate nitrate.trade on Framer"
+        usefulTask.confidence = 0.90
+
+        let coalesced = GmailTaskCanonicalization.coalesced([copiedSubject, usefulTask])
+
+        XCTAssertEqual(coalesced.count, 1)
+        XCTAssertEqual(coalesced.first?.action, "Reactivate nitrate.trade on Framer")
+    }
+
+    func testGmailTaskStorageKeepsOneLiveFactAndRetainsDuplicateHistory() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = -30
+            let messageId: Int64 = -300
+            var message = makeRecord(
+                id: messageId,
+                chatId: chatId,
+                text: "Your Framer site is about to go offline.",
+                date: Date(timeIntervalSince1970: 2_000),
+                senderName: "Framer"
+            )
+            message.source = SourceID(kind: .gmail, account: "test@example.com")
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: [message],
+                updateRecentSyncState: false
+            )
+
+            let copiedSubject = FactDraft(
+                subjectEntity: "Framer",
+                predicate: .iOwe,
+                objectText: "Your Framer site is about to go offline",
+                action: "Your Framer site is about to go offline",
+                loopKind: .action,
+                objectEntity: nil,
+                confidence: 0.99,
+                validFrom: message.date,
+                sourceChatId: chatId,
+                sourceChatTitle: "Action Required",
+                sourceMessageId: messageId,
+                sourceText: message.textContent ?? "",
+                senderName: "Framer"
+            )
+            var usefulTask = copiedSubject
+            usefulTask.objectText = "nitrate.trade subscription"
+            usefulTask.action = "Reactivate nitrate.trade on Framer"
+            usefulTask.confidence = 0.90
+
+            await DatabaseManager.shared.upsertFacts([copiedSubject, usefulTask])
+
+            let open = await DatabaseManager.shared.loadOpenFacts(chatId: chatId)
+            XCTAssertEqual(open.count, 1)
+            XCTAssertEqual(open.first?.action, "Reactivate nitrate.trade on Framer")
+
+            let history = await DatabaseManager.shared.loadRecentFacts(limit: 10)
+            XCTAssertEqual(history.count, 2)
+            XCTAssertEqual(history.filter(\.isOpen).count, 1)
+            XCTAssertEqual(history.first(where: { !$0.isOpen })?.closeReason, .deduplicated)
+        }
+    }
+
+    func testPinnedOwnerChipsHideRedundantAnyoneAndShowItForTeamTasks() {
+        let currentUser = TGUser(
+            id: 99,
+            firstName: "Pratyush",
+            lastName: "",
+            username: "pratzyy",
+            phoneNumber: nil,
+            isBot: false
+        )
+        let mine = DashboardTask.mock(
+            id: 1,
+            title: "Review grant form",
+            status: .open,
+            topicId: nil,
+            topicName: nil,
+            chatId: 1,
+            personName: "Base",
+            ownerName: "Me"
+        )
+        let other = DashboardTask.mock(
+            id: 2,
+            title: "Share campaign report",
+            status: .open,
+            topicId: nil,
+            topicName: nil,
+            chatId: 2,
+            personName: "Rajanshee",
+            ownerName: "Rajanshee"
+        )
+
+        let onlyMine = DashboardTaskListFilters.pinnedOwnerChips(
+            pinnedNames: [],
+            tasks: [mine],
+            currentUser: currentUser
+        )
+        XCTAssertEqual(onlyMine.map(\.label), ["For me"])
+
+        let team = DashboardTaskListFilters.pinnedOwnerChips(
+            pinnedNames: [],
+            tasks: [mine, other],
+            currentUser: currentUser
+        )
+        XCTAssertEqual(team.map(\.label), ["For me", "Anyone"])
+        XCTAssertEqual(team.map(\.count), [1, 2])
+    }
+
     func testExtractionCursorUsesChronologyForNegativeCanonicalMessageIDs() async throws {
         try await withTempDatabase { _ in
             let chatId: Int64 = -77
@@ -6955,6 +7577,55 @@ final class PidgyCoreTests: XCTestCase {
             await DatabaseManager.shared.updateFactExtractionCursor(chatId: chatId, throughMessageId: -900)
             let storedCursor = await DatabaseManager.shared.factExtractionCursor(chatId: chatId)
             XCTAssertEqual(storedCursor, -900)
+        }
+    }
+
+    func testSlackHistoryDecodesThreadReplyMetadata() throws {
+        let json = Data(#"{"type":"message","text":"please review","ts":"1784628914.660039","reply_count":35,"latest_reply":"1784630294.983989"}"#.utf8)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        let message = try decoder.decode(SlackMessage.self, from: json)
+
+        XCTAssertEqual(message.replyCount, 35)
+        XCTAssertEqual(message.latestReply, "1784630294.983989")
+    }
+
+    func testThreadBackfillRewindsExtractionCursorToClosestPredecessor() async throws {
+        try await withTempDatabase { _ in
+            let chatId: Int64 = -88
+            let base = Date(timeIntervalSince1970: 20_000)
+            let records = [
+                makeRecord(id: -100, chatId: chatId, text: "thread root", date: base),
+                makeRecord(id: -300, chatId: chatId, text: "done in thread", date: base.addingTimeInterval(10)),
+                makeRecord(id: -200, chatId: chatId, text: "newer channel message", date: base.addingTimeInterval(20))
+            ]
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatId,
+                messages: records,
+                updateRecentSyncState: false
+            )
+            await DatabaseManager.shared.updateFactExtractionCursor(chatId: chatId, throughMessageId: -200)
+
+            let existing = await DatabaseManager.shared.existingMessageIDs(
+                chatId: chatId,
+                messageIds: [-100, -300, -999]
+            )
+            XCTAssertEqual(existing, [-100, -300])
+
+            let rewound = await DatabaseManager.shared.rewindFactExtractionCursorIfNeeded(
+                chatId: chatId,
+                before: base.addingTimeInterval(10)
+            )
+            XCTAssertTrue(rewound)
+            let cursor = await DatabaseManager.shared.factExtractionCursor(chatId: chatId)
+            XCTAssertEqual(cursor, -100)
+
+            let unnecessary = await DatabaseManager.shared.rewindFactExtractionCursorIfNeeded(
+                chatId: chatId,
+                before: base.addingTimeInterval(20)
+            )
+            XCTAssertFalse(unnecessary)
         }
     }
 
@@ -7078,6 +7749,53 @@ final class PidgyCoreTests: XCTestCase {
             ])
             let openAfterInbound = await DatabaseManager.shared.loadOpenFacts(limit: 50)
             XCTAssertTrue(openAfterInbound.map(\.action).contains("Confirm signup status"))
+        }
+    }
+
+    func testDeferredSlackReplyStaysOpenDespiteLaterUnrelatedMessages() async throws {
+        try await withTempDatabase { _ in
+            let source = SourceID(kind: .slack, account: "T_TEST")
+            let base = Date(timeIntervalSince1970: 40_000)
+            var question = makeRecord(
+                id: -801, chatId: -80,
+                text: "also isme right corner wala blank h kya?", date: base,
+                senderName: "Rajanshee"
+            )
+            question.source = source
+            var deferral = makeRecord(
+                id: -802, chatId: -80,
+                text: "wait lemme check if this is live", date: base.addingTimeInterval(60),
+                isOutgoing: true, senderName: "Pratzyy"
+            )
+            deferral.source = source
+            var unrelated = makeRecord(
+                id: -803, chatId: -80,
+                text: "post on the other thread", date: base.addingTimeInterval(120),
+                isOutgoing: true, senderName: "Pratzyy"
+            )
+            unrelated.source = source
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: -80,
+                messages: [question, deferral, unrelated],
+                updateRecentSyncState: false
+            )
+            await DatabaseManager.shared.upsertFacts([
+                FactDraft(
+                    subjectEntity: "Rajanshee", predicate: .iOwe,
+                    objectText: "whether the right corner is blank",
+                    action: "Check if the right corner is blank", loopKind: .action,
+                    objectEntity: nil, confidence: 0.9, validFrom: base,
+                    sourceChatId: -80, sourceChatTitle: "Rajanshee", sourceMessageId: -801,
+                    sourceText: "also isme right corner wala blank h kya?", senderName: "Rajanshee"
+                )
+            ])
+
+            let repaired = await DatabaseManager.shared.repairSlackQuestionLoopKinds()
+            XCTAssertEqual(repaired, 1)
+            let closed = await DatabaseManager.shared.closeAnsweredReplyLoops(chatId: -80)
+            XCTAssertEqual(closed, 0)
+            let open = await DatabaseManager.shared.loadOpenFacts(chatId: -80)
+            XCTAssertEqual(open.first?.loopKind, .reply)
         }
     }
 
@@ -7237,6 +7955,7 @@ private extension DashboardTask {
         topicName: String?,
         chatId: Int64,
         personName: String,
+        chatTitle: String? = nil,
         ownerName: String = "Me",
         priority: DashboardTaskPriority = .medium,
         updatedAt: Date = Date(),
@@ -7252,7 +7971,7 @@ private extension DashboardTask {
             ownerName: ownerName,
             personName: personName,
             chatId: chatId,
-            chatTitle: personName,
+            chatTitle: chatTitle ?? personName,
             topicId: topicId,
             topicName: topicName,
             priority: priority,
@@ -7502,10 +8221,12 @@ private final class PipelineTestTelegramService: TelegramService {
 
 
 private struct StubAIProvider: AIProvider {
-    var queryPlannerResult: QueryPlannerResultDTO?
-    var queryPlannerError: Error?
+    var summaryResult: String? = nil
+    var queryPlannerResult: QueryPlannerResultDTO? = nil
+    var queryPlannerError: Error? = nil
 
     func summarize(messages: [MessageSnippet], prompt: String) async throws -> String {
+        if let summaryResult { return summaryResult }
         throw AIError.providerNotConfigured
     }
 

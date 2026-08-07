@@ -456,6 +456,9 @@ struct DashboardReplyDetail: View {
     @State private var isGeneratingCatchUp = false
     @State private var catchUpError: String?
     @State private var catchUpForChatId: Int64?
+    @State private var taskCreatedForChatId: Int64?
+    @State private var isCreatingTask = false
+    @State private var taskCreationError: String?
 
     /// Same cap as the Task Evidence section — enough to read the back-and-
     /// forth that triggered the suggestion without becoming a full transcript.
@@ -467,69 +470,73 @@ struct DashboardReplyDetail: View {
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
             if let item {
-                DashboardDetailCover {
-                    DashboardTopicChip(text: item.category.rawValue, tint: categoryTint(item.category))
-                    Text(item.chat.title)
-                        .font(PidgyDashboardTheme.sectionTitleFont)
-                        .tracking(-0.4)
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 8) {
-                        Text(sourceLabel(for: item.chat))
-                        Text("·")
-                        // Age of the ASK (loop date), not the chat's last message.
-                        Text(DateFormatting.compactRelativeTime(from: item.loopDate ?? item.lastMessage.date))
+                if item.chat.source.kind == .gmail {
+                    gmailDetailContent(for: item)
+                } else {
+                    DashboardDetailCover {
+                        DashboardTopicChip(text: item.category.rawValue, tint: categoryTint(item.category))
+                        Text(item.chat.title)
+                            .font(PidgyDashboardTheme.sectionTitleFont)
+                            .tracking(-0.4)
+                            .foregroundStyle(PidgyDashboardTheme.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 8) {
+                            Text(sourceLabel(for: item.chat))
+                            Text("·")
+                            // Age of the ASK (loop date), not the chat's last message.
+                            Text(DateFormatting.compactRelativeTime(from: item.loopDate ?? item.lastMessage.date))
+                        }
+                        .font(PidgyDashboardTheme.metadataFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
                     }
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                }
 
-                DashboardDetailSection(title: "Suggested action") {
-                    Text(item.suggestedAction ?? "No suggested action.")
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                        .lineSpacing(3)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(PidgyDashboardTheme.paper)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(PidgyDashboardTheme.rule)
-                        )
-                }
+                    DashboardDetailSection(title: "Suggested action") {
+                        Text(item.suggestedAction ?? "No suggested action.")
+                            .font(PidgyDashboardTheme.detailBodyFont)
+                            .foregroundStyle(PidgyDashboardTheme.primary)
+                            .lineSpacing(3)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(PidgyDashboardTheme.paper)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(PidgyDashboardTheme.rule)
+                            )
+                    }
 
-                // One combined Assist section: "Catch me up" (rolling summary,
-                // revealed instantly on click) + "Suggest replies" side by
-                // side, instead of two stacked near-empty sections.
-                assistSection(for: item)
+                    // One combined Assist section: "Catch me up" (rolling summary,
+                    // revealed instantly on click) + "Suggest replies" side by
+                    // side, instead of two stacked near-empty sections.
+                    assistSection(for: item)
 
-                let evidenceItems = mergedEvidenceItems(for: item)
-                DashboardDetailSection(
-                    title: "Evidence",
-                    trailing: evidenceTrailing(for: evidenceItems)
-                ) {
-                    VStack(spacing: 6) {
-                        if evidenceItems.isEmpty {
-                            Text(isLoadingContext
-                                 ? "Loading nearby messages…"
-                                 : "No recent messages found for this chat.")
-                                .font(PidgyDashboardTheme.detailBodyFont)
-                                .foregroundStyle(PidgyDashboardTheme.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
-                            ForEach(evidenceItems) { row in
-                                Button {
-                                    if item.chat.source.kind == .telegram {
-                                        Task { await telegramService.openMessageInTelegram(chatId: item.chat.id, messageId: row.id) }
-                                    } else {
-                                        onOpenChat(item.chat)
+                    let evidenceItems = mergedEvidenceItems(for: item)
+                    DashboardDetailSection(
+                        title: "Evidence",
+                        trailing: evidenceTrailing(for: evidenceItems)
+                    ) {
+                        VStack(spacing: 6) {
+                            if evidenceItems.isEmpty {
+                                Text(isLoadingContext
+                                     ? "Loading nearby messages…"
+                                     : "No recent messages found for this chat.")
+                                    .font(PidgyDashboardTheme.detailBodyFont)
+                                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                ForEach(evidenceItems) { row in
+                                    Button {
+                                        if item.chat.source.kind == .telegram {
+                                            Task { await telegramService.openMessageInTelegram(chatId: item.chat.id, messageId: row.id) }
+                                        } else {
+                                            onOpenChat(item.chat)
+                                        }
+                                    } label: {
+                                        DashboardEvidenceContextRow(item: row)
                                     }
-                                } label: {
-                                    DashboardEvidenceContextRow(item: row)
+                                    .buttonStyle(.pidgyPress)
+                                    .help(openLabel(for: item.chat))
                                 }
-                                .buttonStyle(.pidgyPress)
-                                .help(openLabel(for: item.chat))
                             }
                         }
                     }
@@ -545,7 +552,10 @@ struct DashboardReplyDetail: View {
             // Primary action — the top-bar Refresh covers re-analysis.
             // Per-detail Refresh buttons were removed because the global
             // top-bar refresh is the one source of truth for the user.
-            HStack(spacing: 8) {
+            if let item, item.chat.source.kind == .gmail {
+                gmailFooter(for: item)
+            } else {
+                HStack(spacing: 8) {
                 Button {
                     if let item, chatOpenState.openingChatId == nil { onOpenChat(item.chat) }
                 } label: {
@@ -583,6 +593,7 @@ struct DashboardReplyDetail: View {
                     .pidgyCapsuleBackground()
                     .help("Wrong category or suggestion? Flag this triage — you'll review what's shared before sending.")
                 }
+                }
             }
         }
         // Keyed on chat AND loop anchor: the item's identity is chat-stable, so
@@ -603,11 +614,364 @@ struct DashboardReplyDetail: View {
             catchUpForChatId = nil
             storedSummary = nil
             catchUpExpanded = false
+            taskCreatedForChatId = nil
+            taskCreationError = nil
             if let chatId = item?.chat.id {
                 storedSummary = await DatabaseManager.shared.loadCurrentChatSummary(chatId: chatId)
             }
             await loadConversationContext()
+            if let item,
+               item.chat.source.kind == .gmail,
+               storedSummary == nil,
+               aiService.isConfigured {
+                await generateGmailSummary(for: item)
+            }
         }
+    }
+
+    // MARK: - Gmail detail
+
+    @ViewBuilder
+    private func gmailDetailContent(for item: FollowUpItem) -> some View {
+        let sender = GmailPresentation.senderName(from: item.lastMessage.senderName)
+        let age = DateFormatting.compactRelativeTime(from: item.loopDate ?? item.lastMessage.date)
+
+        DashboardDetailCover {
+            HStack(alignment: .top, spacing: 10) {
+                DashboardIdentityAvatar(
+                    chat: item.chat,
+                    label: sender,
+                    source: .gmail,
+                    userID: item.lastMessage.senderUserId,
+                    size: 40
+                )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(sender)
+                        .font(PidgyDashboardTheme.metadataMediumFont)
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .lineLimit(1)
+                    Text("Gmail  ·  \(age)")
+                        .font(PidgyDashboardTheme.metadataFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                }
+                Spacer(minLength: 8)
+                DashboardTopicChip(text: item.category.rawValue, tint: categoryTint(item.category))
+                    .padding(.trailing, 22)
+            }
+
+            Text(item.chat.title)
+                .font(PidgyDashboardTheme.sectionTitleFont)
+                .tracking(-0.4)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: gmailStatusIcon(for: item))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(gmailStatusTint(for: item))
+                .frame(width: 28, height: 28)
+                .background(gmailStatusTint(for: item).opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(gmailStatusTitle(for: item))
+                    .font(PidgyDashboardTheme.metadataMediumFont)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                Text(gmailStatusSubtitle(for: item))
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(22)
+        .overlay(alignment: .bottom) { gmailDivider }
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("ACTIONS")
+                    .font(PidgyDashboardTheme.captionMediumFont)
+                    .tracking(0.8)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+
+                Button {
+                    Task { await createTask(from: item) }
+                } label: {
+                    if isCreatingTask {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 82)
+                    } else {
+                        Label(
+                            taskCreatedForChatId == item.chat.id ? "Created" : "Create task",
+                            systemImage: taskCreatedForChatId == item.chat.id ? "checkmark" : "plus"
+                        )
+                    }
+                }
+                .buttonStyle(.pidgyPress)
+                .font(PidgyDashboardTheme.captionMediumFont)
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .pidgyCapsuleBackground()
+                .disabled(isCreatingTask || taskCreatedForChatId == item.chat.id)
+            }
+
+            if let taskCreationError {
+                Text(taskCreationError)
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .foregroundStyle(PidgyDashboardTheme.red)
+            }
+        }
+        .padding(22)
+        .overlay(alignment: .bottom) { gmailDivider }
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SUMMARY")
+                .font(PidgyDashboardTheme.captionMediumFont)
+                .tracking(0.8)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+
+            gmailSummaryContent(for: item)
+        }
+        .padding(22)
+    }
+
+    @ViewBuilder
+    private func gmailSummaryContent(for item: FollowUpItem) -> some View {
+        if let storedSummary {
+            gmailInlineSummary(storedSummary.summary)
+        } else if catchUpForChatId == item.chat.id, !catchUpText.isEmpty {
+            gmailInlineSummary(catchUpText)
+        } else if isGeneratingCatchUp && catchUpForChatId == item.chat.id {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Summarizing…")
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PidgyDashboardTheme.paper)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        } else {
+            gmailInlineSummary(gmailFallbackSummary(for: item))
+        }
+    }
+
+    private func gmailInlineSummary(_ text: String) -> some View {
+        Text(text)
+            .font(PidgyDashboardTheme.detailBodyFont)
+            .foregroundStyle(PidgyDashboardTheme.primary)
+            .lineSpacing(3)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PidgyDashboardTheme.paper)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(PidgyDashboardTheme.rule)
+            )
+    }
+
+    private func gmailFooter(for item: FollowUpItem) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                if chatOpenState.openingChatId == nil { onOpenChat(item.chat) }
+            } label: {
+                Group {
+                    if chatOpenState.openingChatId == item.chat.id {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Open in Gmail", systemImage: "envelope")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 36)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.pidgyPress)
+            .foregroundStyle(PidgyDashboardTheme.primary)
+            .pidgyCapsuleBackground()
+            .disabled(chatOpenState.openingChatId == item.chat.id)
+
+            Menu {
+                Button("Copy summary", systemImage: "doc.on.doc") {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(gmailDisplayedSummary(for: item), forType: .string)
+                }
+                Divider()
+                Button("Flag triage", systemImage: "flag") {
+                    FlaggedAnswerFixture.replyTriage(item).submitToFeedbackSheet()
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 36, height: 36)
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .foregroundStyle(PidgyDashboardTheme.secondary)
+            .pidgyCapsuleBackground()
+            .help("More email actions")
+        }
+    }
+
+    private var gmailDivider: some View {
+        Rectangle()
+            .fill(PidgyDashboardTheme.rule)
+            .frame(height: 1)
+    }
+
+    private func gmailStatusTitle(for item: FollowUpItem) -> String {
+        switch item.category {
+        case .quiet: return "No action needed"
+        case .onMe: return item.suggestedAction ?? "Reply needed"
+        case .onThem: return "Waiting on them"
+        }
+    }
+
+    private func gmailStatusSubtitle(for item: FollowUpItem) -> String {
+        switch item.category {
+        case .quiet: return "Pidgy marked this email as informational."
+        case .onMe: return "This email expects an answer or action from you."
+        case .onThem: return "Pidgy is tracking the response you are waiting for."
+        }
+    }
+
+    private func gmailStatusIcon(for item: FollowUpItem) -> String {
+        switch item.category {
+        case .quiet: return "checkmark"
+        case .onMe: return "arrowshape.turn.up.left.fill"
+        case .onThem: return "clock.fill"
+        }
+    }
+
+    private func gmailStatusTint(for item: FollowUpItem) -> Color {
+        switch item.category {
+        case .quiet: return Color.Pidgy.success
+        case .onMe: return Color.Pidgy.warning
+        case .onThem: return Color.Pidgy.accent
+        }
+    }
+
+    private func gmailDisplayedSummary(for item: FollowUpItem) -> String {
+        if let summary = storedSummary?.summary.trimmingCharacters(in: .whitespacesAndNewlines),
+           !summary.isEmpty {
+            return summary
+        }
+        let generated = catchUpText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if catchUpForChatId == item.chat.id, !generated.isEmpty {
+            return generated
+        }
+        return gmailFallbackSummary(for: item)
+    }
+
+    private func gmailFallbackSummary(for item: FollowUpItem) -> String {
+        let sender = GmailPresentation.senderName(from: item.lastMessage.senderName)
+        let topic = item.chat.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch item.category {
+        case .onMe:
+            let action = item.suggestedAction?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let action, !action.isEmpty {
+                return "\(sender) emailed about \(topic). \(action)"
+            }
+            return "\(sender) emailed about \(topic), and it needs your response or action."
+        case .onThem:
+            return "You are waiting for \(sender) to follow up about \(topic)."
+        case .quiet:
+            return "\(sender) shared an informational update about \(topic). No action is needed."
+        }
+    }
+
+    private func generateGmailSummary(for item: FollowUpItem) async {
+        catchUpError = nil
+        isGeneratingCatchUp = true
+        catchUpForChatId = item.chat.id
+        defer { isGeneratingCatchUp = false }
+        do {
+            let messages = await loadAIContextMessages(for: item.chat.id)
+            guard !messages.isEmpty else { return }
+            let sender = GmailPresentation.senderName(from: item.lastMessage.senderName)
+            let myUserId = telegramService.currentUser?.id ?? 0
+            let summary = try await aiService.emailSummary(
+                subject: item.chat.title,
+                sender: sender,
+                messages: messages,
+                myUserId: Int64(myUserId)
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !summary.isEmpty else { return }
+            catchUpText = summary
+            await DatabaseManager.shared.saveChatSummary(
+                chatId: item.chat.id,
+                title: item.chat.title,
+                summary: summary,
+                throughMessageId: item.lastMessage.id
+            )
+        } catch {
+            // Keep the detail useful and body-free when AI is unavailable.
+            catchUpError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func createTask(from item: FollowUpItem) async {
+        guard !isCreatingTask else { return }
+        isCreatingTask = true
+        taskCreationError = nil
+        defer { isCreatingTask = false }
+
+        let existing = await DatabaseManager.shared.loadOpenFacts(chatId: item.chat.id)
+            .first { fact in
+                fact.predicate == .iOwe
+                    && (item.loopSourceMessageId == nil || fact.sourceMessageId == item.loopSourceMessageId)
+            }
+        let sender = GmailPresentation.senderName(from: item.lastMessage.senderName)
+        let body = GmailPresentation.compactBody(
+            subject: item.chat.title,
+            messageText: item.lastMessage.displayText
+        )
+
+        let draft: FactDraft
+        if let existing {
+            draft = FactDraft(
+                subjectEntity: existing.subjectEntity,
+                subjectPersonId: existing.subjectPersonId,
+                predicate: .iOwe,
+                objectText: existing.objectText,
+                action: existing.action.isEmpty ? "Review \(item.chat.title)" : existing.action,
+                loopKind: .action,
+                objectEntity: existing.objectEntity,
+                confidence: max(existing.confidence, 0.95),
+                validFrom: existing.validFrom,
+                sourceChatId: existing.sourceChatId,
+                sourceChatTitle: existing.sourceChatTitle,
+                sourceMessageId: existing.sourceMessageId,
+                sourceText: existing.sourceText,
+                senderName: existing.senderName
+            )
+        } else {
+            draft = FactDraft(
+                subjectEntity: sender,
+                predicate: .iOwe,
+                objectText: item.chat.title,
+                action: "Review \(item.chat.title)",
+                loopKind: .action,
+                confidence: 1,
+                validFrom: item.lastMessage.date,
+                sourceChatId: item.chat.id,
+                sourceChatTitle: item.chat.title,
+                sourceMessageId: item.lastMessage.id,
+                sourceText: body,
+                senderName: sender
+            )
+        }
+
+        await DatabaseManager.shared.upsertFacts([draft])
+        taskCreatedForChatId = item.chat.id
+        NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
     }
 
     // MARK: - Assist section (catch-up + suggested replies, #20/#21)
@@ -1082,15 +1446,13 @@ struct DashboardFeedRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if chat?.source.kind == .gmail {
-                DashboardInitialsAvatar(label: item.avatarLabel, size: PidgyDashboardTheme.rowAvatarSize)
-            } else {
-                DashboardTelegramAvatar(
-                    chat: chat,
-                    fallbackTitle: item.avatarLabel,
-                    size: PidgyDashboardTheme.rowAvatarSize
-                )
-            }
+            DashboardIdentityAvatar(
+                chat: chat,
+                label: item.avatarLabel,
+                source: chat?.source.kind,
+                userID: identityUserID,
+                size: PidgyDashboardTheme.rowAvatarSize
+            )
 
             // Title at regular weight (design spec: fontSize 14, no
             // explicit weight → 400 regular). Metadata collapsed onto a
@@ -1138,6 +1500,18 @@ struct DashboardFeedRow: View {
             return sourceRegistry.chat(id: task.chatId)
         }
     }
+
+    private var identityUserID: Int64? {
+        switch item.kind {
+        case .reply(let reply):
+            return reply.lastMessage.senderUserId
+        case .task:
+            guard let message = chat?.lastMessage,
+                  DashboardTaskPresentation.sameIdentity(message.senderName, item.avatarLabel)
+            else { return nil }
+            return message.senderUserId
+        }
+    }
 }
 
 struct DashboardAttentionRow: View {
@@ -1146,15 +1520,13 @@ struct DashboardAttentionRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            if isGmail {
-                DashboardInitialsAvatar(label: personName, size: PidgyDashboardTheme.rowAvatarSize)
-            } else {
-                DashboardTelegramAvatar(
-                    chat: item.chat,
-                    fallbackTitle: personName,
-                    size: PidgyDashboardTheme.rowAvatarSize
-                )
-            }
+            DashboardIdentityAvatar(
+                chat: item.chat,
+                label: personName,
+                source: item.chat.source.kind,
+                userID: item.lastMessage.senderUserId,
+                size: PidgyDashboardTheme.rowAvatarSize
+            )
 
             VStack(alignment: .leading, spacing: 4) {
                 if isGmail {
@@ -1196,12 +1568,6 @@ struct DashboardAttentionRow: View {
                     .font(PidgyDashboardTheme.rowEmphasisFont)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                     .lineLimit(1)
-                Label("Gmail", systemImage: "envelope.fill")
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    .padding(.horizontal, 6)
-                    .frame(height: 18)
-                    .background(PidgyDashboardTheme.raised, in: Capsule())
                 if item.chat.unreadCount > 0 {
                     Circle()
                         .fill(PidgyDashboardTheme.brand)

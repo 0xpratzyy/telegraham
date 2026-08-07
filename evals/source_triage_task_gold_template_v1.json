@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "name": "Sanitized Gmail and Slack triage/task template",
+  "adjudication": "template",
+  "createdAt": "2026-08-06T00:00:00Z",
+  "cases": [
+    {
+      "id": "gmail-example-task",
+      "source": "gmail",
+      "account": "person@example.com",
+      "message": {
+        "externalId": "gmail-message-id"
+      },
+      "gold": {
+        "label": "task"
+      },
+      "review": {
+        "status": "provisional",
+        "reviewer": "replace-me",
+        "reason": "Explicit request with unfinished work."
+      }
+    },
+    {
+      "id": "slack-example-reply",
+      "source": "slack",
+      "account": "T_WORKSPACE",
+      "message": {
+        "conversationExternalId": "D_CHANNEL",
+        "externalId": "1234567890.123456"
+      },
+      "gold": {
+        "label": "reply"
+      },
+      "review": {
+        "status": "provisional",
+        "reviewer": "replace-me",
+        "reason": "Latest unresolved inbound question needs a response."
+      }
+    }
+  ]
+}

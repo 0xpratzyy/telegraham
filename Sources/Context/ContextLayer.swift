@@ -73,6 +73,8 @@ enum FactCloseReason: String, Codable, Sendable {
     case replied = "replied"          // auto: the loop was addressed in chat
     case userDone = "user_done"       // user clicked Mark Done
     case userIgnored = "user_ignored" // user clicked Ignore
+    case deduplicated = "deduplicated" // auto: a richer loop represents the same source message
+    case expired = "expired"           // auto: same-day conversational work is no longer actionable
 }
 
 extension Notification.Name {
@@ -147,6 +149,98 @@ struct FactDraft: Equatable, Sendable {
     var fingerprint: String {
         let subjectKey = subjectPersonId.map { "p:\($0)" } ?? "n:\(subjectEntity.lowercased())"
         return "\(subjectKey)|\(predicate.rawValue)|\(ContextLayer.normalizedLoopObject(objectText))"
+    }
+}
+
+/// Gmail threads are message-shaped, while fact identity is semantic. The
+/// model can phrase one email obligation two different ways across passes, so
+/// semantic fingerprints alone are not enough to prevent duplicate Tasks.
+/// This policy gives a Gmail source message one canonical live action loop and
+/// prefers a useful verb-led task over a copied subject line.
+enum GmailTaskCanonicalization {
+    static func coalesced(_ drafts: [FactDraft]) -> [FactDraft] {
+        var result: [FactDraft] = []
+        var indexBySource: [SourceKey: Int] = [:]
+
+        for draft in drafts {
+            guard isTask(draft) else {
+                result.append(draft)
+                continue
+            }
+
+            let key = SourceKey(chatId: draft.sourceChatId, messageId: draft.sourceMessageId)
+            guard let existingIndex = indexBySource[key] else {
+                indexBySource[key] = result.count
+                result.append(draft)
+                continue
+            }
+
+            if quality(
+                action: draft.action,
+                objectText: draft.objectText,
+                confidence: draft.confidence
+            ) > quality(
+                action: result[existingIndex].action,
+                objectText: result[existingIndex].objectText,
+                confidence: result[existingIndex].confidence
+            ) {
+                result[existingIndex] = draft
+            }
+        }
+        return result
+    }
+
+    static func preferredFact(in facts: [Fact]) -> Fact? {
+        facts.max { lhs, rhs in
+            let lhsQuality = quality(
+                action: lhs.action,
+                objectText: lhs.objectText,
+                confidence: lhs.confidence
+            )
+            let rhsQuality = quality(
+                action: rhs.action,
+                objectText: rhs.objectText,
+                confidence: rhs.confidence
+            )
+            if lhsQuality != rhsQuality { return lhsQuality < rhsQuality }
+            // Stable tie-break: keep the first interpretation instead of
+            // changing task identity every time the message is reprocessed.
+            return lhs.createdAt > rhs.createdAt
+        }
+    }
+
+    private static func isTask(_ draft: FactDraft) -> Bool {
+        draft.predicate == .iOwe && draft.loopKind != .reply
+    }
+
+    private static func quality(action: String, objectText: String, confidence: Double) -> Int {
+        let trimmed = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedAction = trimmed.lowercased()
+        let normalizedObject = objectText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let firstWord = normalizedAction
+            .split(whereSeparator: { !$0.isLetter })
+            .first
+            .map(String.init) ?? ""
+        let strongVerbs: Set<String> = [
+            "approve", "claim", "complete", "download", "fill", "pay",
+            "provide", "reactivate", "renew", "review", "send", "sign",
+            "submit", "upload"
+        ]
+        let wordCount = normalizedAction.split(whereSeparator: \Character.isWhitespace).count
+
+        var score = Int((confidence * 100).rounded())
+        if !trimmed.isEmpty { score += 100 }
+        if normalizedAction != normalizedObject { score += 80 }
+        if strongVerbs.contains(firstWord) { score += 60 }
+        if (3...12).contains(wordCount) { score += min(wordCount, 12) }
+        return score
+    }
+
+    private struct SourceKey: Hashable {
+        let chatId: Int64
+        let messageId: Int64
     }
 }
 

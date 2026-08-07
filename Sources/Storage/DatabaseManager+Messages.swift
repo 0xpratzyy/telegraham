@@ -227,6 +227,29 @@ extension DatabaseManager {
         }
     }
 
+    /// Return the subset of message ids already persisted for one chat. Thread
+    /// hydration uses this before an append so it can distinguish genuinely
+    /// new Slack replies from an idempotent re-fetch and avoid rewinding the
+    /// extraction cursor on every launch.
+    func existingMessageIDs(chatId: Int64, messageIds: [Int64]) async -> Set<Int64> {
+        let uniqueIDs = Array(Set(messageIds))
+        guard !uniqueIDs.isEmpty, let pool = await ensureDatabase() else { return [] }
+        let placeholders = Array(repeating: "?", count: uniqueIDs.count).joined(separator: ",")
+        do {
+            return try await pool.read { db in
+                let arguments: [DatabaseValueConvertible] = [chatId] + uniqueIDs
+                return Set(try Int64.fetchAll(
+                    db,
+                    sql: "SELECT id FROM messages WHERE chat_id = ? AND id IN (\(placeholders))",
+                    arguments: StatementArguments(arguments)
+                ))
+            }
+        } catch {
+            print("[DatabaseManager] existingMessageIDs failed for chat \(chatId): \(error)")
+            return []
+        }
+    }
+
     /// The last `limit` already-processed messages at/before the extraction
     /// cursor — fed to extraction as read-only CONTEXT so a tiny new window
     /// (one terse ping) isn't judged blind. Returned chronologically.

@@ -182,6 +182,7 @@ enum PreferencesResetPlan {
         .gmailRefreshToken,
         .gmailTokenExpiry,
         .gmailAccountEmail,
+        .gmailAccounts,
         .slackAccessToken,
         .slackRefreshToken,
         .slackTeamId,

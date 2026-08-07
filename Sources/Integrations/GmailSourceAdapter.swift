@@ -1,6 +1,15 @@
 import Foundation
 
 struct GmailSourceAdapter: SourceAdapter {
+    static let proactiveInboxQuery =
+        "in:inbox -category:promotions -category:social -category:forums"
+
+    static func proactiveQuery(since: Date?) -> String {
+        guard let since else { return proactiveInboxQuery }
+        let timestamp = max(0, Int(since.timeIntervalSince1970))
+        return "\(proactiveInboxQuery) after:\(timestamp)"
+    }
+
     let source: IntegrationSource = .gmail
     let capabilities = SourceCapabilities(
         canReadHistory: true,
@@ -9,9 +18,11 @@ struct GmailSourceAdapter: SourceAdapter {
     )
 
     private let client: HTTPSourceClient
+    private let since: Date?
 
-    init(accessToken: String, session: URLSession = .shared) throws {
+    init(accessToken: String, session: URLSession = .shared, since: Date? = nil) throws {
         client = try HTTPSourceClient(source: .gmail, bearerToken: accessToken, session: session)
+        self.since = since
     }
 
     func currentAccount() async throws -> ExternalSourceAccount {
@@ -31,7 +42,14 @@ struct GmailSourceAdapter: SourceAdapter {
             // Pidgy is a read-only inbox, not a full mailbox backup. Limiting
             // the first projection to Inbox keeps connect fast and matches the
             // Superhuman-style surface the user is opening.
-            URLQueryItem(name: "q", value: "in:inbox")
+            // Promotions/social/forums are never proactive Pidgy work. Keep
+            // them out of the sync fan-out entirely; the shared eligibility
+            // policy still catches OTP/login/marketing noise that lands in
+            // Gmail's Primary category.
+            URLQueryItem(
+                name: "q",
+                value: Self.proactiveQuery(since: since)
+            )
         ]
         if let cursor { items.append(URLQueryItem(name: "pageToken", value: cursor.rawValue)) }
         components.queryItems = items

@@ -29,6 +29,7 @@ Oracles live in `evals/`, runners in `tools/`:
 | Summary | `summary_oracle_v*.json` | `tools/summary_answer_bench.py` |
 | Query routing | — | `tools/query_routing_bench.py` / `query_routing_probe.py` |
 | Prompt injection | `prompt_injection_oracle_v1.json` | `tools/prompt_injection_eval.py` |
+| Gmail/Slack triage + tasks | private `.private-evals/` fixtures; sanitized schema in `source_triage_task_gold_template_v1.json` | `tools/source_triage_gold_eval.py` |
 | Model swaps | — | `tools/model_swap_eval.py` (replays LangSmith traces; see archive for past results) |
 | Everything at once | `thesis_eval_suite.json` | `tools/thesis_bulk_eval.py` |
 
@@ -44,6 +45,11 @@ deterministic projection of the fact store — its correctness is covered by
 unit tests (structural close, lane routing, answer-payload parity), not a
 prompt harness. The old sheets live in [archive/](archive/). The oracles are
 kept in `evals/` for provenance; don't spend model calls re-running them.
+
+The source triage/task harness is different: it scores the current fact-store
+projection end to end, including missing ingestion and stale open facts. Real
+Gmail/Slack locators and reviewer labels stay gitignored under
+`.private-evals/`; only approved human labels count as gold.
 
 ## Promotion Rule
 

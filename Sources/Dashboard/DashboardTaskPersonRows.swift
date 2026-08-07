@@ -8,11 +8,7 @@ struct DashboardTaskRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            DashboardTelegramAvatar(
-                chat: chat,
-                fallbackTitle: avatarLabel,
-                size: PidgyDashboardTheme.rowAvatarSize
-            )
+            taskAvatar
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(task.title)
@@ -21,24 +17,33 @@ struct DashboardTaskRow: View {
                     .lineLimit(1)
                     .strikethrough(task.status == .done)
 
-                HStack(spacing: 7) {
-                    Text(displayPerson)
-                        .font(PidgyDashboardTheme.metadataMediumFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                    Text("· \(task.chatTitle)")
-                        .font(PidgyDashboardTheme.metadataFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                }
+                Text(DashboardTaskPresentation.metadataLine(task: task, source: sourceKind))
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 12)
 
-            Text(DateFormatting.dashboardListTimestamp(from: task.latestSourceDate ?? task.updatedAt))
-                .font(PidgyDashboardTheme.monoTimestampFont)
-                .foregroundStyle(PidgyDashboardTheme.secondary)
-                .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(DateFormatting.dashboardListTimestamp(from: task.latestSourceDate ?? task.updatedAt))
+                    .font(PidgyDashboardTheme.monoTimestampFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+
+                if task.status != .open {
+                    Text(task.status.label)
+                        .font(PidgyDashboardTheme.captionFont)
+                        .foregroundStyle(PidgyDashboardTheme.tertiary)
+                } else if task.priority == .high {
+                    HStack(spacing: 4) {
+                        DashboardPriorityDot(priority: task.priority)
+                        Text("High")
+                    }
+                    .font(PidgyDashboardTheme.captionFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                }
+            }
+            .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
         .frame(height: PidgyDashboardTheme.compactRowHeight)
@@ -49,12 +54,80 @@ struct DashboardTaskRow: View {
         sourceRegistry.chat(id: task.chatId)
     }
 
+    private var sourceKind: MessageSourceKind {
+        chat?.source.kind ?? .telegram
+    }
+
+    @ViewBuilder
+    private var taskAvatar: some View {
+        DashboardIdentityAvatar(
+            chat: chat,
+            label: avatarLabel,
+            source: sourceKind,
+            userID: identityUserID,
+            size: PidgyDashboardTheme.rowAvatarSize
+        )
+    }
+
     private var avatarLabel: String {
         task.personName.isEmpty ? task.chatTitle : task.personName
     }
 
+    /// A task can come from a channel while its identity is a person. Only use
+    /// the chat's latest sender photo when it is demonstrably that same person;
+    /// otherwise stable initials are more honest than the channel avatar.
+    private var identityUserID: Int64? {
+        guard let message = chat?.lastMessage,
+              DashboardTaskPresentation.sameIdentity(message.senderName, avatarLabel)
+        else { return nil }
+        return message.senderUserId
+    }
+
     private var displayPerson: String {
         task.personName.isEmpty ? task.ownerName : task.personName
+    }
+}
+
+enum DashboardTaskPresentation {
+    /// Builds a short, source-aware metadata line while removing repetitions
+    /// like "Tushar Pasi · Tushar Pasi" and title/subject duplication.
+    static func metadataLine(task: DashboardTask, source: MessageSourceKind) -> String {
+        var parts: [String] = []
+        appendUnique(displayPerson(for: task), to: &parts)
+
+        if !sameText(task.chatTitle, task.title) {
+            appendUnique(task.chatTitle, to: &parts)
+        }
+
+        appendUnique(source.displayName, to: &parts)
+        return parts.joined(separator: "  ·  ")
+    }
+
+    static func sameIdentity(_ lhs: String?, _ rhs: String) -> Bool {
+        guard let lhs else { return false }
+        return normalize(lhs) == normalize(rhs)
+    }
+
+    private static func displayPerson(for task: DashboardTask) -> String {
+        task.personName.isEmpty ? task.ownerName : task.personName
+    }
+
+    private static func appendUnique(_ value: String, to parts: inout [String]) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !parts.contains(where: { sameText($0, trimmed) })
+        else { return }
+        parts.append(trimmed)
+    }
+
+    private static func sameText(_ lhs: String, _ rhs: String) -> Bool {
+        normalize(lhs) == normalize(rhs)
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

@@ -125,6 +125,22 @@ final class AttentionStore: ObservableObject {
             guard let lastMessage = chat.lastMessage else { continue }
             let hit: (loop: Fact, category: FollowUpItem.Category)? =
                 lanes.onMe[chat.id].map { ($0, .onMe) } ?? lanes.onThem[chat.id].map { ($0, .onThem) }
+            if chat.source.kind == .gmail {
+                // Gmail has no QUIET lane. It is a signal source, not an inbox
+                // mirror: only fact-backed reply debt/waiting survives, and
+                // known machine noise stays hidden even if an older model
+                // accidentally persisted a loop for it.
+                guard let hit else { continue }
+                let evidence = hit.loop.sourceText.isEmpty
+                    ? lastMessage.displayText
+                    : hit.loop.sourceText
+                guard GmailEligibilityPolicy.shouldSurface(
+                    subject: chat.title,
+                    sender: hit.loop.senderName.isEmpty ? lastMessage.senderName : hit.loop.senderName,
+                    body: evidence,
+                    hasActionableLoop: true
+                ) else { continue }
+            }
             // ON ME / ON THEM rank + timestamp by the AGE OF THE ASK (the loop's
             // date), so an old pending ask doesn't ride a recent unrelated
             // message to the top. QUIET falls back to the chat's last message.

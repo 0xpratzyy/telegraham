@@ -143,6 +143,22 @@ actor SourceSyncCoordinator {
             throw SourceAdapterError.api(source: adapter.source, message: failure)
         }
 
+        // Advance the account-level sync clock even when there was no new
+        // mail. Gmail uses this timestamp as the next incremental discovery
+        // anchor; without it an idle mailbox repeatedly refetched the full
+        // inbox on every background refresh.
+        try await DatabaseManager.shared.upsertSourceAccount(
+            SourceAccount(
+                id: account.id,
+                source: account.source,
+                externalID: account.externalID,
+                displayName: account.displayName,
+                email: account.email,
+                connectedAt: account.connectedAt,
+                lastSyncedAt: Date()
+            )
+        )
+
         let importedMessageCount = importedMessages
         await MainActor.run {
             NotificationCenter.default.post(

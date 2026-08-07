@@ -9,6 +9,7 @@ struct LauncherView: View {
     @ObservedObject var photoManager = ChatPhotoManager.shared
     @StateObject private var searchCoordinator = SearchCoordinator()
     @StateObject private var attentionStore = AttentionStore.shared
+    @StateObject private var taskIndex = TaskIndexCoordinator.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
 
     // Search & filter
@@ -75,13 +76,28 @@ struct LauncherView: View {
     private var followUpItems: [FollowUpItem] { attentionStore.followUpItems }
     private var showLauncherDebugOverlays: Bool { false }
 
+    private var proactiveGmailChatIds: Set<Int64> {
+        Set(followUpItems
+            .filter { $0.chat.source.kind == .gmail }
+            .map(\.chat.id))
+            .union(taskIndex.tasks.compactMap { task in
+                registry.chat(id: task.chatId)?.source.kind == .gmail ? task.chatId : nil
+            })
+    }
+
+    private var proactiveVisibleChats: [TGChat] {
+        registry.visibleChats.filter { chat in
+            chat.source.kind != .gmail || proactiveGmailChatIds.contains(chat.id)
+        }
+    }
+
     private var displayedChats: [TGChat] {
         let pipelineMatchingIds = pipelineSubFilter.map { subFilter in
             Set(followUpItems.filter { $0.category == subFilter }.map(\.chat.id))
         }
 
         let filtered = LauncherVisibleChatsFilter.filterChats(
-            from: registry.visibleChats.filter { activeSource == nil || $0.source.kind == activeSource },
+            from: proactiveVisibleChats.filter { activeSource == nil || $0.source.kind == activeSource },
             scope: queryScope(for: activeFilter),
             pipelineMatchingIds: pipelineMatchingIds,
             searchText: searchText,
@@ -94,7 +110,7 @@ struct LauncherView: View {
     }
 
     private var aiSearchSourceChats: [TGChat] {
-        registry.visibleChats.filter { chat in
+        proactiveVisibleChats.filter { chat in
             (activeSource == nil || chat.source.kind == activeSource)
                 && (includeBotsInAISearch || !registry.isLikelyBot(chat: chat))
         }

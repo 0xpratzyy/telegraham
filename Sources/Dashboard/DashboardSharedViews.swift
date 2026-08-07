@@ -336,6 +336,111 @@ struct DashboardInitialsAvatar: View {
     }
 }
 
+/// One visual contract for identity across the multi-source dashboard.
+///
+/// The person/conversation stays primary: use a real profile photo whenever
+/// the source can resolve one, then fall back to stable initials. The provider
+/// is always a small corner mark instead of competing with the identity as a
+/// pill, tag, or replacement avatar.
+struct DashboardIdentityAvatar: View {
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
+
+    let chat: TGChat?
+    let label: String
+    var source: MessageSourceKind? = nil
+    var userID: Int64? = nil
+    var size: CGFloat = PidgyDashboardTheme.rowAvatarSize
+    var showsSource = true
+
+    @State private var resolvedUser: TGUser?
+
+    var body: some View {
+        identity
+            .overlay(alignment: .bottomTrailing) {
+                if showsSource {
+                    DashboardSourceMark(source: resolvedSource, avatarSize: size)
+                        .offset(x: size >= 36 ? 2 : 1.5, y: size >= 36 ? 2 : 1.5)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(label), \(resolvedSource.displayName)")
+            .task(id: userLookupID) {
+                await resolveUserIfNeeded()
+            }
+    }
+
+    @ViewBuilder
+    private var identity: some View {
+        if let resolvedUser {
+            DashboardTelegramUserAvatar(
+                user: resolvedUser,
+                fallbackTitle: label,
+                size: size
+            )
+        } else if shouldUseConversationAvatar {
+            DashboardTelegramAvatar(
+                chat: chat,
+                fallbackTitle: label,
+                size: size
+            )
+        } else {
+            DashboardInitialsAvatar(label: label, size: size)
+        }
+    }
+
+    private var resolvedSource: MessageSourceKind {
+        source ?? chat?.source.kind ?? .telegram
+    }
+
+    private var shouldUseConversationAvatar: Bool {
+        guard let chat, resolvedSource != .gmail else { return false }
+        return chat.chatType.isOneOnOne || sameIdentity(label, chat.title)
+    }
+
+    private var userLookupID: String {
+        "\(chat?.source.rawValue ?? resolvedSource.rawValue):\(userID ?? 0)"
+    }
+
+    @MainActor
+    private func resolveUserIfNeeded() async {
+        let expectedLookupID = userLookupID
+        resolvedUser = nil
+        guard let chat, let userID else {
+            return
+        }
+        let user = try? await sourceRegistry.source(for: chat)?.user(id: userID)
+        guard !Task.isCancelled, expectedLookupID == userLookupID else { return }
+        resolvedUser = user
+    }
+
+    private func sameIdentity(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        == rhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct DashboardSourceMark: View {
+    let source: MessageSourceKind
+    let avatarSize: CGFloat
+
+    var body: some View {
+        Image(systemName: source.systemImage)
+            .font(.system(size: markSize * 0.43, weight: .bold))
+            .foregroundStyle(PidgyDashboardTheme.primary)
+            .frame(width: markSize, height: markSize)
+            .background(PidgyDashboardTheme.deep, in: Circle())
+            .overlay(Circle().stroke(PidgyDashboardTheme.rule, lineWidth: 0.75))
+            .shadow(color: Color.black.opacity(0.18), radius: 1, y: 0.5)
+            .accessibilityHidden(true)
+    }
+
+    private var markSize: CGFloat {
+        avatarSize >= 36 ? 16 : 13
+    }
+}
+
 struct DashboardTelegramAvatar: View {
     @EnvironmentObject private var telegramService: TelegramService
     @ObservedObject private var photoManager = ChatPhotoManager.shared

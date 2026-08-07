@@ -31,6 +31,10 @@ private struct GmailOAuthErrorResponse: Decodable {
 enum GmailOAuth {
     static let callbackPort: UInt16 = 53683
     static let redirectURI = "http://127.0.0.1:53683/gmail/callback"
+    /// Account chooser is required even after the first authorization; without
+    /// it Google's remembered session makes “Add account” silently reconnect
+    /// the mailbox already in Pidgy.
+    static let authorizationPrompt = "select_account consent"
     static let scopes = [
         "openid",
         "email",
@@ -71,7 +75,7 @@ enum GmailOAuth {
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "scope", value: scopes.joined(separator: " ")),
             URLQueryItem(name: "access_type", value: "offline"),
-            URLQueryItem(name: "prompt", value: "consent"),
+            URLQueryItem(name: "prompt", value: authorizationPrompt),
             URLQueryItem(name: "code_challenge", value: challenge),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "state", value: state)

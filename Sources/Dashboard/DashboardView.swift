@@ -368,11 +368,28 @@ struct DashboardView: View {
     }
 
     private var scopedVisibleChats: [TGChat] {
-        sourceRegistry.visibleChats.filter(selectedSourceScope.includes)
+        sourceRegistry.visibleChats.filter {
+            selectedSourceScope.includes($0) && isProactiveSurfaceChat($0)
+        }
     }
 
     private var scopedAllChats: [TGChat] {
-        sourceRegistry.chats.filter(selectedSourceScope.includes)
+        sourceRegistry.chats.filter {
+            selectedSourceScope.includes($0) && isProactiveSurfaceChat($0)
+        }
+    }
+
+    private var proactiveGmailChatIds: Set<Int64> {
+        Set(attentionStore.followUpItems
+            .filter { $0.chat.source.kind == .gmail }
+            .map(\.chat.id))
+            .union(taskIndex.tasks.compactMap { task in
+                sourceRegistry.chat(id: task.chatId)?.source.kind == .gmail ? task.chatId : nil
+            })
+    }
+
+    private func isProactiveSurfaceChat(_ chat: TGChat) -> Bool {
+        chat.source.kind != .gmail || proactiveGmailChatIds.contains(chat.id)
     }
 
     private var scopedChatIds: Set<Int64> {

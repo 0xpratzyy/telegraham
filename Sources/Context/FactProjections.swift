@@ -44,7 +44,8 @@ enum FactProjection {
                 // template only when an older fact has no action yet.
                 // All tasks are i_owe work-items now. The title IS the action
                 // ("Pay the Hetzner invoice") — no redundant "Reply to X" hint.
-                let title = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
+                let rawTitle = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
+                let title = DashboardTaskTitle.compact(rawTitle)
                 let suggested = ""
                 let owner = "Me"
                 let priority: DashboardTaskPriority = f.confidence >= 0.8 ? .high : (f.confidence >= 0.5 ? .medium : .low)
@@ -127,7 +128,8 @@ enum FactProjection {
                 let chatTitle = !f.sourceChatTitle.isEmpty
                     ? f.sourceChatTitle
                     : (chatTitles[f.sourceChatId] ?? "Chat \(f.sourceChatId)")
-                let title = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
+                let rawTitle = f.action.isEmpty ? "Follow up with \(f.subjectEntity) about \(f.objectText)" : f.action
+                let title = DashboardTaskTitle.compact(rawTitle)
                 return DashboardTask(
                     id: f.id,
                     stableFingerprint: f.fingerprint,

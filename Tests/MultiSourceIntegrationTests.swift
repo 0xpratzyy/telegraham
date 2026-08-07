@@ -14,6 +14,7 @@ final class MultiSourceIntegrationTests: XCTestCase {
         XCTAssertFalse(GmailOAuth.scopes.contains { scope in
             scope.contains("gmail.modify") || scope.contains("gmail.compose") || scope.contains("gmail.send")
         })
+        XCTAssertEqual(GmailOAuth.authorizationPrompt, "select_account consent")
     }
 
     func testGmailOAuthExplainsTestingAccessDenial() {
@@ -39,6 +40,28 @@ final class MultiSourceIntegrationTests: XCTestCase {
         XCTAssertNil(GmailSyncProgress(title: "Discovering", completed: 0, total: 0).fraction)
         XCTAssertEqual(GmailSyncProgress(title: "Reading", completed: 25, total: 100).fraction, 0.25)
         XCTAssertEqual(GmailSyncProgress(title: "Reading", completed: 120, total: 100).fraction, 1)
+    }
+
+    func testGmailIncrementalDiscoveryKeepsInboxFiltersAndUsesUnixAnchor() {
+        let since = Date(timeIntervalSince1970: 1_786_000_000.9)
+
+        XCTAssertEqual(
+            GmailSourceAdapter.proactiveQuery(since: since),
+            "in:inbox -category:promotions -category:social -category:forums after:1786000000"
+        )
+        XCTAssertEqual(
+            GmailSourceAdapter.proactiveQuery(since: nil),
+            GmailSourceAdapter.proactiveInboxQuery
+        )
+    }
+
+    func testGmailIncrementalSyncOverlapsPreviousSuccessByOneHour() {
+        let lastSync = Date(timeIntervalSince1970: 1_786_005_000)
+        XCTAssertEqual(
+            GmailConnectionManager.incrementalStart(lastSyncedAt: lastSync),
+            Date(timeIntervalSince1970: 1_786_001_400)
+        )
+        XCTAssertNil(GmailConnectionManager.incrementalStart(lastSyncedAt: nil))
     }
 
     func testGmailPresentationCleansTransportFormattingForDashboardRows() {
@@ -156,8 +179,10 @@ final class MultiSourceIntegrationTests: XCTestCase {
 
     func testCanonicalIDsAreStableAndSourceSeparated() {
         let gmail = CanonicalID.conversation(source: .gmail, accountID: "a", externalID: "same")
+        let secondGmailAccount = CanonicalID.conversation(source: .gmail, accountID: "b", externalID: "same")
         let slack = CanonicalID.conversation(source: .slack, accountID: "a", externalID: "same")
         XCTAssertEqual(gmail, CanonicalID.conversation(source: .gmail, accountID: "a", externalID: "same"))
+        XCTAssertNotEqual(gmail, secondGmailAccount)
         XCTAssertNotEqual(gmail, slack)
         XCTAssertNotEqual(CanonicalID.legacyInt64(gmail), CanonicalID.legacyInt64(slack))
     }

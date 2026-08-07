@@ -31,6 +31,8 @@ struct DashboardPreferencesPage: View {
     @State private var telegramStatus: DashboardPreferenceStatus?
     @State private var whatsAppOwnerName = ""
     @State private var showWhatsAppImporter = false
+    @State private var showWhatsAppOptions = false
+    @State private var showTelegramAdvanced = false
     @State private var selectedAIProvider: AIProviderConfig.ProviderType = .none
     @State private var selectedBYOKProvider: BYOKProvider = .openAI
     @State private var aiApiKey = ""
@@ -511,223 +513,312 @@ struct DashboardPreferencesPage: View {
 
     private var accountPage: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PrefSection(topPadding: 0) {
+            PrefSection(topPadding: 0, bottomBorder: false) {
                 PrefSectionHead(
-                    title: "Message sources",
-                    subtitle: "One memory and workflow layer — source apps stay the system of record"
+                    title: "Connections",
+                    subtitle: "Read-only sources. Pidgy keeps replies and tasks together."
                 ) {
                     PrefPill(
-                        text: "\(connectedIntegrationCount) active",
+                        text: "\(connectedIntegrationCount) connected",
                         tone: connectedIntegrationCount > 0 ? .green : .mono
                     )
                 }
 
-                Text("Gmail and Slack start read-only. Pidgy stores normalized copies locally and opens the original app for actions; it does not send messages from these connections.")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Color.Pidgy.fg3)
-                    .lineSpacing(3)
-
-                gmailConnectionRow
-
-                slackConnectionRow
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        integrationIcon(.whatsapp)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("WhatsApp export")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Color.Pidgy.fg1)
-                            Text("Manual chat exports only — no personal-account automation")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Color.Pidgy.fg3)
-                        }
-                        Spacer()
-                        if integrationAccount(for: .whatsapp) != nil {
-                            PrefPill(text: "Imported", tone: .green)
-                        }
-                    }
-
-                    HStack(spacing: 10) {
-                        PrefMinInput(
-                            text: $whatsAppOwnerName,
-                            placeholder: "Your display name in the export"
+                VStack(spacing: 0) {
+                    gmailConnectionRow
+                    sourceDivider
+                    slackConnectionRow
+                    sourceDivider
+                    whatsAppConnectionRow
+                    sourceDivider
+                    telegramConnectionRow
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.Pidgy.bg1)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.Pidgy.border1)
                         )
-                        PrefGhostButton(title: "Import .txt", systemImage: "square.and.arrow.down") {
-                            showWhatsAppImporter = true
-                        }
-                        .disabled(integrationConnections.activity[.whatsapp] == .syncing)
-                    }
-                    if let status = integrationConnections.statusMessage[.whatsapp] {
-                        integrationStatusText(status)
-                    }
-                }
-                .padding(.top, 18)
-            }
-
-            PrefSection(topPadding: 0) {
-                PrefSectionHead(
-                    title: "Telegram",
-                    subtitle: "Connection and local account"
-                ) {
-                    PrefPill(text: authStateDescription, tone: telegramService.authState == .ready ? .green : .amber)
-                }
-
-                if let user = telegramService.currentUser {
-                    PrefField(
-                        label: "Account",
-                        hint: user.displayName,
-                        right: {
-                            PrefGhostButton(title: "Log out", systemImage: "rectangle.portrait.and.arrow.right", tone: .danger) {
-                                NotificationCenter.default.post(name: .pidgyLogOut, object: nil)
-                            }
-                        }
-                    )
-                }
-
-                PrefField(label: "API ID", hint: "Your Telegram developer app ID") {
-                    PrefMinInput(text: $apiId, placeholder: "123456", monospaced: true)
-                }
-
-                PrefField(label: "API Hash", hint: "Stored locally through the credential manager") {
-                    PrefMinInput(text: $apiHash, placeholder: "Telegram API hash", isSecure: true, monospaced: true)
-                }
-
-                PrefField(
-                    label: "Credentials",
-                    hint: "Save locally and start Telegram if possible",
-                    right: {
-                        HStack(spacing: 10) {
-                            if let telegramStatus {
-                                DashboardPreferenceInlineStatus(status: telegramStatus)
-                            }
-                            PrefGhostButton(title: "Save", systemImage: "checkmark", action: saveCredentials)
-                        }
-                    }
                 )
-
-                Link(destination: URL(string: "https://my.telegram.org")!) {
-                    Text("Get credentials from my.telegram.org →")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.Pidgy.accentFg)
-                }
-                .padding(.top, 8)
-            }
-
-            PrefSection(bottomBorder: false) {
-                PrefSectionHead(title: "Account health", subtitle: "What the rest of the app can see")
-                HStack(alignment: .top, spacing: 24) {
-                    PrefStatTile(
-                        eyebrow: "Visible chats",
-                        value: integerString(telegramService.visibleChats.count),
-                        hint: "Loaded in the current session",
-                        dot: .blue
-                    )
-                    PrefStatTile(
-                        eyebrow: "Sync state",
-                        value: recentSyncStatusLabel,
-                        hint: recentSyncStatusCaption,
-                        dot: recentSyncProgress.activeRefreshes > 0 ? .blue : .green
-                    )
-                    PrefStatTile(
-                        eyebrow: "Last refresh",
-                        value: recentSyncProgress.lastSyncAt.map(relativeTimeString) ?? "—",
-                        hint: "Most recently refreshed visible chat",
-                        dot: .green
-                    )
-                }
             }
         }
     }
 
     private var connectedIntegrationCount: Int {
-        var sources = integrationConnections.connectedSources
-        if gmailIsConnected { sources.insert(.gmail) }
+        var sources: Set<IntegrationSource> = []
+        if integrationAccount(for: .whatsapp) != nil { sources.insert(.whatsapp) }
+        if !gmail.accounts.isEmpty { sources.insert(.gmail) }
         if case .connected = slack.state { sources.insert(.slack) }
         if telegramService.authState == .ready { sources.insert(.telegram) }
         return sources.count
     }
 
     private var gmailConnectionRow: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 integrationIcon(.gmail)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Gmail")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color.Pidgy.fg1)
-                    Text(gmailStatusText)
+                    Text(gmail.accounts.isEmpty ? "No accounts connected" : gmailAccountCountLabel)
                         .font(.system(size: 11.5))
                         .foregroundStyle(Color.Pidgy.fg3)
-                        .lineLimit(2)
                 }
                 Spacer()
-                PrefPill(text: gmailIsConnected ? "Connected" : "Not connected", tone: gmailIsConnected ? .green : .mono)
-            }
-            HStack(spacing: 10) {
-                switch gmail.state {
-                case .connecting, .syncing(_):
+                if gmail.isConnecting {
                     ProgressView().controlSize(.small)
-                case .connected(_):
-                    PrefGhostButton(title: "Read now", systemImage: "arrow.clockwise") { Task { await gmail.sync() } }
-                    PrefGhostButton(title: "Remove", systemImage: "xmark", tone: .danger) { gmail.disconnect() }
-                case .disconnected, .failed, .unavailable:
-                    PrefGhostButton(title: "Connect Gmail", systemImage: "link") {
-                        Task { await gmail.connect() }
-                    }
-                    .disabled(gmail.state == .unavailable)
                 }
+                PrefGhostButton(
+                    title: gmail.accounts.isEmpty ? "Connect" : "Add account",
+                    systemImage: "plus"
+                ) { Task { await gmail.connect() } }
+                    .disabled(!gmail.canAddAccount || gmail.isConnecting)
+            }
+            .padding(16)
+
+            if !gmail.accounts.isEmpty {
+                sourceDivider
+                    .padding(.leading, 56)
+                ForEach(Array(gmail.accounts.enumerated()), id: \.element.id) { index, account in
+                    gmailAccountRow(account)
+                    if index < gmail.accounts.count - 1 {
+                        sourceDivider.padding(.leading, 56)
+                    }
+                }
+                if case .failed(let message) = gmail.state {
+                    Text(message)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color.Pidgy.danger)
+                        .padding(.leading, 56)
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 12)
+                }
+            } else if case .failed(let message) = gmail.state {
+                Text(message)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color.Pidgy.danger)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 14)
+            } else if !gmail.canAddAccount {
+                Text("Gmail OAuth is not configured in this build.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color.Pidgy.fg3)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 14)
             }
         }
-        .padding(.top, 18)
     }
 
-    private var gmailIsConnected: Bool {
-        switch gmail.state {
-        case .connected, .syncing: return true
-        default: return false
-        }
+    private var gmailAccountCountLabel: String {
+        gmail.accounts.count == 1 ? "1 account · read-only" : "\(gmail.accounts.count) accounts · read-only"
     }
 
-    private var gmailStatusText: String {
-        switch gmail.state {
-        case .unavailable: return "Gmail isn't configured in this build yet"
-        case .disconnected: return "Threads and senders via read-only Google OAuth"
-        case .connecting: return "Finish signing in in your browser…"
-        case .connected(let detail), .syncing(let detail), .failed(let detail): return detail
+    private func gmailAccountRow(_ account: GmailConnectedAccount) -> some View {
+        let activity = gmail.accountActivity[account.email] ?? .idle
+        let status = gmail.accountStatus[account.email]
+        return HStack(spacing: 10) {
+            Circle()
+                .fill(Color.Pidgy.success)
+                .frame(width: 6, height: 6)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.email)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Color.Pidgy.fg1)
+                    .lineLimit(1)
+                Text(activity == .syncing ? (status ?? "Reading mail…") : (status ?? "Connected"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.Pidgy.fg3)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if activity == .syncing {
+                ProgressView().controlSize(.small)
+            }
+            Menu {
+                Button("Read now", systemImage: "arrow.clockwise") {
+                    Task { await gmail.sync(email: account.email) }
+                }
+                .disabled(activity == .syncing)
+                Divider()
+                Button("Disconnect", systemImage: "xmark", role: .destructive) {
+                    gmail.disconnect(email: account.email)
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.Pidgy.fg2)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Gmail account actions")
         }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .padding(.vertical, 11)
     }
 
     private var slackConnectionRow: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                integrationIcon(.slack)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Slack")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.Pidgy.fg1)
-                    Text(slackStatusText)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Color.Pidgy.fg3)
-                        .lineLimit(2)
-                }
-                Spacer()
-                PrefPill(text: slackIsConnected ? "Connected" : "Not connected", tone: slackIsConnected ? .green : .mono)
+        HStack(spacing: 10) {
+            integrationIcon(.slack)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Slack")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.Pidgy.fg1)
+                Text(slackStatusText)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color.Pidgy.fg3)
+                    .lineLimit(1)
             }
-
-            HStack(spacing: 10) {
-                if slack.state == .connecting {
-                    ProgressView().controlSize(.small)
-                } else if slackIsConnected {
-                    PrefGhostButton(title: "Remove", systemImage: "xmark", tone: .danger) { slack.disconnect() }
-                } else if slack.state != .unavailable {
-                    PrefGhostButton(title: "Connect Slack", systemImage: "link") {
-                        Task { await slack.connect() }
-                    }
+            Spacer()
+            if slack.state == .connecting {
+                ProgressView().controlSize(.small)
+            } else if slackIsConnected {
+                Menu {
+                    Button("Disconnect", systemImage: "xmark", role: .destructive) { slack.disconnect() }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.Pidgy.fg2)
+                        .frame(width: 28, height: 28)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            } else if slack.state != .unavailable {
+                PrefGhostButton(title: "Connect", systemImage: "link") {
+                    Task { await slack.connect() }
                 }
             }
         }
-        .padding(.top, 18)
+        .padding(16)
+    }
+
+    private var whatsAppConnectionRow: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                integrationIcon(.whatsapp)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("WhatsApp export")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.Pidgy.fg1)
+                    Text("Manual .txt imports")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                }
+                Spacer()
+                Button {
+                    withAnimation(PidgyMotion.easeOut) { showWhatsAppOptions.toggle() }
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.Pidgy.fg2)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Import options")
+                PrefGhostButton(title: "Import", systemImage: "square.and.arrow.down") {
+                    showWhatsAppImporter = true
+                }
+                .disabled(integrationConnections.activity[.whatsapp] == .syncing)
+            }
+            .padding(16)
+
+            if showWhatsAppOptions {
+                sourceDivider.padding(.leading, 56)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Your name in the exported chat")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Color.Pidgy.fg2)
+                    PrefMinInput(text: $whatsAppOwnerName, placeholder: "Optional display name")
+                    if let status = integrationConnections.statusMessage[.whatsapp] {
+                        integrationStatusText(status)
+                    }
+                }
+                .padding(.leading, 56)
+                .padding(.trailing, 16)
+                .padding(.bottom, 14)
+            }
+        }
+    }
+
+    private var telegramConnectionRow: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                integrationIcon(.telegram)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Telegram")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.Pidgy.fg1)
+                    Text(telegramService.currentUser?.displayName ?? authStateDescription)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if telegramService.authState == .ready {
+                    Circle().fill(Color.Pidgy.success).frame(width: 6, height: 6)
+                }
+                PrefGhostButton(
+                    title: showTelegramAdvanced ? "Hide setup" : "Setup",
+                    systemImage: "gearshape"
+                ) {
+                    withAnimation(PidgyMotion.easeOut) { showTelegramAdvanced.toggle() }
+                }
+                if telegramService.authState == .ready {
+                    Menu {
+                        Button("Log out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+                            NotificationCenter.default.post(name: .pidgyLogOut, object: nil)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.Pidgy.fg2)
+                            .frame(width: 28, height: 28)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                }
+            }
+            .padding(16)
+
+            if showTelegramAdvanced {
+                sourceDivider.padding(.leading, 56)
+                VStack(alignment: .leading, spacing: 0) {
+                    PrefField(label: "API ID", hint: "Telegram developer app ID", content: {
+                        PrefMinInput(text: $apiId, placeholder: "123456", monospaced: true)
+                    })
+                    PrefField(label: "API Hash", hint: "Stored securely on this Mac", content: {
+                        PrefMinInput(text: $apiHash, placeholder: "Telegram API hash", isSecure: true, monospaced: true)
+                    })
+                    HStack(spacing: 10) {
+                        Link("Get credentials", destination: URL(string: "https://my.telegram.org")!)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.Pidgy.accentFg)
+                        Spacer()
+                        if let telegramStatus {
+                            DashboardPreferenceInlineStatus(status: telegramStatus)
+                        }
+                        PrefGhostButton(title: "Save", systemImage: "checkmark", action: saveCredentials)
+                    }
+                    .padding(.vertical, 12)
+                }
+                .padding(.leading, 56)
+                .padding(.trailing, 16)
+            }
+        }
+    }
+
+    private var sourceDivider: some View {
+        Rectangle()
+            .fill(Color.Pidgy.border1)
+            .frame(height: 1)
     }
 
     private var slackIsConnected: Bool {

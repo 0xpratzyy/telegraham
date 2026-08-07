@@ -105,6 +105,11 @@ struct SlackMessage: Decodable, Sendable {
     /// Slack message id + sort key, e.g. "1700000000.000100".
     let ts: String
     let threadTs: String?
+    /// Present on thread roots returned by `conversations.history`. Slack does
+    /// not include the replies themselves in history, so this is the signal
+    /// that the background reconciler should page `conversations.replies`.
+    let replyCount: Int?
+    let latestReply: String?
 }
 
 // MARK: - users.info

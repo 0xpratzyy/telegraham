@@ -1,7 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct DashboardTaskDetail: View {
     @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
+    @ObservedObject private var chatOpenState = ChatOpenState.shared
     let task: DashboardTask?
     let evidence: [DashboardTaskSourceMessage]
     let isRefreshing: Bool
@@ -21,89 +24,10 @@ struct DashboardTaskDetail: View {
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
             if let task {
-                DashboardDetailCover {
-                    DashboardTopicChip(text: task.topicName ?? "Uncategorized", tint: topicTint(for: task))
-                    Text(task.title)
-                        .font(PidgyDashboardTheme.taskDetailTitleFont)
-                        .tracking(-0.4)
-                        .foregroundStyle(PidgyDashboardTheme.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(spacing: 8) {
-                        DashboardPriorityDot(priority: task.priority)
-                        Text("\(task.priority.label) priority")
-                            .font(PidgyDashboardTheme.metadataMediumFont)
-                        Text("·")
-                        Text(task.chatTitle)
-                        if !displayPerson(for: task).isEmpty {
-                            Text("·")
-                            Text(displayPerson(for: task))
-                                .fontWeight(.medium)
-                        }
-                    }
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                }
-
-                if !task.suggestedAction.isEmpty {
-                    DashboardDetailSection(
-                        title: "Suggested action",
-                        trailing: "conf \(Int((task.confidence * 100).rounded()))%"
-                    ) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Pidgy says")
-                                .font(PidgyDashboardTheme.detailBodyFont)
-                                .italic()
-                                .foregroundStyle(PidgyDashboardTheme.blue)
-                            Text(task.suggestedAction)
-                                .font(PidgyDashboardTheme.detailBodyFont)
-                                .foregroundStyle(PidgyDashboardTheme.primary)
-                                .lineSpacing(3)
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(PidgyDashboardTheme.paper)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(PidgyDashboardTheme.rule)
-                        )
-                    }
-                }
-
-                DashboardDetailSection(title: "Summary") {
-                    Text(task.summary.isEmpty ? "No summary available." : task.summary)
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineSpacing(3)
-                }
-
-                let merged = mergedEvidenceItems()
-                DashboardDetailSection(
-                    title: "Evidence",
-                    trailing: evidenceTrailing(for: merged)
-                ) {
-                    VStack(spacing: 6) {
-                        if merged.isEmpty {
-                            Text(isLoadingContext
-                                 ? "Loading nearby messages…"
-                                 : "No source snippets were stored for this task.")
-                                .font(PidgyDashboardTheme.detailBodyFont)
-                                .foregroundStyle(PidgyDashboardTheme.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
-                            ForEach(merged) { item in
-                                Button {
-                                    Task { await telegramService.openMessageInTelegram(chatId: task.chatId, messageId: item.id) }
-                                } label: {
-                                    DashboardEvidenceContextRow(item: item)
-                                }
-                                .buttonStyle(.pidgyPress)
-                                .help("Open this message in Telegram")
-                            }
-                        }
-                    }
-                }
+                taskHeader(task)
+                taskStatus(task)
+                nextStep(task)
+                taskEvidence(task)
             } else if isRefreshing {
                 VStack(alignment: .leading, spacing: 22) {
                     DashboardSkeletonHeader()
@@ -119,46 +43,8 @@ struct DashboardTaskDetail: View {
                 )
             }
         } actions: {
-            // Primary action — Mark Done when a task is selected,
-            // nothing when the empty state is shown. The global
-            // top-bar Refresh covers re-evaluation; no per-detail Refresh.
             if let task {
-                HStack(spacing: 8) {
-                    // Status-aware primary action: open/snoozed tasks
-                    // get Mark Done; closed tasks (done or ignored —
-                    // whether by hand or auto-complete) get Re-open.
-                    // Re-opening stamps a user touch, so the
-                    // auto-complete pass leaves it alone for a full
-                    // quiet window.
-                    Button {
-                        onUpdateStatus(task, task.isClosed ? .open : .done, nil)
-                    } label: {
-                        Label(
-                            task.isClosed ? "Re-open" : "Mark Done",
-                            systemImage: task.isClosed ? "arrow.uturn.backward" : "checkmark"
-                        )
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .pidgyCapsuleBackground()
-                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-                    Button {
-                        FlaggedAnswerFixture
-                            .task(task, evidence: evidence)
-                            .submitToFeedbackSheet()
-                    } label: {
-                        Image(systemName: "flag")
-                            .frame(width: 36, height: 36)
-                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .pidgyCapsuleBackground()
-                    .help("Not a task, wrong owner, or a duplicate? Flag it — you'll review what's shared before sending.")
-                }
+                taskActions(task)
             }
         }
         .foregroundStyle(PidgyDashboardTheme.primary)
@@ -169,6 +55,337 @@ struct DashboardTaskDetail: View {
 
     private func displayPerson(for task: DashboardTask) -> String {
         task.personName.isEmpty ? task.ownerName : task.personName
+    }
+
+    @ViewBuilder
+    private func taskHeader(_ task: DashboardTask) -> some View {
+        let source = sourceKind(for: task)
+        let age = DateFormatting.compactRelativeTime(from: task.latestSourceDate ?? task.updatedAt)
+
+        DashboardDetailCover {
+            HStack(alignment: .top, spacing: 10) {
+                DashboardIdentityAvatar(
+                    chat: sourceRegistry.chat(id: task.chatId),
+                    label: avatarLabel(for: task),
+                    source: source,
+                    userID: identityUserID(for: task),
+                    size: 40
+                )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(displayPerson(for: task))
+                        .font(PidgyDashboardTheme.metadataMediumFont)
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .lineLimit(1)
+                    Text("\(source.displayName)  ·  \(age)")
+                        .font(PidgyDashboardTheme.metadataFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                DashboardTopicChip(
+                    text: task.topicName ?? task.status.label,
+                    tint: topicTint(for: task)
+                )
+                .padding(.trailing, 22)
+            }
+
+            Text(task.title)
+                .font(PidgyDashboardTheme.taskDetailTitleFont)
+                .tracking(-0.4)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 7) {
+                DashboardPriorityDot(priority: task.priority)
+                Text("\(task.priority.label) priority")
+                    .font(PidgyDashboardTheme.metadataMediumFont)
+
+                if let dueAt = task.dueAt {
+                    Text("·")
+                    Label(
+                        "Due \(DateFormatting.dashboardListTimestamp(from: dueAt))",
+                        systemImage: "calendar"
+                    )
+                }
+            }
+            .font(PidgyDashboardTheme.metadataFont)
+            .foregroundStyle(PidgyDashboardTheme.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func taskStatus(_ task: DashboardTask) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: statusIcon(for: task))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(statusTint(for: task))
+                .frame(width: 28, height: 28)
+                .background(statusTint(for: task).opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(statusTitle(for: task))
+                    .font(PidgyDashboardTheme.metadataMediumFont)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                Text(statusSubtitle(for: task))
+                    .font(PidgyDashboardTheme.metadataFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(22)
+        .overlay(alignment: .bottom) { detailDivider }
+    }
+
+    @ViewBuilder
+    private func nextStep(_ task: DashboardTask) -> some View {
+        DashboardDetailSection(
+            title: "Next step",
+            trailing: "AI \(Int((task.confidence * 100).rounded()))%"
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(task.suggestedAction.isEmpty ? fallbackAction(for: task) : task.suggestedAction)
+                    .font(PidgyDashboardTheme.detailBodyFont.weight(.medium))
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    .lineSpacing(3)
+
+                if !task.summary.isEmpty,
+                   task.summary.localizedCaseInsensitiveCompare(task.suggestedAction) != .orderedSame {
+                    Text(task.summary)
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .lineSpacing(3)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PidgyDashboardTheme.paper)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(PidgyDashboardTheme.rule)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func taskEvidence(_ task: DashboardTask) -> some View {
+        let merged = mergedEvidenceItems()
+        let source = sourceKind(for: task)
+
+        DashboardDetailSection(
+            title: "Source context",
+            trailing: evidenceTrailing(for: merged)
+        ) {
+            VStack(spacing: 8) {
+                if merged.isEmpty {
+                    Text(isLoadingContext
+                         ? "Loading nearby messages…"
+                         : "No source context was stored for this task.")
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ForEach(merged) { item in
+                        Button {
+                            openEvidence(item, for: task)
+                        } label: {
+                            DashboardTaskEvidenceCard(
+                                item: item,
+                                text: evidenceText(item, task: task, source: source),
+                                sourceName: source.displayName
+                            )
+                        }
+                        .buttonStyle(.pidgyPress)
+                        .help("Open in \(source.displayName)")
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func taskActions(_ task: DashboardTask) -> some View {
+        let source = sourceKind(for: task)
+        HStack(spacing: 8) {
+            Button {
+                onUpdateStatus(task, task.isClosed ? .open : .done, nil)
+            } label: {
+                Label(
+                    task.isClosed ? "Re-open" : "Mark done",
+                    systemImage: task.isClosed ? "arrow.uturn.backward" : "checkmark"
+                )
+                .frame(maxWidth: .infinity)
+                .frame(height: 36)
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(PidgyDashboardTheme.primary)
+            .pidgyCapsuleBackground()
+
+            Button {
+                if chatOpenState.openingChatId == nil { onOpenChat(task.chatId) }
+            } label: {
+                Group {
+                    if chatOpenState.openingChatId == task.chatId {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Open", systemImage: source.systemImage)
+                    }
+                }
+                .frame(minWidth: 68)
+                .frame(height: 36)
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(PidgyDashboardTheme.primary)
+            .pidgyCapsuleBackground()
+            .disabled(chatOpenState.openingChatId == task.chatId)
+            .help("Open in \(source.displayName)")
+
+            Menu {
+                if !task.isClosed {
+                    Button("Snooze until tomorrow", systemImage: "moon.zzz") {
+                        onUpdateStatus(task, .snoozed, Date().addingTimeInterval(86_400))
+                    }
+                    Button("Snooze for one week", systemImage: "calendar.badge.clock") {
+                        onUpdateStatus(task, .snoozed, Date().addingTimeInterval(604_800))
+                    }
+                    if task.status == .snoozed {
+                        Button("Move back to Open", systemImage: "tray") {
+                            onUpdateStatus(task, .open, nil)
+                        }
+                    }
+                    Divider()
+                    Button("Ignore task", systemImage: "eye.slash", role: .destructive) {
+                        onUpdateStatus(task, .ignored, nil)
+                    }
+                    Divider()
+                }
+                Button("Copy task", systemImage: "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(task.title, forType: .string)
+                }
+                Button("Flag extraction…", systemImage: "flag") {
+                    FlaggedAnswerFixture
+                        .task(task, evidence: evidence)
+                        .submitToFeedbackSheet()
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 36, height: 36)
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .foregroundStyle(PidgyDashboardTheme.secondary)
+            .pidgyCapsuleBackground()
+            .help("More task actions")
+        }
+    }
+
+    private var detailDivider: some View {
+        Rectangle()
+            .fill(PidgyDashboardTheme.rule)
+            .frame(height: 1)
+    }
+
+    private func sourceKind(for task: DashboardTask) -> MessageSourceKind {
+        sourceRegistry.chat(id: task.chatId)?.source.kind ?? .telegram
+    }
+
+    private func avatarLabel(for task: DashboardTask) -> String {
+        let person = displayPerson(for: task).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !person.isEmpty { return person }
+        if let sender = evidence.first?.senderName, !sender.isEmpty { return sender }
+        return task.chatTitle
+    }
+
+    private func identityUserID(for task: DashboardTask) -> Int64? {
+        guard let chat = sourceRegistry.chat(id: task.chatId),
+              let message = chat.lastMessage,
+              DashboardTaskPresentation.sameIdentity(message.senderName, avatarLabel(for: task))
+        else { return nil }
+        return message.senderUserId
+    }
+
+    private func fallbackAction(for task: DashboardTask) -> String {
+        "Review the source context and complete \(task.title.lowercased())."
+    }
+
+    private func statusTitle(for task: DashboardTask) -> String {
+        switch task.status {
+        case .open: return "Ready to act"
+        case .done: return "Task completed"
+        case .snoozed: return "Snoozed"
+        case .ignored: return "Task ignored"
+        }
+    }
+
+    private func statusSubtitle(for task: DashboardTask) -> String {
+        switch task.status {
+        case .open:
+            if let dueAt = task.dueAt {
+                return "Due \(DateFormatting.dashboardListTimestamp(from: dueAt))."
+            }
+            return "Pidgy found a concrete action for you."
+        case .done:
+            return "This task is out of your active queue."
+        case .snoozed:
+            if let until = task.snoozedUntil {
+                return "Returns \(DateFormatting.compactRelativeTime(from: until))."
+            }
+            return "Hidden until its reminder becomes active."
+        case .ignored:
+            return "This item will stay out of your active queue."
+        }
+    }
+
+    private func statusIcon(for task: DashboardTask) -> String {
+        switch task.status {
+        case .open: return "bolt.fill"
+        case .done: return "checkmark"
+        case .snoozed: return "moon.zzz.fill"
+        case .ignored: return "eye.slash.fill"
+        }
+    }
+
+    private func statusTint(for task: DashboardTask) -> Color {
+        switch task.status {
+        case .open: return Color.Pidgy.warning
+        case .done: return Color.Pidgy.success
+        case .snoozed: return Color.Pidgy.accent
+        case .ignored: return PidgyDashboardTheme.secondary
+        }
+    }
+
+    private func evidenceText(
+        _ item: EvidenceContextItem,
+        task: DashboardTask,
+        source: MessageSourceKind
+    ) -> String {
+        guard source == .gmail else { return item.text }
+        return GmailPresentation.compactBody(
+            subject: task.chatTitle,
+            messageText: item.text,
+            maxCharacters: item.isSource ? 650 : 320
+        )
+    }
+
+    private func openEvidence(_ item: EvidenceContextItem, for task: DashboardTask) {
+        if sourceKind(for: task) == .telegram {
+            Task {
+                await telegramService.openMessageInTelegram(
+                    chatId: task.chatId,
+                    messageId: item.id
+                )
+            }
+        } else {
+            onOpenChat(task.chatId)
+        }
     }
 
     private func loadConversationContext() async {
@@ -272,6 +489,72 @@ struct EvidenceContextItem: Identifiable, Equatable {
     let isOutgoing: Bool
     let text: String
     let isSource: Bool
+}
+
+/// A bounded, readable source preview for the task inspector. Canonical
+/// evidence remains untouched in storage; this view only reduces transport
+/// noise and prevents one long email/message from swallowing the panel.
+struct DashboardTaskEvidenceCard: View {
+    let item: EvidenceContextItem
+    let text: String
+    let sourceName: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 7) {
+                Text(item.senderName)
+                    .font(PidgyDashboardTheme.metadataMediumFont)
+                    .foregroundStyle(item.isOutgoing
+                        ? PidgyDashboardTheme.brand
+                        : PidgyDashboardTheme.primary)
+                    .lineLimit(1)
+
+                Text("·")
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+
+                Text(DateFormatting.compactRelativeTime(from: item.date))
+                    .font(PidgyDashboardTheme.monoCaptionFont)
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+
+                Spacer(minLength: 6)
+
+                if item.isSource {
+                    Label(sourceName, systemImage: "arrow.up.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(PidgyDashboardTheme.brand)
+                }
+            }
+
+            Text(text)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(item.isSource
+                    ? PidgyDashboardTheme.primary
+                    : PidgyDashboardTheme.secondary)
+                .lineSpacing(3)
+                .lineLimit(item.isSource ? 9 : 4)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(item.isSource
+                    ? PidgyDashboardTheme.paper
+                    : PidgyDashboardTheme.paper.opacity(0.48))
+        )
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(item.isSource ? PidgyDashboardTheme.brand : Color.Pidgy.border2)
+                .frame(width: 3)
+                .padding(.vertical, 8)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(PidgyDashboardTheme.rule)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
 }
 
 struct DashboardEvidenceContextRow: View {

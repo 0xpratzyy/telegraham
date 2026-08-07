@@ -197,6 +197,11 @@ struct DashboardTasksPage: View {
                 liveSearchTask?.cancel()
             }
         }
+        .onChange(of: ownerOptions.map(\.id)) { _, visibleOwnerIds in
+            if !visibleOwnerIds.contains(selectedOwnerFilter.id), selectedOwnerFilter == .all {
+                selectedOwnerFilter = .mine
+            }
+        }
     }
 
     private var centeredList: some View {

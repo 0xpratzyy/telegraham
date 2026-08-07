@@ -198,6 +198,27 @@ final class AIService: ObservableObject {
         return try await provider.summarize(messages: snippets, prompt: prompt)
     }
 
+    /// A compact dashboard gist for a Gmail thread. The detail pane deliberately
+    /// does not reproduce the message body: Gmail remains the source of truth for
+    /// full content, while Pidgy explains only why the email matters.
+    func emailSummary(
+        subject: String,
+        sender: String,
+        messages: [TGMessage],
+        myUserId: Int64
+    ) async throws -> String {
+        try requireAIEntitlement()
+        let snippets = conversationSnippets(messages: messages, chatTitle: subject, myUserId: myUserId)
+        guard !snippets.isEmpty else { return "" }
+        let prompt = """
+        Summarize this email thread from \(sender) in 1-2 short sentences, at most 45 words. \
+        Explain the main point and whether the user needs to respond or take action. \
+        Paraphrase instead of copying the email. Never include verification codes, URLs, \
+        signatures, legal footers, tracking text, or quoted message history. Plain text only.
+        """
+        return try await provider.summarize(messages: snippets, prompt: prompt)
+    }
+
     /// Context layer (#48): extract facts from a chat's NEW messages, folding in
     /// its current open loops so the model can also CLOSE the ones the new
     /// messages answered. Runs through the generic `summarize` escape hatch
@@ -253,12 +274,32 @@ final class AIService: ObservableObject {
         let chatTitle = chat.title
         result.drafts = result.drafts.map { var d = $0; d.sourceChatTitle = chatTitle; return d }
         if chat.source.kind == .gmail {
+            // Model output is not sufficient authority to promote machine
+            // mail into Pidgy. OTP/login/marketing facts are rejected before
+            // they ever reach Reply Queue or Tasks.
+            result.drafts = GmailEligibilityPolicy.eligibleDrafts(
+                result.drafts,
+                messages: newMessages,
+                chat: chat
+            )
             let existingSources = Set(result.drafts
                 .filter { $0.predicate == .iOwe && $0.loopKind == .action }
                 .map(\.sourceMessageId))
-            result.drafts.append(contentsOf: GmailActionFallback
+            let fallbacks = GmailActionFallback
                 .drafts(messages: newMessages, chat: chat)
-                .filter { !existingSources.contains($0.sourceMessageId) })
+                .filter { !existingSources.contains($0.sourceMessageId) }
+            result.drafts.append(contentsOf: GmailEligibilityPolicy.eligibleDrafts(
+                fallbacks,
+                messages: newMessages,
+                chat: chat
+            ))
+            result.drafts = GmailTaskCanonicalization.coalesced(result.drafts)
+        } else if chat.source.kind == .slack {
+            result.drafts = SlackTriagePolicy.enhancedDrafts(
+                result.drafts,
+                messages: newMessages,
+                chat: chat
+            )
         }
         return result
     }

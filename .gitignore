@@ -60,6 +60,11 @@ Config/GoogleOAuth.local.xcconfig
 tools/model_swap_eval_out/
 __pycache__/
 
+# Private source-quality fixtures. These may contain Gmail/Slack message IDs,
+# labels, and reviewer notes. Keep them local; only sanitized benchmark
+# templates belong in evals/.
+.private-evals/
+
 # Packaged distribution artifacts (Pidgy-<sha>.dmg etc.)
 dist/
 

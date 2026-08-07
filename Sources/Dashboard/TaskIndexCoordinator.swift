@@ -202,6 +202,9 @@ final class TaskIndexCoordinator: ObservableObject {
     /// True after the first COMPLETED projection — the setBotInclusion
     /// early-return keys on this, not on task count.
     private var hasCompletedInitialLoad = false
+    /// One upgrade-time repair closes duplicate Gmail tasks created by older
+    /// semantic-only builds before the first projection reaches the UI.
+    private var hasRepairedDuplicateGmailTasks = false
     /// Ticket for user-initiated refreshes: only the NEWEST one may clear
     /// the spinner (a first click finishing must not stop it while a second
     /// overlapping click's load is still in flight — and vice versa).
@@ -237,6 +240,14 @@ final class TaskIndexCoordinator: ObservableObject {
             }
         }
 
+        if !hasRepairedDuplicateGmailTasks {
+            let repaired = await DatabaseManager.shared.repairDuplicateOpenGmailTasks()
+            hasRepairedDuplicateGmailTasks = true
+            if repaired > 0 {
+                logger.notice("Closed \(repaired) duplicate Gmail task facts")
+            }
+        }
+
         // The three reads are independent — overlap them on the pool's
         // reader connections instead of paying sum-of-latencies on the
         // hottest reload path in the app.
@@ -246,7 +257,7 @@ final class TaskIndexCoordinator: ObservableObject {
         // and reopenable — Mark Done must not erase all history.
         async let closedFactsRead = DatabaseManager.shared.loadUserClosedFacts()
         let chatTitles: [Int64: String]
-        if let telegramService {
+        if telegramService != nil {
             chatTitles = Dictionary(
                 SourceRegistry.shared.visibleChats.map { ($0.id, $0.title) },
                 uniquingKeysWith: { a, _ in a }
@@ -262,8 +273,10 @@ final class TaskIndexCoordinator: ObservableObject {
         // generation, because its replacement sleeps 20s before loading.
         // Publishing would blank the Tasks page for the whole window.
         guard !Task.isCancelled else { return }
-        let factTasks = FactProjection.tasks(from: openFacts, chatTitles: chatTitles)
-        let closedTasks = FactProjection.closedTasks(from: closedFacts, chatTitles: chatTitles)
+        let eligibleOpenFacts = dashboardEligibleFacts(openFacts)
+        let eligibleClosedFacts = dashboardEligibleFacts(closedFacts)
+        let factTasks = FactProjection.tasks(from: eligibleOpenFacts, chatTitles: chatTitles)
+        let closedTasks = FactProjection.closedTasks(from: eligibleClosedFacts, chatTitles: chatTitles)
         let visibleTasks = await botFilteredTasks(
             factTasks + closedTasks,
             telegramService: telegramService,
@@ -271,7 +284,7 @@ final class TaskIndexCoordinator: ObservableObject {
         )
         let visibleIds = Set(visibleTasks.map(\.id))
         var evidence: [Int64: [DashboardTaskSourceMessage]] = [:]
-        for f in openFacts + closedFacts where visibleIds.contains(f.id) && !f.sourceText.isEmpty {
+        for f in eligibleOpenFacts + eligibleClosedFacts where visibleIds.contains(f.id) && !f.sourceText.isEmpty {
             evidence[f.id] = [DashboardTaskSourceMessage(
                 chatId: f.sourceChatId,
                 messageId: f.sourceMessageId,
@@ -290,6 +303,24 @@ final class TaskIndexCoordinator: ObservableObject {
         evidenceByTaskId = evidence
         hasCompletedInitialLoad = true
         didPublish = true
+    }
+
+    /// Hides old Gmail false positives already present in the fact store.
+    /// Storage stays intact/reversible; only proactive task projection is
+    /// suppressed. New bad facts are also blocked pre-persistence in AIService.
+    private func dashboardEligibleFacts(_ facts: [Fact]) -> [Fact] {
+        facts.filter { fact in
+            guard let chat = SourceRegistry.shared.chat(id: fact.sourceChatId),
+                  chat.source.kind == .gmail else {
+                return true
+            }
+            return GmailEligibilityPolicy.shouldSurface(
+                subject: fact.sourceChatTitle.isEmpty ? chat.title : fact.sourceChatTitle,
+                sender: fact.senderName,
+                body: fact.sourceText,
+                hasActionableLoop: fact.predicate.isOpenLoop
+            )
+        }
     }
 
     /// Reload the projection. Background refreshes only re-read the store;

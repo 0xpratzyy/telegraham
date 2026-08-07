@@ -11,8 +11,16 @@ struct GmailSyncProgress: Equatable, Sendable {
     }
 }
 
+struct GmailConnectedAccount: Identifiable, Equatable, Sendable {
+    let email: String
+    var id: String { email }
+}
+
 @MainActor
 final class GmailConnectionManager: ObservableObject {
+    nonisolated static let automaticRefreshInterval: TimeInterval = 5 * 60
+    nonisolated static let incrementalSyncOverlap: TimeInterval = 60 * 60
+
     enum State: Equatable {
         case unavailable
         case disconnected
@@ -22,33 +30,44 @@ final class GmailConnectionManager: ObservableObject {
         case failed(String)
     }
 
+    enum AccountActivity: Equatable {
+        case idle
+        case syncing
+    }
+
     static let shared = GmailConnectionManager()
     @Published private(set) var state: State
+    @Published private(set) var accounts: [GmailConnectedAccount] = []
+    @Published private(set) var accountActivity: [String: AccountActivity] = [:]
+    @Published private(set) var accountStatus: [String: String] = [:]
     @Published private(set) var syncProgress: GmailSyncProgress?
+    private var automaticRefreshTask: Task<Void, Never>?
 
     private init() {
         state = Self.resolveCredentials() == nil ? .unavailable : .disconnected
         syncProgress = nil
     }
 
-    var configuredClientId: String? {
-        Self.resolveClientId()
-    }
+    var configuredClientId: String? { Self.resolveClientId() }
+    var canAddAccount: Bool { Self.resolveCredentials() != nil }
+    var isConnecting: Bool { state == .connecting }
 
     func restore() async {
-        // Cached Gmail is useful even when this particular build no longer has
-        // OAuth credentials (or the refresh token was removed). Register the
-        // local read-only source first; connection state only controls future
-        // remote syncs.
+        // Cached Gmail remains useful even if OAuth configuration is absent.
+        // Register every locally imported mailbox before resolving whether a
+        // fresh remote sync is possible in this particular build.
         await IntegrationConnectionStore.shared.load()
-        guard Self.resolveCredentials() != nil else { state = .unavailable; return }
-        guard (try? KeychainManager.retrieve(for: .gmailRefreshToken)) != nil,
-              let email = try? KeychainManager.retrieve(for: .gmailAccountEmail) else {
-            state = .disconnected
+        do {
+            setAccounts(try GmailCredentialVault.loadMigratingLegacy())
+        } catch {
+            state = .failed(error.localizedDescription)
             return
         }
-        state = .connected(email)
-        FactExtractionCoordinator.shared.triggerPass()
+        refreshIdleState()
+        if !accounts.isEmpty {
+            FactExtractionCoordinator.shared.triggerPass()
+            startAutomaticRefresh(immediate: true)
+        }
     }
 
     func configureAndConnect(clientId rawClientId: String) async {
@@ -66,71 +85,133 @@ final class GmailConnectionManager: ObservableObject {
         await connect()
     }
 
+    /// Always opens Google's account chooser. Connecting an address already
+    /// in the vault refreshes that account; choosing another adds a new one.
     func connect() async {
         guard let credentials = Self.resolveCredentials() else { state = .unavailable; return }
         state = .connecting
         syncProgress = nil
+        var connectedEmail: String?
         do {
             let token = try await GmailOAuth.connect(
                 clientId: credentials.clientId,
                 clientSecret: credentials.clientSecret
             )
-            try save(token)
             let adapter = try GmailSourceAdapter(accessToken: token.accessToken)
             let external = try await adapter.currentAccount()
-            try KeychainManager.save(external.externalID, for: .gmailAccountEmail)
-            let result = try await runSync(adapter: adapter)
+            let email = external.externalID.lowercased()
+            connectedEmail = email
+            let existingRefresh = try GmailCredentialVault.credential(for: email)?.refreshToken
+            try save(token, email: email, preservingRefresh: existingRefresh)
+            setAccounts(try GmailCredentialVault.load())
+            accountActivity[email] = .syncing
+            let result = try await runSync(adapter: adapter, email: email)
             await IntegrationConnectionStore.shared.load()
             FactExtractionCoordinator.shared.triggerPass(bypassProviderCooldown: true)
-            state = .connected("\(external.displayName) · \(result.messages) messages")
+            accountStatus[email] = "Read \(result.messages) messages"
+            accountActivity[email] = .idle
             syncProgress = nil
+            refreshIdleState()
+            startAutomaticRefresh(immediate: false)
         } catch {
             syncProgress = nil
-            state = .failed(error.localizedDescription)
+            if let connectedEmail, accounts.contains(where: { $0.email == connectedEmail }) {
+                accountActivity[connectedEmail] = .idle
+                accountStatus[connectedEmail] = error.localizedDescription
+                refreshIdleState()
+            } else {
+                state = .failed(error.localizedDescription)
+            }
         }
     }
 
-    func sync() async {
+    func sync(email: String) async {
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard accountActivity[normalizedEmail] != .syncing else { return }
+        accountActivity[normalizedEmail] = .syncing
+        accountStatus[normalizedEmail] = nil
         do {
-            let token = try await validAccessToken()
-            let result = try await runSync(adapter: GmailSourceAdapter(accessToken: token))
+            let token = try await validAccessToken(for: normalizedEmail)
+            let lastSyncedAt = await DatabaseManager.shared.loadSourceAccounts()
+                .first {
+                    $0.source == .gmail &&
+                    $0.externalID.caseInsensitiveCompare(normalizedEmail) == .orderedSame
+                }?
+                .lastSyncedAt
+            let result = try await runSync(
+                adapter: GmailSourceAdapter(
+                    accessToken: token,
+                    since: Self.incrementalStart(lastSyncedAt: lastSyncedAt)
+                ),
+                email: normalizedEmail
+            )
             await IntegrationConnectionStore.shared.load()
             FactExtractionCoordinator.shared.triggerPass(bypassProviderCooldown: true)
-            let email = (try? KeychainManager.retrieve(for: .gmailAccountEmail)) ?? "Gmail"
-            state = .connected("\(email) · \(result.messages) messages")
-            syncProgress = nil
+            accountStatus[normalizedEmail] = "Read \(result.messages) messages"
         } catch {
-            syncProgress = nil
+            accountStatus[normalizedEmail] = error.localizedDescription
+        }
+        accountActivity[normalizedEmail] = .idle
+        syncProgress = nil
+        refreshIdleState()
+    }
+
+    /// Compatibility convenience for existing call sites: sync every mailbox,
+    /// one at a time, so progress and rate limits stay understandable.
+    func sync() async {
+        for account in accounts { await sync(email: account.email) }
+    }
+
+    /// Removes only this mailbox's authorization. Imported local records stay
+    /// available until the user chooses the separate "Delete all local data"
+    /// action, matching Pidgy's existing disconnect semantics.
+    func disconnect(email: String) {
+        do {
+            setAccounts(try GmailCredentialVault.remove(email: email))
+            accountActivity.removeValue(forKey: email.lowercased())
+            accountStatus.removeValue(forKey: email.lowercased())
+            refreshIdleState()
+            if accounts.isEmpty {
+                automaticRefreshTask?.cancel()
+                automaticRefreshTask = nil
+            }
+        } catch {
             state = .failed(error.localizedDescription)
         }
     }
 
     func disconnect() {
-        for key: KeychainManager.Key in [.gmailAccessToken, .gmailRefreshToken, .gmailTokenExpiry, .gmailAccountEmail] {
-            try? KeychainManager.delete(for: key)
+        do {
+            try GmailCredentialVault.deleteAll()
+            setAccounts([])
+            accountActivity = [:]
+            accountStatus = [:]
+            automaticRefreshTask?.cancel()
+            automaticRefreshTask = nil
+            refreshIdleState()
+        } catch {
+            state = .failed(error.localizedDescription)
         }
-        state = .disconnected
-        syncProgress = nil
     }
 
-    private func runSync(adapter: GmailSourceAdapter) async throws -> SourceSyncCoordinator.Result {
-        state = .syncing("Preparing your inbox…")
+    private func runSync(adapter: GmailSourceAdapter, email: String) async throws -> SourceSyncCoordinator.Result {
+        state = .syncing("Preparing \(email)…")
         return try await SourceSyncCoordinator.shared.sync(
             adapter: adapter,
             maxConversations: 200,
             progress: { progress in
                 await MainActor.run {
-                    GmailConnectionManager.shared.apply(progress)
+                    GmailConnectionManager.shared.apply(progress, email: email)
                 }
             }
         )
     }
 
-    private func apply(_ progress: SourceSyncCoordinator.Progress) {
+    private func apply(_ progress: SourceSyncCoordinator.Progress, email: String) {
         let title: String
         switch progress.phase {
         case .discovering:
-            title = "Finding recent inbox threads"
+            title = "Finding recent mail"
         case .reading:
             title = progress.total > 0
                 ? "Reading \(progress.completed) of \(progress.total) threads"
@@ -138,20 +219,22 @@ final class GmailConnectionManager: ObservableObject {
         case .saving:
             title = progress.total > 0
                 ? "Preparing \(progress.completed) of \(progress.total) threads"
-                : "Preparing your inbox"
+                : "Preparing Gmail"
         }
         syncProgress = GmailSyncProgress(title: title, completed: progress.completed, total: progress.total)
+        accountStatus[email] = title
         state = .syncing(title)
     }
 
-    private func validAccessToken() async throws -> String {
-        if let raw = try? KeychainManager.retrieve(for: .gmailTokenExpiry),
-           let expiry = Double(raw), Date().timeIntervalSince1970 < expiry - 60,
-           let access = try? KeychainManager.retrieve(for: .gmailAccessToken) {
-            return access
+    private func validAccessToken(for email: String) async throws -> String {
+        guard var stored = try GmailCredentialVault.credential(for: email) else {
+            throw SourceAdapterError.invalidCredential
+        }
+        if Date().timeIntervalSince1970 < stored.expiresAt - 60, !stored.accessToken.isEmpty {
+            return stored.accessToken
         }
         guard let credentials = Self.resolveCredentials(),
-              let refresh = try? KeychainManager.retrieve(for: .gmailRefreshToken) else {
+              let refresh = stored.refreshToken, !refresh.isEmpty else {
             throw SourceAdapterError.invalidCredential
         }
         let token = try await GmailOAuth.refresh(
@@ -159,19 +242,75 @@ final class GmailConnectionManager: ObservableObject {
             clientSecret: credentials.clientSecret,
             refreshToken: refresh
         )
-        try save(token, preservingRefresh: refresh)
+        stored.accessToken = token.accessToken
+        stored.refreshToken = token.refreshToken ?? refresh
+        stored.expiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970
+        try GmailCredentialVault.upsert(stored)
         return token.accessToken
     }
 
-    private func save(_ token: GmailOAuthToken, preservingRefresh existingRefresh: String? = nil) throws {
-        try KeychainManager.save(token.accessToken, for: .gmailAccessToken)
-        if let refresh = token.refreshToken ?? existingRefresh {
-            try KeychainManager.save(refresh, for: .gmailRefreshToken)
-        }
-        try KeychainManager.save(
-            String(Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970),
-            for: .gmailTokenExpiry
+    private func save(
+        _ token: GmailOAuthToken,
+        email: String,
+        preservingRefresh existingRefresh: String? = nil
+    ) throws {
+        try GmailCredentialVault.upsert(
+            GmailStoredAccountCredential(
+                email: email,
+                accessToken: token.accessToken,
+                refreshToken: token.refreshToken ?? existingRefresh,
+                expiresAt: Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970
+            )
         )
+    }
+
+    private func setAccounts(_ stored: [GmailStoredAccountCredential]) {
+        accounts = stored.map { GmailConnectedAccount(email: $0.email) }
+    }
+
+    nonisolated static func incrementalStart(lastSyncedAt: Date?) -> Date? {
+        lastSyncedAt?.addingTimeInterval(-incrementalSyncOverlap)
+    }
+
+    private func startAutomaticRefresh(immediate: Bool) {
+        automaticRefreshTask?.cancel()
+        guard !accounts.isEmpty else {
+            automaticRefreshTask = nil
+            return
+        }
+
+        automaticRefreshTask = Task { [weak self] in
+            if immediate { await self?.syncIdleAccounts() }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(Self.automaticRefreshInterval * 1_000_000_000)
+                    )
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                await self?.syncIdleAccounts()
+            }
+        }
+    }
+
+    private func syncIdleAccounts() async {
+        let emails = accounts.map(\.email)
+        for email in emails where accountActivity[email] != .syncing {
+            await sync(email: email)
+        }
+    }
+
+    private func refreshIdleState() {
+        if Self.resolveCredentials() == nil {
+            state = .unavailable
+        } else if accounts.isEmpty {
+            state = .disconnected
+        } else {
+            let label = accounts.count == 1 ? "1 account" : "\(accounts.count) accounts"
+            state = .connected(label)
+        }
     }
 
     private static func resolveClientId() -> String? {

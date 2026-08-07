@@ -114,6 +114,11 @@ enum GmailActionFallback {
             guard !message.isOutgoing,
                   let rawText = message.textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !rawText.isEmpty,
+                  !GmailEligibilityPolicy.isHardNoise(
+                    subject: chat.title,
+                    sender: message.senderName,
+                    body: rawText
+                  ),
                   isExplicitAction(rawText) else { return nil }
 
             let subjectLine = rawText
@@ -152,6 +157,7 @@ enum GmailActionFallback {
         let strongPatterns = [
             #"\baction\s+required\b"#,
             #"\b(your\s+action\s+is|required\s+action\s+is)\s+required\b"#,
+            #"\b(?:identity\s+|id\s+)?document\s+has\s+expired\b"#,
             #"\bplease\s+(complete|submit|sign|review|approve|pay|provide|upload|fill\s+out)\b[^\n]{0,180}\b(within|by|before|deadline|required)\b"#,
             #"\b(you\s+must|required\s+to)\s+(complete|submit|sign|review|approve|pay|provide|upload|fill\s+out)\b"#
         ]
@@ -161,6 +167,18 @@ enum GmailActionFallback {
     }
 
     private static func actionTitle(in text: String, fallbackSubject: String) -> String {
+        if text.range(
+            of: #"(?i)\b(?:identity\s+|id\s+)?document\s+has\s+expired\b"#,
+            options: .regularExpression
+        ) != nil {
+            let service = fallbackSubject
+                .replacingOccurrences(of: #"^\[([^\]]+)\].*$"#, with: "$1", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return service.isEmpty || service == fallbackSubject
+                ? "Upload renewed identity document"
+                : "Upload renewed identity document to \(service)"
+        }
+
         for rawLine in text.split(whereSeparator: \Character.isNewline) {
             let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
             guard let marker = line.range(of: "action required", options: [.caseInsensitive]) else { continue }
@@ -185,6 +203,135 @@ enum GmailActionFallback {
         let display = raw.split(separator: "<", maxSplits: 1).first.map(String.init) ?? raw
         let cleaned = display.trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
         return cleaned.isEmpty ? "Email sender" : cleaned
+    }
+}
+
+/// Small structural corrections for Slack where terse conversational language
+/// is easy for the model to mis-lane or omit. These rules require either an
+/// explicit question shape or the user's own concrete commitment; they do not
+/// try to infer tasks from ambient channel chatter.
+enum SlackTriagePolicy {
+    static func isDeferredReply(_ text: String?) -> Bool {
+        guard let text else { return false }
+        let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let prefixes = ["wait", "i will check", "i'll check", "will check", "checking"]
+        return prefixes.contains(where: lower.hasPrefix)
+            || lower.contains("lemme check")
+            || lower.contains("let me check")
+            || lower.contains("get back")
+    }
+
+    static func enhancedDrafts(
+        _ drafts: [FactDraft],
+        messages: [TGMessage],
+        chat: TGChat
+    ) -> [FactDraft] {
+        var enhanced = drafts.map(correctedLoopKind)
+        var anchoredSources = Set(enhanced.map(\.sourceMessageId))
+
+        for requestIndex in messages.indices {
+            let request = messages[requestIndex]
+            guard !request.isOutgoing,
+                  let requestText = request.textContent,
+                  let verb = explicitRequestVerb(in: requestText) else { continue }
+
+            let lookahead = messages.index(after: requestIndex)..<min(messages.endIndex, requestIndex + 4)
+            guard let commitmentIndex = lookahead.first(where: { index in
+                let candidate = messages[index]
+                return candidate.isOutgoing && isExplicitCommitment(candidate.textContent)
+            }), !anchoredSources.contains(request.id) else { continue }
+
+            let detailRange = messages.index(after: commitmentIndex)..<min(messages.endIndex, commitmentIndex + 3)
+            let detail = detailRange
+                .map { messages[$0] }
+                .first { !$0.isOutgoing && !($0.textContent ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            let action = commitmentAction(
+                verb: verb,
+                requestText: requestText,
+                detailText: detail?.textContent
+            )
+            let sender = request.senderName ?? chat.title
+            enhanced.append(FactDraft(
+                subjectEntity: sender,
+                predicate: .iOwe,
+                objectText: action,
+                action: action,
+                loopKind: .action,
+                objectEntity: nil,
+                confidence: 0.93,
+                validFrom: request.date,
+                sourceChatId: chat.id,
+                sourceChatTitle: chat.title,
+                sourceMessageId: request.id,
+                sourceText: requestText,
+                senderName: sender
+            ))
+            anchoredSources.insert(request.id)
+        }
+        return enhanced
+    }
+
+    private static func correctedLoopKind(_ draft: FactDraft) -> FactDraft {
+        guard draft.predicate == .iOwe,
+              draft.loopKind == .action,
+              isDirectQuestion(draft.sourceText) else { return draft }
+        let action = draft.action.lowercased()
+        let answerableCheckPrefixes = [
+            "check if ", "check whether ", "confirm if ", "confirm whether "
+        ]
+        guard answerableCheckPrefixes.contains(where: action.hasPrefix) else { return draft }
+        var corrected = draft
+        corrected.loopKind = .reply
+        return corrected
+    }
+
+    private static func isDirectQuestion(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if lower.contains("?") { return true }
+        return lower.range(
+            of: #"\b(kya|hai kya|can you|could you|would you|is it|are there)\b"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func explicitRequestVerb(in text: String) -> String? {
+        let lower = text.lowercased()
+        let pattern = #"\b(?:can|could|please|pls)?\s*(?:you\s+)?(add|update|change|fix|upload|send|share|review|create|build|publish)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)),
+              let range = Range(match.range(at: 1), in: lower) else { return nil }
+        return String(lower[range])
+    }
+
+    private static func isExplicitCommitment(_ text: String?) -> Bool {
+        guard let text else { return false }
+        return text.lowercased().range(
+            of: #"\b(i\s+will|i'll|ill|let\s+me|lemme)\s+(add|update|change|fix|upload|send|share|review|create|build|publish)\b"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func commitmentAction(verb: String, requestText: String, detailText: String?) -> String {
+        if let detailText {
+            let cleaned = detailText
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "•-*")))
+            if let colon = cleaned.firstIndex(of: ":") {
+                let label = cleaned[..<colon].trimmingCharacters(in: .whitespacesAndNewlines)
+                if (2...40).contains(label.count) {
+                    return "\(verb.capitalized) \(label.lowercased()) to the page"
+                }
+            }
+        }
+
+        let lower = requestText.lowercased()
+        if let range = lower.range(of: verb) {
+            let suffix = lower[range.upperBound...]
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+            if suffix.count >= 4, !["here", "this", "that"].contains(suffix) {
+                return "\(verb.capitalized) \(suffix.prefix(80))"
+            }
+        }
+        return "\(verb.capitalized) the requested update"
     }
 }
 
@@ -285,7 +432,7 @@ enum FactExtractionPrompt {
       * [2] THEM "will share the deck tomorrow" … [4] THEM "btw did you see the news" → nothing was delivered: emit the owes_me loop.
     - CHASED LOOPS: when a NEW message from the OTHER person follows up on / nudges something [ME] owes THEM (an "you owe" OPEN LOOP) without closing it — "any update?", "wen free tonight?", asking the same thing again — do NOT re-emit the loop; report it in "chasedLoops": {"loop": its OPEN LOOPS number, "sourceMsg": the follow-up message's transcript [N]}. This bumps the existing item to the latest ping instead of duplicating it. Only report a chase when the connection to a SPECIFIC loop is clear from the conversation (in a DM, a bare "free tonight?"/"around?" ping usually chases the latest thing [ME] owes them); if it is genuinely ambiguous WHICH loop is being chased, report nothing. A chase never targets a loop where THEY owe [ME].
     - Prefer a few high-confidence facts over many guesses. Empty arrays are perfectly fine.
-    - "action" must read like a to-do you wrote yourself (imperative, natural, specific) — NEVER a template like "Owe X: Y". Keep "object" as the short stable noun phrase; "action" is the human phrasing.
+    - "action" must read like a compact to-do title you wrote yourself: imperative, natural, specific, target 4-9 words and NEVER more than 12. Start with a verb and keep only the essential object plus a critical amount, organization, or deadline. Remove filler such as "your", "the affected", full app-navigation paths, and sentence-style explanation. Prefer "Complete Base grant forms", "Renew nitrate.trade on Framer", or "Pay ICICI card · ₹10,975.98" over the original email sentence. NEVER use a template like "Owe X: Y". Keep "object" as the short stable noun phrase; "action" is the human phrasing.
     - For every i_owe loop, set "kind": "reply" when a quick message closes it, "action" when it needs work or time before you can respond. This is what separates the user's Reply queue (quick replies) from their Tasks (take work). owes_me and durable facts: omit "kind".
 
     BEFORE YOU OUTPUT — run this checklist on EVERY open loop you are about to emit. These four are where mistakes actually happen, so they are repeated here deliberately; a loop that fails any of them must be corrected or dropped.

@@ -176,6 +176,111 @@ struct DashboardTask: Identifiable, Sendable, Equatable, Hashable {
     }
 }
 
+/// Turns model-written task sentences into scan-friendly macOS list titles.
+/// The full source text remains in `summary`/evidence; this is presentation
+/// copy only, so old facts improve immediately without rewriting storage.
+enum DashboardTaskTitle {
+    static func compact(_ rawValue: String) -> String {
+        var title = normalized(rawValue)
+        guard !title.isEmpty else { return "Untitled task" }
+
+        title = title.replacingOccurrences(
+            of: #"(?i)^\[?action required\]?\s*[:\-–—]?\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        let semanticRules: [(pattern: String, replacement: String)] = [
+            (
+                #"(?i)^your\s+(.+?)\s+site at\s+(\S+)\s+is about to go offline[.!]?$"#,
+                "Renew $2 on $1"
+            ),
+            (
+                #"(?i)^reactivate the\s+(.+?)\s+subscription for\s+(\S+)[.!]?$"#,
+                "Renew $2 on $1"
+            ),
+            (
+                #"(?i)^complete the\s+.+\s+for the\s+(.+?)\s+grant[.!]?$"#,
+                "Complete $1 grant forms"
+            ),
+            (
+                #"(?i)^approve the\s+(.+?)\s+transaction(?:\s+in|\s+on)\s+.+$"#,
+                "Approve $1 transaction"
+            ),
+            (
+                #"(?i)^download the affected\s+(.+?)\s+before\s+.+$"#,
+                "Download expiring $1"
+            ),
+            (
+                #"(?i)^provide (?:an?\s+)?identity document for\s+.+?\s+on\s+(?:the\s+)?(.+?)\s+dashboard[.!]?$"#,
+                "Verify identity on $1"
+            ),
+            (
+                #"(?i)^upload the\s+(?:valid\s+)?(?:unexpired\s+)?(.+?)\s+to\s+(?:the\s+)?(.+?)\s+dashboard for\s+.+$"#,
+                "Upload $1 to $2"
+            ),
+            (
+                #"(?i)^pay the invoice for\s+(.+?)\s+to\s+(.+?)[.!]?$"#,
+                "Pay $2 invoice · $1"
+            ),
+            (
+                #"(?i)^pay the\s+(.+?)\s+api invoice\s*\((.+?)\)[.!]?$"#,
+                "Pay $1 invoice · $2"
+            ),
+            (
+                #"(?i)^pay the\s+(.+?)\s+bill of\s+(.+?)(?:\s+due on\s+.+)?[.!]?$"#,
+                "Pay $1 · $2"
+            )
+        ]
+
+        for rule in semanticRules where title.range(of: rule.pattern, options: .regularExpression) != nil {
+            title = title.replacingOccurrences(
+                of: rule.pattern,
+                with: rule.replacement,
+                options: .regularExpression
+            )
+            break
+        }
+
+        title = title.replacingOccurrences(
+            of: #"(?i)\s+(?:in|on)\s+the\s+.+?\s+(?:mobile banking\s+)?app[.!]?$"#,
+            with: "",
+            options: .regularExpression
+        )
+        title = title.replacingOccurrences(
+            of: #"(?i)\s+due on\s+.+$"#,
+            with: "",
+            options: .regularExpression
+        )
+        title = title.replacingOccurrences(of: " credit card", with: " card", options: .caseInsensitive)
+        title = normalized(title)
+            .trimmingCharacters(in: CharacterSet(charactersIn: " .,:;–—-"))
+
+        return bounded(title, maxWords: 9, maxCharacters: 68)
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func bounded(_ value: String, maxWords: Int, maxCharacters: Int) -> String {
+        var words = value.split(whereSeparator: \Character.isWhitespace).map(String.init)
+        var wasClipped = words.count > maxWords
+        if wasClipped { words = Array(words.prefix(maxWords)) }
+        var result = words.joined(separator: " ")
+
+        if result.count > maxCharacters {
+            let end = result.index(result.startIndex, offsetBy: maxCharacters)
+            let prefix = String(result[..<end])
+            result = prefix.lastIndex(of: " ").map { String(prefix[..<$0]) } ?? prefix
+            wasClipped = true
+        }
+        return result + (wasClipped ? "…" : "")
+    }
+}
+
 struct DashboardTaskSourceMessage: Sendable, Equatable, Hashable {
     let chatId: Int64
     let messageId: Int64
@@ -520,15 +625,15 @@ enum DashboardTaskListFilters {
         )
 
         var seen: Set<String> = []
-        // "For me" → just user-owned tasks. "Anyone" → everyone Pidgy
-        // extracted, including tasks assigned to other named people in
-        // your chats (Akhil, Priyanshu, etc.). Surfacing both keeps the
-        // page calm by default while giving a single-tap escape hatch
-        // to see the full team-accountability view.
+        // "Anyone" only adds value when Pidgy actually extracted work owned
+        // by somebody else. If both sets are identical, showing both chips
+        // creates two controls that do the same thing.
         var chips: [DashboardTaskOwnerOption] = [
-            DashboardTaskOwnerOption(filter: .mine, label: "For me", count: mineCount),
-            DashboardTaskOwnerOption(filter: .all, label: "Anyone", count: anyoneCount)
+            DashboardTaskOwnerOption(filter: .mine, label: "For me", count: mineCount)
         ]
+        if anyoneCount > mineCount {
+            chips.append(DashboardTaskOwnerOption(filter: .all, label: "Anyone", count: anyoneCount))
+        }
 
         for rawName in pinnedNames {
             let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
