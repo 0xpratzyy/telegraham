@@ -944,6 +944,36 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertNil(DeepLinkGenerator.serverMessageId(0))
     }
 
+    func testGmailDeepLinkUsesStableAccountSelector() throws {
+        let url = try XCTUnwrap(
+            DeepLinkGenerator.gmailThreadURL(
+                account: "pratyush+work@gmail.com",
+                threadID: "19fdd698fb959cfa"
+            )
+        )
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+
+        XCTAssertEqual(url.host, "mail.google.com")
+        XCTAssertEqual(url.path, "/mail/u")
+        XCTAssertEqual(components.queryItems?.first?.name, "authuser")
+        XCTAssertEqual(components.queryItems?.first?.value, "pratyush+work@gmail.com")
+        XCTAssertEqual(components.fragment, "all/19fdd698fb959cfa")
+        XCTAssertFalse(
+            url.absoluteString.contains("/u/pratyush"),
+            "an email address in Gmail's account-slot path can produce a 404"
+        )
+    }
+
+    func testGmailDeepLinkStillWorksWithoutStoredAccount() throws {
+        let url = try XCTUnwrap(
+            DeepLinkGenerator.gmailThreadURL(account: "  ", threadID: "abc123")
+        )
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+
+        XCTAssertNil(components.query)
+        XCTAssertEqual(components.fragment, "all/abc123")
+    }
+
     func testDeepLinkCandidatesCoverEveryChatTypeAndTarget() {
         // DM — desktop: username resolve first, no mobile-only tg://user.
         let dm = makeChat(
@@ -6955,6 +6985,168 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(body, "one two three four…")
     }
 
+    func testGmailCompactBodyStripsStoredHTMLBeforeSummarizing() {
+        let body = GmailPresentation.compactBody(
+            subject: "Funds/Securities Balance",
+            messageText: """
+            Funds/Securities Balance
+            <html><head><style>p { color: red; }</style></head><body>
+            <p>Dear Investor,</p><p>Please review your balance &amp; upload the required file.</p>
+            </body></html>
+            """
+        )
+
+        XCTAssertEqual(body, "Dear Investor, Please review your balance & upload the required file.")
+        XCTAssertFalse(body.contains("<html>"))
+        XCTAssertFalse(body.contains("color: red"))
+    }
+
+    func testGmailPreviewDocumentKeepsOriginalHTMLForOnDemandRendering() throws {
+        let original = "<div><strong>Approve transfer</strong><p>Reference 42</p></div>"
+        let encoded = Data(original.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let payload: [String: Any] = [
+            "id": "18abc123",
+            "internalDate": "1786374000000",
+            "payload": [
+                "mimeType": "text/html",
+                "headers": [
+                    ["name": "Subject", "value": "Transfer approval"],
+                    ["name": "From", "value": "Wio <alerts@example.com>"]
+                ],
+                "body": ["data": encoded]
+            ]
+        ]
+
+        let document = try GmailSourceAdapter.previewDocument(
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+
+        XCTAssertEqual(document.subject, "Transfer approval")
+        XCTAssertEqual(document.sender, "Wio <alerts@example.com>")
+        XCTAssertEqual(document.html, original)
+    }
+
+    func testGmailPreviewSandboxBlocksActiveAndRemoteContent() {
+        let html = GmailPreviewHTML.sandboxed(
+            "<script>alert('x')</script><img src=\"https://tracker.example/pixel\"><p>Hello</p>"
+        )
+
+        XCTAssertTrue(html.contains("default-src 'none'"))
+        XCTAssertTrue(html.contains("img-src data: cid:"))
+        XCTAssertFalse(html.localizedCaseInsensitiveContains("<script"))
+        XCTAssertTrue(html.contains("<p>Hello</p>"))
+    }
+
+    func testTaskEvidencePresentationHighlightsSourceAndOrdersContext() {
+        let sourceDate = Date(timeIntervalSince1970: 200)
+        let records = [
+            DatabaseManager.MessageRecord(
+                id: 12,
+                chatId: 4,
+                senderUserId: 2,
+                senderName: "Tushar",
+                date: sourceDate,
+                textContent: "Please update the theme",
+                mediaTypeRaw: nil,
+                isOutgoing: false
+            ),
+            DatabaseManager.MessageRecord(
+                id: 11,
+                chatId: 4,
+                senderUserId: 1,
+                senderName: "Pratyush",
+                date: sourceDate.addingTimeInterval(-60),
+                textContent: "Which version?",
+                mediaTypeRaw: nil,
+                isOutgoing: true
+            )
+        ]
+
+        let items = DashboardTaskEvidencePresentation.items(
+            records: records,
+            sourceMessageID: 12,
+            fallback: []
+        )
+
+        XCTAssertEqual(items.map(\.id), [11, 12])
+        XCTAssertEqual(items.first?.senderName, "You")
+        XCTAssertEqual(items.last?.isSource, true)
+    }
+
+    func testTaskEvidenceHeaderUsesSlackThreadRootAsThreadName() {
+        var root = makeRecord(
+            id: 100,
+            chatId: 4,
+            text: "Newspaper launch review and final design feedback",
+            date: Date(timeIntervalSince1970: 100)
+        )
+        root.source = SourceID(kind: .slack, account: "T_TEST")
+        var reply = makeRecord(
+            id: 101,
+            chatId: 4,
+            text: "I will update it today",
+            date: Date(timeIntervalSince1970: 101)
+        )
+        reply.source = root.source
+        reply.threadRootId = root.id
+
+        let header = DashboardTaskEvidencePresentation.header(
+            channelName: "#research",
+            records: [root, reply],
+            sourceMessageID: reply.id,
+            source: .slack
+        )
+
+        XCTAssertEqual(header.channelName, "#research")
+        XCTAssertEqual(header.threadTitle, "Newspaper launch review and final design feedback")
+    }
+
+    func testLoadMessagesAroundKeepsSlackThreadContextTogether() async throws {
+        try await withTempDatabase { _ in
+            let chatID: Int64 = -440
+            let rootID: Int64 = -441
+            let source = SourceID(kind: .slack, account: "T_TEST")
+            let base = Date(timeIntervalSince1970: 10_000)
+
+            func record(id: Int64, text: String, offset: TimeInterval, root: Int64? = nil) -> DatabaseManager.MessageRecord {
+                var value = makeRecord(
+                    id: id,
+                    chatId: chatID,
+                    text: text,
+                    date: base.addingTimeInterval(offset)
+                )
+                value.source = source
+                value.threadRootId = root
+                return value
+            }
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: chatID,
+                messages: [
+                    record(id: rootID, text: "Thread root", offset: 0),
+                    record(id: -442, text: "Reply one", offset: 1, root: rootID),
+                    record(id: -499, text: "Unrelated channel message", offset: 2),
+                    record(id: -443, text: "Source reply", offset: 3, root: rootID),
+                    record(id: -444, text: "Reply after source", offset: 4, root: rootID)
+                ],
+                updateRecentSyncState: false
+            )
+
+            let context = await DatabaseManager.shared.loadMessagesAround(
+                chatId: chatID,
+                messageId: -443,
+                window: 15
+            )
+
+            XCTAssertEqual(Set(context.map(\.id)), Set([rootID, -442, -443, -444]))
+            XCTAssertFalse(context.contains { $0.id == -499 })
+            XCTAssertTrue(context.allSatisfy { $0.source == source })
+        }
+    }
+
     func testGmailEligibilityRejectsAuthenticationAndMarketingNoise() {
         XCTAssertTrue(GmailSourceAdapter.proactiveInboxQuery.contains("-category:promotions"))
         XCTAssertTrue(GmailSourceAdapter.proactiveInboxQuery.contains("-category:social"))
@@ -7042,8 +7234,34 @@ final class PidgyCoreTests: XCTestCase {
         )
     }
 
+    func testTaskDetailUsesShortProvenanceSummaryInsteadOfRawEvidence() {
+        let task = DashboardTask.mock(
+            id: 91,
+            title: "Complete Funds/Securities Balance action",
+            status: .open,
+            topicId: nil,
+            topicName: nil,
+            chatId: -91,
+            personName: "nse_alerts <nse_alerts@nse.co.in>",
+            chatTitle: "Funds/Securities Balance"
+        )
+
+        let summary = DashboardTaskPresentation.detailSummary(task: task, source: .gmail)
+
+        XCTAssertEqual(
+            summary,
+            "Nse Alerts sent an email about \u{201c}Funds/Securities Balance\u{201d}. Pidgy identified \u{201c}Complete Funds/Securities Balance action\u{201d} as the action you need to take. Open Gmail for the original details."
+        )
+        XCTAssertFalse(summary.contains("<html>"))
+        XCTAssertFalse(summary.contains("nse_alerts@nse.co.in"))
+    }
+
     func testDashboardTaskTitlesCompressEmailBoilerplate() {
         let cases: [(String, String)] = [
+            (
+                "Complete required action: Funds/Securities Balance",
+                "Review Funds/Securities Balance"
+            ),
             (
                 "Complete the Ironclad form, tax form, and agreement for the Base grant",
                 "Complete Base grant forms"
@@ -7211,6 +7429,74 @@ final class PidgyCoreTests: XCTestCase {
         let enhanced = SlackTriagePolicy.enhancedDrafts([draft], messages: [], chat: chat)
 
         XCTAssertEqual(enhanced.first?.loopKind, .reply)
+    }
+
+    func testExplicitAssigneePolicyRejectsLeadingSlackAssignee() {
+        let me = TGUser(
+            id: 1, firstName: "Pratzyy", lastName: "", username: "pratzyy",
+            phoneNumber: nil, isBot: false
+        )
+
+        XCTAssertTrue(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
+            sourceText: "@Piyush Jain whats the update on newspaper designs?",
+            currentUserAliases: ExplicitAssigneePolicy.aliases(for: me)
+        ))
+        XCTAssertTrue(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
+            sourceText: "Hey @Nemo_where_is_dory bumping this up",
+            currentUserAliases: ExplicitAssigneePolicy.aliases(for: me)
+        ))
+    }
+
+    func testExplicitAssigneePolicyKeepsMineMultiAssigneeAndRecipientMentions() {
+        let me = TGUser(
+            id: 1, firstName: "Pratzyy", lastName: "", username: "pratzyy",
+            phoneNumber: nil, isBot: false
+        )
+        let aliases = ExplicitAssigneePolicy.aliases(for: me)
+
+        XCTAssertFalse(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
+            sourceText: "@Piyush @pratzyy please review this",
+            currentUserAliases: aliases
+        ))
+        XCTAssertFalse(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
+            sourceText: "Please send this to @Piyush",
+            currentUserAliases: aliases
+        ))
+        XCTAssertFalse(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
+            sourceText: "@channel please review the launch",
+            currentUserAliases: aliases
+        ))
+    }
+
+    func testFactInvalidationByIDOnlyClosesSelectedOwnershipMistake() async throws {
+        try await withTempDatabase { _ in
+            let date = Date(timeIntervalSince1970: 9_000)
+            func draft(messageId: Int64, object: String) -> FactDraft {
+                FactDraft(
+                    subjectEntity: "Teammate", predicate: .iOwe, objectText: object,
+                    action: "Review \(object)", loopKind: .action, objectEntity: nil,
+                    confidence: 0.9, validFrom: date,
+                    sourceChatId: -90, sourceChatTitle: "Team", sourceMessageId: messageId,
+                    sourceText: "@Other review this", senderName: "Manager"
+                )
+            }
+            await DatabaseManager.shared.upsertFacts([
+                draft(messageId: -901, object: "newspaper"),
+                draft(messageId: -902, object: "campaign")
+            ])
+            let before = await DatabaseManager.shared.loadOpenFacts(chatId: -90)
+            let selected = try XCTUnwrap(before.first { $0.sourceMessageId == -901 })
+
+            let closed = await DatabaseManager.shared.invalidateFacts(
+                ids: [selected.id], reason: .assignedElsewhere, at: date
+            )
+
+            XCTAssertEqual(closed, 1)
+            let open = await DatabaseManager.shared.loadOpenFacts(chatId: -90)
+            XCTAssertEqual(open.map(\.sourceMessageId), [-902])
+            let history = await DatabaseManager.shared.loadRecentFacts()
+            XCTAssertEqual(history.first { $0.id == selected.id }?.closeReason, .assignedElsewhere)
+        }
     }
 
     func testSlackTriageTurnsExplicitUserCommitmentIntoAnchoredTask() {
@@ -7749,6 +8035,227 @@ final class PidgyCoreTests: XCTestCase {
             ])
             let openAfterInbound = await DatabaseManager.shared.loadOpenFacts(limit: 50)
             XCTAssertTrue(openAfterInbound.map(\.action).contains("Confirm signup status"))
+        }
+    }
+
+    func testTrackedReplyIntentWaitsForSubstantiveOutgoingMessage() async throws {
+        try await withTempDatabase { _ in
+            let base = Date().addingTimeInterval(-60)
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: 91,
+                messages: [makeRecord(
+                    id: 910, chatId: 91,
+                    text: "Can you confirm the clip format?", date: base,
+                    senderName: "Lexander"
+                )],
+                updateRecentSyncState: false
+            )
+
+            var reply = FactDraft(
+                subjectEntity: "Lexander", predicate: .iOwe,
+                objectText: "the clip format", action: "Confirm the clip format",
+                objectEntity: nil, confidence: 0.9, validFrom: base,
+                sourceChatId: 91, sourceChatTitle: "Lexander", sourceMessageId: 910,
+                sourceText: "Can you confirm the clip format?", senderName: "Lexander"
+            )
+            reply.loopKind = .reply
+            await DatabaseManager.shared.upsertFacts([reply])
+
+            let tracked = await DatabaseManager.shared.recordReplyOpenIntent(
+                chatId: 91,
+                sourceMessageId: 910,
+                requiresThreadMatch: false,
+                at: base.addingTimeInterval(10)
+            )
+            XCTAssertTrue(tracked)
+
+            // A cached message from before the click is not evidence of this
+            // reply attempt; a deferral after the click is not an answer yet.
+            await DatabaseManager.shared.upsertLiveMessages(chatId: 91, messages: [
+                makeRecord(
+                    id: 911, chatId: 91, text: "older outgoing",
+                    date: base.addingTimeInterval(5), isOutgoing: true, senderName: "Me"
+                ),
+                makeRecord(
+                    id: 912, chatId: 91, text: "wait, let me check",
+                    date: base.addingTimeInterval(20), isOutgoing: true, senderName: "Me"
+                )
+            ], updateRecentSyncState: false)
+            let openAfterDeferral = await DatabaseManager.shared.loadOpenFacts(chatId: 91)
+            XCTAssertEqual(openAfterDeferral.count, 1)
+
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: 91,
+                messages: [makeRecord(
+                    id: 913, chatId: 91, text: "Face is optional; product footage is enough.",
+                    date: base.addingTimeInterval(30), isOutgoing: true, senderName: "Me"
+                )],
+                updateRecentSyncState: false
+            )
+            let openAfterAnswer = await DatabaseManager.shared.loadOpenFacts(chatId: 91)
+            XCTAssertTrue(openAfterAnswer.isEmpty)
+        }
+    }
+
+    func testTrackedGroupReplyIntentRequiresMatchingThread() async throws {
+        try await withTempDatabase { _ in
+            let base = Date().addingTimeInterval(-60)
+            let slack = SourceID(kind: .slack, account: "T_TRACK")
+            var source = makeRecord(
+                id: 1_001, chatId: 100,
+                text: "Is face compulsory in the community clip?", date: base,
+                senderName: "Lexander"
+            )
+            source.source = slack
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: 100,
+                messages: [source],
+                updateRecentSyncState: false
+            )
+
+            var reply = FactDraft(
+                subjectEntity: "Lexander", predicate: .iOwe,
+                objectText: "whether face is compulsory", action: "Clarify whether face is required",
+                objectEntity: nil, confidence: 0.9, validFrom: base,
+                sourceChatId: 100, sourceChatTitle: "#first-dollar", sourceMessageId: 1_001,
+                sourceText: source.textContent ?? "", senderName: "Lexander"
+            )
+            reply.loopKind = .reply
+            await DatabaseManager.shared.upsertFacts([reply])
+            let tracked = await DatabaseManager.shared.recordReplyOpenIntent(
+                chatId: 100,
+                sourceMessageId: 1_001,
+                requiresThreadMatch: true,
+                at: base.addingTimeInterval(5)
+            )
+            XCTAssertTrue(tracked)
+
+            var unrelated = makeRecord(
+                id: 1_002, chatId: 100, text: "Unrelated channel update",
+                date: base.addingTimeInterval(10), isOutgoing: true, senderName: "Me"
+            )
+            unrelated.source = slack
+            unrelated.threadRootId = 9_999
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: 100,
+                messages: [unrelated],
+                updateRecentSyncState: false
+            )
+            let openAfterUnrelated = await DatabaseManager.shared.loadOpenFacts(chatId: 100)
+            XCTAssertEqual(openAfterUnrelated.count, 1)
+
+            var matching = makeRecord(
+                id: 1_003, chatId: 100, text: "No, face is optional.",
+                date: base.addingTimeInterval(20), isOutgoing: true, senderName: "Me"
+            )
+            matching.source = slack
+            matching.threadRootId = 1_001
+            await DatabaseManager.shared.upsertLiveMessages(
+                chatId: 100,
+                messages: [matching],
+                updateRecentSyncState: false
+            )
+            let openAfterMatchingReply = await DatabaseManager.shared.loadOpenFacts(chatId: 100)
+            XCTAssertTrue(openAfterMatchingReply.isEmpty)
+        }
+    }
+
+    func testTrackedGmailReplyClosesWhenSentMessageImportsIntoSameThread() async throws {
+        try await withTempDatabase { _ in
+            let base = Date().addingTimeInterval(-60)
+            let email = "owner@example.com"
+            let source = SourceID(kind: .gmail, account: email)
+            let accountID = CanonicalID.account(source: .gmail, externalID: email)
+            let account = SourceAccount(
+                id: accountID,
+                source: .gmail,
+                externalID: email,
+                displayName: email,
+                email: email,
+                connectedAt: base,
+                lastSyncedAt: nil
+            )
+            let conversation = CanonicalConversation(
+                id: CanonicalID.conversation(
+                    source: .gmail,
+                    accountID: accountID,
+                    externalID: "thread-123"
+                ),
+                accountID: accountID,
+                source: .gmail,
+                externalID: "thread-123",
+                kind: .thread,
+                title: "Clip format",
+                updatedAt: base
+            )
+            let incoming = CanonicalMessage(
+                id: CanonicalID.message(
+                    source: .gmail,
+                    conversationID: conversation.id,
+                    externalID: "message-in"
+                ),
+                conversationID: conversation.id,
+                source: .gmail,
+                externalID: "message-in",
+                threadRootID: "thread-123",
+                senderExternalID: "lexander@example.com",
+                senderName: "Lexander <lexander@example.com>",
+                subject: "Clip format",
+                date: base,
+                text: "Is face compulsory in the clip?",
+                isOutgoing: false
+            )
+            try await DatabaseManager.shared.importCanonicalMessages(
+                account: account,
+                conversation: conversation,
+                messages: [incoming]
+            )
+
+            let chatId = CanonicalID.legacyInt64(source.rawValue + "|thread-123")
+            let sourceMessageId = CanonicalID.legacyInt64(incoming.id)
+            var reply = FactDraft(
+                subjectEntity: "Lexander", predicate: .iOwe,
+                objectText: "whether face is compulsory", action: "Clarify whether face is required",
+                objectEntity: nil, confidence: 0.9, validFrom: base,
+                sourceChatId: chatId, sourceChatTitle: "Clip format",
+                sourceMessageId: sourceMessageId,
+                sourceText: incoming.text ?? "", senderName: "Lexander"
+            )
+            reply.loopKind = .reply
+            await DatabaseManager.shared.upsertFacts([reply])
+            let tracked = await DatabaseManager.shared.recordReplyOpenIntent(
+                chatId: chatId,
+                sourceMessageId: sourceMessageId,
+                requiresThreadMatch: false,
+                at: base.addingTimeInterval(5)
+            )
+            XCTAssertTrue(tracked)
+
+            let sent = CanonicalMessage(
+                id: CanonicalID.message(
+                    source: .gmail,
+                    conversationID: conversation.id,
+                    externalID: "message-sent"
+                ),
+                conversationID: conversation.id,
+                source: .gmail,
+                externalID: "message-sent",
+                threadRootID: "thread-123",
+                senderExternalID: email,
+                senderName: email,
+                subject: "Re: Clip format",
+                date: base.addingTimeInterval(20),
+                text: "No, face is optional; product footage is enough.",
+                isOutgoing: true
+            )
+            try await DatabaseManager.shared.importCanonicalMessages(
+                account: account,
+                conversation: conversation,
+                messages: [sent]
+            )
+
+            let openAfterSent = await DatabaseManager.shared.loadOpenFacts(chatId: chatId)
+            XCTAssertTrue(openAfterSent.isEmpty)
         }
     }
 

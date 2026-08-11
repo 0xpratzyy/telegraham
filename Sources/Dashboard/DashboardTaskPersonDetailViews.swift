@@ -1,8 +1,10 @@
 import AppKit
 import SwiftUI
+import WebKit
 
 struct DashboardTaskDetail: View {
     @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var aiService: AIService
     @EnvironmentObject private var sourceRegistry: SourceRegistry
     @ObservedObject private var chatOpenState = ChatOpenState.shared
     let task: DashboardTask?
@@ -12,21 +14,18 @@ struct DashboardTaskDetail: View {
     let onOpenChat: (Int64) -> Void
     let onClose: () -> Void
 
-    @State private var conversationContext: [DatabaseManager.MessageRecord] = []
-    @State private var isLoadingContext = false
-
-    /// Hard cap on the merged Evidence list (source snippets + nearby
-    /// chat context). The trigger snippet alone is often opaque, but five
-    /// messages is enough to read the surrounding ask without turning the
-    /// section into a full chat transcript.
-    private static let maxEvidenceRows = 5
+    @State private var generatedSummary = ""
+    @State private var generatedSummaryTaskId: Int64?
+    @State private var conversationEvidence: [EvidenceContextItem] = []
+    @State private var evidenceHeader: DashboardEvidenceContextHeader?
+    @State private var isLoadingEvidence = false
+    @State private var isEmailPreviewPresented = false
 
     var body: some View {
         DashboardDetailPane(onClose: onClose) {
             if let task {
                 taskHeader(task)
-                taskStatus(task)
-                nextStep(task)
+                taskSummary(task)
                 taskEvidence(task)
             } else if isRefreshing {
                 VStack(alignment: .leading, spacing: 22) {
@@ -39,7 +38,7 @@ struct DashboardTaskDetail: View {
                 DashboardEmptyState(
                     systemImage: "tray",
                     title: "No task selected",
-                    subtitle: "Choose a task to inspect evidence and act on it."
+                    subtitle: "Choose a task to review and act on it."
                 )
             }
         } actions: {
@@ -49,12 +48,21 @@ struct DashboardTaskDetail: View {
         }
         .foregroundStyle(PidgyDashboardTheme.primary)
         .task(id: task?.id) {
-            await loadConversationContext()
+            await loadDetailedSummary()
+            await loadTaskEvidence()
+        }
+        .sheet(isPresented: $isEmailPreviewPresented) {
+            if let task, let target = gmailPreviewTarget(for: task) {
+                GmailEmailPreviewSheet(
+                    source: target.source,
+                    sourceMessageID: target.messageID
+                )
+            }
         }
     }
 
     private func displayPerson(for task: DashboardTask) -> String {
-        task.personName.isEmpty ? task.ownerName : task.personName
+        DashboardTaskPresentation.displayPerson(task: task, source: sourceKind(for: task))
     }
 
     @ViewBuilder
@@ -83,11 +91,6 @@ struct DashboardTaskDetail: View {
                 }
 
                 Spacer(minLength: 8)
-
-                DashboardTopicChip(
-                    text: task.topicName ?? task.status.label,
-                    tint: topicTint(for: task)
-                )
                 .padding(.trailing, 22)
             }
 
@@ -97,118 +100,251 @@ struct DashboardTaskDetail: View {
                 .foregroundStyle(PidgyDashboardTheme.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 7) {
-                DashboardPriorityDot(priority: task.priority)
-                Text("\(task.priority.label) priority")
-                    .font(PidgyDashboardTheme.metadataMediumFont)
+            if gmailPreviewTarget(for: task) != nil {
+                HStack(spacing: 8) {
+                    Button {
+                        isEmailPreviewPresented = true
+                    } label: {
+                        Label("Preview email", systemImage: "doc.richtext")
+                            .font(PidgyDashboardTheme.metadataMediumFont)
+                            .padding(.horizontal, 12)
+                            .frame(height: 30)
+                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    .pidgyCapsuleBackground()
+                    .fixedSize()
+                    .help("Preview email in Pidgy")
 
-                if let dueAt = task.dueAt {
-                    Text("·")
-                    Label(
-                        "Due \(DateFormatting.dashboardListTimestamp(from: dueAt))",
-                        systemImage: "calendar"
-                    )
+                    sourceOpenButton(task, height: 30)
                 }
             }
-            .font(PidgyDashboardTheme.metadataFont)
-            .foregroundStyle(PidgyDashboardTheme.secondary)
+
+            if let dueAt = task.dueAt {
+                Label(
+                    "Due \(DateFormatting.dashboardListTimestamp(from: dueAt))",
+                    systemImage: "calendar"
+                )
+                .font(PidgyDashboardTheme.metadataFont)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+            }
         }
     }
 
     @ViewBuilder
-    private func taskStatus(_ task: DashboardTask) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: statusIcon(for: task))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(statusTint(for: task))
-                .frame(width: 28, height: 28)
-                .background(statusTint(for: task).opacity(0.14), in: Circle())
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(statusTitle(for: task))
-                    .font(PidgyDashboardTheme.metadataMediumFont)
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                Text(statusSubtitle(for: task))
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
+    private func taskSummary(_ task: DashboardTask) -> some View {
+        DashboardDetailSection(title: "Summary") {
+            Text(displayedSummary(for: task))
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(22)
-        .overlay(alignment: .bottom) { detailDivider }
     }
 
-    @ViewBuilder
-    private func nextStep(_ task: DashboardTask) -> some View {
-        DashboardDetailSection(
-            title: "Next step",
-            trailing: "AI \(Int((task.confidence * 100).rounded()))%"
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(task.suggestedAction.isEmpty ? fallbackAction(for: task) : task.suggestedAction)
-                    .font(PidgyDashboardTheme.detailBodyFont.weight(.medium))
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                    .lineSpacing(3)
-
-                if !task.summary.isEmpty,
-                   task.summary.localizedCaseInsensitiveCompare(task.suggestedAction) != .orderedSame {
-                    Text(task.summary)
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineSpacing(3)
-                }
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(PidgyDashboardTheme.paper)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(PidgyDashboardTheme.rule)
-            )
+    private func displayedSummary(for task: DashboardTask) -> String {
+        if generatedSummaryTaskId == task.id {
+            let summary = generatedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !summary.isEmpty { return summary }
         }
+        return DashboardTaskPresentation.detailSummary(task: task, source: sourceKind(for: task))
     }
 
     @ViewBuilder
     private func taskEvidence(_ task: DashboardTask) -> some View {
-        let merged = mergedEvidenceItems()
         let source = sourceKind(for: task)
-
-        DashboardDetailSection(
-            title: "Source context",
-            trailing: evidenceTrailing(for: merged)
-        ) {
-            VStack(spacing: 8) {
-                if merged.isEmpty {
-                    Text(isLoadingContext
-                         ? "Loading nearby messages…"
-                         : "No source context was stored for this task.")
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    ForEach(merged) { item in
-                        Button {
-                            openEvidence(item, for: task)
-                        } label: {
-                            DashboardTaskEvidenceCard(
-                                item: item,
-                                text: evidenceText(item, task: task, source: source),
-                                sourceName: source.displayName
-                            )
-                        }
-                        .buttonStyle(.pidgyPress)
-                        .help("Open in \(source.displayName)")
+        if source == .slack || source == .telegram {
+            if isLoadingEvidence && conversationEvidence.isEmpty {
+                DashboardDetailSection(title: "Evidence") {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading conversation…")
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
                     }
+                }
+            } else if !conversationEvidence.isEmpty {
+                let contextCount = conversationEvidence.filter { !$0.isSource }.count
+                DashboardDetailSection(
+                    title: "Evidence",
+                    trailing: "1 source · \(contextCount) context"
+                ) {
+                    DashboardEvidenceConversationView(
+                        items: conversationEvidence,
+                        sourceMessageID: evidence.first?.messageId,
+                        header: evidenceHeader
+                    )
                 }
             }
         }
     }
 
+    @MainActor
+    private func loadDetailedSummary() async {
+        guard let task else {
+            generatedSummaryTaskId = nil
+            generatedSummary = ""
+            return
+        }
+
+        generatedSummaryTaskId = task.id
+        generatedSummary = ""
+        guard sourceKind(for: task) == .gmail else { return }
+
+        if let stored = await DatabaseManager.shared.loadCurrentChatSummary(chatId: task.chatId) {
+            let cached = stored.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cached.isEmpty {
+                generatedSummary = cached
+                if cached.split(whereSeparator: \Character.isWhitespace).count >= 30 { return }
+            }
+        }
+
+        guard aiService.isConfigured, !Task.isCancelled else { return }
+        let messages = await summaryMessages(for: task)
+        guard !messages.isEmpty, !Task.isCancelled else { return }
+
+        do {
+            let summary = try await aiService.emailSummary(
+                subject: task.chatTitle,
+                sender: displayPerson(for: task),
+                messages: messages,
+                myUserId: Int64(telegramService.currentUser?.id ?? 0)
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !summary.isEmpty, !Task.isCancelled, self.task?.id == task.id else { return }
+            generatedSummary = summary
+            await DatabaseManager.shared.saveChatSummary(
+                chatId: task.chatId,
+                title: task.chatTitle,
+                summary: summary,
+                throughMessageId: messages.map(\.id).max() ?? 0
+            )
+        } catch {
+            // The deterministic summary already on screen remains useful when
+            // AI is offline, rate-limited, or unavailable.
+        }
+    }
+
+    @MainActor
+    private func loadTaskEvidence() async {
+        conversationEvidence = []
+        evidenceHeader = nil
+        guard let task else {
+            isLoadingEvidence = false
+            return
+        }
+        let source = sourceKind(for: task)
+        guard source == .slack || source == .telegram else {
+            isLoadingEvidence = false
+            return
+        }
+
+        isLoadingEvidence = true
+        let sourceMessageID = evidence.first?.messageId
+        var records: [DatabaseManager.MessageRecord]
+        if let sourceMessageID {
+            records = await DatabaseManager.shared.loadMessagesAround(
+                chatId: task.chatId,
+                messageId: sourceMessageID,
+                window: 15
+            )
+        } else {
+            records = []
+        }
+        guard !Task.isCancelled, self.task?.id == task.id else { return }
+        applyEvidence(records, sourceMessageID: sourceMessageID, task: task)
+        isLoadingEvidence = false
+
+        // Thread replies are absent from Slack channel history. If the source
+        // is a reply we pass its known parent; if it is a possible root, Slack
+        // can still return its replies. The cached channel context stays usable
+        // while that on-demand read completes.
+        guard source == .slack,
+              let sourceMessageID,
+              let sourceID = sourceRegistry.chat(id: task.chatId)?.source,
+              let messageSource = sourceRegistry.source(for: sourceID) else { return }
+        let threadRootID = DashboardTaskEvidencePresentation.threadRootID(
+            records: records,
+            sourceMessageID: sourceMessageID
+        )
+        _ = await messageSource.hydrateThread(
+            messageId: sourceMessageID,
+            threadRootId: threadRootID
+        )
+        guard !Task.isCancelled, self.task?.id == task.id else { return }
+        records = await DatabaseManager.shared.loadMessagesAround(
+            chatId: task.chatId,
+            messageId: sourceMessageID,
+            window: 15
+        )
+        guard !Task.isCancelled, self.task?.id == task.id else { return }
+        applyEvidence(records, sourceMessageID: sourceMessageID, task: task)
+    }
+
+    @MainActor
+    private func applyEvidence(
+        _ records: [DatabaseManager.MessageRecord],
+        sourceMessageID: Int64?,
+        task: DashboardTask
+    ) {
+        conversationEvidence = DashboardTaskEvidencePresentation.items(
+            records: records,
+            sourceMessageID: sourceMessageID,
+            fallback: evidence
+        )
+        evidenceHeader = DashboardTaskEvidencePresentation.header(
+            channelName: task.chatTitle,
+            records: records,
+            sourceMessageID: sourceMessageID,
+            source: sourceKind(for: task)
+        )
+    }
+
+    private func summaryMessages(for task: DashboardTask) async -> [TGMessage] {
+        let records = await DatabaseManager.shared.loadMessages(chatId: task.chatId, limit: 6)
+        let cached = records.compactMap { record -> TGMessage? in
+            guard let rawText = record.textContent,
+                  !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            let text = GmailPresentation.compactBody(
+                subject: task.chatTitle,
+                messageText: rawText,
+                maxCharacters: 6_000
+            )
+            return TGMessage(
+                id: record.id,
+                chatId: task.chatId,
+                senderId: record.senderUserId.map { .user($0) } ?? .chat(task.chatId),
+                date: record.date,
+                textContent: text,
+                mediaType: nil,
+                isOutgoing: record.isOutgoing,
+                chatTitle: task.chatTitle,
+                senderName: record.senderName
+            )
+        }
+        if !cached.isEmpty { return cached.sorted { $0.date < $1.date } }
+
+        return evidence.map { source in
+            TGMessage(
+                id: source.messageId,
+                chatId: source.chatId,
+                senderId: .chat(source.chatId),
+                date: source.date,
+                textContent: GmailPresentation.compactBody(
+                    subject: task.chatTitle,
+                    messageText: source.text,
+                    maxCharacters: 6_000
+                ),
+                mediaType: nil,
+                isOutgoing: false,
+                chatTitle: task.chatTitle,
+                senderName: source.senderName
+            )
+        }.sorted { $0.date < $1.date }
+    }
+
     @ViewBuilder
     private func taskActions(_ task: DashboardTask) -> some View {
-        let source = sourceKind(for: task)
         HStack(spacing: 8) {
             Button {
                 onUpdateStatus(task, task.isClosed ? .open : .done, nil)
@@ -225,25 +361,9 @@ struct DashboardTaskDetail: View {
             .foregroundStyle(PidgyDashboardTheme.primary)
             .pidgyCapsuleBackground()
 
-            Button {
-                if chatOpenState.openingChatId == nil { onOpenChat(task.chatId) }
-            } label: {
-                Group {
-                    if chatOpenState.openingChatId == task.chatId {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label("Open", systemImage: source.systemImage)
-                    }
-                }
-                .frame(minWidth: 68)
-                .frame(height: 36)
-                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            if gmailPreviewTarget(for: task) == nil {
+                sourceOpenButton(task, height: 36)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(PidgyDashboardTheme.primary)
-            .pidgyCapsuleBackground()
-            .disabled(chatOpenState.openingChatId == task.chatId)
-            .help("Open in \(source.displayName)")
 
             Menu {
                 if !task.isClosed {
@@ -287,14 +407,41 @@ struct DashboardTaskDetail: View {
         }
     }
 
-    private var detailDivider: some View {
-        Rectangle()
-            .fill(PidgyDashboardTheme.rule)
-            .frame(height: 1)
+    private func sourceOpenButton(_ task: DashboardTask, height: CGFloat) -> some View {
+        let source = sourceKind(for: task)
+        return Button {
+            if chatOpenState.openingChatId == nil { onOpenChat(task.chatId) }
+        } label: {
+            Group {
+                if chatOpenState.openingChatId == task.chatId {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label("Open", systemImage: source.systemImage)
+                }
+            }
+            .font(PidgyDashboardTheme.metadataMediumFont)
+            .padding(.horizontal, height == 30 ? 12 : 0)
+            .frame(minWidth: 68)
+            .frame(height: height)
+            .contentShape(RoundedRectangle(cornerRadius: height == 30 ? 9 : 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(PidgyDashboardTheme.primary)
+        .pidgyCapsuleBackground()
+        .fixedSize(horizontal: true, vertical: false)
+        .disabled(chatOpenState.openingChatId == task.chatId)
+        .help("Open in \(source.displayName)")
     }
 
     private func sourceKind(for task: DashboardTask) -> MessageSourceKind {
         sourceRegistry.chat(id: task.chatId)?.source.kind ?? .telegram
+    }
+
+    private func gmailPreviewTarget(for task: DashboardTask) -> GmailPreviewTarget? {
+        guard let source = sourceRegistry.chat(id: task.chatId)?.source,
+              source.kind == .gmail,
+              let messageID = evidence.first?.messageId else { return nil }
+        return GmailPreviewTarget(source: source, messageID: messageID)
     }
 
     private func avatarLabel(for task: DashboardTask) -> String {
@@ -312,174 +459,117 @@ struct DashboardTaskDetail: View {
         return message.senderUserId
     }
 
-    private func fallbackAction(for task: DashboardTask) -> String {
-        "Review the source context and complete \(task.title.lowercased())."
-    }
+}
 
-    private func statusTitle(for task: DashboardTask) -> String {
-        switch task.status {
-        case .open: return "Ready to act"
-        case .done: return "Task completed"
-        case .snoozed: return "Snoozed"
-        case .ignored: return "Task ignored"
-        }
-    }
+private struct GmailPreviewTarget {
+    let source: SourceID
+    let messageID: Int64
+}
 
-    private func statusSubtitle(for task: DashboardTask) -> String {
-        switch task.status {
-        case .open:
-            if let dueAt = task.dueAt {
-                return "Due \(DateFormatting.dashboardListTimestamp(from: dueAt))."
+enum DashboardTaskEvidencePresentation {
+    static func items(
+        records: [DatabaseManager.MessageRecord],
+        sourceMessageID: Int64?,
+        fallback: [DashboardTaskSourceMessage]
+    ) -> [EvidenceContextItem] {
+        let fallbackByID = Dictionary(uniqueKeysWithValues: fallback.map { ($0.messageId, $0) })
+        let loaded = records.compactMap { record -> EvidenceContextItem? in
+            let storedText = record.textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let text: String
+            if !storedText.isEmpty {
+                text = storedText
+            } else if let media = record.mediaTypeRaw, !media.isEmpty {
+                text = "[\(media)]"
+            } else {
+                return nil
             }
-            return "Pidgy found a concrete action for you."
-        case .done:
-            return "This task is out of your active queue."
-        case .snoozed:
-            if let until = task.snoozedUntil {
-                return "Returns \(DateFormatting.compactRelativeTime(from: until))."
+            let fallbackSender = fallbackByID[record.id]?.senderName
+            let storedSender = record.senderName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let storedFallback = fallbackSender?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sender = record.isOutgoing
+                ? "You"
+                : (storedSender?.isEmpty == false ? storedSender : nil)
+                    ?? (storedFallback?.isEmpty == false ? storedFallback : nil)
+                    ?? "Someone"
+            return EvidenceContextItem(
+                id: record.id,
+                date: record.date,
+                senderName: sender,
+                isOutgoing: record.isOutgoing,
+                text: text,
+                isSource: record.id == sourceMessageID
+            )
+        }
+        if !loaded.isEmpty {
+            return loaded.sorted {
+                if $0.date != $1.date { return $0.date < $1.date }
+                return $0.id < $1.id
             }
-            return "Hidden until its reminder becomes active."
-        case .ignored:
-            return "This item will stay out of your active queue."
+        }
+        return fallback.map { item in
+            EvidenceContextItem(
+                id: item.messageId,
+                date: item.date,
+                senderName: item.senderName,
+                isOutgoing: false,
+                text: item.text,
+                isSource: item.messageId == sourceMessageID
+            )
+        }.sorted {
+            if $0.date != $1.date { return $0.date < $1.date }
+            return $0.id < $1.id
         }
     }
 
-    private func statusIcon(for task: DashboardTask) -> String {
-        switch task.status {
-        case .open: return "bolt.fill"
-        case .done: return "checkmark"
-        case .snoozed: return "moon.zzz.fill"
-        case .ignored: return "eye.slash.fill"
+    static func threadRootID(
+        records: [DatabaseManager.MessageRecord],
+        sourceMessageID: Int64
+    ) -> Int64? {
+        if let source = records.first(where: { $0.id == sourceMessageID }),
+           let parent = source.threadRootId {
+            return parent
         }
+        return records.contains(where: { $0.threadRootId == sourceMessageID })
+            ? sourceMessageID
+            : nil
     }
 
-    private func statusTint(for task: DashboardTask) -> Color {
-        switch task.status {
-        case .open: return Color.Pidgy.warning
-        case .done: return Color.Pidgy.success
-        case .snoozed: return Color.Pidgy.accent
-        case .ignored: return PidgyDashboardTheme.secondary
-        }
-    }
-
-    private func evidenceText(
-        _ item: EvidenceContextItem,
-        task: DashboardTask,
+    static func header(
+        channelName: String,
+        records: [DatabaseManager.MessageRecord],
+        sourceMessageID: Int64?,
         source: MessageSourceKind
-    ) -> String {
-        guard source == .gmail else { return item.text }
-        return GmailPresentation.compactBody(
-            subject: task.chatTitle,
-            messageText: item.text,
-            maxCharacters: item.isSource ? 650 : 320
+    ) -> DashboardEvidenceContextHeader {
+        guard source == .slack,
+              let sourceMessageID,
+              let rootID = threadRootID(records: records, sourceMessageID: sourceMessageID)
+        else {
+            return DashboardEvidenceContextHeader(channelName: channelName, threadTitle: nil)
+        }
+        let rawRootText = records.first(where: { $0.id == rootID }).flatMap { $0.textContent }
+        let rootText = rawRootText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return DashboardEvidenceContextHeader(
+            channelName: channelName,
+            threadTitle: rootText.flatMap(compactThreadTitle)
         )
     }
 
-    private func openEvidence(_ item: EvidenceContextItem, for task: DashboardTask) {
-        if sourceKind(for: task) == .telegram {
-            Task {
-                await telegramService.openMessageInTelegram(
-                    chatId: task.chatId,
-                    messageId: item.id
-                )
-            }
-        } else {
-            onOpenChat(task.chatId)
-        }
+    private static func compactThreadTitle(_ value: String) -> String? {
+        let normalized = value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        guard normalized.count > 90 else { return normalized }
+        let boundary = normalized.index(normalized.startIndex, offsetBy: 90)
+        let prefix = String(normalized[..<boundary])
+        let clipped = prefix.lastIndex(of: " ").map { String(prefix[..<$0]) } ?? prefix
+        return clipped + "…"
     }
+}
 
-    private func loadConversationContext() async {
-        guard let chatId = task?.chatId else {
-            conversationContext = []
-            return
-        }
-        isLoadingContext = true
-        defer { isLoadingContext = false }
-        // Anchor context on the SOURCE message so the user sees the conversation
-        // AROUND where the loop was created — not the chat's latest, unrelated
-        // chatter. Fall back to recent messages only if there's no source id.
-        let anchor = evidence.map(\.messageId).max() ?? 0
-        let nearby: [DatabaseManager.MessageRecord]
-        if anchor > 0 {
-            nearby = await DatabaseManager.shared.loadMessagesAround(
-                chatId: chatId,
-                messageId: anchor,
-                window: Self.maxEvidenceRows
-            )
-        } else {
-            nearby = await DatabaseManager.shared.loadMessages(
-                chatId: chatId,
-                limit: Self.maxEvidenceRows + 4
-            )
-        }
-        conversationContext = nearby.sorted { $0.date < $1.date }
-    }
-
-    /// Combines source snippets (always shown) with a few surrounding chat
-    /// messages, sorted chronologically and capped at `maxEvidenceRows`.
-    /// Source snippets get priority — if there are 5 of them, no extra
-    /// context is added; if there's 1, we fill the rest with the most
-    /// recent context messages.
-    private func mergedEvidenceItems() -> [EvidenceContextItem] {
-        let sourceItems = evidence.map { source in
-            EvidenceContextItem(
-                id: source.messageId,
-                date: source.date,
-                senderName: source.senderName,
-                isOutgoing: false,
-                text: source.text,
-                isSource: true
-            )
-        }
-
-        let evidenceIds = Set(evidence.map(\.messageId))
-        let contextItems = conversationContext
-            .filter { !evidenceIds.contains($0.id) }
-            .map { record in
-                EvidenceContextItem(
-                    id: record.id,
-                    date: record.date,
-                    senderName: record.isOutgoing
-                        ? "You"
-                        : (record.senderName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                           ? (record.senderName ?? "")
-                           : "Unknown"),
-                    isOutgoing: record.isOutgoing,
-                    text: nonEmptyDisplayText(for: record),
-                    isSource: false
-                )
-            }
-
-        let cap = Self.maxEvidenceRows
-        let sourceCapped = Array(sourceItems.prefix(cap))
-        let remaining = max(0, cap - sourceCapped.count)
-        // Take the most recent context messages so the user sees the
-        // freshest surrounding conversation.
-        let contextTrailing = Array(contextItems.suffix(remaining))
-
-        return (sourceCapped + contextTrailing).sorted { $0.date < $1.date }
-    }
-
-    private func nonEmptyDisplayText(for record: DatabaseManager.MessageRecord) -> String {
-        let trimmed = record.textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmed.isEmpty { return trimmed }
-        if let media = record.mediaTypeRaw, !media.isEmpty {
-            return "[\(media)]"
-        }
-        return "[empty]"
-    }
-
-    private func evidenceTrailing(for merged: [EvidenceContextItem]) -> String {
-        let sourceCount = evidence.count
-        let contextCount = merged.count - merged.filter(\.isSource).count
-        if sourceCount == 0 && contextCount == 0 {
-            return isLoadingContext ? "loading…" : "no snippets"
-        }
-        if contextCount == 0 {
-            return "\(sourceCount) snippet\(sourceCount == 1 ? "" : "s")"
-        }
-        return "\(sourceCount) source · \(contextCount) context"
-    }
+struct DashboardEvidenceContextHeader: Equatable {
+    let channelName: String
+    let threadTitle: String?
 }
 
 struct EvidenceContextItem: Identifiable, Equatable {
@@ -489,72 +579,6 @@ struct EvidenceContextItem: Identifiable, Equatable {
     let isOutgoing: Bool
     let text: String
     let isSource: Bool
-}
-
-/// A bounded, readable source preview for the task inspector. Canonical
-/// evidence remains untouched in storage; this view only reduces transport
-/// noise and prevents one long email/message from swallowing the panel.
-struct DashboardTaskEvidenceCard: View {
-    let item: EvidenceContextItem
-    let text: String
-    let sourceName: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 7) {
-                Text(item.senderName)
-                    .font(PidgyDashboardTheme.metadataMediumFont)
-                    .foregroundStyle(item.isOutgoing
-                        ? PidgyDashboardTheme.brand
-                        : PidgyDashboardTheme.primary)
-                    .lineLimit(1)
-
-                Text("·")
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-
-                Text(DateFormatting.compactRelativeTime(from: item.date))
-                    .font(PidgyDashboardTheme.monoCaptionFont)
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-
-                Spacer(minLength: 6)
-
-                if item.isSource {
-                    Label(sourceName, systemImage: "arrow.up.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(PidgyDashboardTheme.brand)
-                }
-            }
-
-            Text(text)
-                .font(PidgyDashboardTheme.detailBodyFont)
-                .foregroundStyle(item.isSource
-                    ? PidgyDashboardTheme.primary
-                    : PidgyDashboardTheme.secondary)
-                .lineSpacing(3)
-                .lineLimit(item.isSource ? 9 : 4)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(item.isSource
-                    ? PidgyDashboardTheme.paper
-                    : PidgyDashboardTheme.paper.opacity(0.48))
-        )
-        .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                .fill(item.isSource ? PidgyDashboardTheme.brand : Color.Pidgy.border2)
-                .frame(width: 3)
-                .padding(.vertical, 8)
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(PidgyDashboardTheme.rule)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-    }
 }
 
 struct DashboardEvidenceContextRow: View {
@@ -600,6 +624,7 @@ struct DashboardEvidenceContextRow: View {
                         ? PidgyDashboardTheme.primary
                         : PidgyDashboardTheme.secondary)
                     .lineSpacing(2)
+                    .lineLimit(item.isSource ? 8 : 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -611,6 +636,266 @@ struct DashboardEvidenceContextRow: View {
                       ? PidgyDashboardTheme.brand.opacity(0.06)
                       : Color.clear)
         )
+    }
+}
+
+struct DashboardEvidenceConversationView: View {
+    let items: [EvidenceContextItem]
+    let sourceMessageID: Int64?
+    let header: DashboardEvidenceContextHeader?
+
+    private var scrollIdentity: String {
+        items.map { String($0.id) }.joined(separator: ":")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let header {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(normalizedChannel(header.channelName), systemImage: "number")
+                        .font(PidgyDashboardTheme.metadataMediumFont)
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .lineLimit(1)
+
+                    if let threadTitle = header.threadTitle {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "arrow.turn.down.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(PidgyDashboardTheme.tertiary)
+                                .padding(.top, 2)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Thread")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .tracking(0.5)
+                                    .textCase(.uppercase)
+                                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+                                Text(threadTitle)
+                                    .font(PidgyDashboardTheme.metadataFont)
+                                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+
+                Rectangle()
+                    .fill(PidgyDashboardTheme.rule)
+                    .frame(height: 1)
+            }
+
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(items) { item in
+                            DashboardEvidenceContextRow(item: item)
+                                .id(item.id)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 10)
+                }
+                .frame(height: 360)
+                .task(id: scrollIdentity) {
+                    guard let sourceMessageID else { return }
+                    await Task.yield()
+                    proxy.scrollTo(sourceMessageID, anchor: .center)
+                }
+            }
+        }
+        .background(PidgyDashboardTheme.paper.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(PidgyDashboardTheme.rule)
+        )
+    }
+
+    private func normalizedChannel(_ rawValue: String) -> String {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.hasPrefix("#") ? String(value.dropFirst()) : value
+    }
+}
+
+struct GmailEmailPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let source: SourceID
+    let sourceMessageID: Int64
+
+    @State private var document: GmailPreviewDocument?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "envelope.open.fill")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(PidgyDashboardTheme.brand)
+                    .frame(width: 32, height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(PidgyDashboardTheme.brand.opacity(0.12))
+                    )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(document?.subject ?? "Email preview")
+                        .font(PidgyDashboardTheme.titleFont)
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .lineLimit(2)
+                    if let document {
+                        Text("\(document.sender)  ·  \(DateFormatting.dashboardListTimestamp(from: document.date))")
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Loading the original from Gmail…")
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                    }
+                }
+
+                Spacer(minLength: 12)
+
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+                .help("Close email preview")
+            }
+            .padding(18)
+
+            Divider()
+
+            Group {
+                if let document {
+                    VStack(spacing: 0) {
+                        Label("Remote images and tracking are blocked", systemImage: "hand.raised.fill")
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 9)
+                            .background(PidgyDashboardTheme.raised)
+
+                        GmailHTMLPreviewView(html: GmailPreviewHTML.sandboxed(document.html))
+                    }
+                } else if let errorMessage {
+                    DashboardEmptyState(
+                        systemImage: "exclamationmark.triangle",
+                        title: "Preview unavailable",
+                        subtitle: errorMessage
+                    )
+                } else {
+                    VStack(spacing: 10) {
+                        ProgressView().controlSize(.regular)
+                        Text("Loading email…")
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: 760, height: 620)
+        .background(PidgyDashboardTheme.paper)
+        .task(id: "\(source.rawValue):\(sourceMessageID)") {
+            do {
+                document = try await GmailConnectionManager.shared.previewDocument(
+                    source: source,
+                    sourceMessageID: sourceMessageID
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+enum GmailPreviewHTML {
+    static func sandboxed(_ original: String) -> String {
+        let withoutActiveContent = original
+            .replacingOccurrences(
+                of: "(?is)<script[^>]*>.*?</script>",
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: "(?is)<(iframe|object|embed)[^>]*>.*?</\\1>",
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: "(?is)<meta[^>]+http-equiv=[\"']?refresh[\"']?[^>]*>",
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: "(?is)<base[^>]*>",
+                with: "",
+                options: .regularExpression
+            )
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:;">
+          <style>
+            :root { color-scheme: light; }
+            html, body { margin: 0; min-height: 100%; background: #ffffff; }
+            body { box-sizing: border-box; padding: 28px 32px; color: #202124; font: 15px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; overflow-wrap: anywhere; }
+            img { max-width: 100%; height: auto; }
+            table { max-width: 100%; }
+            pre { white-space: pre-wrap; font: inherit; margin: 0; }
+            a { color: #2563c9; }
+          </style>
+        </head>
+        <body>\(withoutActiveContent)</body>
+        </html>
+        """
+    }
+}
+
+struct GmailHTMLPreviewView: NSViewRepresentable {
+    let html: String
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.navigationDelegate = context.coordinator
+        view.allowsMagnification = true
+        return view
+    }
+
+    func updateNSView(_ view: WKWebView, context: Context) {
+        guard context.coordinator.loadedHTML != html else { return }
+        context.coordinator.loadedHTML = html
+        view.loadHTMLString(html, baseURL: nil)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var loadedHTML: String?
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            decisionHandler(navigationAction.navigationType == .other ? .allow : .cancel)
+        }
     }
 }
 

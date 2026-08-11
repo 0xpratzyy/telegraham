@@ -1025,6 +1025,7 @@ final class FactExtractionCoordinator: ObservableObject {
                     // a reply-kind loop whose ask the user ALREADY answered in
                     // this same window must not be born — resolvedLoops can only
                     // target pre-existing loops, so it could never close later.
+                    let currentUserAliases = myUser.map(ExplicitAssigneePolicy.aliases(for:)) ?? []
                     let resolved = result.drafts.map { draft -> FactDraft in
                         var d = draft
                         let (pid, name) = FactEntityResolver.resolve(
@@ -1037,6 +1038,16 @@ final class FactExtractionCoordinator: ObservableObject {
                         d.subjectPersonId = pid
                         d.subjectEntity = name
                         return d
+                    }
+                    .filter { d in
+                        guard d.predicate == .iOwe,
+                              chat.source.kind == .slack || chat.source.kind == .telegram else {
+                            return true
+                        }
+                        return !ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
+                            sourceText: d.sourceText,
+                            currentUserAliases: currentUserAliases
+                        )
                     }
                     .filter { d in
                         guard d.predicate == .iOwe, d.loopKind == .reply,

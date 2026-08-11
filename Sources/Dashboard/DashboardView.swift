@@ -606,7 +606,9 @@ struct DashboardView: View {
                         includeBots: includeBotsInAISearch
                     )
                 },
-                onOpenChat: { chat in openChat(chat) }
+                onOpenChat: { chat, targetMessageId in
+                    openChat(chat, targetMessageId: targetMessageId)
+                }
             )
             .environmentObject(attentionStore)
 
@@ -820,7 +822,7 @@ struct DashboardView: View {
         openChat(chat)
     }
 
-    private func openChat(_ chat: TGChat) {
+    private func openChat(_ chat: TGChat, targetMessageId: Int64? = nil) {
         Task { @MainActor in
             ChatOpenState.shared.openingChatId = chat.id
             defer { ChatOpenState.shared.openingChatId = nil }
@@ -829,14 +831,15 @@ struct DashboardView: View {
                 await RecentSyncCoordinator.shared.prioritize(chatId: chat.id)
             }
             if chat.source.kind != .telegram {
-                _ = await DeepLinkGenerator.openExternalChat(chat)
+                _ = await DeepLinkGenerator.openExternalChat(chat, targetMessageId: targetMessageId)
                 return
             }
             let hints = await telegramService.getDeepLinkHints(for: chat)
             let opened = DeepLinkGenerator.openChat(
                 chat,
                 username: hints.username,
-                phoneNumber: hints.phoneNumber
+                phoneNumber: hints.phoneNumber,
+                targetMessageId: targetMessageId
             )
             if !opened, let fallback = URL(string: "tg://resolve?domain=telegram") {
                 _ = DeepLinkGenerator.openInTelegram(fallback)

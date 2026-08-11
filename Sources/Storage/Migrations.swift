@@ -951,6 +951,21 @@ enum PidgyMigrations {
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_gmail_triage_state ON gmail_thread_triage(state, updated_at DESC)")
         }
 
+        migrator.registerMigration("v38_reply_open_intents") { db in
+            // "Open in chat" is intent, not completion. Remember which open
+            // reply loop the user entered and (for group/thread sources) the
+            // exact thread root we expect their outgoing response to use.
+            // The normal message ingestion path consumes this marker only
+            // after a substantive matching outgoing message is observed.
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN reply_intent_opened_at REAL")
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN reply_intent_thread_root_id INTEGER")
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_facts_reply_intent
+                ON facts(source_chat_id, reply_intent_opened_at)
+                WHERE invalid_at IS NULL AND reply_intent_opened_at IS NOT NULL
+                """)
+        }
+
         return migrator
     }
 }

@@ -273,7 +273,31 @@ final class TaskIndexCoordinator: ObservableObject {
         // generation, because its replacement sleeps 20s before loading.
         // Publishing would blank the Tasks page for the whole window.
         guard !Task.isCancelled else { return }
-        let eligibleOpenFacts = dashboardEligibleFacts(openFacts)
+        let assignedElsewhereIds = openFacts.compactMap { fact -> Int64? in
+            guard fact.predicate == .iOwe,
+                  let chat = SourceRegistry.shared.chat(id: fact.sourceChatId),
+                  chat.source.kind == .slack || chat.source.kind == .telegram,
+                  let currentUser = SourceRegistry.shared.currentUser(forAccount: chat.source),
+                  ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
+                    sourceText: fact.sourceText,
+                    currentUserAliases: ExplicitAssigneePolicy.aliases(for: currentUser)
+                  ) else {
+                return nil
+            }
+            return fact.id
+        }
+        let assignedElsewhereSet = Set(assignedElsewhereIds)
+        if !assignedElsewhereIds.isEmpty {
+            let closed = await DatabaseManager.shared.invalidateFacts(
+                ids: assignedElsewhereIds,
+                reason: .assignedElsewhere
+            )
+            if closed > 0 {
+                logger.notice("Closed \(closed) facts explicitly assigned to another participant")
+            }
+        }
+        let ownershipEligibleOpenFacts = openFacts.filter { !assignedElsewhereSet.contains($0.id) }
+        let eligibleOpenFacts = dashboardEligibleFacts(ownershipEligibleOpenFacts)
         let eligibleClosedFacts = dashboardEligibleFacts(closedFacts)
         let factTasks = FactProjection.tasks(from: eligibleOpenFacts, chatTitles: chatTitles)
         let closedTasks = FactProjection.closedTasks(from: eligibleClosedFacts, chatTitles: chatTitles)

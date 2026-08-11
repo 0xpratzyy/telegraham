@@ -48,7 +48,7 @@ enum ChatOpenTarget: String, CaseIterable, Identifiable {
 
 enum DeepLinkGenerator {
     @MainActor @discardableResult
-    static func openExternalChat(_ chat: TGChat) async -> Bool {
+    static func openExternalChat(_ chat: TGChat, targetMessageId: Int64? = nil) async -> Bool {
         guard let native = try? await DatabaseManager.shared.nativeId(source: chat.source, intId: chat.id) else {
             return false
         }
@@ -58,13 +58,16 @@ enum DeepLinkGenerator {
             return false
         case .slack:
             let team = chat.source.account
+            // Slack's documented URI scheme opens a conversation, not an
+            // individual message. The persisted reply intent still carries the
+            // exact thread root and will only close on a matching synced reply.
+            _ = targetMessageId
             urls = [
                 URL(string: "slack://channel?team=\(team)&id=\(native)"),
                 URL(string: "https://app.slack.com/client/\(team)/\(native)")
             ].compactMap { $0 }
         case .gmail:
-            let account = chat.source.account.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "0"
-            urls = [URL(string: "https://mail.google.com/mail/u/\(account)/#all/\(native)")].compactMap { $0 }
+            urls = [gmailThreadURL(account: chat.source.account, threadID: native)].compactMap { $0 }
         case .whatsapp:
             urls = [URL(string: "whatsapp://")].compactMap { $0 }
         }
@@ -73,6 +76,21 @@ enum DeepLinkGenerator {
         }
         return false
     }
+
+    /// Gmail's `/mail/u/<value>/` segment is an account *slot* (`0`, `1`, ...),
+    /// not a stable place for an email address. Slots also change with browser
+    /// sign-in order, so use Gmail's account selector query for multi-account
+    /// routing and keep the native thread id in the hash route.
+    static func gmailThreadURL(account: String, threadID: String) -> URL? {
+        var components = URLComponents(string: "https://mail.google.com/mail/u/")
+        let trimmedAccount = account.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedAccount.isEmpty {
+            components?.queryItems = [URLQueryItem(name: "authuser", value: trimmedAccount)]
+        }
+        components?.fragment = "all/\(threadID)"
+        return components?.url
+    }
+
     /// TDLib message ids are MTProto server ids shifted left 20 bits.
     /// Telegram's link formats (t.me/c/…, privatepost, openmessage)
     /// expect the SERVER id — passing the raw TDLib id navigates to a

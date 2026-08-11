@@ -313,6 +313,167 @@ extension DatabaseManager {
         }
     }
 
+    /// Close exact fact rows selected by a deterministic repair. IDs are used
+    /// instead of semantic fingerprints so an ownership correction cannot
+    /// accidentally close a similar loop from another source conversation.
+    @discardableResult
+    func invalidateFacts(ids: [Int64], reason: FactCloseReason, at date: Date = Date()) async -> Int {
+        guard !ids.isEmpty, let pool = await ensureDatabase() else { return 0 }
+        let ts = date.timeIntervalSince1970
+        do {
+            return try await pool.write { db in
+                let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+                var arguments: [DatabaseValueConvertible] = [ts, reason.rawValue, ts]
+                arguments.append(contentsOf: ids.map { $0 as DatabaseValueConvertible })
+                try db.execute(
+                    sql: "UPDATE facts SET invalid_at = ?, closed_reason = ?, updated_at = ? WHERE invalid_at IS NULL AND id IN (\(placeholders))",
+                    arguments: StatementArguments(arguments)
+                )
+                return db.changesCount
+            }
+        } catch {
+            print("[DatabaseManager] invalidateFacts(ids:) failed: \(error)")
+            return 0
+        }
+    }
+
+    /// Persist that the user entered the source conversation intending to
+    /// answer this exact Reply-queue item. Opening is never treated as done;
+    /// message ingestion consumes the marker only after it sees a matching
+    /// substantive outgoing response.
+    @discardableResult
+    func recordReplyOpenIntent(
+        chatId: Int64,
+        sourceMessageId: Int64,
+        requiresThreadMatch: Bool,
+        at date: Date = Date()
+    ) async -> Bool {
+        guard let pool = await ensureDatabase() else { return false }
+        let openedAt = date.timeIntervalSince1970
+        do {
+            return try await pool.write { db in
+                let source = try Row.fetchOne(
+                    db,
+                    sql: "SELECT source, thread_root_id FROM messages WHERE chat_id = ? AND id = ?",
+                    arguments: [chatId, sourceMessageId]
+                )
+                let storedRoot: Int64? = source?["thread_root_id"]
+                let sourceRaw: String = source?["source"] ?? "telegram"
+                let isSlack = sourceRaw == "slack" || sourceRaw.hasPrefix("slack:")
+                let expectedRoot = requiresThreadMatch
+                    ? (isSlack ? (storedRoot ?? sourceMessageId) : sourceMessageId)
+                    : nil
+
+                try db.execute(
+                    sql: """
+                        UPDATE facts
+                        SET reply_intent_opened_at = ?,
+                            reply_intent_thread_root_id = ?,
+                            updated_at = ?
+                        WHERE id = (
+                            SELECT id FROM facts
+                            WHERE source_chat_id = ?
+                              AND source_message_id = ?
+                              AND invalid_at IS NULL
+                              AND predicate = 'i_owe'
+                              AND loop_kind = 'reply'
+                            ORDER BY valid_from DESC, id DESC
+                            LIMIT 1
+                        )
+                        """,
+                    arguments: [openedAt, expectedRoot, openedAt, chatId, sourceMessageId]
+                )
+                return db.changesCount > 0
+            }
+        } catch {
+            print("[DatabaseManager] recordReplyOpenIntent failed: \(error)")
+            return false
+        }
+    }
+
+    /// Close only reply intents backed by a real outgoing message after the
+    /// click. Group/thread intents require the same thread root; DMs accept the
+    /// next substantive outgoing response. Intents older than seven days do
+    /// not auto-close on unrelated future activity; opening again refreshes
+    /// the marker.
+    func closeTrackedReplyIntents(chatId: Int64? = nil, at date: Date = Date()) async -> Int {
+        guard let pool = await ensureDatabase() else { return 0 }
+        let now = date.timeIntervalSince1970
+        let oldestActiveIntent = date.addingTimeInterval(-7 * 24 * 60 * 60).timeIntervalSince1970
+        do {
+            return try await pool.write { db in
+                var sql = """
+                    UPDATE facts
+                    SET invalid_at = ?, closed_reason = 'replied', updated_at = ?
+                    WHERE invalid_at IS NULL
+                      AND predicate = 'i_owe'
+                      AND loop_kind = 'reply'
+                      AND reply_intent_opened_at IS NOT NULL
+                      AND reply_intent_opened_at >= ?
+                      AND EXISTS (
+                          SELECT 1
+                          FROM messages reply
+                          WHERE reply.chat_id = facts.source_chat_id
+                            AND reply.is_outgoing = 1
+                            AND reply.date >= facts.reply_intent_opened_at
+                            AND (
+                                facts.reply_intent_thread_root_id IS NULL
+                                OR reply.thread_root_id = facts.reply_intent_thread_root_id
+                            )
+                            AND (
+                                LENGTH(TRIM(COALESCE(reply.text_content, ''))) > 0
+                                OR reply.media_type IS NOT NULL
+                            )
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE 'wait%'
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE '%lemme check%'
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE '%let me check%'
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE 'i will check%'
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE 'i''ll check%'
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE 'will check%'
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE 'checking%'
+                            AND LOWER(TRIM(COALESCE(reply.text_content, ''))) NOT LIKE '%get back%'
+                      )
+                    """
+                var arguments: [DatabaseValueConvertible] = [now, now, oldestActiveIntent]
+                if let chatId {
+                    sql += " AND source_chat_id = ?"
+                    arguments.append(chatId)
+                }
+                try db.execute(sql: sql, arguments: StatementArguments(arguments))
+                return db.changesCount
+            }
+        } catch {
+            print("[DatabaseManager] closeTrackedReplyIntents failed: \(error)")
+            return 0
+        }
+    }
+
+    func hasActiveReplyOpenIntent(chatId: Int64, at date: Date = Date()) async -> Bool {
+        guard let pool = await ensureDatabase() else { return false }
+        let oldestActiveIntent = date.addingTimeInterval(-7 * 24 * 60 * 60).timeIntervalSince1970
+        do {
+            return try await pool.read { db in
+                try Bool.fetchOne(
+                    db,
+                    sql: """
+                        SELECT EXISTS (
+                            SELECT 1 FROM facts
+                            WHERE source_chat_id = ?
+                              AND invalid_at IS NULL
+                              AND predicate = 'i_owe'
+                              AND loop_kind = 'reply'
+                              AND reply_intent_opened_at >= ?
+                        )
+                        """,
+                    arguments: [chatId, oldestActiveIntent]
+                ) ?? false
+            }
+        } catch {
+            print("[DatabaseManager] hasActiveReplyOpenIntent failed: \(error)")
+            return false
+        }
+    }
+
     /// Fast close for a REPLY-kind loop after the user's first response. A
     /// deferral ("wait, let me check") deliberately does not count as an
     /// answer; later unrelated messages cannot close it because only the first
@@ -326,6 +487,7 @@ extension DatabaseManager {
                 var sql = """
                     UPDATE facts SET invalid_at = ?, closed_reason = 'replied', updated_at = ?
                     WHERE invalid_at IS NULL AND predicate = 'i_owe' AND loop_kind = 'reply'
+                      AND reply_intent_opened_at IS NULL
                       AND EXISTS (
                           SELECT 1
                           FROM messages m

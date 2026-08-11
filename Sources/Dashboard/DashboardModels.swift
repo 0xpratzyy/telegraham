@@ -192,6 +192,10 @@ enum DashboardTaskTitle {
 
         let semanticRules: [(pattern: String, replacement: String)] = [
             (
+                #"(?i)^complete required action\s*:\s*(.+?)[.!]?$"#,
+                "Review $1"
+            ),
+            (
                 #"(?i)^your\s+(.+?)\s+site at\s+(\S+)\s+is about to go offline[.!]?$"#,
                 "Renew $2 on $1"
             ),

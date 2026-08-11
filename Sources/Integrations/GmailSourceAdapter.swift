@@ -1,5 +1,12 @@
 import Foundation
 
+struct GmailPreviewDocument: Equatable, Sendable {
+    let subject: String
+    let sender: String
+    let date: Date
+    let html: String
+}
+
 struct GmailSourceAdapter: SourceAdapter {
     static let proactiveInboxQuery =
         "in:inbox -category:promotions -category:social -category:forums"
@@ -88,6 +95,39 @@ struct GmailSourceAdapter: SourceAdapter {
         )
     }
 
+    /// Fetches the original body only when the user explicitly asks to preview
+    /// an email. Normal sync continues storing normalized plain text so raw
+    /// markup never leaks into task summaries or search.
+    func fetchPreview(messageID: String) async throws -> GmailPreviewDocument {
+        let encoded = messageID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? messageID
+        var components = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(encoded)")!
+        components.queryItems = [URLQueryItem(name: "format", value: "full")]
+        return try Self.previewDocument(from: await client.data(url: components.url!))
+    }
+
+    static func previewDocument(from data: Data) throws -> GmailPreviewDocument {
+        let message = try JSONDecoder().decode(Message.self, from: data)
+        let headers = (message.payload?.headers ?? []).reduce(into: [String: String]()) { result, header in
+            let key = header.name.lowercased()
+            if result[key] == nil { result[key] = header.value }
+        }
+        let timestamp = Double(message.internalDate ?? "")
+            .map { Date(timeIntervalSince1970: $0 / 1000) } ?? .distantPast
+        let html: String
+        if let originalHTML = decodedPart(in: message.payload, mimeType: "text/html") {
+            html = originalHTML
+        } else {
+            let plain = bodyText(payload: message.payload) ?? message.snippet ?? "Email body unavailable."
+            html = "<pre>\(escapedHTML(plain))</pre>"
+        }
+        return GmailPreviewDocument(
+            subject: headers["subject"]?.nilIfEmpty ?? "Email",
+            sender: headers["from"]?.nilIfEmpty ?? "Unknown sender",
+            date: timestamp,
+            html: html
+        )
+    }
+
     /// Pure decoding seam used by focused tests. Gmail routinely returns
     /// duplicate header names (especially Received), multipart bodies whose
     /// HTML part appears before plain text, and URL-safe base64 without
@@ -139,7 +179,8 @@ struct GmailSourceAdapter: SourceAdapter {
         return nil
     }
 
-    private static func decodedPart(in payload: Payload, mimeType: String) -> String? {
+    private static func decodedPart(in payload: Payload?, mimeType: String) -> String? {
+        guard let payload else { return nil }
         if payload.mimeType?.lowercased() == mimeType,
            let encoded = payload.body?.data,
            let decoded = decodeBase64URL(encoded) {
@@ -182,6 +223,15 @@ struct GmailSourceAdapter: SourceAdapter {
         if remainder != 0 { normalized += String(repeating: "=", count: 4 - remainder) }
         guard let data = Data(base64Encoded: normalized) else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    private static func escapedHTML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 
     private static func emailAddress(in value: String?) -> String? {

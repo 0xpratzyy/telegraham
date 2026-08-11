@@ -160,7 +160,7 @@ struct DashboardReplyQueuePage: View {
     /// Re-projects the queue from the current open-loop facts. Top-bar
     /// button only; detail panes have no Refresh of their own.
     let onRefresh: () -> Void
-    let onOpenChat: (TGChat) -> Void
+    let onOpenChat: (TGChat, Int64?) -> Void
 
     @State private var filter: DashboardReplyFilter = .onMe
     @State private var searchText = ""
@@ -428,11 +428,12 @@ struct DashboardReplyDetail: View {
     @EnvironmentObject private var telegramService: TelegramService
     @EnvironmentObject private var aiService: AIService
     let item: FollowUpItem?
-    let onOpenChat: (TGChat) -> Void
+    let onOpenChat: (TGChat, Int64?) -> Void
     let onClose: () -> Void
 
     @State private var conversationContext: [DatabaseManager.MessageRecord] = []
     @State private var isLoadingContext = false
+    @State private var isPreparingTrackedOpen = false
     /// Drives the inline spinner on "Open in chat" while the Telegram deep
     /// link resolves (a TDLib lookup that isn't instant on a cache miss).
     @ObservedObject private var chatOpenState = ChatOpenState.shared
@@ -529,7 +530,7 @@ struct DashboardReplyDetail: View {
                                         if item.chat.source.kind == .telegram {
                                             Task { await telegramService.openMessageInTelegram(chatId: item.chat.id, messageId: row.id) }
                                         } else {
-                                            onOpenChat(item.chat)
+                                            onOpenChat(item.chat, row.id)
                                         }
                                     } label: {
                                         DashboardEvidenceContextRow(item: row)
@@ -557,11 +558,11 @@ struct DashboardReplyDetail: View {
             } else {
                 HStack(spacing: 8) {
                 Button {
-                    if let item, chatOpenState.openingChatId == nil { onOpenChat(item.chat) }
+                    if let item { openForReply(item) }
                 } label: {
                     Group {
                         if let item {
-                            if chatOpenState.openingChatId == item.chat.id {
+                            if isPreparingTrackedOpen || chatOpenState.openingChatId == item.chat.id {
                                 ProgressView()
                                     .controlSize(.small)
                             } else {
@@ -578,7 +579,11 @@ struct DashboardReplyDetail: View {
                 .buttonStyle(.pidgyPress)
                 .foregroundStyle(PidgyDashboardTheme.primary)
                 .pidgyCapsuleBackground()
-                .disabled(item == nil || item.map { chatOpenState.openingChatId == $0.chat.id } ?? false)
+                .disabled(
+                    isPreparingTrackedOpen
+                        || item == nil
+                        || (item.map { chatOpenState.openingChatId == $0.chat.id } ?? false)
+                )
 
                 if let item {
                     Button {
@@ -774,13 +779,55 @@ struct DashboardReplyDetail: View {
             )
     }
 
+    private func openForReply(_ item: FollowUpItem) {
+        guard !isPreparingTrackedOpen,
+              chatOpenState.openingChatId == nil else { return }
+        isPreparingTrackedOpen = true
+
+        Task { @MainActor in
+            var isTracking = false
+            if item.category == .onMe,
+               let sourceMessageId = item.loopSourceMessageId {
+                isTracking = await DatabaseManager.shared.recordReplyOpenIntent(
+                    chatId: item.chat.id,
+                    sourceMessageId: sourceMessageId,
+                    // A Gmail chat already represents one exact mail thread.
+                    // Slack/Telegram groups need an additional reply-root match.
+                    requiresThreadMatch: item.chat.source.kind != .gmail
+                        && !item.chat.chatType.isOneOnOne
+                )
+            }
+
+            isPreparingTrackedOpen = false
+            if isTracking {
+                let confirmation: String
+                if item.chat.source.kind == .gmail {
+                    confirmation = "Watching this email thread for your reply"
+                    GmailConnectionManager.shared.watchReplyThread(
+                        source: item.chat.source,
+                        chatId: item.chat.id
+                    )
+                } else if item.chat.chatType.isOneOnOne {
+                    confirmation = "Watching for your reply"
+                } else {
+                    confirmation = "Watching this thread for your reply"
+                }
+                ToastCenter.shared.show(
+                    confirmation,
+                    icon: "scope"
+                )
+            }
+            onOpenChat(item.chat, item.loopSourceMessageId)
+        }
+    }
+
     private func gmailFooter(for item: FollowUpItem) -> some View {
         HStack(spacing: 8) {
             Button {
-                if chatOpenState.openingChatId == nil { onOpenChat(item.chat) }
+                openForReply(item)
             } label: {
                 Group {
-                    if chatOpenState.openingChatId == item.chat.id {
+                    if isPreparingTrackedOpen || chatOpenState.openingChatId == item.chat.id {
                         ProgressView().controlSize(.small)
                     } else {
                         Label("Open in Gmail", systemImage: "envelope")
@@ -793,7 +840,7 @@ struct DashboardReplyDetail: View {
             .buttonStyle(.pidgyPress)
             .foregroundStyle(PidgyDashboardTheme.primary)
             .pidgyCapsuleBackground()
-            .disabled(chatOpenState.openingChatId == item.chat.id)
+            .disabled(isPreparingTrackedOpen || chatOpenState.openingChatId == item.chat.id)
 
             Menu {
                 Button("Copy summary", systemImage: "doc.on.doc") {

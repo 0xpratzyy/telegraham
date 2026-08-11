@@ -75,6 +75,7 @@ enum FactCloseReason: String, Codable, Sendable {
     case userIgnored = "user_ignored" // user clicked Ignore
     case deduplicated = "deduplicated" // auto: a richer loop represents the same source message
     case expired = "expired"           // auto: same-day conversational work is no longer actionable
+    case assignedElsewhere = "assigned_elsewhere" // auto: the source explicitly addresses another person
 }
 
 extension Notification.Name {
@@ -149,6 +150,60 @@ struct FactDraft: Equatable, Sendable {
     var fingerprint: String {
         let subjectKey = subjectPersonId.map { "p:\($0)" } ?? "n:\(subjectEntity.lowercased())"
         return "\(subjectKey)|\(predicate.rawValue)|\(ContextLayer.normalizedLoopObject(objectText))"
+    }
+}
+
+/// Conservative ownership guard for group-chat asks. The model can infer an
+/// action correctly while assigning it to the wrong participant; a leading
+/// address such as "@Piyush ..." or "Hey @Nemo ..." is stronger evidence than
+/// that inference. Mentions later in a sentence ("send this to @Piyush") are
+/// deliberately ignored because the untagged addressee may still be the user.
+enum ExplicitAssigneePolicy {
+    private static let leadingMention = try! NSRegularExpression(
+        pattern: #"(?i)^\s*(?:(?:hey|hi|hello|yo)\s*[,!:\-]?\s+)?@([a-z0-9_][a-z0-9_.-]*)"#
+    )
+    private static let anyMention = try! NSRegularExpression(
+        pattern: #"(?i)@([a-z0-9_][a-z0-9_.-]*)"#
+    )
+    private static let broadcastHandles: Set<String> = ["all", "channel", "everyone", "group", "here"]
+
+    static func aliases(for user: TGUser) -> Set<String> {
+        var values: [String] = [user.firstName, user.displayName]
+        if let username = user.username { values.append(username) }
+        return Set(values.flatMap { value in
+            let normalized = normalize(value)
+            let firstToken = value.split(whereSeparator: \Character.isWhitespace).first.map(String.init) ?? ""
+            return [normalized, normalize(firstToken)]
+        }.filter { !$0.isEmpty })
+    }
+
+    static func isExplicitlyAssignedElsewhere(
+        sourceText: String,
+        currentUserAliases: Set<String>
+    ) -> Bool {
+        guard !currentUserAliases.isEmpty else { return false }
+        let range = NSRange(sourceText.startIndex..<sourceText.endIndex, in: sourceText)
+        guard let leadingMatch = leadingMention.firstMatch(in: sourceText, range: range),
+              let leadingRange = Range(leadingMatch.range(at: 1), in: sourceText) else {
+            return false
+        }
+        let leading = normalize(String(sourceText[leadingRange]))
+        guard !broadcastHandles.contains(leading) else { return false }
+
+        // If the user is tagged anywhere in the same ask, keep it. This covers
+        // multi-assignee messages such as "@Piyush @Pratzyy please review".
+        let mentions = anyMention.matches(in: sourceText, range: range).compactMap { match -> String? in
+            guard let mentionRange = Range(match.range(at: 1), in: sourceText) else { return nil }
+            return normalize(String(sourceText[mentionRange]))
+        }
+        if mentions.contains(where: currentUserAliases.contains) { return false }
+        return !currentUserAliases.contains(leading)
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_.-")).inverted)
+            .lowercased()
     }
 }
 

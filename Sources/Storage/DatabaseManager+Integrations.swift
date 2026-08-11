@@ -173,5 +173,19 @@ extension DatabaseManager {
                 arguments: [account.id, conversationCursor?.rawValue, Date().timeIntervalSince1970]
             )
         }
+
+        // Canonical adapters (Gmail/Slack imports) write through this path
+        // rather than `upsertLiveMessages`. Keep reply-intent lifecycle
+        // behavior identical: a newly observed sent message can close the
+        // exact tracked reply loop, never the click that opened the source app.
+        if ContextLayer.enabled, records.contains(where: \.isOutgoing) {
+            let trackedClosed = await closeTrackedReplyIntents(chatId: legacyChatID)
+            let structuralClosed = await closeAnsweredReplyLoops(chatId: legacyChatID)
+            if trackedClosed + structuralClosed > 0 {
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
+                }
+            }
+        }
     }
 }

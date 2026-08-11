@@ -33,11 +33,13 @@ extension DatabaseManager {
             print("[DatabaseManager] Failed to upsert live messages for chat \(chatId): \(error)")
         }
 
-        // Structural close (#48): the user replying in this chat answers any
-        // open reply-kind loop instantly — the Reply queue updates on send,
-        // not on the next extraction pass.
+        // A tracked "Open in chat" intent closes only after a matching outgoing
+        // response arrives. Older, untracked reply loops keep the structural
+        // fallback so replies sent without entering through Pidgy still heal.
         if ContextLayer.enabled, messages.contains(where: { $0.isOutgoing }) {
-            let closed = await closeAnsweredReplyLoops(chatId: chatId)
+            let trackedClosed = await closeTrackedReplyIntents(chatId: chatId)
+            let structuralClosed = await closeAnsweredReplyLoops(chatId: chatId)
+            let closed = trackedClosed + structuralClosed
             if closed > 0 {
                 await MainActor.run {
                     NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
@@ -152,27 +154,47 @@ extension DatabaseManager {
     /// the conversation around where a fact was extracted. Task Evidence uses
     /// this so it shows the RELEVANT lead-up, not the chat's latest unrelated
     /// chatter (the bug where an old task showed today's banter as "context").
+    /// If the source belongs to a Slack-style thread, the window is constrained
+    /// to that parent + its replies instead of mixing nearby channel traffic.
     func loadMessagesAround(chatId: Int64, messageId: Int64, window: Int) async -> [MessageRecord] {
         guard let pool = await ensureDatabase() else { return [] }
-        let cols = "id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing"
+        let cols = "id, chat_id, sender_user_id, sender_name, date, text_content, media_type, is_outgoing, source, source_account_id, conversation_id, external_id, thread_root_id"
         do {
             return try await pool.read { db in
                 guard let anchor = try Row.fetchOne(
                     db,
-                    sql: "SELECT date FROM messages WHERE chat_id = ? AND id = ?",
+                    sql: "SELECT date, thread_root_id FROM messages WHERE chat_id = ? AND id = ?",
                     arguments: [chatId, messageId]
                 ),
                 let anchorDate: Double = anchor["date"] else { return [] }
+                let parentID: Int64? = anchor["thread_root_id"]
+                let anchorHasReplies = (try Int.fetchOne(
+                    db,
+                    sql: "SELECT 1 FROM messages WHERE chat_id = ? AND thread_root_id = ? LIMIT 1",
+                    arguments: [chatId, messageId]
+                )) != nil
+                let threadRootID = parentID ?? (anchorHasReplies ? messageId : nil)
+                let threadClause = threadRootID == nil
+                    ? ""
+                    : " AND (id = ? OR thread_root_id = ?)"
+                var beforeArguments: StatementArguments = [chatId]
+                var afterArguments: StatementArguments = [chatId]
+                if let threadRootID {
+                    beforeArguments += [threadRootID, threadRootID]
+                    afterArguments += [threadRootID, threadRootID]
+                }
+                beforeArguments += [anchorDate, anchorDate, messageId, window + 1]
+                afterArguments += [anchorDate, anchorDate, messageId, window]
                 // The source + `window` messages before it, and `window` after.
                 let before = try Row.fetchAll(
                     db,
-                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND (date < ? OR (date = ? AND id <= ?)) ORDER BY date DESC, id DESC LIMIT ?",
-                    arguments: [chatId, anchorDate, anchorDate, messageId, window + 1]
+                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ?\(threadClause) AND (date < ? OR (date = ? AND id <= ?)) ORDER BY date DESC, id DESC LIMIT ?",
+                    arguments: beforeArguments
                 )
                 let after = try Row.fetchAll(
                     db,
-                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ? AND (date > ? OR (date = ? AND id > ?)) ORDER BY date ASC, id ASC LIMIT ?",
-                    arguments: [chatId, anchorDate, anchorDate, messageId, window]
+                    sql: "SELECT \(cols) FROM messages WHERE chat_id = ?\(threadClause) AND (date > ? OR (date = ? AND id > ?)) ORDER BY date ASC, id ASC LIMIT ?",
+                    arguments: afterArguments
                 )
                 return (before + after).map(Self.messageRecord(from:))
             }

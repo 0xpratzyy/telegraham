@@ -93,7 +93,7 @@ enum DashboardTaskPresentation {
     /// like "Tushar Pasi · Tushar Pasi" and title/subject duplication.
     static func metadataLine(task: DashboardTask, source: MessageSourceKind) -> String {
         var parts: [String] = []
-        appendUnique(displayPerson(for: task), to: &parts)
+        appendUnique(displayPerson(task: task, source: source), to: &parts)
 
         if !sameText(task.chatTitle, task.title) {
             appendUnique(task.chatTitle, to: &parts)
@@ -108,8 +108,43 @@ enum DashboardTaskPresentation {
         return normalize(lhs) == normalize(rhs)
     }
 
-    private static func displayPerson(for task: DashboardTask) -> String {
-        task.personName.isEmpty ? task.ownerName : task.personName
+    /// Tasks deliberately keep their canonical source evidence for auditing,
+    /// but the inspector is an action surface rather than an email/chat reader.
+    /// Summarize provenance without repeating the title or leaking raw HTML.
+    static func detailSummary(task: DashboardTask, source: MessageSourceKind) -> String {
+        let person = displayPerson(task: task, source: source)
+        let context = task.chatTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let origin: String
+        if !context.isEmpty, !sameText(context, task.title) {
+            origin = " about \u{201c}\(context)\u{201d}"
+        } else {
+            origin = ""
+        }
+
+        switch source {
+        case .gmail:
+            return "\(person.isEmpty ? "This sender" : person) sent an email\(origin). Pidgy identified \u{201c}\(task.title)\u{201d} as the action you need to take. Open Gmail for the original details."
+        case .slack:
+            return "\(person.isEmpty ? "This person" : person) raised this in Slack\(origin). Open Slack for the surrounding conversation."
+        case .telegram:
+            return "\(person.isEmpty ? "This person" : person) raised this in Telegram\(origin). Open Telegram for the surrounding conversation."
+        case .whatsapp:
+            return "\(person.isEmpty ? "This person" : person) raised this in WhatsApp\(origin). Open the source for the surrounding conversation."
+        }
+    }
+
+    static func displayPerson(task: DashboardTask, source: MessageSourceKind) -> String {
+        let raw = (task.personName.isEmpty ? task.ownerName : task.personName)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard source == .gmail else { return raw }
+
+        let sender = GmailPresentation.senderName(from: raw, fallback: "Email sender")
+        let separated = sender
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return separated == separated.lowercased() ? separated.capitalized : separated
     }
 
     private static func appendUnique(_ value: String, to parts: inout [String]) {

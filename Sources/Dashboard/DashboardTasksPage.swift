@@ -269,18 +269,12 @@ struct DashboardTasksPage: View {
     }
 
     private var filterBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                DashboardStatusSegments(
-                    selection: $statusFilter,
-                    openCount: openCount,
-                    doneCount: doneCount,
-                    allCount: allCount
-                )
-            }
-
-            ownerChips
-        }
+        DashboardStatusSegments(
+            selection: $statusFilter,
+            openCount: openCount,
+            doneCount: doneCount,
+            allCount: allCount
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

@@ -980,6 +980,13 @@ class TelegramService: ObservableObject {
             senderName = chatCache[senderChatId]?.title
         }
 
+        let repliedMessageId: Int64? = {
+            guard case .messageReplyToMessage(let reply)? = message.replyTo,
+                  (reply.chatId == 0 || reply.chatId == message.chatId),
+                  reply.messageId != 0 else { return nil }
+            return reply.messageId
+        }()
+
         return TGMessage(
             id: message.id,
             chatId: message.chatId,
@@ -989,7 +996,8 @@ class TelegramService: ObservableObject {
             mediaType: mediaType,
             isOutgoing: message.isOutgoing,
             chatTitle: chatTitle,
-            senderName: senderName
+            senderName: senderName,
+            threadRootId: repliedMessageId
         )
     }
 

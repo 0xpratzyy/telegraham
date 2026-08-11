@@ -35,6 +35,20 @@ final class GmailConnectionManager: ObservableObject {
         case syncing
     }
 
+    private enum PreviewError: LocalizedError {
+        case accountUnavailable
+        case messageUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .accountUnavailable:
+                return "This Gmail account is no longer connected."
+            case .messageUnavailable:
+                return "Pidgy couldn't locate the original Gmail message."
+            }
+        }
+    }
+
     static let shared = GmailConnectionManager()
     @Published private(set) var state: State
     @Published private(set) var accounts: [GmailConnectedAccount] = []
@@ -42,6 +56,7 @@ final class GmailConnectionManager: ObservableObject {
     @Published private(set) var accountStatus: [String: String] = [:]
     @Published private(set) var syncProgress: GmailSyncProgress?
     private var automaticRefreshTask: Task<Void, Never>?
+    private var replyThreadRefreshTasks: [Int64: Task<Void, Never>] = [:]
 
     private init() {
         state = Self.resolveCredentials() == nil ? .unavailable : .disconnected
@@ -162,11 +177,57 @@ final class GmailConnectionManager: ObservableObject {
         for account in accounts { await sync(email: account.email) }
     }
 
+    /// After "Open in Gmail", poll only the selected thread a few times while
+    /// the user composes. This remains read-only: Pidgy merely observes a SENT
+    /// message in the same Gmail thread and lets the shared reply-intent close
+    /// hook update the queue. The regular five-minute sync is still the
+    /// long-tail fallback.
+    func watchReplyThread(source: SourceID, chatId: Int64) {
+        guard source.kind == .gmail else { return }
+        replyThreadRefreshTasks[chatId]?.cancel()
+        replyThreadRefreshTasks[chatId] = Task { [weak self] in
+            // Cumulative checks: 15s, 1m, 3m, and 10m after opening Gmail.
+            for delay in [15.0, 45.0, 120.0, 420.0] {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                } catch {
+                    return
+                }
+                guard await DatabaseManager.shared.hasActiveReplyOpenIntent(chatId: chatId) else {
+                    break
+                }
+                await self?.refreshReplyThread(source: source, chatId: chatId)
+            }
+            self?.replyThreadRefreshTasks[chatId] = nil
+        }
+    }
+
+    /// Resolves the locally normalized message back to Gmail and retrieves its
+    /// original MIME body. Called only from the explicit Preview email sheet.
+    func previewDocument(source: SourceID, sourceMessageID: Int64) async throws -> GmailPreviewDocument {
+        guard source.kind == .gmail else { throw PreviewError.messageUnavailable }
+        let email = source.account.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !email.isEmpty else { throw PreviewError.accountUnavailable }
+        guard let nativeID = try await DatabaseManager.shared.nativeId(
+            source: source,
+            intId: sourceMessageID
+        ), nativeID.hasPrefix("msg:"),
+        let externalMessageID = nativeID.split(separator: ":").last.map(String.init),
+        !externalMessageID.isEmpty else {
+            throw PreviewError.messageUnavailable
+        }
+        let token = try await validAccessToken(for: email)
+        let adapter = try GmailSourceAdapter(accessToken: token)
+        return try await adapter.fetchPreview(messageID: externalMessageID)
+    }
+
     /// Removes only this mailbox's authorization. Imported local records stay
     /// available until the user chooses the separate "Delete all local data"
     /// action, matching Pidgy's existing disconnect semantics.
     func disconnect(email: String) {
         do {
+            replyThreadRefreshTasks.values.forEach { $0.cancel() }
+            replyThreadRefreshTasks.removeAll()
             setAccounts(try GmailCredentialVault.remove(email: email))
             accountActivity.removeValue(forKey: email.lowercased())
             accountStatus.removeValue(forKey: email.lowercased())
@@ -182,6 +243,8 @@ final class GmailConnectionManager: ObservableObject {
 
     func disconnect() {
         do {
+            replyThreadRefreshTasks.values.forEach { $0.cancel() }
+            replyThreadRefreshTasks.removeAll()
             try GmailCredentialVault.deleteAll()
             setAccounts([])
             accountActivity = [:]
@@ -205,6 +268,61 @@ final class GmailConnectionManager: ObservableObject {
                 }
             }
         )
+    }
+
+    private func refreshReplyThread(source: SourceID, chatId: Int64) async {
+        let email = source.account.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !email.isEmpty else { return }
+        do {
+            let token = try await validAccessToken(for: email)
+            guard let threadID = try await DatabaseManager.shared.nativeId(source: source, intId: chatId) else {
+                return
+            }
+            let accountID = CanonicalID.account(source: .gmail, externalID: email)
+            guard let account = await DatabaseManager.shared.loadSourceAccounts().first(where: {
+                $0.id == accountID
+            }) else { return }
+            let storedConversation = await DatabaseManager.shared
+                .loadSourceConversations(accountID: accountID)
+                .first { $0.externalID == threadID }
+            let conversation = storedConversation ?? CanonicalConversation(
+                id: CanonicalID.conversation(source: .gmail, accountID: accountID, externalID: threadID),
+                accountID: accountID,
+                source: .gmail,
+                externalID: threadID,
+                kind: .thread,
+                title: "Email thread",
+                updatedAt: nil
+            )
+            let adapter = try GmailSourceAdapter(accessToken: token)
+            let page = try await adapter.fetchMessages(
+                conversation: conversation,
+                cursor: nil,
+                limit: 100
+            )
+            guard !page.messages.isEmpty else { return }
+            let title = page.messages.compactMap(\.subject).first { !$0.isEmpty }
+                ?? conversation.title
+            let resolvedConversation = CanonicalConversation(
+                id: conversation.id,
+                accountID: conversation.accountID,
+                source: conversation.source,
+                externalID: conversation.externalID,
+                kind: conversation.kind,
+                title: title,
+                updatedAt: page.messages.map(\.date).max(),
+                unreadCount: page.messages.filter(\.isUnread).count
+            )
+            try await DatabaseManager.shared.importCanonicalMessages(
+                account: account,
+                conversation: resolvedConversation,
+                messages: page.messages
+            )
+        } catch {
+            // Background intent checks are best-effort; the normal Gmail sync
+            // remains active and exposes any durable account error in Settings.
+            print("[GmailConnectionManager] Reply-thread refresh failed: \(error)")
+        }
     }
 
     private func apply(_ progress: SourceSyncCoordinator.Progress, email: String) {

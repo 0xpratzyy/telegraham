@@ -402,7 +402,13 @@ final class SlackService: ObservableObject, MessageSource {
     /// the cap prevents a large workspace from booking the replies limiter for
     /// hours. Newly-fetched history adds precise `reply_count > 0` roots below.
     private func enqueueOpenFactThreadsForReconciliation() async {
-        let slackChatsByID = Dictionary(uniqueKeysWithValues: chats.map { ($0.id, $0) })
+        // Slack can briefly return the same conversation more than once while
+        // paginated workspace state is merging. Keep one copy instead of
+        // crashing the app on Dictionary's unique-key precondition.
+        let slackChatsByID = Dictionary(
+            chats.map { ($0.id, $0) },
+            uniquingKeysWith: { existing, _ in existing }
+        )
         guard !slackChatsByID.isEmpty else { return }
         let openFacts = await db.loadOpenFacts(limit: 500)
         let myName = currentUser?.displayName.lowercased()

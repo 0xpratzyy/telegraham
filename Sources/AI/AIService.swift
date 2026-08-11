@@ -211,8 +211,8 @@ final class AIService: ObservableObject {
         let snippets = conversationSnippets(messages: messages, chatTitle: subject, myUserId: myUserId)
         guard !snippets.isEmpty else { return "" }
         let prompt = """
-        Summarize this email thread from \(sender) in 1-2 short sentences, at most 45 words. \
-        Explain the main point and whether the user needs to respond or take action. \
+        Summarize this email thread from \(sender) in 2-3 short sentences, at most 75 words. \
+        Explain the main point, why it matters, and exactly what response or action is needed. \
         Paraphrase instead of copying the email. Never include verification codes, URLs, \
         signatures, legal footers, tracking text, or quoted message history. Plain text only.
         """

@@ -46,7 +46,7 @@ enum GmailPresentation {
         messageText: String,
         maxCharacters: Int = 700
     ) -> String {
-        var body = preview(subject: subject, messageText: messageText)
+        var body = preview(subject: subject, messageText: readableText(messageText))
         body = body.replacingOccurrences(
             of: #"\[image:[^\]]*\]"#,
             with: "",
@@ -95,6 +95,42 @@ enum GmailPresentation {
             clipped = prefix.lastIndex(of: " ").map { String(prefix[..<$0]) } ?? prefix
         }
         return clipped.trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+    }
+
+    /// Gmail's canonical payload can be HTML even when it is stored in the
+    /// message text column. Keep that source untouched, but never send markup
+    /// to summaries or dashboard previews.
+    private static func readableText(_ value: String) -> String {
+        var text = value
+        text = text.replacingOccurrences(
+            of: #"(?is)<(?:script|style)[^>]*>.*?</(?:script|style)>"#,
+            with: " ",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: #"(?i)</?(?:p|div|br|li|tr|td|h[1-6]|blockquote)[^>]*>"#,
+            with: " ",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: #"<[^>]+>"#,
+            with: " ",
+            options: .regularExpression
+        )
+
+        let entities = [
+            "&nbsp;": " ",
+            "&amp;": "&",
+            "&quot;": "\"",
+            "&#39;": "'",
+            "&apos;": "'",
+            "&lt;": "<",
+            "&gt;": ">"
+        ]
+        for (entity, replacement) in entities {
+            text = text.replacingOccurrences(of: entity, with: replacement, options: .caseInsensitive)
+        }
+        return text
     }
 
     private static func normalize(_ value: String) -> String {
