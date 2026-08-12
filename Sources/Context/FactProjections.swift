@@ -48,7 +48,7 @@ enum FactProjection {
                 let title = DashboardTaskTitle.compact(rawTitle)
                 let suggested = ""
                 let owner = "Me"
-                let priority: DashboardTaskPriority = f.confidence >= 0.8 ? .high : (f.confidence >= 0.5 ? .medium : .low)
+                let priority = taskPriority(for: f)
                 return DashboardTask(
                     id: f.id,
                     stableFingerprint: f.fingerprint,
@@ -142,7 +142,7 @@ enum FactProjection {
                     chatTitle: chatTitle,
                     topicId: nil,
                     topicName: nil,
-                    priority: f.confidence >= 0.8 ? .high : (f.confidence >= 0.5 ? .medium : .low),
+                    priority: taskPriority(for: f),
                     status: f.closeReason == .userIgnored ? .ignored : .done,
                     confidence: f.confidence,
                     createdAt: f.createdAt,
@@ -154,5 +154,27 @@ enum FactProjection {
                 )
             }
             .sorted { ($0.statusSetByUserAt ?? .distantPast) > ($1.statusSetByUserAt ?? .distantPast) }
+    }
+
+    /// Extraction confidence describes how sure the model is that a task
+    /// exists; it is not the task's urgency. Keep ordinary work medium and
+    /// reserve High for language that carries an explicit time or operational
+    /// consequence. This prevents every well-extracted task from looking like
+    /// an emergency while preserving useful ordering for real deadlines.
+    static func taskPriority(for fact: Fact) -> DashboardTaskPriority {
+        guard fact.confidence >= 0.5 else { return .low }
+
+        let text = [fact.action, fact.objectText, fact.sourceText]
+            .joined(separator: " ")
+            .lowercased()
+
+        let explicitUrgencySignals = [
+            "urgent", "asap", "immediately", "right away",
+            "due today", "by today", "today's deadline", "overdue",
+            "final reminder", "last chance", "expires today", "expired",
+            "suspended", "suspension", "go offline", "downtime", "outage"
+        ]
+
+        return explicitUrgencySignals.contains(where: text.contains) ? .high : .medium
     }
 }

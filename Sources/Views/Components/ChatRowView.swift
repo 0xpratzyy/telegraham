@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Clean two-line chat row for the launcher results list.
 struct ChatRowView: View {
-    @EnvironmentObject var telegramService: TelegramService
+    @Environment(\.telegramServiceReference) private var telegramService
     @ObservedObject var photoManager = ChatPhotoManager.shared
 
     let chat: TGChat
@@ -114,7 +114,7 @@ struct ChatRowView: View {
     }
 
     private func requestPhotoIfNeeded() {
-        if let fileId = chat.smallPhotoFileId {
+        if let fileId = chat.smallPhotoFileId, let telegramService {
             photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
         } else if let avatarURL = chat.avatarURL {
             photoManager.requestPhoto(chatId: chat.id, avatarURL: avatarURL)

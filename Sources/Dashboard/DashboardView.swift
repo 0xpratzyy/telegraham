@@ -54,7 +54,10 @@ enum DashboardSourceScope: String, CaseIterable, Identifiable, Hashable {
 }
 
 struct DashboardView: View {
-    @EnvironmentObject private var telegramService: TelegramService
+    /// Kept as a plain reference intentionally. Dashboard data arrives through
+    /// `SourceRegistry`; observing the whole Telegram service here caused every
+    /// chat-cache publication to invalidate the entire dashboard hierarchy.
+    let telegramService: TelegramService
     @EnvironmentObject private var aiService: AIService
     @EnvironmentObject private var sourceRegistry: SourceRegistry
     @StateObject private var attentionStore = AttentionStore.shared
@@ -368,28 +371,42 @@ struct DashboardView: View {
     }
 
     private var scopedVisibleChats: [TGChat] {
-        sourceRegistry.visibleChats.filter {
-            selectedSourceScope.includes($0) && isProactiveSurfaceChat($0)
+        // Resolve Gmail eligibility once for the whole projection. The old
+        // predicate called `proactiveGmailChatIds` for every chat, rebuilding
+        // the full follow-up/task set hundreds of times during each SwiftUI
+        // body update and pinning the main thread near 100% CPU.
+        let eligibleGmailChatIds = proactiveGmailChatIds
+        return sourceRegistry.visibleChats.filter {
+            selectedSourceScope.includes($0)
+                && isProactiveSurfaceChat($0, eligibleGmailChatIds: eligibleGmailChatIds)
         }
     }
 
     private var scopedAllChats: [TGChat] {
-        sourceRegistry.chats.filter {
-            selectedSourceScope.includes($0) && isProactiveSurfaceChat($0)
+        let eligibleGmailChatIds = proactiveGmailChatIds
+        return sourceRegistry.chats.filter {
+            selectedSourceScope.includes($0)
+                && isProactiveSurfaceChat($0, eligibleGmailChatIds: eligibleGmailChatIds)
         }
     }
 
     private var proactiveGmailChatIds: Set<Int64> {
-        Set(attentionStore.followUpItems
+        let gmailChatIds = Set(sourceRegistry.chats.lazy
+            .filter { $0.source.kind == .gmail }
+            .map(\.id))
+        return Set(attentionStore.followUpItems
             .filter { $0.chat.source.kind == .gmail }
             .map(\.chat.id))
-            .union(taskIndex.tasks.compactMap { task in
-                sourceRegistry.chat(id: task.chatId)?.source.kind == .gmail ? task.chatId : nil
-            })
+            .union(taskIndex.tasks.lazy
+                .filter { gmailChatIds.contains($0.chatId) }
+                .map(\.chatId))
     }
 
-    private func isProactiveSurfaceChat(_ chat: TGChat) -> Bool {
-        chat.source.kind != .gmail || proactiveGmailChatIds.contains(chat.id)
+    private func isProactiveSurfaceChat(
+        _ chat: TGChat,
+        eligibleGmailChatIds: Set<Int64>
+    ) -> Bool {
+        chat.source.kind != .gmail || eligibleGmailChatIds.contains(chat.id)
     }
 
     private var scopedChatIds: Set<Int64> {

@@ -100,8 +100,8 @@ struct DashboardTaskDetail: View {
                 .foregroundStyle(PidgyDashboardTheme.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if gmailPreviewTarget(for: task) != nil {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                if gmailPreviewTarget(for: task) != nil {
                     Button {
                         isEmailPreviewPresented = true
                     } label: {
@@ -116,9 +116,9 @@ struct DashboardTaskDetail: View {
                     .pidgyCapsuleBackground()
                     .fixedSize()
                     .help("Preview email in Pidgy")
-
-                    sourceOpenButton(task, height: 30)
                 }
+
+                sourceOpenButton(task, height: 30)
             }
 
             if let dueAt = task.dueAt {
@@ -360,10 +360,6 @@ struct DashboardTaskDetail: View {
             .buttonStyle(.plain)
             .foregroundStyle(PidgyDashboardTheme.primary)
             .pidgyCapsuleBackground()
-
-            if gmailPreviewTarget(for: task) == nil {
-                sourceOpenButton(task, height: 36)
-            }
 
             Menu {
                 if !task.isClosed {

@@ -442,7 +442,7 @@ private struct DashboardSourceMark: View {
 }
 
 struct DashboardTelegramAvatar: View {
-    @EnvironmentObject private var telegramService: TelegramService
+    @Environment(\.telegramServiceReference) private var telegramService
     @ObservedObject private var photoManager = ChatPhotoManager.shared
 
     let chat: TGChat?
@@ -477,7 +477,7 @@ struct DashboardTelegramAvatar: View {
 
     private func requestPhotoIfNeeded() {
         guard let chat else { return }
-        if let fileId = chat.smallPhotoFileId {
+        if let fileId = chat.smallPhotoFileId, let telegramService {
             photoManager.requestPhoto(chatId: chat.id, fileId: fileId, telegramService: telegramService)
         } else if let avatarURL = chat.avatarURL {
             photoManager.requestPhoto(chatId: chat.id, avatarURL: avatarURL)
@@ -486,7 +486,7 @@ struct DashboardTelegramAvatar: View {
 }
 
 struct DashboardTelegramUserAvatar: View {
-    @EnvironmentObject private var telegramService: TelegramService
+    @Environment(\.telegramServiceReference) private var telegramService
     @ObservedObject private var photoManager = UserPhotoManager.shared
 
     let user: TGUser?
@@ -531,7 +531,7 @@ struct DashboardTelegramUserAvatar: View {
 
     private func requestPhotoIfNeeded() {
         guard let user else { return }
-        if let fileId = user.smallPhotoFileId {
+        if let fileId = user.smallPhotoFileId, let telegramService {
             photoManager.requestPhoto(userId: user.id, fileId: fileId, telegramService: telegramService)
         } else if let avatarURL = user.avatarURL {
             photoManager.requestPhoto(userId: user.id, avatarURL: avatarURL)

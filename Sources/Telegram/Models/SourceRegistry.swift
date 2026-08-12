@@ -22,8 +22,17 @@ final class SourceRegistry: ObservableObject {
         objectWillChange.send()
         registered.append(source)
         sourceCancellables[ObjectIdentifier(source)] = source.objectWillChange
-            .sink { [weak self] _ in
+            // Keep imperative lookups coherent immediately, even while UI
+            // invalidations are batched below.
+            .handleEvents(receiveOutput: { [weak self] _ in
                 self?.chatSnapshotDirty = true
+            })
+            // Telegram publishes its chat array repeatedly while TDLib sends
+            // the initial chat/update burst. The dashboard only needs a
+            // human-scale refresh cadence, not one full SwiftUI invalidation
+            // per individual TDLib update.
+            .throttle(for: .milliseconds(500), scheduler: RunLoop.main, latest: true)
+            .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
     }

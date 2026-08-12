@@ -3,7 +3,10 @@ import Combine
 import TDLibKit
 
 struct LauncherView: View {
-    @EnvironmentObject var telegramService: TelegramService
+    /// Search data is observed through `SourceRegistry`. Keep the client as a
+    /// non-observing method dependency so a hidden launcher does not redraw on
+    /// every Telegram chat publication.
+    let telegramService: TelegramService
     @EnvironmentObject var aiService: AIService
     @EnvironmentObject var registry: SourceRegistry
     @ObservedObject var photoManager = ChatPhotoManager.shared
@@ -77,17 +80,25 @@ struct LauncherView: View {
     private var showLauncherDebugOverlays: Bool { false }
 
     private var proactiveGmailChatIds: Set<Int64> {
-        Set(followUpItems
+        let gmailChatIds = Set(registry.chats.lazy
+            .filter { $0.source.kind == .gmail }
+            .map(\.id))
+        return Set(followUpItems
             .filter { $0.chat.source.kind == .gmail }
             .map(\.chat.id))
-            .union(taskIndex.tasks.compactMap { task in
-                registry.chat(id: task.chatId)?.source.kind == .gmail ? task.chatId : nil
-            })
+            .union(taskIndex.tasks.lazy
+                .filter { gmailChatIds.contains($0.chatId) }
+                .map(\.chatId))
     }
 
     private var proactiveVisibleChats: [TGChat] {
-        registry.visibleChats.filter { chat in
-            chat.source.kind != .gmail || proactiveGmailChatIds.contains(chat.id)
+        // The launcher window is created eagerly and stays alive even while
+        // hidden. Resolve Gmail eligibility once per projection; rebuilding
+        // this set inside the per-chat predicate kept the hidden launcher on
+        // the main thread and could pin a CPU core indefinitely.
+        let eligibleGmailChatIds = proactiveGmailChatIds
+        return registry.visibleChats.filter { chat in
+            chat.source.kind != .gmail || eligibleGmailChatIds.contains(chat.id)
         }
     }
 

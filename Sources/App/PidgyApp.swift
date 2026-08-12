@@ -1,6 +1,21 @@
 import AppKit
 import SwiftUI
 
+/// Non-observing access to the Telegram client for views that only need to
+/// call a method (for example, loading an avatar). Using `@EnvironmentObject`
+/// for those views subscribed every visible row to the service's high-volume
+/// chat publications and fanned one source update into hundreds of redraws.
+private struct TelegramServiceReferenceKey: EnvironmentKey {
+    static let defaultValue: TelegramService? = nil
+}
+
+extension EnvironmentValues {
+    var telegramServiceReference: TelegramService? {
+        get { self[TelegramServiceReferenceKey.self] }
+        set { self[TelegramServiceReferenceKey.self] = newValue }
+    }
+}
+
 @main
 struct PidgyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate

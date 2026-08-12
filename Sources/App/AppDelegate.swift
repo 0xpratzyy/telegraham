@@ -734,10 +734,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return
         }
 
-        let dashboardView = DashboardView()
+        let dashboardView = DashboardView(telegramService: telegramService)
             .environmentObject(telegramService)
             .environmentObject(aiService)
             .environmentObject(SourceRegistry.shared)
+            .environment(\.telegramServiceReference, telegramService)
 
         let hostingView = NSHostingView(rootView: dashboardView)
 

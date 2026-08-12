@@ -6772,6 +6772,35 @@ final class PidgyCoreTests: XCTestCase {
 
     // MARK: - Answer engine reply parity
 
+    func testFactTaskPriorityUsesUrgencyInsteadOfExtractionConfidence() {
+        func fact(confidence: Double = 0.95, action: String, source: String = "") -> Fact {
+            Fact(
+                id: 1, subjectEntity: "Akhil", predicate: .iOwe,
+                objectText: action, action: action, loopKind: .action,
+                objectEntity: nil, confidence: confidence,
+                validFrom: Date(), invalidAt: nil,
+                sourceChatId: 42, sourceChatTitle: "Akhil",
+                sourceMessageId: 7, sourceText: source, senderName: "Akhil",
+                fingerprint: "f", createdAt: Date(), updatedAt: Date()
+            )
+        }
+
+        XCTAssertEqual(
+            FactProjection.taskPriority(for: fact(action: "Share the updated design")),
+            .medium,
+            "high extraction confidence must not make ordinary work high priority"
+        )
+        XCTAssertEqual(
+            FactProjection.taskPriority(for: fact(action: "Reactivate the site", source: "Final reminder: the site will go offline")),
+            .high
+        )
+        XCTAssertEqual(
+            FactProjection.taskPriority(for: fact(confidence: 0.4, action: "Urgent: review this now")),
+            .low,
+            "uncertain extractions should remain low even when copied text sounds urgent"
+        )
+    }
+
     /// "Who should I reply to" must be answerable from REPLY-kind loops
     /// alone: the payload tags each i_owe loop with its kind (the same
     /// reply-vs-action split that separates the Reply queue from Tasks),

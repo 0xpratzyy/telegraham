@@ -167,10 +167,11 @@ final class PanelManager {
         containerView.layer?.cornerRadius = PidgyRadius.lg
 
         let hostingView = NSHostingView(
-            rootView: LauncherView()
+            rootView: LauncherView(telegramService: telegramService)
                 .environmentObject(telegramService)
                 .environmentObject(aiService)
                 .environmentObject(SourceRegistry.shared)
+                .environment(\.telegramServiceReference, telegramService)
         )
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         // The panel is a fixed 640×480 — never let SwiftUI's ideal size drive

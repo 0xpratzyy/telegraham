@@ -209,7 +209,6 @@ struct DashboardTasksPage: View {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 filterBar
-                    .padding(.bottom, 10)
                 taskRows
             }
             .frame(maxWidth: PidgyDashboardTheme.pageMaxWidth, alignment: .leading)
@@ -222,22 +221,13 @@ struct DashboardTasksPage: View {
 
     private var compactList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Tasks")
-                    .font(PidgyDashboardTheme.titleFont)
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                Spacer()
-                Text("\(filteredTasks.count) shown")
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                filterBar
             }
             .padding(.horizontal, 28)
             .padding(.top, 28)
-            .padding(.bottom, 12)
-
-            filterBar
-                .padding(.horizontal, 28)
-                .padding(.bottom, 10)
+            .padding(.bottom, 14)
 
             ScrollView {
                 taskRows
@@ -252,20 +242,20 @@ struct DashboardTasksPage: View {
         // Page-internal Refresh button removed — the global top-bar
         // Refresh (with the "Updated Xm ago" stamp) is the only entry
         // point now. Single-button refresh model per UX spec.
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Tasks")
-                    .font(PidgyDashboardTheme.pageTitleFont)
-                    .tracking(-0.6)
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                Text(aiConfigured ? "\(filteredTasks.count) matching tasks" : "Connect AI to extract tasks")
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Tasks")
+                .font(PidgyDashboardTheme.pageTitleFont)
+                .tracking(-0.6)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+
+            if !aiConfigured {
+                Text("Connect AI to extract tasks")
                     .font(PidgyDashboardTheme.pageSubtitleFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
             }
-            Spacer()
         }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(selectedTask == nil ? EdgeInsets(top: 0, leading: 8, bottom: 12, trailing: 8) : EdgeInsets())
     }
 
     private var filterBar: some View {
@@ -276,6 +266,7 @@ struct DashboardTasksPage: View {
             allCount: allCount
         )
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(selectedTask == nil ? EdgeInsets(top: 4, leading: 8, bottom: 22, trailing: 8) : EdgeInsets(top: 4, leading: 0, bottom: 22, trailing: 0))
     }
 
     private var ownerChips: some View {

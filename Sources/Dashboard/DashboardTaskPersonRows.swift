@@ -34,13 +34,6 @@ struct DashboardTaskRow: View {
                     Text(task.status.label)
                         .font(PidgyDashboardTheme.captionFont)
                         .foregroundStyle(PidgyDashboardTheme.tertiary)
-                } else if task.priority == .high {
-                    HStack(spacing: 4) {
-                        DashboardPriorityDot(priority: task.priority)
-                        Text("High")
-                    }
-                    .font(PidgyDashboardTheme.captionFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
                 }
             }
             .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
