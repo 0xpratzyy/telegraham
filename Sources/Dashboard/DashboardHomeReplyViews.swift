@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct DashboardHomePage: View {
+    @EnvironmentObject private var telegramService: TelegramService
+    @EnvironmentObject private var aiService: AIService
+
     let tasks: [DashboardTask]
     let followUpItems: [FollowUpItem]
     let isLoading: Bool
@@ -13,6 +16,13 @@ struct DashboardHomePage: View {
     // live here, so the layout stays identical and birds simply
     // disappear.
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
+    @StateObject private var askChat = AskPidgyChatModel()
+    @State private var aiQuestion = ""
+    @FocusState private var isAIBarFocused: Bool
+
+    private var hasInlineConversation: Bool {
+        !askChat.thread.isEmpty || askChat.isAnswering
+    }
 
     private var feedItems: [DashboardFeedItem] {
         let actionableTasks = tasks.filter(\.isActionableNow)
@@ -46,29 +56,56 @@ struct DashboardHomePage: View {
             }
     }
 
+    private var remainingFeedItems: [DashboardFeedItem] {
+        feedItems
+    }
+
+    private var needsYouCount: Int {
+        feedItems.filter { $0.section == .onFire }.count
+    }
+
+    private var personalName: String {
+        let firstName = telegramService.currentUser?.firstName
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return firstName.isEmpty ? "there" : firstName
+    }
+
+    private var greeting: String {
+        switch Calendar.current.component(.hour, from: Date()) {
+        case 5..<12: return "Good morning"
+        case 12..<17: return "Good afternoon"
+        case 17..<22: return "Good evening"
+        default: return "Still up"
+        }
+    }
+
+    private var briefingLine: String {
+        guard !feedItems.isEmpty else {
+            return aiConfigured
+                ? "I’m watching your connected sources. Nothing needs you right now."
+                : "Connect an AI provider and I’ll sort what needs your attention."
+        }
+        if needsYouCount == 1 {
+            return "I found one thing that needs you now. The rest can wait."
+        }
+        if needsYouCount > 1 {
+            return "I found \(needsYouCount) things that need you now. The rest can wait."
+        }
+        return "I sorted \(feedItems.count) open loop\(feedItems.count == 1 ? "" : "s"). Nothing is urgent."
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Hero header — flush-left with the outer page padding.
-                // Removed the +12 inner wrapper that was making the
-                // title sit further right than the row avatars below
-                // (Dashboard.jsx puts hero text at body x=0 and the
-                // eyebrow + row content at body x=8, so the hero
-                // intentionally hugs the left more tightly).
-                //
-                // Inner spacings now match the design: 6pt between
-                // title and subtitle, 10pt subtitle-to-squiggle (4 from
-                // VStack + 6 from squiggle's padding-top), and the
-                // squiggle has 4pt below so the first group sits 4+28
-                // away from the squiggle baseline.
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("What to do now")
+                    Text("\(greeting), \(personalName)")
                         .font(PidgyDashboardTheme.heroTitleFont)
                         .tracking(-0.7)
                         .foregroundStyle(PidgyDashboardTheme.primary)
-                    Text("\(feedItems.count) active item\(feedItems.count == 1 ? "" : "s")")
+                    Text(briefingLine)
                         .font(PidgyDashboardTheme.pageSubtitleFont)
                         .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Group {
                         if showPigeonFlock {
                             DashboardPigeonFlock()
@@ -80,9 +117,12 @@ struct DashboardHomePage: View {
                 }
                 .padding(.bottom, 4)
 
+                askPidgyBar
+                    .padding(.top, 24)
+
                 if feedItems.isEmpty && isLoading {
                     DashboardSkeletonRows(count: 7)
-                        .padding(.top, 6)
+                        .padding(.top, 24)
                 } else if feedItems.isEmpty {
                     DashboardEmptyState(
                         systemImage: aiConfigured ? "checkmark.circle" : "sparkles",
@@ -108,7 +148,7 @@ struct DashboardHomePage: View {
                     // covers both cases.
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(DashboardFeedSection.allCases) { section in
-                            let items = feedItems.filter { $0.section == section }
+                            let items = remainingFeedItems.filter { $0.section == section }
                             if !items.isEmpty {
                                 // Design's `group: { marginTop: 28 }`
                                 // gives every section a generous gap.
@@ -149,6 +189,133 @@ struct DashboardHomePage: View {
             .frame(maxWidth: .infinity)
         }
         .background(PidgyDashboardTheme.paper)
+    }
+
+    private var askPidgyBar: some View {
+        VStack(spacing: 0) {
+            if hasInlineConversation {
+                HStack(spacing: 10) {
+                    PidgyMascotMark(size: 30)
+                    Text("ASK PIDGY")
+                        .font(PidgyDashboardTheme.captionMediumFont)
+                        .foregroundStyle(PidgyDashboardTheme.brand)
+                        .tracking(0.7)
+
+                    Spacer()
+
+                    Button {
+                        askChat.reset()
+                        aiQuestion = ""
+                        isAIBarFocused = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(PidgyDashboardTheme.tertiary)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close conversation")
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 50)
+
+                AskPidgyThreadView(model: askChat)
+                    .frame(height: 250)
+
+                Divider()
+                    .overlay(PidgyDashboardTheme.rule)
+
+                askPidgyComposer
+                    .frame(minHeight: 58)
+            } else {
+                askPidgyComposer
+                    .frame(minHeight: 82)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: PidgyRadius.lg, style: .continuous)
+                .fill(PidgyDashboardTheme.raised)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: PidgyRadius.lg, style: .continuous)
+                .stroke(
+                    isAIBarFocused ? PidgyDashboardTheme.brand.opacity(0.65) : PidgyDashboardTheme.rule,
+                    lineWidth: 1
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: PidgyRadius.lg, style: .continuous))
+        .onTapGesture {
+            if !hasInlineConversation {
+                isAIBarFocused = true
+            }
+        }
+        .animation(PidgyMotion.easeOutFast, value: isAIBarFocused)
+        .animation(PidgyMotion.easeOut, value: hasInlineConversation)
+    }
+
+    private var askPidgyComposer: some View {
+        HStack(spacing: 14) {
+            if !hasInlineConversation {
+                PidgyMascotMark(size: 38)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                if !hasInlineConversation {
+                    Text("ASK PIDGY")
+                        .font(PidgyDashboardTheme.captionMediumFont)
+                        .foregroundStyle(PidgyDashboardTheme.brand)
+                        .tracking(0.7)
+                }
+
+                TextField(
+                    hasInlineConversation
+                        ? "Ask a follow-up…"
+                        : "Ask about your Gmail, Slack, or Telegram…",
+                    text: $aiQuestion
+                )
+                .textFieldStyle(.plain)
+                .font(PidgyDashboardTheme.rowEmphasisFont)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .focused($isAIBarFocused)
+                .onSubmit(submitAIQuestion)
+                .disabled(!aiConfigured || askChat.isAnswering)
+            }
+
+            Spacer(minLength: 12)
+
+            Button(action: submitAIQuestion) {
+                Image(systemName: askChat.isAnswering ? "ellipsis" : "arrow.up")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(canSubmitAIQuestion ? PidgyDashboardTheme.primary : PidgyDashboardTheme.tertiary)
+                    .frame(width: 30, height: 30)
+                    .background(
+                        Circle().fill(canSubmitAIQuestion ? PidgyDashboardTheme.brand : PidgyDashboardTheme.sidebar)
+                    )
+            }
+            .buttonStyle(.pidgyPress)
+            .disabled(!canSubmitAIQuestion)
+            .help(aiConfigured ? "Ask Pidgy" : "Connect an AI provider in Preferences")
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var canSubmitAIQuestion: Bool {
+        aiConfigured
+            && !askChat.isAnswering
+            && !aiQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func submitAIQuestion() {
+        let question = aiQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canSubmitAIQuestion, !question.isEmpty else { return }
+        aiQuestion = ""
+        if askChat.thread.isEmpty {
+            askChat.start(with: question, aiService: aiService)
+        } else {
+            askChat.send(question, aiService: aiService)
+        }
+        isAIBarFocused = true
     }
 }
 
@@ -1509,22 +1676,19 @@ struct DashboardFeedRow: View {
         HStack(spacing: 12) {
             DashboardIdentityAvatar(
                 chat: chat,
-                label: item.avatarLabel,
+                label: personName,
                 source: chat?.source.kind,
                 userID: identityUserID,
                 size: PidgyDashboardTheme.rowAvatarSize
             )
 
-            // Title at regular weight (design spec: fontSize 14, no
-            // explicit weight → 400 regular). Metadata collapsed onto a
-            // single fg-3 line: "<person> · <chat-or-type> [· <topic>]".
-            // The old two-line treatment doubled the visual mass of every
-            // row; the design's compact context line is what gives the
-            // feed its calmer rhythm.
-            VStack(alignment: .leading, spacing: 2) {
+            // Match Tasks and Reply Queue: identity/provenance first, then the
+            // concise action. Raw Gmail subjects and generic topic labels do
+            // not help the user decide what to do next.
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
-                    Text(item.title)
-                        .font(Font.Pidgy.body)
+                    Text(personName)
+                        .font(PidgyDashboardTheme.rowEmphasisFont)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .lineLimit(1)
                         .layoutPriority(1)
@@ -1532,11 +1696,20 @@ struct DashboardFeedRow: View {
                     if let source = chat?.source.kind {
                         DashboardInlineSourceLabel(source: source)
                     }
+
+                    if let conversationContext {
+                        Text("·")
+                            .foregroundStyle(PidgyDashboardTheme.tertiary)
+                        Text(conversationContext)
+                            .font(PidgyDashboardTheme.detailBodyFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
-                Text(contextLine)
-                    .font(PidgyDashboardTheme.metadataFont)
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+                Text(item.title)
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
                     .lineLimit(1)
             }
 
@@ -1552,12 +1725,21 @@ struct DashboardFeedRow: View {
         .pidgyRow()
     }
 
-    private var contextLine: String {
-        var parts: [String] = [item.person, item.chat]
-        if let topic = item.topic, !topic.isEmpty {
-            parts.append(topic)
-        }
-        return parts.joined(separator: " · ")
+    private var conversationContext: String? {
+        guard let chat,
+              chat.source.kind != .gmail,
+              !chat.chatType.isPrivate
+        else { return nil }
+        let title = item.chat.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty,
+              !DashboardTaskPresentation.sameIdentity(title, personName)
+        else { return nil }
+        return title
+    }
+
+    private var personName: String {
+        guard chat?.source.kind == .gmail else { return item.person }
+        return GmailPresentation.senderName(from: item.person)
     }
 
     private var chat: TGChat? {
@@ -1575,7 +1757,7 @@ struct DashboardFeedRow: View {
             return reply.lastMessage.senderUserId
         case .task:
             guard let message = chat?.lastMessage,
-                  DashboardTaskPresentation.sameIdentity(message.senderName, item.avatarLabel)
+                  DashboardTaskPresentation.sameIdentity(message.senderName, personName)
             else { return nil }
             return message.senderUserId
         }
@@ -1703,11 +1885,11 @@ enum DashboardFeedSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .onFire:
-            return "On fire"
+            return "Needs you now"
         case .thisWeek:
-            return "This week"
+            return "Up next"
         case .later:
-            return "Later"
+            return "I’m keeping an eye on"
         }
     }
 
@@ -1733,7 +1915,6 @@ struct DashboardFeedItem: Identifiable {
     let title: String
     let person: String
     let chat: String
-    let topic: String?
     let avatarLabel: String
     let date: Date
     let section: DashboardFeedSection
@@ -1745,7 +1926,6 @@ struct DashboardFeedItem: Identifiable {
             title: task.title,
             person: task.personName.isEmpty ? task.ownerName : task.personName,
             chat: task.chatTitle,
-            topic: task.topicName ?? "Uncategorized",
             avatarLabel: task.personName.isEmpty ? task.chatTitle : task.personName,
             date: task.latestSourceDate ?? task.updatedAt,
             section: section(for: task.priority),
@@ -1770,7 +1950,6 @@ struct DashboardFeedItem: Identifiable {
             title: item.suggestedAction ?? (isGmail ? item.chat.title : item.lastMessage.displayText),
             person: person,
             chat: chatLabel,
-            topic: nil,
             avatarLabel: person,
             date: item.lastMessage.date,
             section: section(for: item.category),

@@ -17,6 +17,7 @@ struct DashboardTaskDetail: View {
 
     @State private var generatedSummary = ""
     @State private var generatedSummaryTaskId: Int64?
+    @State private var isLoadingSummary = false
     @State private var conversationEvidence: [EvidenceContextItem] = []
     @State private var evidenceHeader: DashboardEvidenceContextHeader?
     @State private var isLoadingEvidence = false
@@ -149,12 +150,21 @@ struct DashboardTaskDetail: View {
     @ViewBuilder
     private func taskSummary(_ task: DashboardTask) -> some View {
         DashboardDetailSection(title: "Summary") {
-            Text(displayedSummary(for: task))
-                .font(PidgyDashboardTheme.detailBodyFont)
-                .foregroundStyle(PidgyDashboardTheme.primary)
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
+            if shouldShowSummarySkeleton(for: task) {
+                DashboardSkeletonTextBlock(lineCount: 4)
+            } else {
+                Text(displayedSummary(for: task))
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(PidgyDashboardTheme.primary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    private func shouldShowSummarySkeleton(for task: DashboardTask) -> Bool {
+        sourceKind(for: task) == .gmail
+            && (generatedSummaryTaskId != task.id || isLoadingSummary)
     }
 
     private func displayedSummary(for task: DashboardTask) -> String {
@@ -199,24 +209,49 @@ struct DashboardTaskDetail: View {
         guard let task else {
             generatedSummaryTaskId = nil
             generatedSummary = ""
+            isLoadingSummary = false
             return
         }
 
         generatedSummaryTaskId = task.id
         generatedSummary = ""
-        guard sourceKind(for: task) == .gmail else { return }
+        guard sourceKind(for: task) == .gmail else {
+            isLoadingSummary = false
+            return
+        }
+
+        isLoadingSummary = true
+        defer {
+            if self.task?.id == task.id {
+                isLoadingSummary = false
+            }
+        }
+
+        var cachedFallback = ""
 
         if let stored = await DatabaseManager.shared.loadCurrentChatSummary(chatId: task.chatId) {
             let cached = stored.summary.trimmingCharacters(in: .whitespacesAndNewlines)
             if !cached.isEmpty {
-                generatedSummary = cached
-                if cached.split(whereSeparator: \Character.isWhitespace).count >= 30 { return }
+                cachedFallback = cached
+                if cached.split(whereSeparator: \Character.isWhitespace).count >= 30 {
+                    guard !Task.isCancelled, self.task?.id == task.id else { return }
+                    generatedSummary = cached
+                    return
+                }
             }
         }
 
-        guard aiService.isConfigured, !Task.isCancelled else { return }
+        guard !Task.isCancelled, self.task?.id == task.id else { return }
+        guard aiService.isConfigured else {
+            generatedSummary = cachedFallback
+            return
+        }
         let messages = await summaryMessages(for: task)
-        guard !messages.isEmpty, !Task.isCancelled else { return }
+        guard !Task.isCancelled, self.task?.id == task.id else { return }
+        guard !messages.isEmpty else {
+            generatedSummary = cachedFallback
+            return
+        }
 
         do {
             let summary = try await aiService.emailSummary(
@@ -234,8 +269,10 @@ struct DashboardTaskDetail: View {
                 throughMessageId: messages.map(\.id).max() ?? 0
             )
         } catch {
-            // The deterministic summary already on screen remains useful when
-            // AI is offline, rate-limited, or unavailable.
+            // Reveal the best cached copy after the final attempt. If none
+            // exists, the deterministic summary becomes the stable fallback.
+            guard !Task.isCancelled, self.task?.id == task.id else { return }
+            generatedSummary = cachedFallback
         }
     }
 

@@ -390,14 +390,24 @@ struct LauncherView: View {
         // Without an AI provider (or with the memory engine killed) the chat
         // can't answer, so degrade to plain focused search — the field must
         // still get focus, or ⌘K opens a panel with a dead input.
-        .onReceive(NotificationCenter.default.publisher(for: .requestLauncherAsk)) { _ in
-            if ContextLayer.enabled, aiService.isConfigured, !chatMode {
-                chatMode = true
-                LauncherChatSession.isActive = true
-                askChat.reset()
-                searchText = ""
-                searchCoordinator.cancelSearch()
-                searchCoordinator.clearAIState()
+        .onReceive(NotificationCenter.default.publisher(for: .requestLauncherAsk)) { notification in
+            let submittedQuestion = (notification.object as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if ContextLayer.enabled, aiService.isConfigured {
+                if let submittedQuestion, !submittedQuestion.isEmpty {
+                    enterChat(with: submittedQuestion)
+                } else if !chatMode {
+                    chatMode = true
+                    LauncherChatSession.isActive = true
+                    askChat.reset()
+                    searchText = ""
+                    searchCoordinator.cancelSearch()
+                    searchCoordinator.clearAIState()
+                }
+            } else if let submittedQuestion, !submittedQuestion.isEmpty {
+                // Without the answer engine, preserve the user's text as a
+                // normal launcher search instead of silently discarding it.
+                searchText = submittedQuestion
             }
             isSearchFocused = true
         }

@@ -908,7 +908,7 @@ enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
     var subtitle: String {
         switch self {
         case .dashboard:
-            return "What to do now"
+            return "Your brief from Pidgy"
         case .replyQueue:
             return "Chats that need attention"
         case .tasks:
