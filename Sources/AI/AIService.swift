@@ -634,7 +634,8 @@ final class AIService: ObservableObject {
         // needs to ship. `persist: false` for the same reason as the bundled
         // key — rotating the token in a follow-up build must take effect.
         //
-        // Managed plan runs on Gemini 3 Flash via the proxy's Vertex path. We
+        // Managed plan uses Gemini Flash-Lite with stage-specific 3.7 Flash
+        // escalation via the proxy's Vertex path. We
         // derive that path from whatever proxy host is bundled (the release
         // pipeline injects the base URL), so no secret change is needed to
         // switch OpenAI→Gemini — just this routing + `managedModel`.

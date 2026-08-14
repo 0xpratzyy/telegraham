@@ -157,7 +157,21 @@ struct AIModelPricing {
 }
 
 enum AIUsagePricingCatalog {
-    static func pricing(for provider: AIUsageProvider, model: String) -> AIModelPricing? {
+    private static let gemini37StandardPricingStartsAt: Date = {
+        var components = DateComponents()
+        components.calendar = Calendar(identifier: .gregorian)
+        components.timeZone = TimeZone(secondsFromGMT: 0)
+        components.year = 2027
+        components.month = 1
+        components.day = 1
+        return components.date!
+    }()
+
+    static func pricing(
+        for provider: AIUsageProvider,
+        model: String,
+        at date: Date = Date()
+    ) -> AIModelPricing? {
         guard let family = canonicalFamily(for: provider, model: model) else { return nil }
 
         switch (provider, family) {
@@ -222,6 +236,16 @@ enum AIUsagePricingCatalog {
                 inputUSDPerMillionTokens: 1.50,
                 outputUSDPerMillionTokens: 9.00
             )
+        case (.openAI, "gemini-3.7-flash"):
+            // Google launch pricing is 50% off through 2026-12-31. The cost
+            // meter switches automatically when standard pricing starts so a
+            // 2027 build does not silently understate managed-plan spend.
+            let isIntroductoryPricing = date < gemini37StandardPricingStartsAt
+            return AIModelPricing(
+                family: family,
+                inputUSDPerMillionTokens: isIntroductoryPricing ? 0.75 : 1.50,
+                outputUSDPerMillionTokens: isIntroductoryPricing ? 3.75 : 7.50
+            )
         case (.openAI, "gemini-2.5-flash"):
             // GA, regional, cheapest reliable fallback.
             return AIModelPricing(
@@ -246,6 +270,7 @@ enum AIUsagePricingCatalog {
             // Managed plan: Gemini via the OpenAI-compat proxy path is recorded
             // under .openAI with a `google/gemini-*` model id. Check the more
             // specific variants first (3.1-flash-lite before 3-flash, etc).
+            if normalized.contains("gemini-3.7-flash") { return "gemini-3.7-flash" }
             if normalized.contains("gemini-3.1-flash-lite") { return "gemini-3.1-flash-lite" }
             if normalized.contains("gemini-3.5-flash-lite") { return "gemini-3.5-flash-lite" }
             if normalized.contains("gemini-3.5-flash") { return "gemini-3.5-flash" }

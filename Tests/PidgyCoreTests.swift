@@ -7259,7 +7259,7 @@ final class PidgyCoreTests: XCTestCase {
 
         XCTAssertEqual(
             DashboardTaskPresentation.metadataLine(task: task, source: .gmail),
-            "Tushar Pasi  ·  Gmail"
+            "Tushar Pasi"
         )
     }
 
@@ -7345,7 +7345,7 @@ final class PidgyCoreTests: XCTestCase {
 
         XCTAssertEqual(
             DashboardTaskPresentation.metadataLine(task: task, source: .slack),
-            "Ohm  ·  research  ·  Slack"
+            "Ohm  ·  research"
         )
     }
 

@@ -339,9 +339,9 @@ struct DashboardInitialsAvatar: View {
 /// One visual contract for identity across the multi-source dashboard.
 ///
 /// The person/conversation stays primary: use a real profile photo whenever
-/// the source can resolve one, then fall back to stable initials. The provider
-/// is always a small corner mark instead of competing with the identity as a
-/// pill, tag, or replacement avatar.
+/// the source can resolve one, then fall back to stable initials. Source
+/// identity belongs beside the row title (matching the launcher), not on top
+/// of the person's photo.
 struct DashboardIdentityAvatar: View {
     @EnvironmentObject private var sourceRegistry: SourceRegistry
 
@@ -350,7 +350,7 @@ struct DashboardIdentityAvatar: View {
     var source: MessageSourceKind? = nil
     var userID: Int64? = nil
     var size: CGFloat = PidgyDashboardTheme.rowAvatarSize
-    var showsSource = true
+    var showsSource = false
 
     @State private var resolvedUser: TGUser?
 
@@ -418,6 +418,40 @@ struct DashboardIdentityAvatar: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         == rhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Compact launcher-style provider label used after a row's primary title.
+/// Telegram stays unlabelled because it is Pidgy's native/default source;
+/// connected sources need the extra provenance cue.
+struct DashboardInlineSourceLabel: View {
+    let source: MessageSourceKind
+
+    var body: some View {
+        if source != .telegram {
+            Label(source.displayName, systemImage: source.systemImage)
+                .font(Font.Pidgy.monoSm)
+                .foregroundStyle(PidgyDashboardTheme.brand)
+                .labelStyle(.titleAndIcon)
+                .fixedSize()
+                .accessibilityLabel(source.displayName)
+        }
+    }
+}
+
+enum DashboardSourceMetadata {
+    static func providerLine(source: MessageSourceKind, age: String) -> String {
+        "\(source.displayName)  ·  \(age)"
+    }
+
+    static func accountLabel(
+        source: MessageSourceKind,
+        account: String,
+        connectedGmailAccountCount: Int
+    ) -> String? {
+        let email = account.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard source == .gmail, connectedGmailAccountCount > 1, !email.isEmpty else { return nil }
+        return email
     }
 }
 

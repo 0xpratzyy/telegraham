@@ -7,20 +7,25 @@ struct DashboardTaskRow: View {
     let isSelected: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: 14) {
             taskAvatar
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(task.title)
-                    .font(PidgyDashboardTheme.rowTitleFont)
-                    .foregroundStyle(task.status == .done ? PidgyDashboardTheme.secondary : PidgyDashboardTheme.primary)
-                    .lineLimit(1)
-                    .strikethrough(task.status == .done)
+                HStack(spacing: 7) {
+                    Text(displayPerson)
+                        .font(PidgyDashboardTheme.rowTitleFont)
+                        .foregroundStyle(task.status == .done ? PidgyDashboardTheme.secondary : PidgyDashboardTheme.primary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
 
-                Text(DashboardTaskPresentation.metadataLine(task: task, source: sourceKind))
+                    DashboardInlineSourceLabel(source: sourceKind)
+                }
+
+                Text(task.title)
                     .font(PidgyDashboardTheme.metadataFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
                     .lineLimit(1)
+                    .strikethrough(task.status == .done)
             }
 
             Spacer(minLength: 12)
@@ -39,7 +44,7 @@ struct DashboardTaskRow: View {
             .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
-        .frame(height: PidgyDashboardTheme.compactRowHeight)
+        .frame(height: 58)
         .pidgyRow(isSelected: isSelected)
     }
 
@@ -77,7 +82,7 @@ struct DashboardTaskRow: View {
     }
 
     private var displayPerson: String {
-        task.personName.isEmpty ? task.ownerName : task.personName
+        DashboardTaskPresentation.displayPerson(task: task, source: sourceKind)
     }
 }
 
@@ -92,7 +97,6 @@ enum DashboardTaskPresentation {
             appendUnique(task.chatTitle, to: &parts)
         }
 
-        appendUnique(source.displayName, to: &parts)
         return parts.joined(separator: "  ·  ")
     }
 

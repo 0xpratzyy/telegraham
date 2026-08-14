@@ -33,26 +33,27 @@ enum AppConstants {
         static let claudeAPIVersion = "2023-06-01"
         static let defaultClaudeModel = "claude-sonnet-4-20250514"
         static let defaultOpenAIModel = "gpt-5"
-        /// Managed (Pidgy AI) plan model + proxy path — Gemini 3.5 Flash-Lite
-        /// (released 2026-07-21) via the proxy's Vertex path. To switch to
+        /// Managed (Pidgy AI) base model + proxy path. Flash-Lite handles the
+        /// high-volume, well-bounded stages; `managedModelOverride` escalates
+        /// only reasoning-heavy ownership and extraction work to 3.7 Flash.
+        /// To switch to
         /// gpt-5, flip to "gpt-5" + "/v1/chat/completions" (proxy + Vertex
         /// auth already wired).
         static let managedModel = "google/gemini-3.5-flash-lite"
 
         /// Per-stage model routing for the MANAGED plan only (BYOK users'
-        /// chosen model is never overridden). If deep-summary prose or
-        /// search ranking feels dumber on lite, restore:
-        ///   case .summary: return "google/gemini-3.5-flash"
+        /// chosen model is never overridden). The expensive model is reserved
+        /// for work where the product pays for better judgment: ownership,
+        /// commitments, task extraction, and multi-candidate adjudication.
         static func managedModelOverride(for kind: AIRequestKind?) -> String? {
             switch kind {
-            case .factExtraction:
-                // 3.5-flash-lite regressed on the extraction prompt's
-                // direction rule (a speaker's own commitment repeatedly
-                // became [ME]'s task — 2026-07-23, reproduced even after
-                // worked examples were added to the prompt). 3.1 is the
-                // model this rule was validated on (#22/#24); keep
-                // extraction pinned there until a fixture re-eval passes.
-                return "google/gemini-3.1-flash-lite"
+            case .factExtraction,
+                 .replyQueueTriage,
+                 .dashboardTaskTriage,
+                 .dashboardTaskExtraction,
+                 .agenticSearch,
+                 .answerEngine:
+                return "google/gemini-3.7-flash"
             default:
                 return nil
             }

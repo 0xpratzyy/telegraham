@@ -7,6 +7,7 @@ struct DashboardTaskDetail: View {
     @EnvironmentObject private var aiService: AIService
     @EnvironmentObject private var sourceRegistry: SourceRegistry
     @ObservedObject private var chatOpenState = ChatOpenState.shared
+    @ObservedObject private var gmailConnection = GmailConnectionManager.shared
     let task: DashboardTask?
     let evidence: [DashboardTaskSourceMessage]
     let isRefreshing: Bool
@@ -85,9 +86,22 @@ struct DashboardTaskDetail: View {
                         .font(PidgyDashboardTheme.metadataMediumFont)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .lineLimit(1)
-                    Text("\(source.displayName)  ·  \(age)")
+                    Text(DashboardSourceMetadata.providerLine(source: source, age: age))
                         .font(PidgyDashboardTheme.metadataFont)
                         .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .lineLimit(1)
+                    if let account = DashboardSourceMetadata.accountLabel(
+                        source: source,
+                        account: sourceRegistry.chat(id: task.chatId)?.source.account ?? "",
+                        connectedGmailAccountCount: gmailConnection.accounts.count
+                    ) {
+                        Text(account)
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
                 }
 
                 Spacer(minLength: 8)

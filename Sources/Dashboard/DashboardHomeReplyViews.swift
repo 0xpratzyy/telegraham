@@ -427,6 +427,7 @@ struct DashboardReplyQueuePage: View {
 struct DashboardReplyDetail: View {
     @EnvironmentObject private var telegramService: TelegramService
     @EnvironmentObject private var aiService: AIService
+    @ObservedObject private var gmailConnection = GmailConnectionManager.shared
     let item: FollowUpItem?
     let onOpenChat: (TGChat, Int64?) -> Void
     let onClose: () -> Void
@@ -655,9 +656,22 @@ struct DashboardReplyDetail: View {
                         .font(PidgyDashboardTheme.metadataMediumFont)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .lineLimit(1)
-                    Text("Gmail  ·  \(age)")
+                    Text(DashboardSourceMetadata.providerLine(source: .gmail, age: age))
                         .font(PidgyDashboardTheme.metadataFont)
                         .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .lineLimit(1)
+                    if let account = DashboardSourceMetadata.accountLabel(
+                        source: .gmail,
+                        account: item.chat.source.account,
+                        connectedGmailAccountCount: gmailConnection.accounts.count
+                    ) {
+                        Text(account)
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
                 }
                 Spacer(minLength: 8)
                 DashboardTopicChip(text: item.category.rawValue, tint: categoryTint(item.category))
@@ -1508,10 +1522,17 @@ struct DashboardFeedRow: View {
             // row; the design's compact context line is what gives the
             // feed its calmer rhythm.
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.title)
-                    .font(Font.Pidgy.body)
-                    .foregroundStyle(PidgyDashboardTheme.primary)
-                    .lineLimit(1)
+                HStack(spacing: 7) {
+                    Text(item.title)
+                        .font(Font.Pidgy.body)
+                        .foregroundStyle(PidgyDashboardTheme.primary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+
+                    if let source = chat?.source.kind {
+                        DashboardInlineSourceLabel(source: source)
+                    }
+                }
 
                 Text(contextLine)
                     .font(PidgyDashboardTheme.metadataFont)
@@ -1604,10 +1625,6 @@ struct DashboardAttentionRow: View {
 
     private var isGmail: Bool { item.chat.source.kind == .gmail }
 
-    private var gmailPreview: String {
-        GmailPresentation.preview(subject: item.chat.title, messageText: item.lastMessage.displayText)
-    }
-
     private var gmailContent: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
@@ -1615,6 +1632,8 @@ struct DashboardAttentionRow: View {
                     .font(PidgyDashboardTheme.rowEmphasisFont)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                     .lineLimit(1)
+                    .layoutPriority(1)
+                DashboardInlineSourceLabel(source: item.chat.source.kind)
                 if item.chat.unreadCount > 0 {
                     Circle()
                         .fill(PidgyDashboardTheme.brand)
@@ -1623,19 +1642,10 @@ struct DashboardAttentionRow: View {
                 }
             }
 
-            HStack(spacing: 5) {
-                Text(item.chat.title)
-                    .font(PidgyDashboardTheme.detailBodyFont.weight(.medium))
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                if !gmailPreview.isEmpty {
-                    Text("— \(gmailPreview)")
-                        .font(PidgyDashboardTheme.detailBodyFont)
-                        .foregroundStyle(PidgyDashboardTheme.tertiary)
-                        .lineLimit(1)
-                }
-            }
+            Text(item.suggestedAction ?? item.chat.title)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+                .lineLimit(1)
         }
     }
 
@@ -1646,16 +1656,16 @@ struct DashboardAttentionRow: View {
                     .font(PidgyDashboardTheme.rowEmphasisFont)
                     .foregroundStyle(PidgyDashboardTheme.primary)
                     .lineLimit(1)
-                Text("·")
-                    .foregroundStyle(PidgyDashboardTheme.tertiary)
-                Text(item.chat.title)
-                    .font(PidgyDashboardTheme.detailBodyFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .lineLimit(1)
-                Text("· \(item.chat.chatType.displayName)")
-                    .font(PidgyDashboardTheme.detailBodyFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .lineLimit(1)
+                    .layoutPriority(1)
+                DashboardInlineSourceLabel(source: item.chat.source.kind)
+                if let conversationContext {
+                    Text("·")
+                        .foregroundStyle(PidgyDashboardTheme.tertiary)
+                    Text(conversationContext)
+                        .font(PidgyDashboardTheme.detailBodyFont)
+                        .foregroundStyle(PidgyDashboardTheme.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Text(item.suggestedAction ?? item.lastMessage.displayText)
@@ -1663,6 +1673,23 @@ struct DashboardAttentionRow: View {
                 .foregroundStyle(PidgyDashboardTheme.secondary)
                 .lineLimit(1)
         }
+    }
+
+    /// DMs already use the conversation title as the person's identity, so
+    /// repeating both the name and "DM" adds no information. Group/channel
+    /// context remains visible when it is genuinely distinct from the person.
+    private var conversationContext: String? {
+        guard !item.chat.chatType.isPrivate else { return nil }
+        let title = item.chat.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !sameIdentity(title, personName) else { return nil }
+        return title
+    }
+
+    private func sameIdentity(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        == rhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
