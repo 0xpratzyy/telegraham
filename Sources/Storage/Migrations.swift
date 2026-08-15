@@ -966,6 +966,17 @@ enum PidgyMigrations {
                 """)
         }
 
+        migrator.registerMigration("v39_source_identity_metadata") { db in
+            let conversationColumns = Set(try db.columns(in: "source_conversations").map(\.name))
+            if !conversationColumns.contains("avatar_url") {
+                try db.execute(sql: "ALTER TABLE source_conversations ADD COLUMN avatar_url TEXT")
+            }
+            let handleColumns = Set(try db.columns(in: "source_handles").map(\.name))
+            if !handleColumns.contains("avatar_url") {
+                try db.execute(sql: "ALTER TABLE source_handles ADD COLUMN avatar_url TEXT")
+            }
+        }
+
         return migrator
     }
 }

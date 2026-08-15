@@ -20,6 +20,7 @@ struct DashboardTaskDetail: View {
     @State private var isLoadingSummary = false
     @State private var conversationEvidence: [EvidenceContextItem] = []
     @State private var evidenceHeader: DashboardEvidenceContextHeader?
+    @State private var evidenceUserIDsByName: [String: Int64] = [:]
     @State private var isLoadingEvidence = false
     @State private var isEmailPreviewPresented = false
 
@@ -172,13 +173,17 @@ struct DashboardTaskDetail: View {
             let summary = generatedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
             if !summary.isEmpty { return summary }
         }
-        return DashboardTaskPresentation.detailSummary(task: task, source: sourceKind(for: task))
+        return DashboardTaskPresentation.detailSummary(
+            task: task,
+            source: sourceKind(for: task),
+            conversationTitle: sourceRegistry.chat(id: task.chatId)?.title
+        )
     }
 
     @ViewBuilder
     private func taskEvidence(_ task: DashboardTask) -> some View {
         let source = sourceKind(for: task)
-        if source == .slack || source == .telegram {
+        if source.supportsConversationEvidence {
             if isLoadingEvidence && conversationEvidence.isEmpty {
                 DashboardDetailSection(title: "Evidence") {
                     HStack(spacing: 8) {
@@ -285,7 +290,7 @@ struct DashboardTaskDetail: View {
             return
         }
         let source = sourceKind(for: task)
-        guard source == .slack || source == .telegram else {
+        guard source.supportsConversationEvidence else {
             isLoadingEvidence = false
             return
         }
@@ -343,8 +348,20 @@ struct DashboardTaskDetail: View {
             sourceMessageID: sourceMessageID,
             fallback: evidence
         )
+        evidenceUserIDsByName = Dictionary(
+            records.compactMap { record -> (String, Int64)? in
+                guard let id = record.senderUserId,
+                      let rawName = record.senderName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !rawName.isEmpty else { return nil }
+                let normalized = rawName
+                    .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return (normalized, id)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
         evidenceHeader = DashboardTaskEvidencePresentation.header(
-            channelName: task.chatTitle,
+            channelName: sourceRegistry.chat(id: task.chatId)?.title ?? task.chatTitle,
             records: records,
             sourceMessageID: sourceMessageID,
             source: sourceKind(for: task)
@@ -499,6 +516,12 @@ struct DashboardTaskDetail: View {
     }
 
     private func identityUserID(for task: DashboardTask) -> Int64? {
+        let normalizedLabel = avatarLabel(for: task)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let evidenceUserID = evidenceUserIDsByName[normalizedLabel] {
+            return evidenceUserID
+        }
         guard let chat = sourceRegistry.chat(id: task.chatId),
               let message = chat.lastMessage,
               DashboardTaskPresentation.sameIdentity(message.senderName, avatarLabel(for: task))
@@ -544,7 +567,10 @@ enum DashboardTaskEvidencePresentation {
                 senderName: sender,
                 isOutgoing: record.isOutgoing,
                 text: text,
-                isSource: record.id == sourceMessageID
+                isSource: record.id == sourceMessageID,
+                chatID: record.chatId,
+                senderUserID: record.senderUserId,
+                source: record.source.kind
             )
         }
         if !loaded.isEmpty {
@@ -591,13 +617,18 @@ enum DashboardTaskEvidencePresentation {
               let sourceMessageID,
               let rootID = threadRootID(records: records, sourceMessageID: sourceMessageID)
         else {
-            return DashboardEvidenceContextHeader(channelName: channelName, threadTitle: nil)
+            return DashboardEvidenceContextHeader(
+                channelName: channelName,
+                threadTitle: nil,
+                source: source
+            )
         }
         let rawRootText = records.first(where: { $0.id == rootID }).flatMap { $0.textContent }
         let rootText = rawRootText?.trimmingCharacters(in: .whitespacesAndNewlines)
         return DashboardEvidenceContextHeader(
             channelName: channelName,
-            threadTitle: rootText.flatMap(compactThreadTitle)
+            threadTitle: rootText.flatMap(compactThreadTitle),
+            source: source
         )
     }
 
@@ -617,6 +648,7 @@ enum DashboardTaskEvidencePresentation {
 struct DashboardEvidenceContextHeader: Equatable {
     let channelName: String
     let threadTitle: String?
+    let source: MessageSourceKind
 }
 
 struct EvidenceContextItem: Identifiable, Equatable {
@@ -626,19 +658,43 @@ struct EvidenceContextItem: Identifiable, Equatable {
     let isOutgoing: Bool
     let text: String
     let isSource: Bool
+    var chatID: Int64? = nil
+    var senderUserID: Int64? = nil
+    var source: MessageSourceKind? = nil
 }
 
 struct DashboardEvidenceContextRow: View {
+    @EnvironmentObject private var sourceRegistry: SourceRegistry
     let item: EvidenceContextItem
 
+    private var chat: TGChat? {
+        item.chatID.flatMap { sourceRegistry.chat(id: $0) }
+    }
+
+    private var avatarUserID: Int64? {
+        if item.isOutgoing, let chat {
+            return sourceRegistry.source(for: chat)?.currentUser?.id
+        }
+        return item.senderUserID
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 8) {
             // Left gutter — bright on the source message that drove
             // extraction, faint on surrounding context messages.
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(item.isSource ? PidgyDashboardTheme.brand : Color.Pidgy.border2)
                 .frame(width: 2)
                 .frame(maxHeight: .infinity)
+
+            DashboardIdentityAvatar(
+                chat: chat,
+                label: item.senderName,
+                source: item.source,
+                userID: avatarUserID,
+                size: 14
+            )
+            .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -695,11 +751,27 @@ struct DashboardEvidenceConversationView: View {
         items.map { String($0.id) }.joined(separator: ":")
     }
 
+    private var participantSummary: String? {
+        guard header?.source == .whatsapp else { return nil }
+        var seen = Set<String>()
+        let names = items.compactMap { item -> String? in
+            guard !item.isOutgoing else { return nil }
+            let name = item.senderName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, name != "Someone", name != "Unknown", seen.insert(name).inserted else { return nil }
+            return name
+        }
+        guard !names.isEmpty else { return nil }
+        return names.prefix(3).joined(separator: ", ") + (names.count > 3 ? " +\(names.count - 3)" : "")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let header {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label(normalizedChannel(header.channelName), systemImage: "number")
+                    Label(
+                        normalizedConversationTitle(header.channelName, source: header.source),
+                        systemImage: header.source.systemImage
+                    )
                         .font(PidgyDashboardTheme.metadataMediumFont)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .lineLimit(1)
@@ -722,6 +794,13 @@ struct DashboardEvidenceConversationView: View {
                                     .lineLimit(2)
                             }
                         }
+                    }
+
+                    if let participantSummary {
+                        Text(participantSummary)
+                            .font(PidgyDashboardTheme.metadataFont)
+                            .foregroundStyle(PidgyDashboardTheme.tertiary)
+                            .lineLimit(1)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -759,9 +838,22 @@ struct DashboardEvidenceConversationView: View {
         )
     }
 
-    private func normalizedChannel(_ rawValue: String) -> String {
+    private func normalizedConversationTitle(
+        _ rawValue: String,
+        source: MessageSourceKind
+    ) -> String {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            return source == .whatsapp ? "WhatsApp chat" : "Conversation"
+        }
+        guard source == .slack else { return value }
         return value.hasPrefix("#") ? String(value.dropFirst()) : value
+    }
+}
+
+private extension MessageSourceKind {
+    var supportsConversationEvidence: Bool {
+        self == .slack || self == .telegram || self == .whatsapp
     }
 }
 

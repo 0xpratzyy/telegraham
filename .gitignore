@@ -58,6 +58,7 @@ Config/GoogleOAuth.local.xcconfig
 .env.eval.local
 .env.eval
 tools/model_swap_eval_out/
+tools/WhatsAppBridge/bin/
 __pycache__/
 
 # Private source-quality fixtures. These may contain Gmail/Slack message IDs,

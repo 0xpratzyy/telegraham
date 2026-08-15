@@ -50,6 +50,7 @@ struct CanonicalConversation: Identifiable, Sendable, Equatable {
     let title: String
     let updatedAt: Date?
     let unreadCount: Int
+    let avatarURL: String?
 
     init(
         id: String,
@@ -59,7 +60,8 @@ struct CanonicalConversation: Identifiable, Sendable, Equatable {
         kind: SourceConversationKind,
         title: String,
         updatedAt: Date?,
-        unreadCount: Int = 0
+        unreadCount: Int = 0,
+        avatarURL: String? = nil
     ) {
         self.id = id
         self.accountID = accountID
@@ -69,6 +71,7 @@ struct CanonicalConversation: Identifiable, Sendable, Equatable {
         self.title = title
         self.updatedAt = updatedAt
         self.unreadCount = max(0, unreadCount)
+        self.avatarURL = avatarURL
     }
 }
 
@@ -85,6 +88,7 @@ struct CanonicalMessage: Identifiable, Sendable, Equatable {
     let text: String?
     let isOutgoing: Bool
     let isUnread: Bool
+    let senderAvatarURL: String?
 
     init(
         id: String,
@@ -98,7 +102,8 @@ struct CanonicalMessage: Identifiable, Sendable, Equatable {
         date: Date,
         text: String?,
         isOutgoing: Bool,
-        isUnread: Bool = false
+        isUnread: Bool = false,
+        senderAvatarURL: String? = nil
     ) {
         self.id = id
         self.conversationID = conversationID
@@ -112,7 +117,15 @@ struct CanonicalMessage: Identifiable, Sendable, Equatable {
         self.text = text
         self.isOutgoing = isOutgoing
         self.isUnread = isUnread
+        self.senderAvatarURL = senderAvatarURL
     }
+}
+
+struct CanonicalSourceHandle: Sendable, Equatable {
+    let externalID: String
+    let aliases: [String]
+    let displayName: String?
+    let avatarURL: String?
 }
 
 struct SyncCursor: RawRepresentable, Codable, Sendable, Equatable {

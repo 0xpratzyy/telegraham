@@ -108,9 +108,9 @@ enum DashboardTaskPresentation {
     /// Tasks deliberately keep their canonical source evidence for auditing,
     /// but the inspector is an action surface rather than an email/chat reader.
     /// Summarize provenance without repeating the title or leaking raw HTML.
-    static func detailSummary(task: DashboardTask, source: MessageSourceKind) -> String {
+    static func detailSummary(task: DashboardTask, source: MessageSourceKind, conversationTitle: String? = nil) -> String {
         let person = displayPerson(task: task, source: source)
-        let context = task.chatTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = (conversationTitle ?? task.chatTitle).trimmingCharacters(in: .whitespacesAndNewlines)
 
         let origin: String
         if !context.isEmpty, !sameText(context, task.title) {

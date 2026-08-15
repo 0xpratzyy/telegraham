@@ -69,7 +69,18 @@ enum DeepLinkGenerator {
         case .gmail:
             urls = [gmailThreadURL(account: chat.source.account, threadID: native)].compactMap { $0 }
         case .whatsapp:
-            urls = [URL(string: "whatsapp://")].compactMap { $0 }
+            let recipient = native.components(separatedBy: "@").first ?? ""
+            let digits = recipient.filter(\.isNumber)
+            if native.hasSuffix("@s.whatsapp.net"), !digits.isEmpty {
+                urls = [
+                    URL(string: "whatsapp://send?phone=\(digits)"),
+                    URL(string: "https://wa.me/\(digits)")
+                ].compactMap { $0 }
+            } else {
+                // WhatsApp has no stable public deep link for an arbitrary
+                // linked-device group JID, so fall back to opening the app.
+                urls = [URL(string: "whatsapp://")].compactMap { $0 }
+            }
         }
         for url in urls where NSWorkspace.shared.open(url) {
             return true

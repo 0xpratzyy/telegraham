@@ -7133,6 +7133,19 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(header.threadTitle, "Newspaper launch review and final design feedback")
     }
 
+    func testTaskEvidenceHeaderPreservesWhatsAppConversationIdentity() {
+        let header = DashboardTaskEvidencePresentation.header(
+            channelName: "Launch crew",
+            records: [],
+            sourceMessageID: 42,
+            source: .whatsapp
+        )
+
+        XCTAssertEqual(header.channelName, "Launch crew")
+        XCTAssertNil(header.threadTitle)
+        XCTAssertEqual(header.source, .whatsapp)
+    }
+
     func testLoadMessagesAroundKeepsSlackThreadContextTogether() async throws {
         try await withTempDatabase { _ in
             let chatID: Int64 = -440

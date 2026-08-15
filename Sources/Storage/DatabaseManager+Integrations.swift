@@ -21,13 +21,68 @@ extension DatabaseManager {
                         kind: kind,
                         title: row["title"],
                         updatedAt: updated.map(Date.init(timeIntervalSince1970:)),
-                        unreadCount: row["unread_count"] ?? 0
+                        unreadCount: row["unread_count"] ?? 0,
+                        avatarURL: row["avatar_url"]
                     )
                 }
             }
         } catch {
             return []
         }
+    }
+
+    func upsertSourceConversation(account: SourceAccount, conversation: CanonicalConversation) async throws {
+        try await write { db in
+            try Self.upsertCanonicalSourceAccount(account, in: db)
+            try Self.upsertCanonicalConversation(conversation, in: db)
+        }
+    }
+
+    func upsertSourceHandles(sourceID: SourceID, handles: [CanonicalSourceHandle]) async throws {
+        guard !handles.isEmpty else { return }
+        try await write { db in
+            for handle in handles {
+                let aliases = Array(Set([handle.externalID] + handle.aliases)).filter { !$0.isEmpty }
+                for alias in aliases {
+                    let handleID = "\(sourceID.rawValue):handle:\(alias)"
+                    try db.execute(
+                        sql: """
+                            INSERT INTO source_handles (id, source, external_id, display_name, avatar_url)
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(source, external_id) DO UPDATE SET
+                                display_name = COALESCE(NULLIF(excluded.display_name, ''), display_name),
+                                avatar_url = COALESCE(NULLIF(excluded.avatar_url, ''), avatar_url)
+                            """,
+                        arguments: [handleID, sourceID.rawValue, alias, handle.displayName, handle.avatarURL]
+                    )
+                    let senderID = CanonicalID.legacyInt64(sourceID.rawValue + "|user|" + alias)
+                    if let name = handle.displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                        try db.execute(
+                            sql: """
+                                UPDATE messages SET sender_name = ?
+                                WHERE sender_user_id = ?
+                                  AND (sender_name IS NULL OR TRIM(sender_name) = '' OR sender_name IN ('Unknown', 'Someone'))
+                                """,
+                            arguments: [name, senderID]
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    func loadSourceUsers(sourceID: SourceID) async -> [Int64: TGUser] {
+        do {
+            return try await read { db in
+                let rows = try Row.fetchAll(db, sql: "SELECT external_id, display_name, avatar_url FROM source_handles WHERE source = ?", arguments: [sourceID.rawValue])
+                return Dictionary(uniqueKeysWithValues: rows.map { row in
+                    let externalID: String = row["external_id"]
+                    let displayName: String = (row["display_name"] as String?)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let id = CanonicalID.legacyInt64(sourceID.rawValue + "|user|" + externalID)
+                    return (id, TGUser(id: id, firstName: displayName.isEmpty ? "WhatsApp contact" : displayName, lastName: "", username: nil, phoneNumber: nil, isBot: false, avatarURL: row["avatar_url"]))
+                })
+            }
+        } catch { return [:] }
     }
 
     func upsertSourceAccount(_ account: SourceAccount) async throws {
@@ -146,18 +201,19 @@ extension DatabaseManager {
             try db.execute(
                 sql: """
                     INSERT INTO source_conversations
-                    (id, account_id, source, external_id, kind, title, updated_at, unread_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, account_id, source, external_id, kind, title, updated_at, unread_count, avatar_url)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         title = excluded.title,
                         updated_at = COALESCE(excluded.updated_at, updated_at),
-                        unread_count = excluded.unread_count
+                        unread_count = excluded.unread_count,
+                        avatar_url = COALESCE(NULLIF(excluded.avatar_url, ''), avatar_url)
                     """,
                 arguments: [
                     conversation.id, account.id, conversation.source.rawValue,
                     conversation.externalID, conversation.kind.rawValue,
                     conversation.title, conversation.updatedAt?.timeIntervalSince1970,
-                    conversation.unreadCount
+                    conversation.unreadCount, conversation.avatarURL
                 ]
             )
             try Self.insertMessages(records, into: db)
@@ -187,5 +243,25 @@ extension DatabaseManager {
                 }
             }
         }
+    }
+
+    private static func upsertCanonicalSourceAccount(_ account: SourceAccount, in db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO source_accounts (id, source, external_id, display_name, email, connected_at, last_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, last_synced_at = excluded.last_synced_at
+            """, arguments: [account.id, account.source.rawValue, account.externalID, account.displayName, account.email, account.connectedAt.timeIntervalSince1970, Date().timeIntervalSince1970])
+    }
+
+    private static func upsertCanonicalConversation(_ conversation: CanonicalConversation, in db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO source_conversations (id, account_id, source, external_id, kind, title, updated_at, unread_count, avatar_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = CASE WHEN TRIM(excluded.title) = '' THEN title ELSE excluded.title END,
+                updated_at = COALESCE(excluded.updated_at, updated_at),
+                unread_count = excluded.unread_count,
+                avatar_url = COALESCE(NULLIF(excluded.avatar_url, ''), avatar_url)
+            """, arguments: [conversation.id, conversation.accountID, conversation.source.rawValue, conversation.externalID, conversation.kind.rawValue, conversation.title, conversation.updatedAt?.timeIntervalSince1970, conversation.unreadCount, conversation.avatarURL])
     }
 }

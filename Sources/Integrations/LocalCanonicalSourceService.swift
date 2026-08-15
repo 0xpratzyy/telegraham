@@ -11,6 +11,7 @@ final class LocalCanonicalSourceService: ObservableObject, MessageSource {
     @Published private(set) var isReady = false
     var visibleChats: [TGChat] { chats.filter(\.isInMainList) }
     var currentUser: TGUser?
+    private var usersByID: [Int64: TGUser] = [:]
 
     init(account: SourceAccount) {
         self.account = account
@@ -30,6 +31,18 @@ final class LocalCanonicalSourceService: ObservableObject, MessageSource {
 
     func refresh() async {
         let conversations = await DatabaseManager.shared.loadSourceConversations(accountID: account.id)
+        usersByID = await DatabaseManager.shared.loadSourceUsers(sourceID: sourceID)
+        if let ownIdentity = usersByID[currentUser?.id ?? 0] {
+            currentUser = TGUser(
+                id: ownIdentity.id,
+                firstName: account.displayName,
+                lastName: "",
+                username: account.email,
+                phoneNumber: ownIdentity.phoneNumber,
+                isBot: false,
+                avatarURL: ownIdentity.avatarURL
+            )
+        }
         let conversationChatIds = Dictionary(
             uniqueKeysWithValues: conversations.map { conversation in
                 (
@@ -56,7 +69,8 @@ final class LocalCanonicalSourceService: ObservableObject, MessageSource {
                 order: Int64((conversation.updatedAt ?? latest?.date ?? .distantPast).timeIntervalSince1970),
                 isInMainList: true,
                 smallPhotoFileId: nil,
-                source: sourceID
+                source: sourceID,
+                avatarURL: conversation.avatarURL
             )
         }
         chats = mapped.sorted { ($0.lastActivityDate ?? .distantPast) > ($1.lastActivityDate ?? .distantPast) }
@@ -71,7 +85,7 @@ final class LocalCanonicalSourceService: ObservableObject, MessageSource {
 
     func user(id: Int64) async throws -> TGUser? {
         if currentUser?.id == id { return currentUser }
-        return nil
+        return usersByID[id]
     }
 
     nonisolated func isLikelyBot(chat: TGChat) -> Bool { false }

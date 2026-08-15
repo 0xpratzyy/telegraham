@@ -9,6 +9,7 @@ struct DashboardPreferencesPage: View {
     @StateObject private var integrationConnections = IntegrationConnectionStore.shared
     @ObservedObject private var slack = SlackConnectionManager.shared
     @ObservedObject private var gmail = GmailConnectionManager.shared
+    @ObservedObject private var whatsApp = WhatsAppConnectionManager.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
     @AppStorage(AppConstants.Preferences.showPigeonFlockKey) private var showPigeonFlock = true
     @AppStorage(AppConstants.Preferences.contextLayerEnabledKey) private var contextLayerEnabled = true
@@ -32,6 +33,7 @@ struct DashboardPreferencesPage: View {
     @State private var whatsAppOwnerName = ""
     @State private var showWhatsAppImporter = false
     @State private var showWhatsAppOptions = false
+    @State private var showWhatsAppPairing = false
     @State private var showTelegramAdvanced = false
     @State private var selectedAIProvider: AIProviderConfig.ProviderType = .none
     @State private var selectedBYOKProvider: BYOKProvider = .openAI
@@ -165,6 +167,11 @@ struct DashboardPreferencesPage: View {
                     url: url,
                     ownerName: owner.isEmpty ? nil : owner
                 )
+            }
+        }
+        .sheet(isPresented: $showWhatsAppPairing) {
+            WhatsAppPairingView(connection: whatsApp) {
+                showWhatsAppPairing = false
             }
         }
     }
@@ -547,7 +554,7 @@ struct DashboardPreferencesPage: View {
 
     private var connectedIntegrationCount: Int {
         var sources: Set<IntegrationSource> = []
-        if integrationAccount(for: .whatsapp) != nil { sources.insert(.whatsapp) }
+        if whatsApp.isConnected || integrationAccount(for: .whatsapp) != nil { sources.insert(.whatsapp) }
         if !gmail.accounts.isEmpty { sources.insert(.gmail) }
         if case .connected = slack.state { sources.insert(.slack) }
         if telegramService.authState == .ready { sources.insert(.telegram) }
@@ -704,14 +711,20 @@ struct DashboardPreferencesPage: View {
             HStack(spacing: 10) {
                 integrationIcon(.whatsapp)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("WhatsApp export")
+                    Text("WhatsApp")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color.Pidgy.fg1)
-                    Text("Manual .txt imports")
+                    Text(whatsApp.statusLabel)
                         .font(.system(size: 11.5))
                         .foregroundStyle(Color.Pidgy.fg3)
+                        .lineLimit(1)
                 }
                 Spacer()
+                if whatsApp.isConnected {
+                    Circle().fill(Color.Pidgy.success).frame(width: 6, height: 6)
+                } else if whatsApp.state == .connecting || whatsApp.state == .pairing {
+                    ProgressView().controlSize(.small)
+                }
                 Button {
                     withAnimation(PidgyMotion.easeOut) { showWhatsAppOptions.toggle() }
                 } label: {
@@ -721,21 +734,40 @@ struct DashboardPreferencesPage: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .help("Import options")
-                PrefGhostButton(title: "Import", systemImage: "square.and.arrow.down") {
-                    showWhatsAppImporter = true
+                .help("More options")
+                if whatsApp.isConnected {
+                    Menu {
+                        Button("Reconnect", systemImage: "arrow.clockwise") { whatsApp.reconnect() }
+                        Button("Unlink device", systemImage: "xmark", role: .destructive) { whatsApp.logout() }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.Pidgy.fg2)
+                            .frame(width: 28, height: 28)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                } else {
+                    PrefGhostButton(title: "Connect", systemImage: "link") {
+                        showWhatsAppPairing = true
+                        whatsApp.connect()
+                    }
                 }
-                .disabled(integrationConnections.activity[.whatsapp] == .syncing)
             }
             .padding(16)
 
             if showWhatsAppOptions {
                 sourceDivider.padding(.leading, 56)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Your name in the exported chat")
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Import an exported chat instead")
                         .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(Color.Pidgy.fg2)
                     PrefMinInput(text: $whatsAppOwnerName, placeholder: "Optional display name")
+                    PrefGhostButton(title: "Import .txt", systemImage: "square.and.arrow.down") {
+                        showWhatsAppImporter = true
+                    }
+                    .disabled(integrationConnections.activity[.whatsapp] == .syncing)
                     if let status = integrationConnections.statusMessage[.whatsapp] {
                         integrationStatusText(status)
                     }

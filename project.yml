@@ -54,6 +54,9 @@ targets:
   Pidgy:
     type: application
     platform: macOS
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
     sources:
       - path: Sources
     dependencies:
@@ -111,7 +114,29 @@ targets:
         # is too slow for a beta where we ship frequent fixes.
         SUScheduledCheckInterval: 21600
         SUEnableAutomaticChecks: true
+    preBuildScripts:
+      - name: Build read-only WhatsApp bridge
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          "${SRCROOT}/script/build_whatsapp_bridge.sh"
     postBuildScripts:
+      - name: Embed read-only WhatsApp bridge
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          SOURCE="${SRCROOT}/tools/WhatsAppBridge/bin/pidgy-whatsapp-bridge"
+          DESTINATION_DIR="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Resources"
+          DESTINATION="${DESTINATION_DIR}/pidgy-whatsapp-bridge"
+          mkdir -p "$DESTINATION_DIR"
+          cp "$SOURCE" "$DESTINATION"
+          chmod 755 "$DESTINATION"
+          IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY_NAME:--}"
+          case "$IDENTITY" in
+            ""|"Sign to Run Locally"*) IDENTITY="-" ;;
+          esac
+          /usr/bin/codesign --force --sign "$IDENTITY" "$DESTINATION"
+          echo "Embedded read-only WhatsApp bridge"
       - name: Stamp commit SHA into .app sidecar file
         basedOnDependencyAnalysis: false
         # Writes the current commit SHA to a sidecar file inside the

@@ -11,6 +11,7 @@ APP_BUNDLE="$DERIVED_DATA/Build/Products/Debug/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 build_app() {
+  "$ROOT_DIR/script/build_whatsapp_bridge.sh"
   if [[ -n "${PIDGY_CLONED_SOURCE_PACKAGES:-}" ]]; then
     xcodebuild \
       -project "$ROOT_DIR/Pidgy.xcodeproj" \

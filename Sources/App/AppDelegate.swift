@@ -115,6 +115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         SourceRegistry.shared.register(telegramService)
         SlackConnectionManager.shared.restore()
         Task { await GmailConnectionManager.shared.restore() }
+        Task { await WhatsAppConnectionManager.shared.restore() }
 
         // Grandfather this install if it's running a pre-paywall build, so
         // existing testers keep AI for free once enforcement is switched on.
@@ -666,6 +667,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         graphBuildLoopTask?.cancel()
         TaskIndexCoordinator.shared.stop()
         telegramService.stop()
+        WhatsAppConnectionManager.shared.stop()
 
         // Reply exactly once — whichever fires first, the async stops or
         // the watchdog below.
