@@ -407,8 +407,8 @@ final class TaskIndexCoordinator: ObservableObject {
         NotificationCenter.default.post(name: .contextFactsChanged, object: nil)
     }
 
-    func addTopic(named name: String) async -> DashboardTopic? {
-        let added = await DatabaseManager.shared.addDashboardTopic(name: name)
+    func addTopic(named name: String, rationale: String = "Added manually.") async -> DashboardTopic? {
+        let added = await DatabaseManager.shared.addDashboardTopic(name: name, rationale: rationale)
         await loadFromStore()
         guard let added else { return nil }
         return topics.first { $0.id == added.id } ?? added

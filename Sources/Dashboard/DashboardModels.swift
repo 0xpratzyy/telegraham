@@ -75,9 +75,9 @@ enum DashboardTopicMatcher {
         }
 
         return topics.compactMap { topic -> DashboardSidebarTopicSummary? in
-            let query = TopicQuery(name: topic.name)
+            let query = DashboardTopicMatchQuery(name: topic.name, rationale: topic.rationale)
             let chatCount = normalizedChats.reduce(into: 0) { count, chat in
-                if query.matches(chat.title) || chat.preview.map(query.matches) == true {
+                if query.matchesNormalized(chat.title) || chat.preview.map(query.matchesNormalized) == true {
                     count += 1
                 }
             }
@@ -107,30 +107,259 @@ enum DashboardTopicMatcher {
         let preview: String?
     }
 
-    private struct TopicQuery: Sendable {
-        let normalizedName: String
-        let terms: [String]
+    fileprivate static func normalize(_ text: String) -> String {
+        asciiWords(in: text, padded: false)
+    }
 
-        init(name: String) {
-            normalizedName = DashboardTopicMatcher.normalize(name)
-            terms = normalizedName
-                .split(separator: " ")
-                .map(String.init)
-                .filter { $0.count >= 3 }
+    fileprivate static func asciiWords(in text: String, padded: Bool) -> String {
+        var normalized = padded ? " " : ""
+        normalized.reserveCapacity(text.utf8.count + (padded ? 2 : 0))
+        var needsSeparator = false
+
+        for byte in text.lowercased().utf8 {
+            let isASCIILetter = byte >= 97 && byte <= 122
+            let isASCIIDigit = byte >= 48 && byte <= 57
+            if isASCIILetter || isASCIIDigit {
+                if needsSeparator, normalized.last != " " {
+                    normalized.append(" ")
+                }
+                normalized.unicodeScalars.append(UnicodeScalar(byte))
+                needsSeparator = false
+            } else if normalized.last != " " {
+                needsSeparator = true
+            }
         }
 
-        func matches(_ text: String) -> Bool {
-            guard !text.isEmpty, !normalizedName.isEmpty else { return false }
-            if text.contains(normalizedName) { return true }
-            guard terms.count > 1 else { return terms.first.map { text.contains($0) } ?? false }
-            return terms.allSatisfy { text.contains($0) }
+        if padded, normalized.last != " " {
+            normalized.append(" ")
+        }
+        return normalized
+    }
+}
+
+/// Compiled lexical definition shared by sidebar counts and the Topics page.
+/// Branded topics (for example "First Dollar support") must retain their
+/// brand anchor; generic support words must never pull unrelated chats into
+/// that workspace.
+struct DashboardTopicMatchQuery: Sendable {
+    private let normalizedName: String
+    private let nameTerms: [String]
+    private let descriptionTerms: [String]
+    private let brandAnchor: String?
+
+    init(name: String, rationale: String) {
+        normalizedName = DashboardTopicMatcher.normalize(name)
+        let compiledNameTerms = normalizedName
+            .split(separator: " ")
+            .map(String.init)
+            .filter { $0.count >= 3 }
+        nameTerms = compiledNameTerms
+
+        let identityTerms = compiledNameTerms.filter { !Self.genericTopicTerms.contains($0) }
+        brandAnchor = identityTerms.isEmpty ? nil : identityTerms.joined(separator: " ")
+
+        let normalizedRationale = DashboardTopicMatcher.normalize(rationale)
+        descriptionTerms = normalizedRationale
+            .split(separator: " ")
+            .map(String.init)
+            .filter {
+                $0.count >= 3
+                    && !Self.topicStopWords.contains($0)
+                    && !compiledNameTerms.contains($0)
+            }
+    }
+
+    func matches(_ text: String) -> Bool {
+        matchesNormalized(DashboardTopicMatcher.normalize(text))
+    }
+
+    func matchesNormalized(_ text: String) -> Bool {
+        guard !text.isEmpty, !normalizedName.isEmpty else { return false }
+        if text.contains(normalizedName) { return true }
+
+        if let brandAnchor, !text.contains(brandAnchor) {
+            return false
+        }
+
+        let descriptionMatches = descriptionTerms.reduce(into: 0) { count, term in
+            if text.contains(term) { count += 1 }
+        }
+
+        if brandAnchor != nil {
+            return descriptionMatches >= 1
+        }
+
+        if nameTerms.count > 1, nameTerms.allSatisfy({ text.contains($0) }) { return true }
+        if nameTerms.count == 1, nameTerms.first.map({ text.contains($0) }) == true { return true }
+
+        let requiredDescriptionMatches = min(2, descriptionTerms.count)
+        return requiredDescriptionMatches > 0 && descriptionMatches >= requiredDescriptionMatches
+    }
+
+    private static let genericTopicTerms: Set<String> = [
+        "billing", "problem", "problems", "issue", "issues", "support", "ticket", "tickets",
+        "product", "feedback", "design", "review", "reviews", "partnership", "partnerships",
+        "intro", "intros", "introduction", "introductions", "hiring", "candidate", "candidates",
+        "travel", "booking", "bookings", "bug", "bugs", "incident", "incidents", "request",
+        "requests", "update", "updates", "customer", "customers", "help"
+    ]
+
+    private static let topicStopWords: Set<String> = [
+        "added", "manually", "about", "across", "include", "includes", "including",
+        "related", "things", "topic", "topics", "where", "with", "from", "that",
+        "this", "these", "those", "your", "their", "into", "everything"
+    ]
+}
+
+struct DashboardSuggestedTopic: Sendable, Equatable, Hashable {
+    let name: String
+    let description: String
+    let chatCount: Int
+    let tintSeed: Int64
+}
+
+/// Produces broad, reusable topic suggestions from real conversation volume.
+/// Individual chat titles, email subjects, channel names, and provider IDs are
+/// intentionally never promoted into topic suggestions.
+enum DashboardTopicSuggestionEngine {
+    static func rankedSuggestions(
+        chats: [DashboardTopicMatcher.ChatSnapshot],
+        existingTopicNames: [String],
+        minimumChatCount: Int = 5,
+        limit: Int = 6
+    ) -> [DashboardSuggestedTopic] {
+        let existing = Set(existingTopicNames.map(normalize))
+        let normalizedChats = chats.map { chat in
+            Array(normalize([chat.title, chat.preview ?? ""].joined(separator: " ")).utf8)
+        }
+
+        return catalog.enumerated().compactMap { index, candidate -> DashboardSuggestedTopic? in
+            guard !existing.contains(normalize(candidate.name)) else { return nil }
+            let count = normalizedChats.reduce(into: 0) { result, chatText in
+                if candidate.matches(chatText) { result += 1 }
+            }
+            guard count >= minimumChatCount else { return nil }
+            return DashboardSuggestedTopic(
+                name: candidate.name,
+                description: candidate.description,
+                chatCount: count,
+                tintSeed: Int64(-10_000 - index)
+            )
+        }
+        .sorted {
+            if $0.chatCount != $1.chatCount { return $0.chatCount > $1.chatCount }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        .prefix(limit)
+        .map { $0 }
+    }
+
+    private struct Candidate: Sendable {
+        let name: String
+        let description: String
+        /// Every group must contribute at least one matching phrase. A single
+        /// group represents an OR-list; multiple groups make a focused AND.
+        let normalizedPhraseGroups: [[[UInt8]]]
+
+        init(name: String, description: String, requiredPhraseGroups: [[String]]) {
+            self.name = name
+            self.description = description
+            normalizedPhraseGroups = requiredPhraseGroups.map { group in
+                group.map { Array(DashboardTopicSuggestionEngine.normalize($0).utf8) }
+            }
+        }
+
+        func matches(_ text: [UInt8]) -> Bool {
+            normalizedPhraseGroups.allSatisfy { group in
+                group.contains { DashboardTopicSuggestionEngine.contains($0, in: text) }
+            }
         }
     }
 
+    private static let catalog: [Candidate] = [
+        Candidate(
+            name: "Billing problems",
+            description: "Failed or overdue payments, card declines, invoices, refunds, renewals, subscription issues, and billing support.",
+            requiredPhraseGroups: [[
+                "billing", "bill", "invoice", "payment", "paid", "pay", "charge", "refund",
+                "renewal", "renew", "subscription", "card decline", "declined", "failed transaction",
+                "overdue", "receipt", "top up", "topup"
+            ]]
+        ),
+        Candidate(
+            name: "First Dollar support",
+            description: "Customer questions, bug reports, profile verification, onboarding issues, and support requests about First Dollar.",
+            requiredPhraseGroups: [
+                ["first dollar", "firstdollar", "first-dollar"],
+                ["support", "ticket", "help", "issue", "bug", "problem", "verify", "verification", "profile", "onboard", "application", "account", "access", "review", "fix", "error", "failed"]
+            ]
+        ),
+        Candidate(
+            name: "Product feedback",
+            description: "Product feedback, feature requests, user testing notes, usability issues, and requested improvements.",
+            requiredPhraseGroups: [[
+                "product feedback", "feature request", "user testing", "usability", "beta tester",
+                "design feedback", "feedback on", "requested improvement"
+            ]]
+        ),
+        Candidate(
+            name: "Design reviews",
+            description: "Design reviews and requested changes involving Figma, UI, UX, pages, screens, themes, and visual assets.",
+            requiredPhraseGroups: [
+                ["design", "figma", " ui ", " ux ", "page", "screen", "theme", "mockup", "storyline"],
+                ["review", "feedback", "check", "approve", "change", "update", "fix", "better version"]
+            ]
+        ),
+        Candidate(
+            name: "Partnerships & intros",
+            description: "Partnership discussions, introductions, collaborations, sponsorships, and follow-ups with potential partners.",
+            requiredPhraseGroups: [[
+                "partnership", "partner", "introduction", "intro", "collaboration", "collab",
+                "sponsorship", "sponsor", "distribution connection"
+            ]]
+        ),
+        Candidate(
+            name: "Hiring & candidates",
+            description: "Hiring conversations, applicants, interviews, job offers, candidate reviews, and role discussions.",
+            requiredPhraseGroups: [[
+                "hiring", "candidate", "applicant", "interview", "job offer", "job application", "role opening", "recruit"
+            ]]
+        ),
+        Candidate(
+            name: "Travel & bookings",
+            description: "Flights, hotels, check-ins, itineraries, visas, reservations, and other travel logistics.",
+            requiredPhraseGroups: [[
+                "flight", "hotel", "check in", "check-in", "itinerary", "visa", "reservation", "travel", "booking"
+            ]]
+        ),
+        Candidate(
+            name: "Bugs & incidents",
+            description: "Errors, outages, broken flows, failed deployments, regressions, and production incidents that need investigation.",
+            requiredPhraseGroups: [[
+                "bug", "error", "outage", "offline", "broken", "failed deployment", "regression", "incident", "not working"
+            ]]
+        )
+    ]
+
     private static func normalize(_ text: String) -> String {
-        text.lowercased()
-            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        DashboardTopicMatcher.asciiWords(in: text, padded: true)
+    }
+
+    /// The matcher operates only on normalized ASCII. A byte scan avoids
+    /// Foundation's locale-aware String range machinery, which dominated the
+    /// sidebar suggestion profile even after regex normalization was removed.
+    private static func contains(_ needle: [UInt8], in haystack: [UInt8]) -> Bool {
+        guard !needle.isEmpty, needle.count <= haystack.count else { return false }
+        let lastStart = haystack.count - needle.count
+        for start in 0...lastStart {
+            var matched = true
+            for offset in needle.indices where haystack[start + offset] != needle[offset] {
+                matched = false
+                break
+            }
+            if matched { return true }
+        }
+        return false
     }
 }
 

@@ -19,6 +19,15 @@ struct DashboardTaskRow: View {
                         .layoutPriority(1)
 
                     DashboardInlineSourceLabel(source: sourceKind)
+
+                    if let conversationTitle {
+                        Text("·")
+                            .foregroundStyle(PidgyDashboardTheme.tertiary)
+                        Text(conversationTitle)
+                            .font(PidgyDashboardTheme.monoCaptionFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Text(task.title)
@@ -84,6 +93,17 @@ struct DashboardTaskRow: View {
     private var displayPerson: String {
         DashboardTaskPresentation.displayPerson(task: task, source: sourceKind)
     }
+
+    private var conversationTitle: String? {
+        guard let title = DashboardTaskPresentation.displayConversationTitle(
+            task.chatTitle,
+            source: sourceKind
+        ),
+        !DashboardTaskPresentation.sameIdentity(title, displayPerson),
+        !DashboardTaskPresentation.sameText(title, task.title)
+        else { return nil }
+        return title
+    }
 }
 
 enum DashboardTaskPresentation {
@@ -93,8 +113,9 @@ enum DashboardTaskPresentation {
         var parts: [String] = []
         appendUnique(displayPerson(task: task, source: source), to: &parts)
 
-        if !sameText(task.chatTitle, task.title) {
-            appendUnique(task.chatTitle, to: &parts)
+        if let conversation = displayConversationTitle(task.chatTitle, source: source),
+           !sameText(conversation, task.title) {
+            appendUnique(conversation, to: &parts)
         }
 
         return parts.joined(separator: "  ·  ")
@@ -105,12 +126,30 @@ enum DashboardTaskPresentation {
         return normalize(lhs) == normalize(rhs)
     }
 
+    static func matches(_ task: DashboardTask, query: String) -> Bool {
+        let normalizedQuery = normalize(query)
+        guard !normalizedQuery.isEmpty else { return true }
+        let fields = [
+            task.title,
+            task.summary,
+            task.suggestedAction,
+            task.personName,
+            task.ownerName,
+            task.chatTitle,
+            task.topicName ?? ""
+        ]
+        return fields.contains { normalize($0).contains(normalizedQuery) }
+    }
+
     /// Tasks deliberately keep their canonical source evidence for auditing,
     /// but the inspector is an action surface rather than an email/chat reader.
     /// Summarize provenance without repeating the title or leaking raw HTML.
     static func detailSummary(task: DashboardTask, source: MessageSourceKind, conversationTitle: String? = nil) -> String {
         let person = displayPerson(task: task, source: source)
-        let context = (conversationTitle ?? task.chatTitle).trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = displayConversationTitle(
+            conversationTitle ?? task.chatTitle,
+            source: source
+        ) ?? ""
 
         let origin: String
         if !context.isEmpty, !sameText(context, task.title) {
@@ -119,16 +158,36 @@ enum DashboardTaskPresentation {
             origin = ""
         }
 
+        let action = task.suggestedAction
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ? task.title : task.suggestedAction.trimmingCharacters(in: .whitespacesAndNewlines)
+        let actor = person.isEmpty ? "This person" : person
+
         switch source {
         case .gmail:
-            return "\(person.isEmpty ? "This sender" : person) sent an email\(origin). Pidgy identified \u{201c}\(task.title)\u{201d} as the action you need to take. Open Gmail for the original details."
+            return "\(person.isEmpty ? "This sender" : person) sent an email\(origin). Next step: \(action). Open Gmail for the original details."
         case .slack:
-            return "\(person.isEmpty ? "This person" : person) raised this in Slack\(origin). Open Slack for the surrounding conversation."
+            return "\(actor) needs your attention in Slack\(origin). Next step: \(action). Open Slack for the surrounding conversation."
         case .telegram:
-            return "\(person.isEmpty ? "This person" : person) raised this in Telegram\(origin). Open Telegram for the surrounding conversation."
+            return "\(actor) needs your attention in Telegram\(origin). Next step: \(action). Open Telegram for the surrounding conversation."
         case .whatsapp:
-            return "\(person.isEmpty ? "This person" : person) raised this in WhatsApp\(origin). Open the source for the surrounding conversation."
+            return "\(actor) needs your attention in WhatsApp\(origin). Next step: \(action). Open WhatsApp for the surrounding conversation."
         }
+    }
+
+    /// Returns a human-readable conversation title, suppressing provider
+    /// identifiers that are useful for sync but not useful in the UI (for
+    /// example a raw WhatsApp group JID such as 120363423799511145).
+    static func displayConversationTitle(_ raw: String?, source: MessageSourceKind) -> String? {
+        let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !value.isEmpty else { return nil }
+        guard source == .whatsapp else { return value }
+
+        let digitsOnly = !value.isEmpty && value.allSatisfy(\.isNumber)
+        if digitsOnly || value.caseInsensitiveCompare("WhatsApp chat") == .orderedSame {
+            return nil
+        }
+        return value
     }
 
     static func displayPerson(task: DashboardTask, source: MessageSourceKind) -> String {
@@ -152,7 +211,7 @@ enum DashboardTaskPresentation {
         parts.append(trimmed)
     }
 
-    private static func sameText(_ lhs: String, _ rhs: String) -> Bool {
+    static func sameText(_ lhs: String, _ rhs: String) -> Bool {
         normalize(lhs) == normalize(rhs)
     }
 
@@ -291,9 +350,9 @@ enum DashboardReplyFilter: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .onMe:
-            return "On me"
+            return "Needs reply"
         case .onThem:
-            return "On them"
+            return "Waiting"
         case .quiet:
             return "Quiet"
         }

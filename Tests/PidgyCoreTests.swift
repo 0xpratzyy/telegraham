@@ -1559,6 +1559,100 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(items.last?.chatCount, 12)
     }
 
+    func testDashboardTopicMatcherUsesTopicDescriptionForSemanticCoverage() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let billing = DashboardTopic(
+            id: 9,
+            name: "Billing problems",
+            rationale: "Failed payments, subscription renewals, card declines, and invoice issues.",
+            score: 50,
+            rank: 1,
+            createdAt: now,
+            updatedAt: now
+        )
+        let chats = [
+            DashboardTopicMatcher.ChatSnapshot(
+                id: 1,
+                title: "Stripe support",
+                preview: "The invoice payment failed again."
+            ),
+            DashboardTopicMatcher.ChatSnapshot(
+                id: 2,
+                title: "Finance ops",
+                preview: "Subscription renewal invoice needs review."
+            ),
+            DashboardTopicMatcher.ChatSnapshot(
+                id: 3,
+                title: "Design",
+                preview: "New homepage mockups are ready."
+            )
+        ]
+
+        let items = DashboardTopicMatcher.sidebarItems(
+            topics: [billing],
+            chats: chats,
+            minimumChatCount: 0
+        )
+
+        XCTAssertEqual(items.first?.name, "Billing problems")
+        XCTAssertEqual(items.first?.chatCount, 2)
+    }
+
+    func testDashboardTopicMatcherKeepsBrandedSupportScopedToBrand() {
+        let now = Date(timeIntervalSince1970: 1_777_400_000)
+        let firstDollarSupport = DashboardTopic(
+            id: 10,
+            name: "First Dollar support",
+            rationale: "Customer questions, bug reports, profile verification, onboarding issues, and support requests about First Dollar.",
+            score: 50,
+            rank: 1,
+            createdAt: now,
+            updatedAt: now
+        )
+        let chats = [
+            DashboardTopicMatcher.ChatSnapshot(
+                id: 1,
+                title: "Shampooch",
+                preview: "Reply regarding dog grooming packages and customer questions."
+            ),
+            DashboardTopicMatcher.ChatSnapshot(
+                id: 2,
+                title: "First Dollar",
+                preview: "Help Mautin with First Dollar profile verification."
+            )
+        ]
+
+        let items = DashboardTopicMatcher.sidebarItems(
+            topics: [firstDollarSupport],
+            chats: chats,
+            minimumChatCount: 0
+        )
+
+        XCTAssertEqual(items.first?.chatCount, 1)
+    }
+
+    func testDashboardTopicSuggestionsRankRecurringThemesInsteadOfChatTitles() {
+        let chats = [
+            DashboardTopicMatcher.ChatSnapshot(id: 1, title: "Stripe support", preview: "Invoice payment failed"),
+            DashboardTopicMatcher.ChatSnapshot(id: 2, title: "Finance ops", preview: "Card declined for subscription renewal"),
+            DashboardTopicMatcher.ChatSnapshot(id: 3, title: "Accounts", preview: "Refund and billing issue"),
+            DashboardTopicMatcher.ChatSnapshot(id: 4, title: "First Dollar Alpha", preview: "Customer needs help with profile verification"),
+            DashboardTopicMatcher.ChatSnapshot(id: 5, title: "FD support", preview: "FirstDollar onboarding account error"),
+            DashboardTopicMatcher.ChatSnapshot(id: 6, title: "120363423799511145", preview: "Unrelated casual conversation")
+        ]
+
+        let suggestions = DashboardTopicSuggestionEngine.rankedSuggestions(
+            chats: chats,
+            existingTopicNames: [],
+            minimumChatCount: 2
+        )
+
+        XCTAssertEqual(suggestions.first?.name, "Billing problems")
+        XCTAssertEqual(suggestions.first?.chatCount, 3)
+        XCTAssertTrue(suggestions.contains { $0.name == "First Dollar support" && $0.chatCount == 2 })
+        XCTAssertFalse(suggestions.contains { $0.name == "120363423799511145" })
+    }
+
     func testDashboardTopicSemanticSearchKeepsChatScopedMessageMatches() {
         let now = Date(timeIntervalSince1970: 1_777_400_000)
         let first = TGMessage(

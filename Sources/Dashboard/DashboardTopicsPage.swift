@@ -15,7 +15,11 @@ struct DashboardTopicsPage: View {
 
     @State private var searchText = ""
     @State private var selectedCommand: DashboardTopicCommand = .allChats
+    @State private var cachedTopicTasks: [DashboardTask] = []
+    @State private var cachedTopicReplies: [FollowUpItem] = []
     @State private var cachedTopicChatSignals: [DashboardTopicChatSignal] = []
+    @State private var cachedActiveTaskCount = 0
+    @State private var cachedActiveReplyCount = 0
     @State private var recentMessages: [DashboardPersonRecentMessage] = []
     @State private var isLoadingRecentMessages = false
     @State private var semanticResults: [DashboardTopicSemanticSearchResult] = []
@@ -74,31 +78,22 @@ struct DashboardTopicsPage: View {
     }
 
     private var topicTasks: [DashboardTask] {
-        guard let selectedTopic else { return [] }
-        return tasks.filter { task in
-            if selectedTopic.isUncategorized {
-                return task.topicId == nil
-            }
-            return task.topicId == selectedTopic.id
-                || task.topicName?.caseInsensitiveCompare(selectedTopic.name) == .orderedSame
-        }
+        cachedTopicTasks
     }
 
     private var topicReplies: [FollowUpItem] {
-        guard let selectedTopic else { return [] }
-        return followUpItems.filter { item in
-            matchesTopic(selectedTopic, text: item.chat.title)
-                || matchesTopic(selectedTopic, text: item.suggestedAction)
-                || matchesTopic(selectedTopic, text: item.lastMessage.displayText)
-        }
+        cachedTopicReplies
     }
 
     private var topicChatSignals: [DashboardTopicChatSignal] {
         cachedTopicChatSignals
+            .filter(commandAllows)
+            .filter(matchesSearch)
     }
 
     private var isSemanticSearchActive: Bool {
-        selectedCommand == .catchUp || (selectedCommand == .allChats && !trimmedSearchText.isEmpty)
+        selectedCommand == .catchUp
+            || (selectedCommand == .allChats && !trimmedSearchText.isEmpty)
     }
 
     private var trimmedSearchText: String {
@@ -106,25 +101,31 @@ struct DashboardTopicsPage: View {
     }
 
     private var semanticQuery: String {
-        if !trimmedSearchText.isEmpty {
-            return trimmedSearchText
-        }
         guard let selectedTopic else { return "" }
-        return "recent important updates decisions asks open loops \(selectedTopic.name)"
+        let description = selectedTopic.rationale == "Added manually." ? "" : selectedTopic.rationale
+        let topicDefinition = "\(selectedTopic.name) \(description)"
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSearchText.isEmpty {
+            return "\(topicDefinition) \(trimmedSearchText)"
+        }
+        if selectedCommand == .catchUp {
+            return "recent important updates decisions asks open loops \(topicDefinition)"
+        }
+        return topicDefinition
     }
 
     private var semanticSearchKey: String {
-        let chatKey = semanticScopeChatSignals.prefix(120).map(\.chatId).sorted().map(String.init).joined(separator: ",")
+        let chatKey = cachedTopicChatSignals.prefix(120).map(\.chatId).sorted().map(String.init).joined(separator: ",")
         let recentKey = recentMessages.prefix(20).map { "\($0.chatId):\($0.date.timeIntervalSince1970)" }.joined(separator: "|")
         return "\(selectedTopic?.id ?? 0):\(selectedCommand.rawValue):\(searchText):\(chatKey):\(recentKey):\(tasks.count):\(followUpItems.count)"
     }
 
     private var semanticScopeChatSignals: [DashboardTopicChatSignal] {
-        buildTopicChatSignals(applyCommandFilter: false, applySearchFilter: false)
+        cachedTopicChatSignals
     }
 
     private var chatTitleById: [Int64: String] {
-        Dictionary(uniqueKeysWithValues: semanticScopeChatSignals.map { ($0.chatId, $0.title) })
+        Dictionary(uniqueKeysWithValues: allChats.map { ($0.id, $0.title) })
     }
 
     private var displayedTopicTasks: [DashboardTask] {
@@ -237,20 +238,22 @@ struct DashboardTopicsPage: View {
     }
 
     private func buildTopicChatSignals(
+        query: DashboardTopicMatchQuery,
+        matchingTasks: [DashboardTask],
+        matchingReplies: [FollowUpItem],
         applyCommandFilter: Bool = true,
         applySearchFilter: Bool = true
     ) -> [DashboardTopicChatSignal] {
-        guard let selectedTopic else { return [] }
         let chats = allChats
         let chatById = Dictionary(uniqueKeysWithValues: chats.map { ($0.id, $0) })
-        let tasksByChatId = Dictionary(grouping: topicTasks.filter(\.isActionableNow), by: \.chatId)
-        let repliesByChatId = Dictionary(grouping: topicReplies, by: { $0.chat.id })
+        let tasksByChatId = Dictionary(grouping: matchingTasks.filter(\.isActionableNow), by: \.chatId)
+        let repliesByChatId = Dictionary(grouping: matchingReplies, by: { $0.chat.id })
 
         var chatIds = Set<Int64>()
         chatIds.formUnion(tasksByChatId.keys)
         chatIds.formUnion(repliesByChatId.keys)
-        for chat in chats where matchesTopic(selectedTopic, text: chat.title)
-            || matchesTopic(selectedTopic, text: chat.lastMessage?.displayText) {
+        for chat in chats where matchesTopic(query, text: chat.title)
+            || matchesTopic(query, text: chat.lastMessage?.displayText) {
             chatIds.insert(chat.id)
         }
 
@@ -292,50 +295,49 @@ struct DashboardTopicsPage: View {
         }
     }
 
-    private var filteredRecentMessages: [DashboardPersonRecentMessage] {
-        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !trimmed.isEmpty else { return recentMessages }
-        return recentMessages.filter {
-            $0.chatTitle.lowercased().contains(trimmed)
-                || $0.senderName.lowercased().contains(trimmed)
-                || $0.text.lowercased().contains(trimmed)
-        }
-    }
-
     private var activeTaskCount: Int {
-        topicTasks.filter(\.isActionableNow).count
+        cachedActiveTaskCount
     }
 
     private var activeReplyCount: Int {
-        topicReplies.filter { $0.category == .onMe }.count
+        cachedActiveReplyCount
     }
 
     private var recentReloadKey: String {
-        "\(selectedTopic?.id ?? 0):\(semanticScopeChatSignals.prefix(60).map(\.chatId).sorted().map(String.init).joined(separator: ","))"
+        "\(selectedTopic?.id ?? 0):\(selectedCommand.rawValue):\(semanticScopeChatSignals.prefix(60).map(\.chatId).sorted().map(String.init).joined(separator: ","))"
     }
 
-    private var topicSignalRefreshKey: String {
-        let topicKey = "\(selectedTopic?.id ?? 0):\(selectedTopic?.name ?? ""):\(selectedCommand.rawValue):\(searchText)"
-        let taskKey = tasks
-            .map { "\($0.id):\($0.status.rawValue):\($0.topicId ?? 0):\($0.chatId):\($0.updatedAt.timeIntervalSince1970)" }
-            .joined(separator: "|")
-        let replyKey = followUpItems
-            .map { "\($0.chat.id):\($0.category.rawValue):\($0.lastMessage.id)" }
-            .joined(separator: "|")
-        let chatKey = allChats
-            .map { "\($0.id):\($0.title):\($0.lastMessage?.id ?? 0)" }
-            .joined(separator: "|")
-        return "\(topicKey)#\(taskKey)#\(replyKey)#\(chatKey)"
+    private var topicSignalRefreshKey: Int {
+        var hasher = Hasher()
+        hasher.combine(selectedTopic?.id)
+        hasher.combine(selectedTopic?.name)
+        hasher.combine(selectedTopic?.rationale)
+        for task in tasks {
+            hasher.combine(task.id)
+            hasher.combine(task.status.rawValue)
+            hasher.combine(task.topicId)
+            hasher.combine(task.chatId)
+            hasher.combine(task.updatedAt)
+        }
+        for item in followUpItems {
+            hasher.combine(item.chat.id)
+            hasher.combine(item.category.rawValue)
+            hasher.combine(item.lastMessage.id)
+        }
+        for chat in allChats {
+            hasher.combine(chat.id)
+            hasher.combine(chat.title)
+            hasher.combine(chat.lastMessage?.id)
+        }
+        return hasher.finalize()
     }
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 24) {
+            VStack(alignment: .leading, spacing: 0) {
                 if let selectedTopic {
-                    topicHero(selectedTopic)
-                    searchBox(selectedTopic)
-                    commandRow
-
+                    topicHeader(selectedTopic)
+                    controlsRow(selectedTopic)
                     contentSections
                 } else if topics.isEmpty && !topicLoadGracePeriodElapsed {
                     // First-load skeleton — the indexer typically
@@ -355,8 +357,8 @@ struct DashboardTopicsPage: View {
                     .padding(.top, 120)
                 }
             }
-            .frame(maxWidth: 760)
-            .padding(.top, 70)
+            .frame(maxWidth: PidgyDashboardTheme.pageMaxWidth, alignment: .leading)
+            .padding(.top, PidgyDashboardTheme.pageTopPadding)
             .padding(.horizontal, PidgyDashboardTheme.pageHorizontalPadding)
             .padding(.bottom, PidgyDashboardTheme.pageBottomPadding)
             .frame(maxWidth: .infinity)
@@ -395,136 +397,95 @@ struct DashboardTopicsPage: View {
 
     /// Skeleton placeholder rendered before any topic is selected
     /// AND while the first-load grace period is still running. Mimics
-    /// the populated layout — hero title block, search box, command
-    /// row, and a few content rows — so the page doesn't appear to
+    /// the populated layout — title block, compact controls, search,
+    /// and a few content rows — so the page doesn't appear to
     /// pop content in from a blank canvas.
     private var topicsLoadingSkeleton: some View {
-        VStack(spacing: 24) {
-            // Hero — title + meta strip.
-            VStack(spacing: 10) {
-                DashboardSkeletonBlock(width: 260, height: 30, cornerRadius: 8)
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 7) {
+                DashboardSkeletonBlock(width: 260, height: 28, cornerRadius: 7)
                 DashboardSkeletonBlock(width: 180, height: 12, cornerRadius: 5)
             }
+            .padding(.horizontal, 8)
 
-            // Search box.
-            DashboardSkeletonBlock(width: 520, height: 36, cornerRadius: 10)
-
-            // Command row pills.
-            HStack(spacing: 8) {
-                DashboardSkeletonBlock(width: 90, height: 28, cornerRadius: 14)
-                DashboardSkeletonBlock(width: 110, height: 28, cornerRadius: 14)
-                DashboardSkeletonBlock(width: 80, height: 28, cornerRadius: 14)
-                DashboardSkeletonBlock(width: 100, height: 28, cornerRadius: 14)
+            HStack(spacing: 12) {
+                HStack(spacing: 2) {
+                    DashboardSkeletonBlock(width: 82, height: 28, cornerRadius: 7)
+                    DashboardSkeletonBlock(width: 92, height: 28, cornerRadius: 7)
+                    DashboardSkeletonBlock(width: 82, height: 28, cornerRadius: 7)
+                    DashboardSkeletonBlock(width: 90, height: 28, cornerRadius: 7)
+                }
+                Spacer(minLength: 12)
+                DashboardSkeletonBlock(width: 220, height: 28, cornerRadius: 8)
             }
-            .padding(.top, 2)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 10)
 
             DashboardSkeletonRows(count: 6)
-                .padding(.top, 12)
         }
         .frame(maxWidth: .infinity)
     }
 
-    private func topicHero(_ topic: DashboardTopicOption) -> some View {
-        // Centered hero — Newsreader display title, then a compact
-        // "N chats · X tasks · Y replies" meta line. Dropped the folder
-        // tile (per design) and the rationale paragraph (it crowded the
-        // hero and rarely had useful content). Anything that needs to go
-        // somewhere lives in the rationale chip below the title now.
-        VStack(spacing: 8) {
-            Text(topic.name)
-                .font(PidgyDashboardTheme.heroTitleFont)
-                .tracking(-0.7)
-                .foregroundStyle(PidgyDashboardTheme.primary)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-
-            HStack(spacing: 8) {
-                topicMetaItem(icon: "person.2", text: chatCountLine(for: topic))
-                Text("·").foregroundStyle(PidgyDashboardTheme.tertiary)
-                topicMetaItem(text: taskCountLine(for: topic))
-                Text("·").foregroundStyle(PidgyDashboardTheme.tertiary)
-                topicMetaItem(text: replyCountLine(for: topic))
-            }
-            .font(PidgyDashboardTheme.metadataFont)
-            .foregroundStyle(PidgyDashboardTheme.tertiary)
-            .lineLimit(1)
-        }
+    private func topicHeader(_ topic: DashboardTopicOption) -> some View {
+        Text(topic.name)
+            .font(PidgyDashboardTheme.pageTitleFont)
+            .tracking(-0.6)
+            .foregroundStyle(PidgyDashboardTheme.primary)
+            .lineLimit(2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(EdgeInsets(top: 0, leading: 8, bottom: 10, trailing: 8))
     }
 
-    private func topicMetaItem(icon: String? = nil, text: String) -> some View {
-        HStack(spacing: 5) {
-            if let icon {
-                Image(systemName: icon)
-                    .font(.system(size: 11))
-            }
-            Text(text)
-        }
-    }
-
-    private func chatCountLine(for topic: DashboardTopicOption) -> String {
-        let count = semanticScopeChatSignals.count
-        return "\(count) chat\(count == 1 ? "" : "s")"
-    }
-
-    private func taskCountLine(for topic: DashboardTopicOption) -> String {
-        let count = taskCount(for: topic)
-        return "\(count) task\(count == 1 ? "" : "s")"
-    }
-
-    private func replyCountLine(for topic: DashboardTopicOption) -> String {
-        let count = replyCount(for: topic)
-        return "\(count) repl\(count == 1 ? "y" : "ies")"
-    }
-
-    private func searchBox(_ topic: DashboardTopicOption) -> some View {
-        DashboardSearchField(
-            placeholder: "Search \(topic.name)",
-            text: $searchText,
-            size: .prominent,
-            maxWidth: 620
-        )
-    }
-
-    private var commandRow: some View {
-        // Centered tab row, generous gap, accent color on the active
-        // tab — matches the design's "gap: 28" with no chrome / pill.
-        HStack(spacing: 28) {
-            ForEach(DashboardTopicCommand.allCases) { command in
-                Button {
-                    selectedCommand = command
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: command.systemImage)
-                            .font(PidgyDashboardTheme.metadataFont)
-                        Text(command.label)
-                            .font(PidgyDashboardTheme.metadataMediumFont)
-                        if let count = commandCount(command), count > 0 {
-                            Text("\(count)")
-                                .font(PidgyDashboardTheme.monoCaptionFont)
-                                .opacity(0.7)
+    private func controlsRow(_ topic: DashboardTopicOption) -> some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 2) {
+                ForEach(DashboardTopicCommand.allCases) { command in
+                    Button {
+                        selectedCommand = command
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text(command.label)
+                            if let count = commandCount(command), count > 0 {
+                                Text("\(count)")
+                                    .foregroundStyle(selectedCommand == command ? PidgyDashboardTheme.secondary : PidgyDashboardTheme.tertiary)
+                            }
                         }
+                        .font(PidgyDashboardTheme.metadataMediumFont)
+                        .padding(.horizontal, 9)
+                        .frame(height: 28)
+                        .foregroundStyle(selectedCommand == command ? PidgyDashboardTheme.primary : PidgyDashboardTheme.secondary)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(selectedCommand == command ? PidgyDashboardTheme.raised : Color.clear)
+                        )
+                        .contentShape(Rectangle())
                     }
-                    .foregroundStyle(selectedCommand == command ? PidgyDashboardTheme.blue : PidgyDashboardTheme.secondary)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 6)
-                    .contentShape(Rectangle())
-                    .animation(PidgyMotion.easeOutFast, value: selectedCommand)
+                    .buttonStyle(.plain)
+                    .pidgyHoverRow(cornerRadius: 7)
                 }
-                .buttonStyle(.plain)
             }
+
+            Spacer(minLength: 12)
+
+            DashboardSearchField(
+                placeholder: "Search \(topic.name)",
+                text: $searchText,
+                size: .compact
+            )
+            .frame(width: 220)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(EdgeInsets(top: 4, leading: 8, bottom: 22, trailing: 8))
     }
 
     private var contentSections: some View {
-        VStack(alignment: .leading, spacing: 26) {
+        VStack(alignment: .leading, spacing: 0) {
             switch selectedCommand {
             case .allChats:
                 if isSemanticSearchActive {
                     semanticResultsSection(title: "Matches")
                 } else {
                     chatSection
-                    recentSection
                 }
             case .catchUp:
                 catchUpSection
@@ -585,8 +546,7 @@ struct DashboardTopicsPage: View {
     }
 
     private var topicTasksSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            DashboardSectionLabel("Open tasks")
+        VStack(alignment: .leading, spacing: 0) {
             if displayedTopicTasks.isEmpty {
                 DashboardSmallEmptyText(trimmedSearchText.isEmpty ? "No open tasks for this topic." : "No tasks matched this search.")
             } else {
@@ -595,7 +555,7 @@ struct DashboardTopicsPage: View {
                         Button {
                             onOpenTask(task)
                         } label: {
-                            DashboardMiniTaskRow(task: task)
+                            DashboardTaskRow(task: task, isSelected: false)
                         }
                         .buttonStyle(.plain)
                     }
@@ -605,8 +565,7 @@ struct DashboardTopicsPage: View {
     }
 
     private var topicRepliesSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            DashboardSectionLabel("Needs reply")
+        VStack(alignment: .leading, spacing: 0) {
             if displayedTopicReplies.isEmpty {
                 DashboardSmallEmptyText(trimmedSearchText.isEmpty ? "No reply queue items for this topic." : "No replies matched this search.")
             } else {
@@ -615,7 +574,7 @@ struct DashboardTopicsPage: View {
                         Button {
                             onOpenReply(item)
                         } label: {
-                            DashboardMiniReplyRow(item: item)
+                            DashboardAttentionRow(item: item, isSelected: false)
                         }
                         .buttonStyle(.plain)
                     }
@@ -665,9 +624,7 @@ struct DashboardTopicsPage: View {
     }
 
     private var chatSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            DashboardSectionLabel("Chats")
-
+        VStack(alignment: .leading, spacing: 0) {
             if topicChatSignals.isEmpty {
                 DashboardSmallEmptyText("No matching chats for this filter.")
             } else {
@@ -685,50 +642,11 @@ struct DashboardTopicsPage: View {
         }
     }
 
-    private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                DashboardSectionLabel("Recent context")
-                Spacer()
-                if isLoadingRecentMessages {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Text("\(filteredRecentMessages.count)")
-                        .font(PidgyDashboardTheme.monoCaptionFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                }
-            }
-
-            if filteredRecentMessages.isEmpty && isLoadingRecentMessages {
-                DashboardSkeletonRows(count: 5, showTimestamp: false)
-            } else if filteredRecentMessages.isEmpty {
-                DashboardSmallEmptyText("No indexed recent messages for this topic yet.")
-            } else {
-                LazyVStack(spacing: 8) {
-                    ForEach(filteredRecentMessages.prefix(12)) { snippet in
-                        DashboardPersonSnippetRow(snippet: snippet)
-                    }
-                }
-            }
-        }
-    }
-
     private var allChats: [TGChat] {
         var seen = Set<Int64>()
         return sourceChats.filter {
             seen.insert($0.id).inserted
         }
-    }
-
-    private func summaryLine(for topic: DashboardTopicOption) -> String {
-        let chatCount = semanticScopeChatSignals.count
-        let parts = [
-            chatCount == 1 ? "1 chat" : "\(chatCount) chats",
-            activeTaskCount == 1 ? "1 task" : "\(activeTaskCount) tasks",
-            activeReplyCount == 1 ? "1 reply" : "\(activeReplyCount) replies"
-        ]
-        return parts.joined(separator: " · ")
     }
 
     private func selectDefaultTopicIfNeeded() {
@@ -737,33 +655,46 @@ struct DashboardTopicsPage: View {
     }
 
     private func rebuildTopicChatSignals() async {
-        let signals = buildTopicChatSignals()
-        guard !Task.isCancelled else { return }
-        cachedTopicChatSignals = signals
-    }
-
-    private func taskCount(for option: DashboardTopicOption) -> Int {
-        tasks.filter { task in
-            task.isActionableNow && taskBelongsToTopic(task, option: option)
-        }.count
-    }
-
-    private func replyCount(for option: DashboardTopicOption) -> Int {
-        followUpItems.filter { item in
-            item.category == .onMe && (
-                matchesTopic(option, text: item.chat.title)
-                    || matchesTopic(option, text: item.suggestedAction)
-                    || matchesTopic(option, text: item.lastMessage.displayText)
-            )
-        }.count
-    }
-
-    private func taskBelongsToTopic(_ task: DashboardTask, option: DashboardTopicOption) -> Bool {
-        if option.isUncategorized {
-            return task.topicId == nil
+        guard let topic = selectedTopic else {
+            cachedTopicTasks = []
+            cachedTopicReplies = []
+            cachedTopicChatSignals = []
+            cachedActiveTaskCount = 0
+            cachedActiveReplyCount = 0
+            return
         }
-        return task.topicId == option.id
-            || task.topicName?.caseInsensitiveCompare(option.name) == .orderedSame
+
+        let query = topicMatchQuery(for: topic)
+        let matchingTasks = tasks.filter { task in
+            if topic.isUncategorized {
+                return task.topicId == nil
+            }
+            return task.topicId == topic.id
+                || task.topicName?.caseInsensitiveCompare(topic.name) == .orderedSame
+                || matchesTopic(
+                    query,
+                    text: [task.title, task.summary, task.suggestedAction, task.chatTitle]
+                        .joined(separator: " ")
+                )
+        }
+        let matchingReplies = followUpItems.filter { item in
+            matchesTopic(query, text: item.chat.title)
+                || matchesTopic(query, text: item.suggestedAction)
+                || matchesTopic(query, text: item.lastMessage.displayText)
+        }
+        let signals = buildTopicChatSignals(
+            query: query,
+            matchingTasks: matchingTasks,
+            matchingReplies: matchingReplies,
+            applyCommandFilter: false,
+            applySearchFilter: false
+        )
+        guard !Task.isCancelled else { return }
+        cachedTopicTasks = matchingTasks
+        cachedTopicReplies = matchingReplies
+        cachedTopicChatSignals = signals
+        cachedActiveTaskCount = matchingTasks.lazy.filter(\.isActionableNow).count
+        cachedActiveReplyCount = matchingReplies.lazy.filter { $0.category == .onMe }.count
     }
 
     private func commandAllows(_ signal: DashboardTopicChatSignal) -> Bool {
@@ -784,9 +715,9 @@ struct DashboardTopicsPage: View {
         case .catchUp:
             return nil
         case .openTasks:
-            return topicTasks.filter(\.isActionableNow).count
+            return cachedActiveTaskCount
         case .needsReply:
-            return topicReplies.filter { $0.category == .onMe }.count
+            return cachedActiveReplyCount
         }
     }
 
@@ -807,36 +738,42 @@ struct DashboardTopicsPage: View {
         return terms.contains { haystack.contains($0) }
     }
 
-    private func matchesTopic(_ topic: DashboardTopicOption, text: String?) -> Bool {
-        guard let text else { return false }
-        let normalizedText = normalizedTopicText(text)
-        guard !normalizedText.isEmpty else { return false }
-        let normalizedName = normalizedTopicText(topic.name)
-        if normalizedText.contains(normalizedName) {
-            return true
-        }
-        let terms = topicTerms(for: topic)
-        if terms.count > 1 {
-            return terms.allSatisfy { normalizedText.contains($0) }
-        }
-        return terms.first.map { normalizedText.contains($0) } ?? false
+    private func topicMatchQuery(for topic: DashboardTopicOption) -> DashboardTopicMatchQuery {
+        DashboardTopicMatchQuery(name: topic.name, rationale: topic.rationale)
     }
 
-    private func topicTerms(for topic: DashboardTopicOption) -> [String] {
-        let terms = normalizedTopicText(topic.name)
-            .split(separator: " ")
-            .map(String.init)
-            .filter { $0.count >= 3 }
-        return terms.isEmpty ? [normalizedTopicText(topic.name)].filter { !$0.isEmpty } : terms
+    private func matchesTopic(_ query: DashboardTopicMatchQuery, text: String?) -> Bool {
+        text.map(query.matches) ?? false
     }
 
     private func normalizedTopicText(_ text: String) -> String {
-        text.lowercased()
-            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var normalized = ""
+        normalized.reserveCapacity(text.utf8.count)
+        var needsSeparator = false
+
+        for byte in text.lowercased().utf8 {
+            let isASCIILetter = byte >= 97 && byte <= 122
+            let isASCIIDigit = byte >= 48 && byte <= 57
+            if isASCIILetter || isASCIIDigit {
+                if needsSeparator, !normalized.isEmpty {
+                    normalized.append(" ")
+                }
+                normalized.unicodeScalars.append(UnicodeScalar(byte))
+                needsSeparator = false
+            } else if !normalized.isEmpty {
+                needsSeparator = true
+            }
+        }
+
+        return normalized
     }
 
     private func loadRecentMessages() async {
+        guard selectedCommand == .catchUp else {
+            recentMessages = []
+            return
+        }
+
         let chatIds = Array(semanticScopeChatSignals.prefix(60).map(\.chatId))
         guard !chatIds.isEmpty else {
             recentMessages = []
@@ -902,14 +839,13 @@ struct DashboardTopicsPage: View {
         }
         guard !Task.isCancelled else { return }
 
-        let scopeSignals = semanticScopeChatSignals
-        let chatIds = Array(scopeSignals.prefix(220).map(\.chatId))
-        guard !chatIds.isEmpty else {
-            semanticResults = []
-            semanticSummary = nil
-            semanticSearchError = "No chats are attached to this topic yet."
-            return
-        }
+        // Topic discovery must search the whole local index. Restricting this
+        // call to chats that already matched the topic name made semantic
+        // topics circular: "Billing problems" could never discover a card
+        // decline unless that chat had already been labelled Billing.
+        // The topic definition remains part of typed searches, so those can
+        // also discover relevant chats that were never labelled beforehand.
+        let chatIds: [Int64]? = nil
 
         let query = semanticQuery
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -944,7 +880,7 @@ struct DashboardTopicsPage: View {
             query: selectedCommand == .catchUp ? trimmedSearchText : query,
             mode: selectedCommand == .catchUp ? .catchUp : .search,
             topicName: selectedTopic.name,
-            chatTitles: Dictionary(uniqueKeysWithValues: scopeSignals.map { ($0.chatId, $0.title) }),
+            chatTitles: chatTitleById,
             ftsHits: ftsHits,
             vectorHits: vectorHits,
             recentMessages: recentMessages,

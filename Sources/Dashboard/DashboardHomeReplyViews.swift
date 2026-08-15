@@ -86,10 +86,10 @@ struct DashboardHomePage: View {
                 : "Connect an AI provider and I’ll sort what needs your attention."
         }
         if needsYouCount == 1 {
-            return "I found one thing that needs you now. The rest can wait."
+            return "I found one thing that needs attention. The rest can wait."
         }
         if needsYouCount > 1 {
-            return "I found \(needsYouCount) things that need you now. The rest can wait."
+            return "I found \(needsYouCount) things that need attention. The rest can wait."
         }
         return "I sorted \(feedItems.count) open loop\(feedItems.count == 1 ? "" : "s"). Nothing is urgent."
     }
@@ -271,7 +271,7 @@ struct DashboardHomePage: View {
                 TextField(
                     hasInlineConversation
                         ? "Ask a follow-up…"
-                        : "Ask about your Gmail, Slack, or Telegram…",
+                        : "Ask about your Gmail, Slack, Telegram, or WhatsApp…",
                     text: $aiQuestion
                 )
                 .textFieldStyle(.plain)
@@ -1730,8 +1730,10 @@ struct DashboardFeedRow: View {
               chat.source.kind != .gmail,
               !chat.chatType.isPrivate
         else { return nil }
-        let title = item.chat.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty,
+        guard let title = DashboardTaskPresentation.displayConversationTitle(
+            item.chat,
+            source: chat.source.kind
+        ),
               !DashboardTaskPresentation.sameIdentity(title, personName)
         else { return nil }
         return title
@@ -1862,8 +1864,10 @@ struct DashboardAttentionRow: View {
     /// context remains visible when it is genuinely distinct from the person.
     private var conversationContext: String? {
         guard !item.chat.chatType.isPrivate else { return nil }
-        let title = item.chat.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, !sameIdentity(title, personName) else { return nil }
+        guard let title = DashboardTaskPresentation.displayConversationTitle(
+            item.chat.title,
+            source: item.chat.source.kind
+        ), !sameIdentity(title, personName) else { return nil }
         return title
     }
 
@@ -1885,7 +1889,7 @@ enum DashboardFeedSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .onFire:
-            return "Needs you now"
+            return "Needs attention"
         case .thisWeek:
             return "Up next"
         case .later:

@@ -505,51 +505,82 @@ struct DashboardTopicChatRow: View {
     let signal: DashboardTopicChatSignal
 
     var body: some View {
-        HStack(spacing: 12) {
-            DashboardTelegramAvatar(
+        HStack(alignment: .center, spacing: 14) {
+            DashboardIdentityAvatar(
                 chat: signal.chat,
-                fallbackTitle: signal.title,
+                label: personName,
+                source: sourceKind,
+                userID: signal.chat?.lastMessage?.senderUserId,
                 size: PidgyDashboardTheme.rowAvatarSize
             )
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(signal.title)
+                HStack(spacing: 7) {
+                    Text(personName)
                         .font(PidgyDashboardTheme.rowEmphasisFont)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .lineLimit(1)
-                    Text("·")
-                        .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    Text(signal.typeLabel)
-                        .font(PidgyDashboardTheme.metadataFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
+                        .layoutPriority(1)
+                    DashboardInlineSourceLabel(source: sourceKind)
+                    if let conversationContext {
+                        Text("·")
+                            .foregroundStyle(PidgyDashboardTheme.tertiary)
+                        Text(conversationContext)
+                            .font(PidgyDashboardTheme.detailBodyFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
-                Text(signal.snippet)
-                    .font(PidgyDashboardTheme.metadataFont)
+                Text(previewText)
+                    .font(PidgyDashboardTheme.detailBodyFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
                     .lineLimit(1)
             }
 
             Spacer(minLength: 12)
 
-            HStack(spacing: 6) {
-                if signal.replyCount > 0 {
-                    DashboardTopicMiniBadge(text: "\(signal.replyCount)", tint: PidgyDashboardTheme.brand)
-                }
-                if signal.openTaskCount > 0 {
-                    DashboardTopicMiniBadge(text: "\(signal.openTaskCount)", tint: PidgyDashboardTheme.blue)
-                }
-                Text(signal.lastActivityAt.map { DateFormatting.dashboardListTimestamp(from: $0) } ?? "-")
-                    .font(PidgyDashboardTheme.monoTimestampFont)
-                    .foregroundStyle(PidgyDashboardTheme.secondary)
-                    .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
-            }
+            Text(signal.lastActivityAt.map { DateFormatting.dashboardListTimestamp(from: $0) } ?? "-")
+                .font(PidgyDashboardTheme.monoTimestampFont)
+                .foregroundStyle(PidgyDashboardTheme.secondary)
+                .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
-        .frame(height: PidgyDashboardTheme.topicRowHeight)
+        .frame(height: 58)
         .pidgyRow()
+    }
+
+    private var sourceKind: MessageSourceKind {
+        signal.chat?.source.kind ?? .telegram
+    }
+
+    private var personName: String {
+        if sourceKind == .gmail {
+            return GmailPresentation.senderName(from: signal.chat?.lastMessage?.senderName)
+        }
+        if signal.chat?.chatType.isPrivate == true {
+            return signal.title
+        }
+        return signal.chat?.lastMessage?.senderName ?? signal.title
+    }
+
+    private var conversationContext: String? {
+        let title = signal.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty,
+              !DashboardTaskPresentation.sameIdentity(title, personName)
+        else { return nil }
+        return DashboardTaskPresentation.displayConversationTitle(title, source: sourceKind)
+    }
+
+    private var previewText: String {
+        if sourceKind == .gmail {
+            return GmailPresentation.compactBody(
+                subject: signal.title,
+                messageText: signal.snippet,
+                maxCharacters: 180
+            )
+        }
+        return signal.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -558,38 +589,37 @@ struct DashboardTopicSemanticResultRow: View {
     let chat: TGChat?
 
     var body: some View {
-        HStack(spacing: 12) {
-            DashboardTelegramAvatar(
+        HStack(alignment: .center, spacing: 14) {
+            DashboardIdentityAvatar(
                 chat: chat,
-                fallbackTitle: result.chatTitle,
+                label: personName,
+                source: sourceKind,
+                userID: chat?.lastMessage?.senderUserId,
                 size: PidgyDashboardTheme.rowAvatarSize
             )
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    DashboardTopicSourceBadge(source: result.source)
-                    Text(result.title)
+                HStack(spacing: 7) {
+                    Text(personName)
                         .font(PidgyDashboardTheme.rowEmphasisFont)
                         .foregroundStyle(PidgyDashboardTheme.primary)
                         .lineLimit(1)
-                    Text("·")
-                        .foregroundStyle(PidgyDashboardTheme.tertiary)
-                    Text(result.chatTitle)
-                        .font(PidgyDashboardTheme.metadataFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
+                        .layoutPriority(1)
+                    DashboardInlineSourceLabel(source: sourceKind)
+                    if let conversationContext {
+                        Text("·")
+                            .foregroundStyle(PidgyDashboardTheme.tertiary)
+                        Text(conversationContext)
+                            .font(PidgyDashboardTheme.detailBodyFont)
+                            .foregroundStyle(PidgyDashboardTheme.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
-                HStack(spacing: 6) {
-                    Text(result.senderName)
-                        .font(PidgyDashboardTheme.captionMediumFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                    Text(result.snippet)
-                        .font(PidgyDashboardTheme.metadataFont)
-                        .foregroundStyle(PidgyDashboardTheme.secondary)
-                        .lineLimit(1)
-                }
+                Text(secondaryText)
+                    .font(PidgyDashboardTheme.detailBodyFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 12)
@@ -600,8 +630,42 @@ struct DashboardTopicSemanticResultRow: View {
                 .frame(width: PidgyDashboardTheme.timestampColumnWidth, alignment: .trailing)
         }
         .padding(.horizontal, PidgyDashboardTheme.rowHorizontalPadding)
-        .frame(height: PidgyDashboardTheme.topicRowHeight)
+        .frame(height: 58)
         .pidgyRow()
+    }
+
+    private var sourceKind: MessageSourceKind {
+        chat?.source.kind ?? .telegram
+    }
+
+    private var personName: String {
+        if sourceKind == .gmail {
+            return GmailPresentation.senderName(from: result.senderName)
+        }
+        let sender = result.senderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return sender.isEmpty ? result.chatTitle : sender
+    }
+
+    private var conversationContext: String? {
+        let title = result.chatTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty,
+              !DashboardTaskPresentation.sameIdentity(title, personName),
+              !DashboardTaskPresentation.sameText(title, result.title)
+        else { return nil }
+        return DashboardTaskPresentation.displayConversationTitle(title, source: sourceKind)
+    }
+
+    private var secondaryText: String {
+        let title = result.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { return title }
+        if sourceKind == .gmail {
+            return GmailPresentation.compactBody(
+                subject: result.chatTitle,
+                messageText: result.snippet,
+                maxCharacters: 180
+            )
+        }
+        return result.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -651,4 +715,3 @@ struct DashboardTopicMiniBadge: View {
             .clipShape(Capsule())
     }
 }
-

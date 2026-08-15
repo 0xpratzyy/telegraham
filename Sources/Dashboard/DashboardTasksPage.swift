@@ -15,6 +15,7 @@ struct DashboardTasksPage: View {
     @State private var selectedOwnerFilter: DashboardTaskOwnerFilter = .mine
     @State private var isOwnerPickerPresented = false
     @State private var ownerSearchQuery = ""
+    @State private var taskSearchQuery = ""
     @State private var cachedSearchBase: [DashboardTaskOwnerSearchOption] = []
     @State private var liveSearchHits: [DashboardTaskOwnerSearchOption] = []
     @State private var liveSearchTask: Task<Void, Never>?
@@ -26,12 +27,15 @@ struct DashboardTasksPage: View {
     @State private var isFactCrawlRunning = FactExtractionCoordinator.shared.isCrawling
 
     private var filteredTasks: [DashboardTask] {
-        DashboardTaskListFilters.filteredTasks(
+        let ownedTasks = DashboardTaskListFilters.filteredTasks(
             tasksForSelectedStatus,
             status: nil,
             ownerFilter: selectedOwnerFilter,
             currentUser: currentUser
         )
+        let query = taskSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return ownedTasks }
+        return ownedTasks.filter { DashboardTaskPresentation.matches($0, query: query) }
     }
 
     private var selectedTask: DashboardTask? {
@@ -252,6 +256,10 @@ struct DashboardTasksPage: View {
                 Text("Connect AI to extract tasks")
                     .font(PidgyDashboardTheme.pageSubtitleFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
+            } else {
+                Text("From Gmail, Slack, Telegram, and WhatsApp")
+                    .font(PidgyDashboardTheme.pageSubtitleFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -259,12 +267,23 @@ struct DashboardTasksPage: View {
     }
 
     private var filterBar: some View {
-        DashboardStatusSegments(
-            selection: $statusFilter,
-            openCount: openCount,
-            doneCount: doneCount,
-            allCount: allCount
-        )
+        HStack(spacing: 12) {
+            DashboardStatusSegments(
+                selection: $statusFilter,
+                openCount: openCount,
+                doneCount: doneCount,
+                allCount: allCount
+            )
+
+            Spacer(minLength: 12)
+
+            DashboardSearchField(
+                placeholder: "Search tasks",
+                text: $taskSearchQuery,
+                size: .compact
+            )
+            .frame(width: 220)
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(selectedTask == nil ? EdgeInsets(top: 4, leading: 8, bottom: 22, trailing: 8) : EdgeInsets(top: 4, leading: 0, bottom: 22, trailing: 0))
     }
@@ -399,6 +418,13 @@ struct DashboardTasksPage: View {
     // have plenty of tasks, which looks like the whole feature is
     // broken.
     private func emptyStateContent() -> (image: String, title: String, subtitle: String) {
+        if !taskSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (
+                "magnifyingglass",
+                "No tasks match",
+                "Try a different title, person, channel, or source."
+            )
+        }
         if let profileName = selectedProfileName {
             return (
                 "tray",

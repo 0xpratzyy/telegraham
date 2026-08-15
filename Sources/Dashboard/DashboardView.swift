@@ -4,7 +4,13 @@ let dashboardUncategorizedTopicId: Int64 = Int64.min
 
 enum DashboardReplyQueueMetrics {
     static func sidebarCount(for items: [FollowUpItem]) -> Int {
-        items.count
+        // The sidebar badge represents work that can move forward, not the
+        // informational/quiet bucket. Quiet remains available as an explicit
+        // tab in Reply queue, but it should not make the queue look larger
+        // than the work that actually needs a response.
+        items.reduce(into: 0) { count, item in
+            if item.category != .quiet { count += 1 }
+        }
     }
 }
 
@@ -89,6 +95,7 @@ struct DashboardView: View {
     @State private var staleContacts: [RelationGraph.Node] = []
     @State private var allContacts: [RelationGraph.Node] = []
     @State private var sidebarTopicItems: [DashboardSidebarTopicSummary] = []
+    @State private var discoveredTopicSuggestions: [DashboardTopicSuggestion] = []
 
     var body: some View {
         let currentPage = navigation.selectedPage ?? .dashboard
@@ -110,7 +117,10 @@ struct DashboardView: View {
                     canLogOut: telegramService.currentUser != nil,
                     availableSources: availableSourceScopes,
                     selectedSource: $selectedSourceScope,
-                    onAddTopic: { isAddingTopic = true },
+                    onAddTopic: {
+                        isAddingTopic = true
+                        Task { await rebuildSidebarTopicItems(includeSuggestions: true) }
+                    },
                     onRemoveTopic: { topicId in
                         Task {
                             await taskIndex.removeTopic(id: topicId)
@@ -378,6 +388,7 @@ struct DashboardView: View {
         let eligibleGmailChatIds = proactiveGmailChatIds
         return sourceRegistry.visibleChats.filter {
             selectedSourceScope.includes($0)
+                && (includeBotsInAISearch || !sourceRegistry.isLikelyBot(chat: $0))
                 && isProactiveSurfaceChat($0, eligibleGmailChatIds: eligibleGmailChatIds)
         }
     }
@@ -386,6 +397,7 @@ struct DashboardView: View {
         let eligibleGmailChatIds = proactiveGmailChatIds
         return sourceRegistry.chats.filter {
             selectedSourceScope.includes($0)
+                && (includeBotsInAISearch || !sourceRegistry.isLikelyBot(chat: $0))
                 && isProactiveSurfaceChat($0, eligibleGmailChatIds: eligibleGmailChatIds)
         }
     }
@@ -487,7 +499,7 @@ struct DashboardView: View {
 
     private var sidebarTopicRefreshKey: String {
         let topicKey = taskIndex.topics
-            .map { "\($0.id):\($0.name):\($0.rank):\($0.score):\($0.updatedAt.timeIntervalSince1970)" }
+            .map { "\($0.id):\($0.name):\($0.rationale):\($0.rank):\($0.score):\($0.updatedAt.timeIntervalSince1970)" }
             .joined(separator: "|")
         // Use only structurally-stable chat fields (id + title) — NOT
         // `lastMessage.id`. Including the last message id made every
@@ -500,95 +512,18 @@ struct DashboardView: View {
         let chatKey = scopedVisibleChats
             .map { "\($0.source.rawValue):\($0.id):\($0.title)" }
             .joined(separator: "|")
-        return "\(topicKey)#\(chatKey)"
+        // Topic suggestions also use extracted tasks and reply intent. Track
+        // one compact revision per dataset instead of every message body so a
+        // completed extraction refreshes suggestions without returning to the
+        // expensive per-message invalidation that caused high CPU usage.
+        let latestTaskRevision = activeTasks.map(\.updatedAt).max()?.timeIntervalSince1970 ?? 0
+        let latestReplyRevision = scopedFollowUpItems.map(\.lastMessage.date).max()?.timeIntervalSince1970 ?? 0
+        let signalKey = "\(activeTasks.count):\(latestTaskRevision):\(scopedFollowUpItems.count):\(latestReplyRevision)"
+        return "\(topicKey)#\(chatKey)#\(signalKey)"
     }
 
     private var addTopicSuggestions: [DashboardTopicSuggestion] {
-        var suggestionsByName: [String: (name: String, count: Int, score: Double, seed: Int64)] = [:]
-        let groupChatIds = Set((scopedVisibleChats + scopedAllChats).compactMap { chat -> Int64? in
-            if case .privateChat = chat.chatType { return nil }
-            return chat.id
-        })
-
-        func add(_ rawName: String?, count: Int, score: Double, seed: Int64) {
-            guard let rawName else { return }
-            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let key = normalizedTopicSuggestionName(name)
-            guard !name.isEmpty, !key.isEmpty, !genericTopicSuggestionNames.contains(key) else { return }
-
-            if let existing = suggestionsByName[key] {
-                suggestionsByName[key] = (
-                    name: existing.name,
-                    count: max(existing.count, count),
-                    score: max(existing.score, score),
-                    seed: existing.seed
-                )
-            } else {
-                suggestionsByName[key] = (name: name, count: count, score: score, seed: seed)
-            }
-        }
-
-        for item in sidebarTopicItems {
-            add(item.name, count: item.chatCount, score: 10_000 + Double(item.chatCount), seed: item.id)
-        }
-
-        for topic in taskIndex.topics.prefix(24) {
-            let rankBoost = Double(max(0, 200 - topic.rank))
-            add(topic.name, count: 0, score: topic.score + rankBoost, seed: topic.id)
-        }
-
-        var taskChatCounts: [String: (name: String, count: Int, seed: Int64)] = [:]
-        for task in taskIndex.tasks where !task.chatTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard task.status != .ignored else { continue }
-            guard groupChatIds.contains(task.chatId) || task.chatTitle.contains("<>") || task.chatTitle.contains("|") else { continue }
-            let name = task.chatTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            let key = normalizedTopicSuggestionName(name)
-            guard !key.isEmpty, !genericTopicSuggestionNames.contains(key) else { continue }
-            let current = taskChatCounts[key] ?? (name: name, count: 0, seed: task.chatId)
-            taskChatCounts[key] = (name: current.name, count: current.count + 1, seed: current.seed)
-        }
-
-        for chat in taskChatCounts.values where chat.count >= 2 {
-            add(chat.name, count: chat.count, score: Double(chat.count) * 100, seed: chat.seed)
-        }
-
-        return suggestionsByName.values
-            .sorted {
-                if $0.score != $1.score { return $0.score > $1.score }
-                if $0.count != $1.count { return $0.count > $1.count }
-                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
-            .prefix(8)
-            .map {
-                DashboardTopicSuggestion(
-                    name: $0.name,
-                    count: $0.count,
-                    tintSeed: $0.seed
-                )
-            }
-    }
-
-    private var genericTopicSuggestionNames: Set<String> {
-        [
-            "uncategorized",
-            "airdrops",
-            "web3",
-            "crypto deals",
-            "crypto markets",
-            "crypto payments",
-            "web3 jobs",
-            "web3 build",
-            "predictions",
-            "revenue sharing",
-            "launches",
-            "partnerships",
-            "talent network",
-            "payments",
-            "nft tools",
-            "ai tools",
-            "product launches",
-            "ugc campaigns"
-        ]
+        discoveredTopicSuggestions
     }
 
     @ViewBuilder
@@ -730,9 +665,13 @@ struct DashboardView: View {
         refreshDashboard()
     }
 
-    private func addTopic(_ name: String) {
+    private func addTopic(_ name: String, description: String) {
         Task { @MainActor in
-            if let topic = await taskIndex.addTopic(named: name) {
+            let rationale = description.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let topic = await taskIndex.addTopic(
+                named: name,
+                rationale: rationale.isEmpty ? "Added manually." : rationale
+            ) {
                 selectedTopicId = topic.id
                 navigation.selectedPage = .topics
             }
@@ -763,19 +702,29 @@ struct DashboardView: View {
         }
     }
 
-    private func normalizedTopicSuggestionName(_ name: String) -> String {
-        name.lowercased()
-            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    private func rebuildSidebarTopicItems(includeSuggestions: Bool = false) async {
+        // Collapse bursts from task/reply/source publication into one rebuild.
+        // `.task(id:)` cancels this sleep when a newer snapshot arrives, so we
+        // never fan out several expensive detached matchers at launch.
+        try? await Task.sleep(for: .milliseconds(250))
+        guard !Task.isCancelled else { return }
 
-    private func rebuildSidebarTopicItems() async {
         let topics = taskIndex.topics
+        let taskSignals = Dictionary(grouping: activeTasks.filter { $0.status != .ignored }, by: \.chatId)
+        let replySignals = Dictionary(grouping: scopedFollowUpItems, by: { $0.chat.id })
         let snapshots = scopedVisibleChats.map {
-            DashboardTopicMatcher.ChatSnapshot(
+            let taskText = (taskSignals[$0.id] ?? []).prefix(3).flatMap {
+                [$0.title, $0.summary, $0.suggestedAction]
+            }
+            let replyText = (replySignals[$0.id] ?? []).prefix(3).compactMap(\.suggestedAction)
+            let semanticPreview = ([$0.lastMessage?.displayText] + taskText.map(Optional.some) + replyText.map(Optional.some))
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            return DashboardTopicMatcher.ChatSnapshot(
                 id: $0.id,
                 title: $0.title,
-                preview: $0.lastMessage?.displayText
+                preview: semanticPreview.isEmpty ? nil : semanticPreview
             )
         }
 
@@ -787,19 +736,42 @@ struct DashboardView: View {
         // even when the new array equals the old, and rapid republishes can
         // overlap with the sidebar rebuild). Keep the last-good list visible
         // until we have inputs that can produce a real answer.
-        guard !topics.isEmpty, !snapshots.isEmpty else { return }
+        guard !snapshots.isEmpty else { return }
 
-        let items = await Task.detached(priority: .utility) {
-            DashboardTopicMatcher.sidebarItems(topics: topics, chats: snapshots)
+        let result = await Task.detached(priority: .utility) {
+            let items = DashboardTopicMatcher.sidebarItems(topics: topics, chats: snapshots)
+            let suggestions = includeSuggestions
+                ? DashboardTopicSuggestionEngine.rankedSuggestions(
+                    chats: snapshots,
+                    existingTopicNames: topics.map(\.name)
+                )
+                : []
+            return (items, suggestions)
         }.value
+        let (items, suggestions) = result
 
         guard !Task.isCancelled else { return }
+        if includeSuggestions {
+            let mappedSuggestions = suggestions.map {
+                DashboardTopicSuggestion(
+                    name: $0.name,
+                    count: $0.chatCount,
+                    tintSeed: $0.tintSeed,
+                    description: $0.description
+                )
+            }
+            if discoveredTopicSuggestions != mappedSuggestions {
+                discoveredTopicSuggestions = mappedSuggestions
+            }
+        }
         // Same defense: if the rebuild produced nothing (e.g. no topic
         // matched), keep prior items rather than flashing an empty sidebar.
         // Pinned topics with score >= 9000 should always satisfy the
         // sidebarItems filter, so empty output is suspicious.
         guard !items.isEmpty else { return }
-        sidebarTopicItems = items
+        if sidebarTopicItems != items {
+            sidebarTopicItems = items
+        }
     }
 
     private func toggleSidebar() {
@@ -912,7 +884,7 @@ enum DashboardPage: String, CaseIterable, Identifiable, Hashable {
         case .replyQueue:
             return "Chats that need attention"
         case .tasks:
-            return "Extracted from chat"
+            return "Extracted from connected sources"
         case .topics:
             return "Workspaces and recent context"
         case .people:
@@ -1451,10 +1423,11 @@ struct DashboardSidebarTopicItem: Identifiable {
     let isPinned: Bool
 }
 
-struct DashboardTopicSuggestion: Identifiable {
+struct DashboardTopicSuggestion: Identifiable, Equatable {
     let name: String
     let count: Int
     let tintSeed: Int64
+    let description: String
 
     var id: String { name.lowercased() }
 }
@@ -1462,9 +1435,10 @@ struct DashboardTopicSuggestion: Identifiable {
 struct DashboardAddTopicSheet: View {
     let suggestions: [DashboardTopicSuggestion]
     let onCancel: () -> Void
-    let onAdd: (String) -> Void
+    let onAdd: (String, String) -> Void
 
     @State private var topicName = ""
+    @State private var topicDescription = ""
 
     private var trimmedName: String {
         topicName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1476,12 +1450,12 @@ struct DashboardAddTopicSheet: View {
                 Text("Add topic")
                     .font(PidgyDashboardTheme.displayTitleFont)
                     .foregroundStyle(PidgyDashboardTheme.primary)
-                Text("Pin a company, project, community, or workspace.")
+                Text("Define a theme and Pidgy will gather related conversations across every source.")
                     .font(PidgyDashboardTheme.detailBodyFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
             }
 
-            TextField("First Dollar", text: $topicName)
+            TextField("Billing problems", text: $topicName)
                 .textFieldStyle(.plain)
                 .font(PidgyDashboardTheme.detailBodyFont)
                 .foregroundStyle(PidgyDashboardTheme.primary)
@@ -1490,9 +1464,32 @@ struct DashboardAddTopicSheet: View {
                 .pidgyCapsuleBackground()
                 .onSubmit(save)
 
+            VStack(alignment: .leading, spacing: 7) {
+                Text("What belongs in this topic?")
+                    .font(PidgyDashboardTheme.captionMediumFont)
+                    .foregroundStyle(PidgyDashboardTheme.secondary)
+
+                TextField(
+                    "For example: failed payments, renewals, card declines, and invoice issues",
+                    text: $topicDescription,
+                    axis: .vertical
+                )
+                .textFieldStyle(.plain)
+                .font(PidgyDashboardTheme.detailBodyFont)
+                .foregroundStyle(PidgyDashboardTheme.primary)
+                .lineLimit(2...4)
+                .padding(12)
+                .frame(minHeight: 64, alignment: .topLeading)
+                .pidgyCapsuleBackground()
+
+                Text("Pidgy uses this description to find related conversations across every connected source.")
+                    .font(PidgyDashboardTheme.captionFont)
+                    .foregroundStyle(PidgyDashboardTheme.tertiary)
+            }
+
             if !suggestions.isEmpty {
                 VStack(alignment: .leading, spacing: 9) {
-                    Text("Suggestions")
+                    Text("Popular across chats")
                         .font(PidgyDashboardTheme.captionMediumFont)
                         .tracking(0.7)
                         .foregroundStyle(PidgyDashboardTheme.tertiary)
@@ -1505,6 +1502,9 @@ struct DashboardAddTopicSheet: View {
                         ForEach(suggestions) { suggestion in
                             Button {
                                 topicName = suggestion.name
+                                if suggestion.description != "Added manually." {
+                                    topicDescription = suggestion.description
+                                }
                             } label: {
                                 DashboardTopicSuggestionChip(suggestion: suggestion)
                             }
@@ -1548,7 +1548,7 @@ struct DashboardAddTopicSheet: View {
 
     private func save() {
         guard !trimmedName.isEmpty else { return }
-        onAdd(trimmedName)
+        onAdd(trimmedName, topicDescription.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
 
@@ -1569,7 +1569,7 @@ struct DashboardTopicSuggestionChip: View {
             Spacer(minLength: 2)
 
             if suggestion.count > 0 {
-                Text("\(suggestion.count)")
+                Text("\(suggestion.count) chats")
                     .font(PidgyDashboardTheme.monoCaptionFont)
                     .foregroundStyle(PidgyDashboardTheme.secondary)
             }

@@ -422,20 +422,18 @@ struct DashboardIdentityAvatar: View {
 }
 
 /// Compact launcher-style provider label used after a row's primary title.
-/// Telegram stays unlabelled because it is Pidgy's native/default source;
-/// connected sources need the extra provenance cue.
+/// Every source gets the same provenance treatment so rows remain scannable
+/// when Gmail, Slack, Telegram, and WhatsApp are mixed together.
 struct DashboardInlineSourceLabel: View {
     let source: MessageSourceKind
 
     var body: some View {
-        if source != .telegram {
-            Label(source.displayName, systemImage: source.systemImage)
-                .font(Font.Pidgy.monoSm)
-                .foregroundStyle(PidgyDashboardTheme.brand)
-                .labelStyle(.titleAndIcon)
-                .fixedSize()
-                .accessibilityLabel(source.displayName)
-        }
+        Label(source.displayName, systemImage: source.systemImage)
+            .font(Font.Pidgy.monoSm)
+            .foregroundStyle(PidgyDashboardTheme.brand)
+            .labelStyle(.titleAndIcon)
+            .fixedSize()
+            .accessibilityLabel(source.displayName)
     }
 }
 
