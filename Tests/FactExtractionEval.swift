@@ -45,6 +45,87 @@ private struct EvalCase {
 
 final class FactExtractionEval: XCTestCase {
 
+    /// Manual cost/quality/latency A/B for the production extraction shape.
+    ///
+    /// Bulk sends the complete labelled conversation in one paid call.
+    /// Separate mirrors the live micro-batch path: one new message per call,
+    /// up to eight already-processed context messages, and carried open loops.
+    /// A unique title marker keeps the paid calls out of the exact-response
+    /// cache and makes their usage traces independently attributable.
+    func testBulkVersusSeparateExtractionBenchmark() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["PIDGY_RUN_BATCH_BENCH"] == "1"
+                || FileManager.default.fileExists(atPath: "/tmp/pidgy-run-batch-bench"),
+            "Set PIDGY_RUN_BATCH_BENCH=1 to run the paid bulk-vs-separate benchmark."
+        )
+        let aiService = await AIService()
+        guard await aiService.isConfigured else {
+            throw XCTSkip("No AI provider configured — benchmark needs managed AI or a BYOK key.")
+        }
+
+        let markerFile = "/tmp/pidgy-run-batch-bench"
+        let requestedMarker = (try? String(contentsOfFile: markerFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let marker = requestedMarker?.hasPrefix("BatchBench-") == true
+            ? requestedMarker!
+            : "BatchBench-\(UUID().uuidString.prefix(8))"
+        print("BATCH_BENCH_MARKER=\(marker)")
+
+        let bulkStarted = Date()
+        var bulkRows: [(name: String, produced: [String], ok: Bool)] = []
+        var bulkErrors = 0
+        for c in Self.cases {
+            do {
+                let outcome = try await evaluateBulk(c, marker: marker, using: aiService)
+                bulkRows.append((c.name, outcome.produced, outcome.ok))
+            } catch {
+                bulkErrors += 1
+                print("BATCH_BENCH_ERROR mode=bulk case=\(c.name) error=\(error)")
+            }
+        }
+        let bulkElapsed = Date().timeIntervalSince(bulkStarted)
+
+        let separateStarted = Date()
+        var separateRows: [(name: String, produced: [String], ok: Bool)] = []
+        var separateErrors = 0
+        var separateCalls = 0
+        for c in Self.cases {
+            do {
+                let outcome = try await evaluateSeparate(c, marker: marker, using: aiService)
+                separateRows.append((c.name, outcome.produced, outcome.ok))
+                separateCalls += c.messages.count
+            } catch {
+                separateErrors += 1
+                print("BATCH_BENCH_ERROR mode=separate case=\(c.name) error=\(error)")
+            }
+        }
+        let separateElapsed = Date().timeIntervalSince(separateStarted)
+
+        let bulkPassed = bulkRows.filter(\.ok).count
+        let separatePassed = separateRows.filter(\.ok).count
+        for c in Self.cases {
+            let bulk = bulkRows.first { $0.name == c.name }
+            let separate = separateRows.first { $0.name == c.name }
+            print(
+                "BATCH_BENCH_CASE name=\(c.name) "
+                + "bulk=\(bulk?.ok == true ? "pass" : "fail") "
+                + "separate=\(separate?.ok == true ? "pass" : "fail")\n"
+                + "  bulk_output=\(bulk?.produced.joined(separator: ", ") ?? "ERROR")\n"
+                + "  separate_output=\(separate?.produced.joined(separator: ", ") ?? "ERROR")\n"
+                + "  expected=\(Self.describe(c.expected, kind: c.expectedKind))"
+            )
+        }
+        print("""
+
+        BATCH_BENCH_SUMMARY marker=\(marker)
+        bulk_cases=\(bulkRows.count) bulk_calls=\(Self.cases.count) bulk_passed=\(bulkPassed) bulk_errors=\(bulkErrors) bulk_elapsed_s=\(String(format: "%.3f", bulkElapsed))
+        separate_cases=\(separateRows.count) separate_calls=\(separateCalls) separate_passed=\(separatePassed) separate_errors=\(separateErrors) separate_elapsed_s=\(String(format: "%.3f", separateElapsed))
+
+        """)
+
+        XCTAssertGreaterThan(bulkRows.count + separateRows.count, 0)
+    }
+
     /// Every case below is a REAL window from the developer's own chats that
     /// the current prompt got right or wrong on 2026-07-25. Names are kept as
     /// they appear so failures are recognisable.
@@ -279,8 +360,109 @@ final class FactExtractionEval: XCTestCase {
     /// Runs one case through the real prompt + real parser. Returns the loops
     /// the model produced (as readable strings) and whether they match the label.
     private func evaluate(_ c: EvalCase, using aiService: AIService) async throws -> ([String], Bool) {
+        let (chat, messages) = Self.makeConversation(c, title: c.chatTitle)
+        let result = try await benchmarkExtract {
+            try await aiService.extractFacts(
+                chat: chat,
+                newMessages: messages,
+                contextMessages: [],
+                openLoops: [],
+                myUserId: 1,
+                myUser: Self.benchmarkUser
+            )
+        }
+        let loops = result.drafts.filter { $0.predicate.isOpenLoop }
+        return (Self.describe(loops), Self.matches(loops, expectedBy: c))
+    }
+
+    private func evaluateBulk(
+        _ c: EvalCase,
+        marker: String,
+        using aiService: AIService
+    ) async throws -> (produced: [String], ok: Bool) {
+        let (chat, messages) = Self.makeConversation(c, title: "\(c.chatTitle) [\(marker)]")
+        let result = try await aiService.extractFacts(
+            chat: chat,
+            newMessages: messages,
+            contextMessages: [],
+            openLoops: [],
+            myUserId: 1,
+            myUser: Self.benchmarkUser
+        )
+        let loops = result.drafts.filter { $0.predicate.isOpenLoop }
+        return (Self.describe(loops), Self.matches(loops, expectedBy: c))
+    }
+
+    private func evaluateSeparate(
+        _ c: EvalCase,
+        marker: String,
+        using aiService: AIService
+    ) async throws -> (produced: [String], ok: Bool) {
+        let (chat, messages) = Self.makeConversation(c, title: "\(c.chatTitle) [\(marker)]")
+        var openLoops: [Fact] = []
+
+        for index in messages.indices {
+            let contextStart = max(messages.startIndex, index - 8)
+            let context = Array(messages[contextStart..<index])
+            let result = try await benchmarkExtract {
+                try await aiService.extractFacts(
+                    chat: chat,
+                    newMessages: [messages[index]],
+                    contextMessages: context,
+                    openLoops: openLoops,
+                    myUserId: 1,
+                    myUser: Self.benchmarkUser
+                )
+            }
+            let resolved = Set(result.resolvedFingerprints)
+            openLoops.removeAll { resolved.contains($0.fingerprint) }
+            for draft in result.drafts where draft.predicate.isOpenLoop {
+                let fact = Self.fact(from: draft, id: Int64(openLoops.count + 1))
+                if let existing = openLoops.firstIndex(where: { $0.fingerprint == fact.fingerprint }) {
+                    openLoops[existing] = fact
+                } else {
+                    openLoops.append(fact)
+                }
+            }
+        }
+
+        let drafts = openLoops.map(Self.draft(from:))
+        return (Self.describe(drafts), Self.matches(drafts, expectedBy: c))
+    }
+
+    /// The managed provider already performs a short in-request backoff. This
+    /// outer benchmark pacing avoids turning the measurement itself into a
+    /// burst-load test, then gives a depleted quota window time to recover.
+    private func benchmarkExtract(
+        operation: () async throws -> FactExtractionResult
+    ) async throws -> FactExtractionResult {
+        try await Task.sleep(nanoseconds: 6_000_000_000)
+        var lastError: Error?
+        for attempt in 0..<4 {
+            do {
+                return try await operation()
+            } catch AIError.rateLimited(let retryAfter) {
+                lastError = AIError.rateLimited(retryAfter: retryAfter)
+                let delay = retryAfter ?? Double(20 * (attempt + 1))
+                print("BATCH_BENCH_RATE_LIMIT attempt=\(attempt + 1) sleep_s=\(Int(delay))")
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                throw error
+            }
+        }
+        throw lastError ?? AIError.rateLimited(retryAfter: nil)
+    }
+
+    private static var benchmarkUser: TGUser {
+        TGUser(
+            id: 1, firstName: "Pratyush", lastName: "", username: "pratzyy",
+            phoneNumber: nil, isBot: false, smallPhotoFileId: nil
+        )
+    }
+
+    private static func makeConversation(_ c: EvalCase, title: String) -> (TGChat, [TGMessage]) {
         let chat = TGChat(
-            id: -999, title: c.chatTitle,
+            id: -999, title: title,
             chatType: c.isGroup ? .supergroup(supergroupId: 999, isChannel: false) : .privateChat(userId: 999),
             unreadCount: 0, lastMessage: nil,
             memberCount: c.isGroup ? 8 : nil, order: 1, isInMainList: true, smallPhotoFileId: nil
@@ -299,19 +481,54 @@ final class FactExtractionEval: XCTestCase {
                 senderName: m.2 ? "Me" : m.0
             )
         }
-        let result = try await aiService.extractFacts(
-            chat: chat,
-            newMessages: messages,
-            contextMessages: [],
-            openLoops: [],
-            myUserId: 1,
-            myUser: TGUser(
-                id: 1, firstName: "Pratyush", lastName: "", username: "pratzyy",
-                phoneNumber: nil, isBot: false, smallPhotoFileId: nil
-            )
-        )
-        let loops = result.drafts.filter { $0.predicate.isOpenLoop }
+        return (chat, messages)
+    }
 
+    private static func fact(from draft: FactDraft, id: Int64) -> Fact {
+        Fact(
+            id: id,
+            subjectEntity: draft.subjectEntity,
+            subjectPersonId: draft.subjectPersonId,
+            predicate: draft.predicate,
+            objectText: draft.objectText,
+            action: draft.action,
+            loopKind: draft.loopKind,
+            objectEntity: draft.objectEntity,
+            confidence: draft.confidence,
+            validFrom: draft.validFrom,
+            invalidAt: nil,
+            closeReason: nil,
+            sourceChatId: draft.sourceChatId,
+            sourceChatTitle: draft.sourceChatTitle,
+            sourceMessageId: draft.sourceMessageId,
+            sourceText: draft.sourceText,
+            senderName: draft.senderName,
+            fingerprint: draft.fingerprint,
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+    }
+
+    private static func draft(from fact: Fact) -> FactDraft {
+        FactDraft(
+            subjectEntity: fact.subjectEntity,
+            subjectPersonId: fact.subjectPersonId,
+            predicate: fact.predicate,
+            objectText: fact.objectText,
+            action: fact.action,
+            loopKind: fact.loopKind,
+            objectEntity: fact.objectEntity,
+            confidence: fact.confidence,
+            validFrom: fact.validFrom,
+            sourceChatId: fact.sourceChatId,
+            sourceChatTitle: fact.sourceChatTitle,
+            sourceMessageId: fact.sourceMessageId,
+            sourceText: fact.sourceText,
+            senderName: fact.senderName
+        )
+    }
+
+    private static func matches(_ loops: [FactDraft], expectedBy c: EvalCase) -> Bool {
         // Match = same number of open loops, and each expected (predicate,
         // subject) has a counterpart. Object wording is deliberately NOT
         // compared: phrasing varies harmlessly, direction and person do not.
@@ -330,11 +547,14 @@ final class FactExtractionEval: XCTestCase {
         if ok, let expectedKind = c.expectedKind {
             ok = loops.allSatisfy { $0.loopKind == expectedKind }
         }
-        let shown = loops.map { l -> String in
+        return ok
+    }
+
+    private static func describe(_ loops: [FactDraft]) -> [String] {
+        loops.map { l -> String in
             let kind = l.loopKind.map { "·\($0.rawValue)" } ?? ""
             return "\(l.predicate.rawValue)\(kind)/\(l.subjectEntity)"
         }
-        return (shown, ok)
     }
 
     private static func describe(_ expected: [(FactPredicate, String)], kind: LoopKind?) -> String {

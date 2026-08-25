@@ -351,6 +351,11 @@ struct DashboardIdentityAvatar: View {
     var userID: Int64? = nil
     var size: CGFloat = PidgyDashboardTheme.rowAvatarSize
     var showsSource = false
+    /// Evidence rows explicitly set this for outgoing messages. Some local
+    /// connectors (notably WhatsApp) do not expose their own signed-in user
+    /// through SourceRegistry, so the Pidgy account photo is the correct
+    /// visual fallback instead of a cramped `YO` initials badge.
+    var isCurrentUser = false
 
     @State private var resolvedUser: TGUser?
 
@@ -371,9 +376,9 @@ struct DashboardIdentityAvatar: View {
 
     @ViewBuilder
     private var identity: some View {
-        if let resolvedUser {
+        if let identityUser {
             DashboardTelegramUserAvatar(
-                user: resolvedUser,
+                user: identityUser,
                 fallbackTitle: label,
                 size: size
             )
@@ -386,6 +391,17 @@ struct DashboardIdentityAvatar: View {
         } else {
             DashboardInitialsAvatar(label: label, size: size)
         }
+    }
+
+    private var identityUser: TGUser? {
+        if let resolvedUser { return resolvedUser }
+        guard isCurrentUser else { return nil }
+        if let chat, let sourceUser = sourceRegistry.currentUser(forAccount: chat.source) {
+            return sourceUser
+        }
+        // Pidgy's local account remains the stable self identity when a
+        // read-only connector has no independently-resolvable account user.
+        return sourceRegistry.currentUser(for: .telegram)
     }
 
     private var resolvedSource: MessageSourceKind {

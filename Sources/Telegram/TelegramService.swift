@@ -535,6 +535,15 @@ class TelegramService: ObservableObject {
         return false
     }
 
+    /// Authoritative status used by paid extraction. Unlike
+    /// `isLikelyBotChat`, an uncached private user stays unknown instead of
+    /// being guessed non-bot; callers can fail closed until hydration finishes.
+    func cachedBotStatusForExtraction(_ chat: TGChat) -> Bool? {
+        guard chat.source.kind == .telegram else { return nil }
+        guard case .privateChat(let userId) = chat.chatType else { return false }
+        return userCache[userId]?.isBot
+    }
+
     /// Resolve a user's display name, fetching from TDLib if it
     /// isn't cached. Used by the reply-queue detail pane to fill in
     /// group-message sender names that were nil at cache time (which

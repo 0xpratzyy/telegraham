@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import CryptoKit
 
 /// Central AI service manager. Owns the current provider, manages configuration,
 /// and exposes high-level AI operations that combine TelegramService data with AI.
@@ -258,7 +259,28 @@ final class AIService: ObservableObject {
         // Already-processed context rides along unnumbered so a tiny window
         // (one terse ping) isn't judged blind.
         let transcript = FactExtractionPrompt.numberedTranscript(snippets: snippets, context: contextSnippets)
-        let response = try await provider.answer(systemPrompt: systemPrompt, userMessage: transcript, kind: .factExtraction)
+        let requestKey = factExtractionRequestKey(
+            systemPrompt: systemPrompt,
+            transcript: transcript
+        )
+        let response: String
+        if let cached = await DatabaseManager.shared.factExtractionCachedResponse(requestKey: requestKey) {
+            response = cached
+        } else {
+            response = try await provider.answer(
+                systemPrompt: systemPrompt,
+                userMessage: transcript,
+                kind: .factExtraction
+            )
+            // Save the successful provider reply BEFORE parsing. A malformed
+            // reply or a later SQLite failure then retries locally instead of
+            // issuing the identical paid request after a pass/app restart.
+            await DatabaseManager.shared.saveFactExtractionResponse(
+                response,
+                requestKey: requestKey,
+                chatId: chat.id
+            )
+        }
         // validFrom fallback for a snippet with no date — parse() prefers each
         // fact's CITED message date.
         let newest = newMessages.max(by: { $0.date < $1.date })
@@ -302,6 +324,19 @@ final class AIService: ObservableObject {
             )
         }
         return result
+    }
+
+    private func factExtractionRequestKey(systemPrompt: String, transcript: String) -> String {
+        let material = [
+            "fact-extraction-response-v1",
+            providerType.rawValue,
+            providerModel,
+            systemPrompt,
+            transcript
+        ].joined(separator: "\n\u{241E}\n")
+        return SHA256.hash(data: Data(material.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     /// Entity memory (M1): fold a chat's NEW messages into its rolling summary.

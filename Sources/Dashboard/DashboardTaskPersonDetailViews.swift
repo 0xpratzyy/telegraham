@@ -692,7 +692,8 @@ struct DashboardEvidenceContextRow: View {
                 label: item.senderName,
                 source: item.source,
                 userID: avatarUserID,
-                size: 14
+                size: 14,
+                isCurrentUser: item.isOutgoing
             )
             .padding(.top, 2)
 

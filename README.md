@@ -37,11 +37,12 @@ You can leave any value blank. Empty values fall back to the runtime user-entry 
 ### Build & run
 
 ```bash
-xcodebuild -project Pidgy.xcodeproj -scheme Pidgy -configuration Debug \
-  -destination 'platform=macOS,arch=arm64' build
-
-open ~/Library/Developer/Xcode/DerivedData/Pidgy-*/Build/Products/Debug/Pidgy.app
+./script/build_and_run.sh run
 ```
+
+Use the repository launcher instead of `open -a Pidgy` or a DerivedData glob.
+macOS LaunchServices can otherwise select a stale debug bundle from another
+worktree because every local build shares the same bundle identifier.
 
 The post-build step stamps the current `git rev-parse --short HEAD` into the built `Info.plist` under `PidgyBuildCommitSHA`. You'll see it in **Preferences → About → Build**, which makes bug reports traceable to a specific commit.
 

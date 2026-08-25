@@ -11,6 +11,63 @@ struct FactStoreUnavailableError: Error {}
 extension DatabaseManager {
     // MARK: - Context layer (facts) — #48
 
+    /// Raw model response for an exact fact-extraction request. This is stored
+    /// before parsing so deterministic parser/transaction retries do not issue
+    /// another paid request. The key includes model + full prompts, therefore a
+    /// prompt or model change naturally misses the old entry.
+    func factExtractionCachedResponse(requestKey: String) async -> String? {
+        guard let pool = await ensureDatabase() else { return nil }
+        do {
+            return try await pool.write { db in
+                guard let response = try String.fetchOne(
+                    db,
+                    sql: "SELECT response FROM fact_extraction_response_cache WHERE request_key = ?",
+                    arguments: [requestKey]
+                ) else { return nil }
+                try db.execute(
+                    sql: "UPDATE fact_extraction_response_cache SET last_used_at = ? WHERE request_key = ?",
+                    arguments: [Date().timeIntervalSince1970, requestKey]
+                )
+                return response
+            }
+        } catch {
+            print("[DatabaseManager] factExtractionCachedResponse failed: \(error)")
+            return nil
+        }
+    }
+
+    func saveFactExtractionResponse(
+        _ response: String,
+        requestKey: String,
+        chatId: Int64
+    ) async {
+        guard let pool = await ensureDatabase() else { return }
+        let now = Date().timeIntervalSince1970
+        do {
+            try await pool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO fact_extraction_response_cache
+                            (request_key, chat_id, response, created_at, last_used_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(request_key) DO UPDATE SET
+                            response = excluded.response,
+                            last_used_at = excluded.last_used_at
+                        """,
+                    arguments: [requestKey, chatId, response, now, now]
+                )
+                // Keep the retry cache bounded. Thirty days is longer than the
+                // extraction horizon, so a live cursor can never need older data.
+                try db.execute(
+                    sql: "DELETE FROM fact_extraction_response_cache WHERE last_used_at < ?",
+                    arguments: [now - (30 * 24 * 60 * 60)]
+                )
+            }
+        } catch {
+            print("[DatabaseManager] saveFactExtractionResponse failed: \(error)")
+        }
+    }
+
     /// Provenance keys already seen at any point in fact history. Callers use
     /// the full history (not only live facts) so an upgrade backfill cannot
     /// reopen work the user already completed or dismissed.

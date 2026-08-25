@@ -8,9 +8,9 @@
       "port": null
     },
     {
-      "name": "Pidgy (Run App)",
-      "runtimeExecutable": "open",
-      "runtimeArgs": ["-a", "Pidgy"],
+      "name": "Pidgy (Build & Run Current Workspace)",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": ["${workspaceFolder}/script/build_and_run.sh", "run"],
       "port": null
     }
   ]

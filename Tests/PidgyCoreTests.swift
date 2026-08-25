@@ -35,6 +35,122 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(FactExtractionRuntimePolicy.maxConcurrentChats(isManagedAI: false), 10)
     }
 
+    func testFactExtractionBotGateFailsClosedForUnknownTelegramPrivateChats() {
+        let telegramDM = makeChat(
+            id: 91,
+            title: "Poke",
+            chatType: .privateChat(userId: 901),
+            unreadCount: 1,
+            lastMessageDate: Date()
+        )
+
+        XCTAssertFalse(FactExtractionBotGate.shouldInclude(
+            chat: telegramDM,
+            includeBots: false,
+            telegramBotStatus: nil,
+            fallbackLikelyBot: false
+        ))
+        XCTAssertFalse(FactExtractionBotGate.shouldInclude(
+            chat: telegramDM,
+            includeBots: false,
+            telegramBotStatus: true,
+            fallbackLikelyBot: false
+        ))
+        XCTAssertTrue(FactExtractionBotGate.shouldInclude(
+            chat: telegramDM,
+            includeBots: false,
+            telegramBotStatus: false,
+            fallbackLikelyBot: false
+        ))
+        XCTAssertTrue(FactExtractionBotGate.shouldInclude(
+            chat: telegramDM,
+            includeBots: true,
+            telegramBotStatus: true,
+            fallbackLikelyBot: true
+        ))
+    }
+
+    func testFactExtractionBotGateUsesRegistryForOtherSources() {
+        let slackDM = makeChat(
+            id: -92,
+            title: "Slack app",
+            chatType: .privateChat(userId: -902),
+            unreadCount: 1,
+            lastMessageDate: Date(),
+            source: SourceID(kind: .slack, account: "workspace")
+        )
+
+        XCTAssertFalse(FactExtractionBotGate.shouldInclude(
+            chat: slackDM,
+            includeBots: false,
+            telegramBotStatus: nil,
+            fallbackLikelyBot: true
+        ))
+        XCTAssertTrue(FactExtractionBotGate.shouldInclude(
+            chat: slackDM,
+            includeBots: false,
+            telegramBotStatus: nil,
+            fallbackLikelyBot: false
+        ))
+    }
+
+    @MainActor
+    func testFactExtractionResponseCacheSurvivesDatabaseRestart() async throws {
+        try await withTempDatabase { _ in
+            let provider = CountingFactExtractionProvider()
+            let firstService = AIService(
+                testingProvider: provider,
+                providerType: .openai,
+                providerModel: "cache-test-model"
+            )
+            let chat = self.makeChat(
+                id: 93,
+                title: "Cache test",
+                chatType: .privateChat(userId: 903),
+                unreadCount: 1,
+                lastMessageDate: Date()
+            )
+            let message = self.makeTGMessage(
+                id: 9301,
+                chatId: chat.id,
+                text: "Can you send the final document?",
+                date: Date(),
+                senderUserId: 903,
+                senderName: "Tester"
+            )
+
+            _ = try await firstService.extractFacts(
+                chat: chat,
+                newMessages: [message],
+                openLoops: [],
+                myUserId: 1,
+                myUser: nil
+            )
+            let callsBeforeRestart = await provider.answerCallCount()
+            XCTAssertEqual(callsBeforeRestart, 1)
+
+            // Simulate an app restart: the in-memory AIService is replaced and
+            // SQLite is reopened. The identical request must not hit AI again.
+            await DatabaseManager.shared.close()
+            await DatabaseManager.shared.initialize()
+            let restartedService = AIService(
+                testingProvider: provider,
+                providerType: .openai,
+                providerModel: "cache-test-model"
+            )
+            _ = try await restartedService.extractFacts(
+                chat: chat,
+                newMessages: [message],
+                openLoops: [],
+                myUserId: 1,
+                myUser: nil
+            )
+
+            let callsAfterRestart = await provider.answerCallCount()
+            XCTAssertEqual(callsAfterRestart, 1)
+        }
+    }
+
     func testFactExtractionPrioritizesNewlyConnectedGmailBeforeTrackedChats() {
         let now = Date()
         let telegram = makeChat(
@@ -8909,5 +9025,40 @@ private struct StubAIProvider: AIProvider {
 
     func testConnection() async throws -> Bool {
         throw AIError.providerNotConfigured
+    }
+}
+
+private actor CountingFactExtractionProvider: AIProvider {
+    private var calls = 0
+
+    func answerCallCount() -> Int { calls }
+
+    func summarize(messages: [MessageSnippet], prompt: String) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
+    func answer(systemPrompt: String, userMessage: String) async throws -> String {
+        calls += 1
+        return #"{"facts":[],"resolvedLoops":[]}"#
+    }
+
+    func semanticSearch(query: String, messages: [MessageSnippet]) async throws -> [SemanticSearchResultDTO] {
+        throw AIError.providerNotConfigured
+    }
+
+    func planQuery(
+        query: String,
+        activeFilter: QueryScope,
+        deterministicSpec: QuerySpec
+    ) async throws -> QueryPlannerResultDTO {
+        throw AIError.providerNotConfigured
+    }
+
+    func extractPersonProfile(personName: String, messages: [MessageSnippet]) async throws -> String {
+        throw AIError.providerNotConfigured
+    }
+
+    func testConnection() async throws -> Bool {
+        true
     }
 }

@@ -30,9 +30,12 @@ struct AvatarView: View {
     var body: some View {
         ZStack {
             if let photo {
+                resolvedShape
+                    .fill(Self.colors[colorIndex % Self.colors.count].opacity(0.22))
+
                 Image(nsImage: photo)
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: photoContentMode)
                     .frame(width: size, height: size)
             } else {
                 resolvedShape
@@ -47,13 +50,31 @@ struct AvatarView: View {
                         )
                     )
 
-                Text(initials)
-                    .font(.system(size: size * 0.38, weight: .semibold, design: .rounded))
+                Text(displayInitials)
+                    .font(.system(size: initialsFontSize, weight: .semibold, design: .rounded))
                     .foregroundColor(.white)
             }
         }
         .frame(width: size, height: size)
         .clipShape(resolvedShape)
+    }
+
+    /// At evidence-row scale an aspect-fill crop can remove most of an
+    /// off-centre face. Preserve the whole profile image at 16pt and below;
+    /// larger list/detail avatars keep the familiar edge-to-edge fill.
+    private var photoContentMode: ContentMode {
+        size <= 16 ? .fit : .fill
+    }
+
+    /// Two initials become illegible inside the compact 14pt evidence avatar.
+    /// Use one stable initial there and retain the normal two-letter treatment
+    /// everywhere else.
+    private var displayInitials: String {
+        size <= 16 ? String(initials.prefix(1)) : initials
+    }
+
+    private var initialsFontSize: CGFloat {
+        size * (size <= 16 ? 0.46 : 0.38)
     }
 
     /// Resolved shape for both the placeholder fill and the outer clip.

@@ -163,6 +163,23 @@ enum FactExtractionCandidateOrder {
     }
 }
 
+/// Paid extraction must never infer "not a bot" from missing Telegram user
+/// metadata. Other sources retain their registry-level bot classification.
+enum FactExtractionBotGate {
+    static func shouldInclude(
+        chat: TGChat,
+        includeBots: Bool,
+        telegramBotStatus: Bool?,
+        fallbackLikelyBot: Bool
+    ) -> Bool {
+        guard !includeBots else { return true }
+        if chat.source.kind == .telegram, case .privateChat = chat.chatType {
+            return telegramBotStatus == false
+        }
+        return !fallbackLikelyBot
+    }
+}
+
 @MainActor
 final class FactExtractionCoordinator: ObservableObject {
     static let shared = FactExtractionCoordinator()
@@ -398,15 +415,27 @@ final class FactExtractionCoordinator: ObservableObject {
         // next pass re-reads those chats. `purgeFacts` clears their cursor for
         // exactly that reason, so the toggle heals itself rather than needing
         // a manual re-extract.
+        let includeBots = includeBotsInAISearch()
         let eligible: [TGChat]
-        if includeBotsInAISearch() {
+        if includeBots {
             eligible = visibleEligible
         } else {
-            var kept: [TGChat] = []
-            for chat in visibleEligible where !SourceRegistry.shared.isLikelyBot(chat: chat) {
-                kept.append(chat)
+            // Extraction is the paid boundary, so Telegram private chats must
+            // have real user metadata before they are admitted. Unknown status
+            // fails closed for this pass and retries after hydration instead of
+            // being guessed non-bot (the startup race that let Poke through).
+            _ = await telegramService.warmPrivateChatUserMetadata(
+                for: visibleEligible.filter { $0.source.kind == .telegram },
+                priority: .background
+            )
+            eligible = visibleEligible.filter { chat in
+                FactExtractionBotGate.shouldInclude(
+                    chat: chat,
+                    includeBots: false,
+                    telegramBotStatus: telegramService.cachedBotStatusForExtraction(chat),
+                    fallbackLikelyBot: SourceRegistry.shared.isLikelyBot(chat: chat)
+                )
             }
-            eligible = kept
             await purgeStoredBotFacts()
         }
         // No prefix — iterate newest-active first and cap on chats actually
@@ -1223,7 +1252,10 @@ final class FactExtractionCoordinator: ObservableObject {
         guard !storedIds.isEmpty else { return }
         var botChatIds: [Int64] = []
         for chat in SourceRegistry.shared.visibleChats where storedIds.contains(chat.id) {
-            if SourceRegistry.shared.isLikelyBot(chat: chat) { botChatIds.append(chat.id) }
+            let telegramStatus = telegramService?.cachedBotStatusForExtraction(chat)
+            if telegramStatus == true || SourceRegistry.shared.isLikelyBot(chat: chat) {
+                botChatIds.append(chat.id)
+            }
         }
         let purged = await DatabaseManager.shared.purgeFacts(chatIds: botChatIds)
         guard purged > 0 else { return }

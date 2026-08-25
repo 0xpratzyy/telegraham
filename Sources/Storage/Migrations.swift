@@ -977,6 +977,25 @@ enum PidgyMigrations {
             }
         }
 
+        migrator.registerMigration("v40_fact_extraction_response_cache") { db in
+            // Persist the raw provider reply before parsing it. If parsing or
+            // the following fact transaction fails, the exact same extraction
+            // request can be retried without paying for another model call.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS fact_extraction_response_cache (
+                    request_key TEXT PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    response TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    last_used_at REAL NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_fact_extraction_response_cache_age
+                ON fact_extraction_response_cache(last_used_at)
+                """)
+        }
+
         return migrator
     }
 }
