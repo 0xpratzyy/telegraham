@@ -54,7 +54,7 @@ const BubbleCard: React.FC<{ b: Bubble; appear: number; jitter: number }> = ({ b
       borderRadius: 22,
       background: "rgba(43,43,43,0.94)",
       border: `1px solid ${C.border3}`,
-      boxShadow: "0 30px 60px rgba(0,0,0,0.55)",
+      boxShadow: "0 18px 36px rgba(0,0,0,0.5)",
       display: "flex",
       gap: 16,
       alignItems: "center",
@@ -110,9 +110,27 @@ export const NoiseField: React.FC<{ t: number; implode?: number; agitation?: num
 }) => {
   return (
     <AbsoluteFill>
-      {BUBBLES.map((b) => {
-        const front = b.z > 0.93 && b.i !== 0;
-        if ((layer === "front") !== front) return null;
+      {layer === "back" ? (
+        <>
+          <AbsoluteFill style={{ filter: "blur(4px)" }}>{renderBubbles(t, implode, agitation, "far")}</AbsoluteFill>
+          <AbsoluteFill>{renderBubbles(t, implode, agitation, "mid")}</AbsoluteFill>
+        </>
+      ) : (
+        <AbsoluteFill style={{ filter: "blur(3px)" }}>{renderBubbles(t, implode, agitation, "front")}</AbsoluteFill>
+      )}
+    </AbsoluteFill>
+  );
+};
+
+// One blur per depth band instead of one per bubble: ~100 individually
+// filtered layers exhaust the software rasterizer during parallel renders
+// and whole regions of the frame come out unpainted.
+type Band = "far" | "mid" | "front";
+const bandOf = (b: Bubble): Band => (b.i === 0 ? "mid" : b.z > 0.93 ? "front" : b.z < 0.5 ? "far" : "mid");
+
+const renderBubbles = (t: number, implode: number, agitation: number, band: Band) =>
+  BUBBLES.map((b) => {
+        if (bandOf(b) !== band) return null;
         const age = t - b.spawn;
         if (age < 0) return null;
         const appear = ease.outBack(clamp(age / 14));
@@ -121,7 +139,6 @@ export const NoiseField: React.FC<{ t: number; implode?: number; agitation?: num
         const x = lerp(b.x, 960, imp);
         const y = lerp(b.y, 540, imp);
         const jitter = agitation * Math.sin(t * 1.7 + b.i) * 3;
-        const blur = b.i === 0 ? 0 : (1 - b.z) * 5 + (front ? 3 : 0);
         return (
           <div
             key={b.i}
@@ -130,7 +147,6 @@ export const NoiseField: React.FC<{ t: number; implode?: number; agitation?: num
               left: x,
               top: y,
               transform: `translate(-50%,-50%) scale(${scale * (1 - imp)}) rotate(${imp * 180 * (b.i % 2 ? 1 : -1)}deg)`,
-              filter: blur > 0.5 ? `blur(${blur}px)` : undefined,
               opacity: 0.35 + b.z * 0.65,
               zIndex: Math.round(b.z * 100),
             }}
@@ -138,10 +154,7 @@ export const NoiseField: React.FC<{ t: number; implode?: number; agitation?: num
             <BubbleCard b={b} appear={appear} jitter={jitter} />
           </div>
         );
-      })}
-    </AbsoluteFill>
-  );
-};
+  });
 
 export const unreadCount = (t: number) => {
   let n = 0;
