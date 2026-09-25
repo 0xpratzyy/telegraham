@@ -94,11 +94,11 @@ export const Hero: React.FC = () => {
                   position: "absolute",
                   left: 960,
                   top: 540,
-                  width: 10,
-                  height: 10,
+                  width: ease.outCubic(p) * 2200,
+                  height: ease.outCubic(p) * 2200,
                   borderRadius: "50%",
-                  border: `${(1 - p) * 10}px solid rgba(255,255,255,${0.8 * (1 - p)})`,
-                  transform: `translate(-50%,-50%) scale(${ease.outCubic(p) * 220})`,
+                  border: `${2 + (1 - p) * 18}px solid rgba(255,255,255,${0.75 * (1 - p)})`,
+                  transform: "translate(-50%,-50%)",
                 }}
               />
             );
