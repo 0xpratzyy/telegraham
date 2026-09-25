@@ -44,7 +44,7 @@ export const Question: React.FC = () => {
         color,
       }}
     >
-      <div style={{ fontFamily: FONT.mono, fontSize: 64, letterSpacing: -1, whiteSpace: "pre" }}>
+      <div style={{ fontFamily: FONT.mono, fontSize: 72, fontWeight: 500, letterSpacing: -1, whiteSpace: "pre" }}>
         <span style={{ color: color === "white" ? C.accent : color }}>› </span>
         {QUESTION_TEXT.slice(0, typed)}
         <span
@@ -75,6 +75,20 @@ export const Question: React.FC = () => {
       </AbsoluteFill>
       <Camera id="q" zoom={1 + imp * 0.5 - (1 - freezeFade) * 0.05} rot={imp * -4}>
         <AbsoluteFill style={{ transform: `scale(${1 - imp * 0.9})`, opacity: 1 - dot }}>
+          <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
+            <div
+              style={{
+                width: 1720,
+                height: 170,
+                borderRadius: 28,
+                background: "rgba(18,19,24,0.82)",
+                border: `1px solid ${C.border3}`,
+                boxShadow: `0 40px 120px rgba(0,0,0,0.7), 0 0 90px rgba(79,127,220,${0.18 + kick(abs, lastKey, 5, 0) * 0.1})`,
+                transform: `scale(${0.94 + freezeFade * 0.06})`,
+                opacity: freezeFade,
+              }}
+            />
+          </AbsoluteFill>
           {textLayer("#ff2a55", -split)}
           {textLayer("#2af0ff", split)}
           {textLayer("white", 0)}

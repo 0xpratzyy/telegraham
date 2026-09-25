@@ -117,8 +117,9 @@ export const LocalFirst: React.FC = () => {
                       key={`${id}${k}`}
                       cx={x}
                       cy={y}
-                      r={5}
+                      r={8}
                       fill={id === "slack" ? "#E01E5A" : CHANNEL[id].tint}
+                      filter="url(#glowLine)"
                       opacity={prog(frame, 90 + i * 8, 20) * Math.sin(t * Math.PI)}
                     />
                   );
@@ -132,14 +133,14 @@ export const LocalFirst: React.FC = () => {
                     key={`o${i}`}
                     cx={CORE.x + Math.cos(a) * r * 1.4}
                     cy={CORE.y + Math.sin(a) * r * 0.8}
-                    r={rnd(`orb${i}z`, 1.5, 4)}
+                    r={rnd(`orb${i}z`, 2.5, 6)}
                     fill={i % 3 ? "rgba(145,172,232,0.8)" : C.teal}
                     opacity={core * 0.8}
                   />
                 );
               })}
               {escapees.map((e, i) => (
-                <circle key={`e${i}`} cx={e.x} cy={e.y} r={6} fill="white" opacity={prog(frame, 120, 20)} filter="url(#glowLine)" />
+                <circle key={`e${i}`} cx={e.x} cy={e.y} r={9} fill="white" opacity={prog(frame, 120, 20)} filter="url(#glowLine)" />
               ))}
               {bounces.map((b, i) => (
                 <circle key={`b${i}`} cx={b.x} cy={b.y} r={22} fill="none" stroke={C.accentFg} strokeWidth={3} opacity={0.8 * prog(frame, 120, 20)} />

@@ -31,8 +31,8 @@ export const FeatureFrame: React.FC<{
       <Aurora colors={aurora} opacity={0.55} seed={id} />
       <GridFloor />
       <Whip id={id} dur={dur}>
-        <AbsoluteFill style={{ padding: "0 110px", flexDirection: "row", alignItems: "center" }}>
-          <div style={{ width: 640, flex: "none", transform: `translateX(${-drift * 30}px)` }}>
+        <AbsoluteFill style={{ padding: "0 70px 0 100px", flexDirection: "row", alignItems: "center" }}>
+          <div style={{ width: 580, flex: "none", transform: `translateX(${-drift * 30}px)` }}>
             <div
               style={{
                 fontFamily: FONT.mono,
@@ -60,7 +60,7 @@ export const FeatureFrame: React.FC<{
               style={{
                 fontFamily: FONT.display,
                 fontWeight: 500,
-                fontSize: 104,
+                fontSize: 96,
                 lineHeight: 1.0,
                 letterSpacing: -3,
                 color: "white",
@@ -92,7 +92,7 @@ export const FeatureFrame: React.FC<{
             <div
               style={{
                 width: panelWidth,
-                transform: `translateX(${-drift * 60 + 40}px) rotateY(${-16 * tilt - 5 + drift * 4}deg) rotateX(${6 * tilt + 3}deg) translateZ(${-200 * tilt}px)`,
+                transform: `translateX(${-drift * 60 + 30}px) rotateY(${-16 * tilt - 5 + drift * 4}deg) rotateX(${6 * tilt + 3}deg) translateZ(${-200 * tilt}px) scale(1.16)`,
                 transformStyle: "preserve-3d",
               }}
             >

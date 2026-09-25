@@ -23,8 +23,8 @@ export const Tagline: React.FC = () => {
             const snapAt = BEAT * (4.5 + i * 0.5);
             const snap = ease.snap(clamp((frame - snapAt) / 20));
             const a = frame * 0.035 + (i * Math.PI) / 2;
-            const ox = Math.cos(a) * 760;
-            const oy = Math.sin(a) * 120 - 20;
+            const ox = Math.cos(a) * 780;
+            const oy = Math.sin(a) * 330 - 75;
             const oz = Math.sin(a) * 300;
             const tx = (i - 1.5) * 250;
             const ty = 300;
