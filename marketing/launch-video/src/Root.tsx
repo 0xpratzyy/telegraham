@@ -4,8 +4,8 @@ import { PidgyLaunch, type LaunchProps } from "./PidgyLaunch";
 import { DURATION, FPS, HEIGHT, WIDTH } from "./timeline";
 
 const defaultProps: LaunchProps = {
-  cta: "Download for macOS",
-  url: "",
+  cta: "Request access",
+  url: "pidgy.chat",
 };
 
 export const RemotionRoot: React.FC = () => (

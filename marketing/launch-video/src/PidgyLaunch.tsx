@@ -1,48 +1,74 @@
 import React from "react";
-import { AbsoluteFill, Audio, Sequence, getStaticFiles, staticFile } from "remotion";
+import { AbsoluteFill, Audio, Sequence, getStaticFiles, interpolate, staticFile, useCurrentFrame } from "remotion";
 import { ensureFonts } from "./fonts";
 import { Grain, Vignette } from "./fx/Overlays";
-import { EndCard } from "./scenes/EndCard";
+import { Channels } from "./scenes/Channels";
+import { End } from "./scenes/End";
 import { Hero } from "./scenes/Hero";
-import { LocalFirst } from "./scenes/LocalFirst";
-import { Lookup } from "./scenes/Lookup";
-import { Noise } from "./scenes/Noise";
-import { Question } from "./scenes/Question";
-import { Rapid } from "./scenes/Rapid";
-import { Recap } from "./scenes/Recap";
-import { Replies } from "./scenes/Replies";
-import { Tagline } from "./scenes/Tagline";
-import { Topics } from "./scenes/Topics";
-import { SCENES, type SceneId } from "./timeline";
+import { Launcher } from "./scenes/Launcher";
+import { Opening } from "./scenes/Opening";
+import { Queue } from "./scenes/Queue";
+import { Values } from "./scenes/Values";
+import { SKY_FROM, Sky } from "./ui/Sky";
+import { DURATION, MUSIC_LOOP_AT, MUSIC_TRIM, SCENES, s } from "./timeline";
 
 ensureFonts();
 
 export type LaunchProps = { cta: string; url: string };
 
-const scene = (id: SceneId, node: React.ReactNode) => (
-  <Sequence key={id} from={SCENES[id].from} durationInFrames={SCENES[id].dur} name={id}>
-    {node}
-  </Sequence>
-);
+const span = (a: keyof typeof SCENES, b: keyof typeof SCENES = a) => ({
+  from: SCENES[a].from,
+  durationInFrames: SCENES[b].from + SCENES[b].dur - SCENES[a].from,
+});
 
 export const PidgyLaunch: React.FC<LaunchProps> = ({ cta, url }) => {
-  const hasSoundtrack = getStaticFiles().some((f) => f.name === "soundtrack.wav");
+  const frame = useCurrentFrame();
+  const hasSfx = getStaticFiles().some((f) => f.name === "sfx.wav");
+  const skyIn = interpolate(frame, [SKY_FROM, SCENES.hero.from + s(0.3)], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const fadeOut = (f: number) => interpolate(f, [DURATION - s(3), DURATION], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
   return (
-    <AbsoluteFill style={{ background: "#000" }}>
-      {scene("noise", <Noise />)}
-      {scene("question", <Question />)}
-      {scene("hero", <Hero />)}
-      {scene("tagline", <Tagline />)}
-      {scene("lookup", <Lookup />)}
-      {scene("topics", <Topics />)}
-      {scene("replies", <Replies />)}
-      {scene("recap", <Recap />)}
-      {scene("local", <LocalFirst />)}
-      {scene("rapid", <Rapid />)}
-      {scene("end", <EndCard cta={cta} url={url} />)}
-      <Vignette strength={0.5} />
-      <Grain opacity={0.08} />
-      {hasSoundtrack && <Audio src={staticFile("soundtrack.wav")} />}
+    <AbsoluteFill style={{ background: "black" }}>
+      {frame >= SKY_FROM && (
+        <AbsoluteFill style={{ opacity: skyIn }}>
+          <Sky />
+        </AbsoluteFill>
+      )}
+      <Sequence {...span("inbox", "buried")} name="opening">
+        <Opening />
+      </Sequence>
+      <Sequence {...span("hero")} name="hero">
+        <Hero />
+      </Sequence>
+      <Sequence {...span("queue")} name="queue">
+        <Queue />
+      </Sequence>
+      <Sequence {...span("find", "prep")} name="launcher">
+        <Launcher />
+      </Sequence>
+      <Sequence {...span("values")} name="values">
+        <Values />
+      </Sequence>
+      <Sequence {...span("channels")} name="channels">
+        <Channels />
+      </Sequence>
+      <Sequence {...span("end")} name="end">
+        <End cta={cta} url={url} />
+      </Sequence>
+      <Vignette strength={0.28} />
+      <Grain opacity={0.045} />
+
+      <Sequence from={0} durationInFrames={MUSIC_LOOP_AT + s(0.8)} name="music-a">
+        <Audio
+          src={staticFile("golden-hour-haze.mp3")}
+          trimBefore={MUSIC_TRIM}
+          volume={(f) => interpolate(f, [MUSIC_LOOP_AT, MUSIC_LOOP_AT + s(0.7)], [0.9, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" })}
+        />
+      </Sequence>
+      <Sequence from={MUSIC_LOOP_AT} durationInFrames={DURATION - MUSIC_LOOP_AT} name="music-b">
+        <Audio src={staticFile("golden-hour-haze.mp3")} trimBefore={MUSIC_TRIM} volume={(f) => 0.9 * fadeOut(f + MUSIC_LOOP_AT)} />
+      </Sequence>
+      {hasSfx && <Audio src={staticFile("sfx.wav")} volume={0.8} />}
     </AbsoluteFill>
   );
 };
