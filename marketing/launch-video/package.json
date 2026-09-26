@@ -1,0 +1,26 @@
+{
+  "name": "pidgy-launch-video",
+  "private": true,
+  "version": "1.0.0",
+  "description": "60-second Pidgy launch video, built as code with Remotion.",
+  "scripts": {
+    "synth": "tsx scripts/synth.ts",
+    "studio": "npm run synth && remotion studio",
+    "still": "remotion still PidgyLaunch",
+    "render": "npm run synth && remotion render PidgyLaunch out/pidgy-launch.mp4",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.529",
+    "@remotion/motion-blur": "4.0.529",
+    "remotion": "4.0.529",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
