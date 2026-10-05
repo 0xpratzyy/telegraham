@@ -45,6 +45,7 @@ enum PerChatExtractionPrompt {
         - Plain text. No markdown, no JSON, no chat-name headers.
         - Stay grounded in the actual message text. Don't invent dates,
           decisions, or facts.
+        - For project status or updates, include budget/funding, approval, ownership, timing, blockers and readiness when present, even if the query does not name each facet. Preserve amounts and negation.
         - Be specific: prefer concrete names/numbers/quotes over
           generic phrases like "the team discussed pricing".
         - Mirror the language of the messages (Hindi/Hinglish stays

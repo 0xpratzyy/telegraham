@@ -85,7 +85,7 @@ final class PidgyTelemetryScrubTests: XCTestCase {
         // Identity ON (default): install id + telegram username, and NOTHING
         // auto-populated survives (email/device id are discarded).
         defaults.set(true, forKey: AppConstants.Preferences.diagnosticsIdentityEnabledKey)
-        PidgyTelemetry.identify(username: "pratzyy", firstName: "Pratyush")
+        PidgyTelemetry.identify(username: "pratzyy", firstName: "Sam")
         PidgyTelemetry.scrubEvent(event)
         XCTAssertEqual(event.user?.userId, PidgyTelemetry.installId)
         XCTAssertEqual(event.user?.username, "pratzyy")

@@ -355,6 +355,7 @@ final class FactExtractionCoordinator: ObservableObject {
 
     private func runPass(bypassProviderCooldown: Bool = false) async {
         guard ContextLayer.enabled, !stopped, !isRunning, let telegramService, let aiService else { return }
+        guard aiService.allowsBackgroundExtraction else { return }
         if !bypassProviderCooldown,
            let retryAt = nextProviderRetryAt,
            retryAt > Date() {
@@ -525,7 +526,7 @@ final class FactExtractionCoordinator: ObservableObject {
         // Awaited before the pass stamps below so stop()'s drain still
         // covers this writer.
         let ocrTask = Task { [telegramService] in
-            await PhotoOCRIndexer.shared.runPass(telegramService: telegramService)
+            await PhotoOCRIndexer.shared.runPass(telegramService: telegramService, aiService: aiService)
         }
         // Backlog detection: true when this pass stopped for BUDGET reasons
         // (per-chat window cap, per-pass chat cap) rather than catching up —

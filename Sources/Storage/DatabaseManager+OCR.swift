@@ -32,7 +32,7 @@ extension DatabaseManager {
     /// Record an OCR result: marks the message processed and, when text was
     /// recognized, appends it to text_content as "[photo text: …]" so every
     /// reader (extraction transcript, search FTS, evidence rows) sees it.
-    func applyPhotoOCR(messageId: Int64, chatId: Int64, text: String?) async {
+    func applyPhotoOCR(messageId: Int64, chatId: Int64, text: String?, summary: String? = nil) async {
         guard let pool = await ensureDatabase() else { return }
         let cleaned = text?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -46,7 +46,11 @@ extension DatabaseManager {
                         sql: "SELECT text_content FROM messages WHERE id = ? AND chat_id = ?",
                         arguments: [messageId, chatId]
                     ) ?? ""
-                    let marker = "[photo text: \(capped)]"
+                    var marker = "[photo text: \(capped)]"
+                    if let summary, !summary.isEmpty {
+                        let safeSummary = String(summary.replacingOccurrences(of: "\u{00}", with: "").prefix(500))
+                        marker += "\n[image text summary: \(safeSummary)]"
+                    }
                     let combined = existing.isEmpty ? marker : existing + "\n" + marker
                     try db.execute(
                         sql: "UPDATE messages SET text_content = ?, ocr_state = 1 WHERE id = ? AND chat_id = ?",

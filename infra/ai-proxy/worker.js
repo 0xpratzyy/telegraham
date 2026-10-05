@@ -38,6 +38,7 @@ const VERTEX_PATH = "/v1/vertex/chat/completions";
 // Gemini 3 preview models live on the `global` location, not a region.
 const VERTEX_LOCATION = "global";
 const INVITE_PREFIX = "/v1/invite/";
+const ACCOUNT_PREFIX = "/v1/account/";
 
 export default {
   async fetch(request, env, ctx) {
@@ -49,6 +50,11 @@ export default {
     // is untouched.
     if (url.pathname.startsWith(INVITE_PREFIX)) {
       return handleInvite(request, env, url);
+    }
+    // Account linking (Clerk-signed session JWT → install id). Identifiers
+    // only: the Clerk user id and random install ids. No email, no name.
+    if (url.pathname.startsWith(ACCOUNT_PREFIX)) {
+      return handleAccount(request, env, url);
     }
     if (request.method !== "POST") {
       return json(405, { error: "method_not_allowed" });
@@ -193,17 +199,50 @@ async function handleInvite(request, env, url) {
   const installId = typeof body.installId === "string" ? body.installId.slice(0, 64) : "";
   if (!installId) return json(400, { error: "missing_install_id" });
 
-  if (route === "redeem") return inviteRedeem(env, body, installId);
-  if (route === "status") return inviteStatus(env, installId);
+  // Optional account: a verified Clerk session lets a returning user on a
+  // fresh machine inherit their registration instead of burning a code.
+  const accountId = await verifiedAccountId(request, env);
+
+  if (route === "redeem") return inviteRedeem(env, body, installId, accountId);
+  if (route === "status") return inviteStatus(env, installId, accountId);
   return json(404, { error: "not_found" });
 }
 
-async function inviteRedeem(env, body, installId) {
+async function inheritRegistration(env, installId, accountId) {
+  if (!accountId) return null;
+  const account = await env.INVITES.get(`account:${accountId}`, "json");
+  const sourceInstall = account?.installIds?.find((id) => id !== installId);
+  if (!sourceInstall) return null;
+  const source = await env.INVITES.get(`install:${sourceInstall}`, "json");
+  if (!source) return null;
+  // Share the same code pool + referral count across the account's installs.
+  const copy = { ...source, inheritedFrom: sourceInstall, onboardedAt: new Date().toISOString() };
+  await env.INVITES.put(`install:${installId}`, JSON.stringify(copy));
+  await linkAccount(env, accountId, installId);
+  return copy;
+}
+
+async function linkAccount(env, accountId, installId) {
+  const key = `account:${accountId}`;
+  const record = (await env.INVITES.get(key, "json")) ?? { installIds: [], linkedAt: new Date().toISOString() };
+  if (!record.installIds.includes(installId)) {
+    record.installIds = [...record.installIds, installId].slice(-10);
+    await env.INVITES.put(key, JSON.stringify(record));
+  }
+}
+
+async function inviteRedeem(env, body, installId, accountId = null) {
   // Re-onboard after a reset (same install id): idempotent — hand back the
   // existing registration instead of burning a second code.
   const existing = await env.INVITES.get(`install:${installId}`, "json");
   if (existing) {
+    if (accountId) await linkAccount(env, accountId, installId);
     return json(200, { ok: true, codes: existing.codes, referrals: existing.referrals ?? 0, alreadyRegistered: true });
+  }
+  // Same account, new machine: inherit instead of redeeming.
+  const inherited = await inheritRegistration(env, installId, accountId);
+  if (inherited) {
+    return json(200, { ok: true, codes: inherited.codes, referrals: inherited.referrals ?? 0, alreadyRegistered: true });
   }
 
   // Brute-force throttle per install per UTC day.
@@ -232,6 +271,7 @@ async function inviteRedeem(env, body, installId) {
     `install:${installId}`,
     JSON.stringify({ codes, invitedBy: code, referrals: 0, onboardedAt: now }),
   );
+  if (accountId) await linkAccount(env, accountId, installId);
 
   // Reward the referrer: +1 counted referral (free Pro months at billing
   // cutover) and bonus codes to keep handing out.
@@ -248,8 +288,10 @@ async function inviteRedeem(env, body, installId) {
   return json(200, { ok: true, codes, referrals: 0 });
 }
 
-async function inviteStatus(env, installId) {
-  const record = await env.INVITES.get(`install:${installId}`, "json");
+async function inviteStatus(env, installId, accountId = null) {
+  let record = await env.INVITES.get(`install:${installId}`, "json");
+  if (record && accountId) await linkAccount(env, accountId, installId);
+  if (!record) record = await inheritRegistration(env, installId, accountId);
   if (!record) return json(200, { registered: false });
   // Resolve per-code redemption so the app can show used/unused.
   const codes = await Promise.all(
@@ -431,4 +473,105 @@ async function timingSafeEqual(a, b) {
     crypto.subtle.digest("SHA-256", encoder.encode(b)),
   ]);
   return crypto.subtle.timingSafeEqual(da, db);
+}
+
+// --- Accounts (Clerk) ------------------------------------------------------
+// The app presents its Clerk session JWT in `X-Pidgy-Account`. We verify the
+// RS256 signature against the instance JWKS (CLERK_JWKS_URL, e.g.
+// https://clerk.pidgy.chat/.well-known/jwks.json) and use `sub` (the Clerk
+// user id) as the account key. Nothing else from the token is stored.
+// Unset CLERK_JWKS_URL ⇒ accounts are ignored everywhere (fail closed to
+// "anonymous", never to "trusted").
+
+let jwksCache = { fetchedAt: 0, keys: [] };
+
+async function handleAccount(request, env, url) {
+  if (request.method !== "POST") return json(405, { error: "method_not_allowed" });
+  if (!env.INVITES) return json(503, { error: "invites_not_configured" });
+  const auth = request.headers.get("Authorization") ?? "";
+  const presented = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!env.PIDGY_PROXY_TOKEN || !(await timingSafeEqual(presented, env.PIDGY_PROXY_TOKEN))) {
+    return json(401, { error: "invalid_token" });
+  }
+  const route = url.pathname.slice(ACCOUNT_PREFIX.length);
+  if (route !== "link") return json(404, { error: "not_found" });
+
+  let body;
+  try {
+    body = await request.json();
+  } catch (_) {
+    return json(400, { error: "bad_json" });
+  }
+  const installId = typeof body.installId === "string" ? body.installId.slice(0, 64) : "";
+  if (!installId) return json(400, { error: "missing_install_id" });
+  const accountId = await verifiedAccountId(request, env);
+  if (!accountId) return json(401, { error: "invalid_account_token" });
+  await linkAccount(env, accountId, installId);
+  const record = await env.INVITES.get(`install:${installId}`, "json");
+  return json(200, { ok: true, registered: Boolean(record) });
+}
+
+async function verifiedAccountId(request, env) {
+  const token = request.headers.get("X-Pidgy-Account");
+  if (!token || !env.CLERK_JWKS_URL) return null;
+  try {
+    const claims = await verifyClerkJWT(token, env.CLERK_JWKS_URL);
+    return typeof claims.sub === "string" ? claims.sub.slice(0, 64) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function verifyClerkJWT(token, jwksUrl) {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new Error("malformed");
+  const header = JSON.parse(textFromBase64Url(parts[0]));
+  const claims = JSON.parse(textFromBase64Url(parts[1]));
+  if (header.alg !== "RS256" || !header.kid) throw new Error("alg");
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof claims.exp !== "number" || claims.exp < now - 30) throw new Error("expired");
+  if (typeof claims.nbf === "number" && claims.nbf > now + 30) throw new Error("nbf");
+
+  const jwk = await jwkFor(header.kid, jwksUrl);
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    jwk,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
+  const ok = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    bytesFromBase64Url(parts[2]),
+    new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
+  );
+  if (!ok) throw new Error("signature");
+  return claims;
+}
+
+async function jwkFor(kid, jwksUrl) {
+  const stale = Date.now() - jwksCache.fetchedAt > 3600_000;
+  let key = jwksCache.keys.find((k) => k.kid === kid);
+  if (!key || stale) {
+    const res = await fetch(jwksUrl, { cf: { cacheTtl: 3600 } });
+    if (!res.ok) throw new Error("jwks");
+    const body = await res.json();
+    jwksCache = { fetchedAt: Date.now(), keys: body.keys ?? [] };
+    key = jwksCache.keys.find((k) => k.kid === kid);
+  }
+  if (!key) throw new Error("kid");
+  return key;
+}
+
+function bytesFromBase64Url(input) {
+  const padded = input.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(input.length / 4) * 4, "=");
+  const bin = atob(padded);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function textFromBase64Url(input) {
+  return new TextDecoder().decode(bytesFromBase64Url(input));
 }

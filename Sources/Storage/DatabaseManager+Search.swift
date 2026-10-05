@@ -12,7 +12,7 @@ extension DatabaseManager {
     /// on the default AND-of-quoted-tokens that `normalizedFTSQuery`
     /// produces. Returns an empty array if the expression is empty or
     /// the FTS engine rejects it (which it does for malformed queries).
-    func localSearchFTSRaw(rawFTSQuery: String, chatIds: [Int64]? = nil, limit: Int = 50) async -> [ScoredMessageRecord] {
+    func localSearchFTSRaw(rawFTSQuery: String, chatIds: [Int64]? = nil, limit: Int = 50, timeRange: TimeRangeConstraint? = nil) async -> [ScoredMessageRecord] {
         let trimmed = rawFTSQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         if let chatIds, chatIds.isEmpty { return [] }
@@ -21,6 +21,8 @@ extension DatabaseManager {
         do {
             return try await pool.read { db in
                 let rows: [Row]
+                let dateClause = timeRange == nil ? "" : " AND m.date >= ? AND m.date <= ?"
+                let dateArguments: [Double] = timeRange.map { [$0.startDate.timeIntervalSince1970, $0.endDate.timeIntervalSince1970] } ?? []
                 if let chatIds {
                     let placeholders = Array(repeating: "?", count: chatIds.count).joined(separator: ", ")
                     var arguments = StatementArguments()
@@ -28,6 +30,7 @@ extension DatabaseManager {
                     for chatId in chatIds {
                         arguments += [chatId]
                     }
+                    arguments += StatementArguments(dateArguments)
                     arguments += [limit]
                     rows = try Row.fetchAll(
                         db,
@@ -37,7 +40,7 @@ extension DatabaseManager {
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
                             WHERE messages_fts MATCH ?
-                              AND m.chat_id IN (\(placeholders))
+                              AND m.chat_id IN (\(placeholders))\(dateClause)
                             ORDER BY semantic_score DESC, m.date DESC, m.id DESC
                             LIMIT ?
                             """,
@@ -51,11 +54,11 @@ extension DatabaseManager {
                                    (-bm25(messages_fts)) AS semantic_score
                             FROM messages_fts
                             JOIN messages AS m ON m.rowid = messages_fts.rowid
-                            WHERE messages_fts MATCH ?
+                            WHERE messages_fts MATCH ?\(dateClause)
                             ORDER BY semantic_score DESC, m.date DESC, m.id DESC
                             LIMIT ?
                             """,
-                        arguments: [trimmed, limit]
+                        arguments: StatementArguments([trimmed]) + StatementArguments(dateArguments) + StatementArguments([limit])
                     )
                 }
                 return rows.map { row in

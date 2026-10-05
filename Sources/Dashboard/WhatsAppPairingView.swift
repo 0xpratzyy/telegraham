@@ -84,7 +84,7 @@ struct WhatsAppPairingView: View {
     }
 }
 
-private enum WhatsAppQRCodeRenderer {
+enum WhatsAppQRCodeRenderer {
     static func image(for value: String) -> NSImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(value.utf8)

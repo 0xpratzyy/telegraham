@@ -12,6 +12,10 @@ APP_BUNDLE="$DERIVED_DATA/Build/Products/Debug/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 build_app() {
+  (cd "$ROOT_DIR" && xcodegen generate)
+  source "$ROOT_DIR/scripts/source_build_settings.sh"
+  local settings=()
+  if [[ "${PIDGY_SOURCE_BUILD:-0}" == "1" ]]; then settings=("${PIDGY_SOURCE_BUILD_SETTINGS[@]}"); fi
   "$ROOT_DIR/script/build_whatsapp_bridge.sh"
   xcodebuild \
     -project "$ROOT_DIR/Pidgy.xcodeproj" \
@@ -20,7 +24,7 @@ build_app() {
     -destination 'platform=macOS' \
     -derivedDataPath "$DERIVED_DATA" \
     -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
-    build
+    ${settings[@]+"${settings[@]}"} build
 }
 
 launch_app() {

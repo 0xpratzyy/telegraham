@@ -22,6 +22,13 @@ final class MenuBarManager: NSObject {
         setup()
     }
 
+    /// Screen-space frame of the status item button (nil until installed).
+    /// Onboarding's pigeon flies here at the end.
+    var statusItemScreenFrame: NSRect? {
+        guard let button = statusItem?.button, let window = button.window else { return nil }
+        return window.convertToScreen(button.convert(button.bounds, to: nil))
+    }
+
     private func setup() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 

@@ -60,6 +60,7 @@ enum DashboardSourceScope: String, CaseIterable, Identifiable, Hashable {
 }
 
 struct DashboardView: View {
+    @StateObject private var coachMarks = DashboardCoachMarksModel()
     /// Kept as a plain reference intentionally. Dashboard data arrives through
     /// `SourceRegistry`; observing the whole Telegram service here caused every
     /// chat-cache publication to invalidate the entire dashboard hierarchy.
@@ -179,6 +180,11 @@ struct DashboardView: View {
             .animation(PidgyMotion.easeOut, value: currentPage)
         }
         .overlay(ToastOverlay())
+        .overlayPreferenceValue(CoachMarkAnchorKey.self) { anchors in
+            if coachMarks.isPresented {
+                DashboardCoachMarksOverlay(model: coachMarks, anchors: anchors)
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .pidgyToggleSidebar)) { _ in
             toggleSidebar()
         }
@@ -1043,12 +1049,18 @@ struct DashboardSidebar: View {
                 .padding(.bottom, 12)
 
             sidebarLauncherShortcut
+                .coachMarkTarget(.launcher)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 6)
 
             VStack(spacing: 2) {
                 ForEach(DashboardPage.allCases.filter { $0 != .topics && $0 != .preferences }) { page in
-                    sidebarButton(page, count: count(for: page))
+                    if page == .replyQueue {
+                        sidebarButton(page, count: count(for: page))
+                            .coachMarkTarget(.replyQueue)
+                    } else {
+                        sidebarButton(page, count: count(for: page))
+                    }
                 }
             }
             .padding(.horizontal, 10)
@@ -1071,6 +1083,7 @@ struct DashboardSidebar: View {
                     accountMenu
                 }
             }
+            .coachMarkTarget(.sources)
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
             .background {

@@ -16,9 +16,11 @@ enum AuthState: Equatable {
 struct CodeInfo: Equatable {
     let phoneNumber: String
     let timeout: Int
+    let canResend: Bool
 
-    init(phoneNumber: String = "", timeout: Int = 0) {
+    init(phoneNumber: String = "", timeout: Int = 0, canResend: Bool = false) {
         self.phoneNumber = phoneNumber
         self.timeout = timeout
+        self.canResend = canResend
     }
 }

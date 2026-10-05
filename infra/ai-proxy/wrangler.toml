@@ -9,6 +9,10 @@ compatibility_date = "2026-06-01"
 # the RATE KV namespace (day-bucket counts only — never message content).
 [vars]
 DAILY_REQUEST_CAP = "5000"
+# Clerk instance JWKS for verifying account session tokens (X-Pidgy-Account).
+# Leave blank to ignore accounts entirely. Find it in the Clerk dashboard
+# under API keys → Frontend API: https://<frontend-api>/.well-known/jwks.json
+CLERK_JWKS_URL = ""
 
 # Created by: wrangler kv namespace create RATE
 # Paste the generated id below before first deploy.

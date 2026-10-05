@@ -80,6 +80,31 @@ final class AIPricingCachedTests: XCTestCase {
         XCTAssertEqual(pricing.outputUSDPerMillionTokens, 7.50, accuracy: 1e-9)
     }
 
+    func testGemini38UsesLaunchPricingThrough2026() {
+        let date = Date(timeIntervalSince1970: 1_798_675_200) // 2026-12-31T00:00:00Z
+        let pricing = AIUsagePricingCatalog.pricing(
+            for: .openAI,
+            model: "google/gemini-3.8-flash",
+            at: date
+        )!
+
+        XCTAssertEqual(pricing.family, "gemini-3.8-flash")
+        XCTAssertEqual(pricing.inputUSDPerMillionTokens, 0.75, accuracy: 1e-9)
+        XCTAssertEqual(pricing.outputUSDPerMillionTokens, 3.75, accuracy: 1e-9)
+    }
+
+    func testGemini38SwitchesToStandardPricingIn2027() {
+        let date = Date(timeIntervalSince1970: 1_798_761_600) // 2027-01-01T00:00:00Z
+        let pricing = AIUsagePricingCatalog.pricing(
+            for: .openAI,
+            model: "gemini-3.8-flash",
+            at: date
+        )!
+
+        XCTAssertEqual(pricing.inputUSDPerMillionTokens, 1.50, accuracy: 1e-9)
+        XCTAssertEqual(pricing.outputUSDPerMillionTokens, 7.50, accuracy: 1e-9)
+    }
+
     func testManagedHybridKeepsHighVolumeStagesOnFlashLite() {
         XCTAssertEqual(AppConstants.AI.managedModel, "google/gemini-3.5-flash-lite")
         XCTAssertNil(AppConstants.AI.managedModelOverride(for: .pipelineTriage))
@@ -88,7 +113,7 @@ final class AIPricingCachedTests: XCTestCase {
         XCTAssertNil(AppConstants.AI.managedModelOverride(for: .queryPlanning))
     }
 
-    func testManagedHybridEscalatesOwnershipAndExtractionTo37Flash() {
+    func testManagedHybridEscalatesOwnershipAndExtractionTo38Flash() {
         let escalatedKinds: [AIRequestKind] = [
             .factExtraction,
             .replyQueueTriage,
@@ -101,7 +126,7 @@ final class AIPricingCachedTests: XCTestCase {
         for kind in escalatedKinds {
             XCTAssertEqual(
                 AppConstants.AI.managedModelOverride(for: kind),
-                "google/gemini-3.7-flash",
+                "google/gemini-3.8-flash",
                 "Expected \(kind.rawValue) to use the stronger managed model"
             )
         }

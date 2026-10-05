@@ -35,7 +35,7 @@ enum AppConstants {
         static let defaultOpenAIModel = "gpt-5"
         /// Managed (Pidgy AI) base model + proxy path. Flash-Lite handles the
         /// high-volume, well-bounded stages; `managedModelOverride` escalates
-        /// only reasoning-heavy ownership and extraction work to 3.7 Flash.
+        /// only reasoning-heavy ownership and extraction work to 3.8 Flash.
         /// To switch to
         /// gpt-5, flip to "gpt-5" + "/v1/chat/completions" (proxy + Vertex
         /// auth already wired).
@@ -53,7 +53,7 @@ enum AppConstants {
                  .dashboardTaskExtraction,
                  .agenticSearch,
                  .answerEngine:
-                return "google/gemini-3.7-flash"
+                return "google/gemini-3.8-flash"
             default:
                 return nil
             }
@@ -421,6 +421,12 @@ enum AppConstants {
         static let inviteRegisteredKey = "inviteRegistered"
         static let inviteCodesCacheKey = "inviteCodesCache"
         static let inviteReferralsKey = "inviteReferrals"
+        /// Set once the post-onboarding dashboard coach marks have been
+        /// shown (or dismissed). Cleared with the onboarding flag on reset.
+        static let didShowDashboardCoachMarksKey = "pidgyDidShowDashboardCoachMarks"
+        /// Cached account profile (email/name) so Preferences can render the
+        /// signed-in row before Clerk finishes loading on launch.
+        static let accountProfileCacheKey = "pidgyAccountProfileCache"
 
         /// Where "Open in chat" lands: "desktop" (tg:// deep links) or
         /// "web" (web.telegram.org). Unset = auto-detect from whether a

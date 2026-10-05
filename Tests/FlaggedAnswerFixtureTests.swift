@@ -19,13 +19,13 @@ final class FlaggedAnswerFixtureTests: XCTestCase {
 
     private func makeFixture() -> FlaggedAnswerFixture {
         FlaggedAnswerFixture(
-            query: "what did we decide with Akhil on the media team",
+            query: "what did we decide with Alex on the media team",
             route: "summarySearch",
-            resultTitle: "Recent Akhil Context",
+            resultTitle: "Recent Alex Context",
             resultText: "Decision: ship the weekly update on Friday.",
             supportingSnippets: [
-                "Core(EANSG): few things: have our builders showcase",
-                "AI Weekends: lifi will confirm their 5k in a bit."
+                "Project Commons: builders will showcase a synthetic demo",
+                "Demo Showcase: The fictional sponsor will confirm their 5k demo budget shortly."
             ],
             capturedAt: Date(timeIntervalSince1970: 1_760_000_000),
             appVersion: "1.0.8",
@@ -39,11 +39,11 @@ final class FlaggedAnswerFixtureTests: XCTestCase {
     func testAttachmentTextContainsEveryShareableField() {
         let attachment = makeFixture().attachmentText()
 
-        XCTAssertTrue(attachment.contains("what did we decide with Akhil on the media team"))
+        XCTAssertTrue(attachment.contains("what did we decide with Alex on the media team"))
         XCTAssertTrue(attachment.contains("summarySearch"))
-        XCTAssertTrue(attachment.contains("Recent Akhil Context"))
+        XCTAssertTrue(attachment.contains("Recent Alex Context"))
         XCTAssertTrue(attachment.contains("Decision: ship the weekly update on Friday."))
-        XCTAssertTrue(attachment.contains("Core(EANSG)"))
+        XCTAssertTrue(attachment.contains("Project Commons"))
         XCTAssertTrue(attachment.contains("1.0.8 (abc1234)"))
     }
 

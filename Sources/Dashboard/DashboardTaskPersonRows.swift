@@ -165,7 +165,7 @@ enum DashboardTaskPresentation {
 
         switch source {
         case .gmail:
-            return "\(person.isEmpty ? "This sender" : person) sent an email\(origin). Next step: \(action). Open Gmail for the original details."
+            return "\(person.isEmpty ? "This sender" : person) sent an email\(origin). Pidgy identified \u{201c}\(action)\u{201d} as the action you need to take. Open Gmail for the original details."
         case .slack:
             return "\(actor) needs your attention in Slack\(origin). Next step: \(action). Open Slack for the surrounding conversation."
         case .telegram:

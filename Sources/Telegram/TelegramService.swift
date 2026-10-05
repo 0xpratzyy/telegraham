@@ -126,6 +126,11 @@ class TelegramService: ObservableObject {
         _ = try await client.checkAuthenticationCode(code: code)
     }
 
+    func resendVerificationCode() async throws {
+        guard let client else { throw TGError.clientNotInitialized }
+        _ = try await client.resendAuthenticationCode(reason: nil)
+    }
+
     func submitPassword(_ password: String) async throws {
         guard let client else { throw TGError.clientNotInitialized }
         _ = try await client.checkAuthenticationPassword(password: password)
@@ -831,7 +836,8 @@ class TelegramService: ObservableObject {
         case .authorizationStateWaitCode(let info):
             authState = .waitingForCode(codeInfo: CodeInfo(
                 phoneNumber: info.codeInfo.phoneNumber,
-                timeout: info.codeInfo.timeout
+                timeout: info.codeInfo.timeout,
+                canResend: info.codeInfo.nextType != nil
             ))
 
         case .authorizationStateWaitPassword(let info):

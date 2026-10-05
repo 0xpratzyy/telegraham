@@ -55,6 +55,7 @@ enum QuerySummaryPrompt {
         - Never refuse. Never output "No clear local summary context
           found" or any equivalent. If you have any messages at all,
           produce a Direct answer paragraph that says what you DO see.
+        - Cover every relevant chat and distinct status facet present: budget/funding and amounts, approvals, owners, timing, blockers and readiness. Do not drop financial evidence just because the query asks for status. Preserve negation and distinguish proposed from approved.
         - Be concrete and concise. One sentence per chat.
         - Prefer decisions, asks, blockers, next actions, rankings,
           options, feedback, gaps over general chatter.

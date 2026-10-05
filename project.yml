@@ -25,6 +25,13 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
+  # Accounts (Sign in with Google / Apple) via Clerk. The account is the
+  # cross-machine identity for invites, referrals, and the Dodo license;
+  # it never sees message content. Skipped entirely when no publishable
+  # key is bundled (source builds) — see AccountService.isConfigured.
+  Clerk:
+    url: https://github.com/clerk/clerk-ios
+    from: "1.5.2"
   # On-device multilingual sentence embeddings (intfloat/multilingual-
   # e5-small, XLM-RoBERTa). Pure-Swift on Apple's MLTensor — no MLX, no
   # Python. Model weights download once from Hugging Face on first use
@@ -68,6 +75,8 @@ targets:
         product: Sparkle
       - package: SwiftEmbeddings
         product: Embeddings
+      - package: Clerk
+        product: ClerkKit
     configFiles:
       Debug: Config/BetaSecrets.xcconfig
       Release: Config/BetaSecrets.xcconfig
@@ -90,6 +99,17 @@ targets:
         PidgyBundledDodoCheckoutBundled: $(PIDGY_DODO_CHECKOUT_BUNDLED)
         PidgyBundledDodoPortalURL: $(PIDGY_DODO_PORTAL_URL)
         PidgyBundledSentryDsn: $(PIDGY_SENTRY_DSN)
+        PidgyBundledClerkPublishableKey: $(PIDGY_CLERK_PUBLISHABLE_KEY)
+        PidgyChatGPTLocalOSS: $(PIDGY_CHATGPT_OSS_ENABLED)
+        # OAuth callback for Clerk sign-in (Google / Apple) — the hosted
+        # flow redirects to com.pidgy.app://callback, which
+        # ASWebAuthenticationSession only delivers when the scheme is
+        # registered here.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.pidgy.app.auth
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes:
+              - com.pidgy.app
         PidgyBuildCommitSHA: $(PIDGY_BUILD_COMMIT_SHA)
         # Sparkle auto-updater wiring.
         #
@@ -108,7 +128,7 @@ targets:
         # repo — separate from the private `telegraham` source so
         # we can serve the file without leaking code.
         SUPublicEDKey: ZvPujxTMtOfaewSOF2uoCycxcjO/X5/BeqdEPVRMTn4=
-        SUFeedURL: https://raw.githubusercontent.com/0xpratzyy/pidgy-releases/main/appcast.xml
+        SUFeedURL: $(PIDGY_UPDATE_FEED_URL)
         # Auto-check every 6 hours after launch; user can also
         # trigger manually via the menu. Default is 1 day, which
         # is too slow for a beta where we ship frequent fixes.
@@ -123,6 +143,8 @@ targets:
     postBuildScripts:
       - name: Embed read-only WhatsApp bridge
         basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/pidgy-whatsapp-bridge
         script: |
           set -eu
           SOURCE="${SRCROOT}/tools/WhatsAppBridge/bin/pidgy-whatsapp-bridge"
@@ -139,6 +161,8 @@ targets:
           echo "Embedded read-only WhatsApp bridge"
       - name: Stamp commit SHA into .app sidecar file
         basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/PidgyBuildSHA.txt
         # Writes the current commit SHA to a sidecar file inside the
         # built .app:  Contents/Resources/PidgyBuildSHA.txt
         # Read at runtime via Bundle.main.url(forResource:).
@@ -159,6 +183,8 @@ targets:
           SIDECAR_FILE="${SIDECAR_DIR}/PidgyBuildSHA.txt"
 
           resolve_sha_via_git() {
+            # A source archive inside another checkout must not inherit its SHA.
+            [ -e "${SRCROOT}/.git" ] || return 0
             /usr/bin/git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || true
           }
 

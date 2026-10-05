@@ -8,9 +8,9 @@ Two halves: **where the code actually stands** (measured, not guessed) and
 
 ---
 
-## 1. Where Pidgy stands today
+## 1. Historical baseline (July 2026)
 
-Measured on this branch:
+The following measurements describe the July research snapshot, not the current release:
 
 | Fact | Number |
 |---|---|
@@ -26,11 +26,12 @@ Measured on this branch:
    past migration left — but the storage shape does not have to change to
    admit a second source.
 2. The context layer is *conceptually* source-free already. A fact is
-   `subject–predicate–object + provenance`. Nothing about "i_owe Akhil the
+   `subject–predicate–object + provenance`. Nothing about "i_owe Alex the
    invoice" is Telegram-specific; only the ids in `source_chat_id` /
    `source_message_id` are.
-3. Onboarding already renders Telegram / Slack / Gmail tiles
-   (`OnboardingConnectSteps`), with Slack and Gmail marked coming-soon.
+3. Onboarding connects Telegram / Slack / Gmail / WhatsApp from one hub
+   (`OnboardingSourcesStep`); each row drives its connection manager
+   inline, so adding a source is a row + a manager, not a new step.
 
 **The real coupling is identity, not messages.** `facts.subject_person_id`
 is documented as "canonical Telegram user id"; `person_profiles.user_id`

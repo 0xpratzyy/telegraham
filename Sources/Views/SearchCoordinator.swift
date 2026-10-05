@@ -165,6 +165,10 @@ final class SearchCoordinator: ObservableObject {
         isAISearching = optimisticIntent != nil
 
         searchTask = Task { @MainActor in
+            // Debounce BEFORE the paid planner, not after it. Quick local/Jev
+            // previews can update independently while the user is still typing.
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
             let resolvedSpec = await aiService.queryRouter.resolveQuerySpec(
                 query: query,
                 activeFilter: activeScope,
@@ -199,9 +203,6 @@ final class SearchCoordinator: ObservableObject {
                 isAISearching = false
                 return
             }
-
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
 
             if searchStartedAt == nil {
                 searchStartedAt = Foundation.Date()

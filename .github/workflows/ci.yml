@@ -37,6 +37,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/WhatsAppBridge/go.mod
+          cache-dependency-path: tools/WhatsAppBridge/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Install xcodegen
         run: brew install xcodegen
 
@@ -54,13 +62,7 @@ jobs:
           restore-keys: |
             spm-${{ runner.os }}-
 
-      - name: Build and run tests
-        run: |
-          set -o pipefail
-          xcodebuild \
-            -project Pidgy.xcodeproj \
-            -scheme Pidgy \
-            -configuration Debug \
-            -destination 'platform=macOS,arch=arm64' \
-            -clonedSourcePackagesDirPath SourcePackages \
-            test
+      - name: Build and run all offline checks
+        env:
+          PIDGY_CLONED_SOURCE_PACKAGES: ${{ github.workspace }}/SourcePackages
+        run: ./scripts/test.sh

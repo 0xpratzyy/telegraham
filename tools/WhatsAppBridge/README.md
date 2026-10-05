@@ -14,3 +14,7 @@ This is an unofficial integration. WhatsApp can change or block the linked
 device protocol, and users should understand that using unofficial clients can
 carry account-restriction risk. The `.txt` export importer remains available as
 a zero-session fallback.
+
+## License
+
+This helper is GPL-3.0-or-later; see [LICENSE](LICENSE). It links whatsmeow (MPL-2.0) and libsignal (GPL-3.0). Distribute its corresponding source and preserve dependency notices with helper binaries.

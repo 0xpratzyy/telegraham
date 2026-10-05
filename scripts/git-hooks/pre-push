@@ -93,7 +93,7 @@ while read local_ref local_sha remote_ref remote_sha; do
   if [ -s "$hits_file" ]; then
     echo ""
     echo "ERROR: credential-looking strings in commits being pushed:" >&2
-    head -10 "$hits_file" >&2
+    echo "    $(wc -l < "$hits_file") matches (credential content redacted)." >&2
     echo "" >&2
     echo "If these are false positives, override with:  git push --no-verify" >&2
     echo "If they're real, rotate the key first, then rewrite history." >&2

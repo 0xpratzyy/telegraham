@@ -68,11 +68,11 @@ final class ContextLayerTests: XCTestCase {
 
     func test_fingerprint_keysOnName_whenUnresolved() {
         // Leading article is stripped by the canonical object normalizer.
-        XCTAssertEqual(draft(subject: "Piyush").fingerprint, "n:piyush|i_owe|deck")
+        XCTAssertEqual(draft(subject: "Casey").fingerprint, "n:casey|i_owe|deck")
     }
 
     func test_fingerprint_keysOnPersonId_whenResolved() {
-        XCTAssertEqual(draft(subject: "Piyush", personId: 100).fingerprint, "p:100|i_owe|deck")
+        XCTAssertEqual(draft(subject: "Casey", personId: 100).fingerprint, "p:100|i_owe|deck")
     }
 
     func test_fingerprint_articleVariantsCollapse() {
@@ -90,10 +90,10 @@ final class ContextLayerTests: XCTestCase {
     }
 
     func test_fingerprint_nameVariantsCollapse_underSamePersonId() {
-        // "Piyush" and "Piyush Avantis" must produce the SAME identity once both
+        // "Casey" and "Casey Avantis" must produce the SAME identity once both
         // resolve to the same person — the whole point of entity resolution.
-        let a = draft(subject: "Piyush", personId: 100)
-        let b = draft(subject: "Piyush Avantis", personId: 100)
+        let a = draft(subject: "Casey", personId: 100)
+        let b = draft(subject: "Casey Avantis", personId: 100)
         XCTAssertEqual(a.fingerprint, b.fingerprint)
     }
 
@@ -116,11 +116,11 @@ final class ContextLayerTests: XCTestCase {
     }
 
     func test_resolve_dmCounterparty_tokenMatch_resolves() {
-        let r = FactEntityResolver.resolve(subject: "Piyush", predicate: .iOwe,
-                                           chat: dmChat(title: "Piyush Avantis", userId: 100),
+        let r = FactEntityResolver.resolve(subject: "Casey", predicate: .iOwe,
+                                           chat: dmChat(title: "Casey Avantis", userId: 100),
                                            myUserId: 1, directory: .empty)
         XCTAssertEqual(r.personId, 100)
-        XCTAssertEqual(r.displayName, "Piyush Avantis")
+        XCTAssertEqual(r.displayName, "Casey Avantis")
     }
 
     /// Review finding #4: a 3rd party mentioned in a DM must NOT be misattributed
@@ -134,23 +134,23 @@ final class ContextLayerTests: XCTestCase {
 
     func test_resolve_globalDirectory_resolvesMentionedPersonInGroup() {
         let dir = FactContactDirectory.build(
-            rows: [(id: 200, name: "Deeksha Rungta", count: 12)],
+            rows: [(id: 200, name: "Diana Rungta", count: 12)],
             dmContacts: []
         )
-        // A group (no DM counterparty) where Deeksha is only mentioned.
-        let r = FactEntityResolver.resolve(subject: "Deeksha", predicate: .owesMe,
+        // A group (no DM counterparty) where Diana is only mentioned.
+        let r = FactEntityResolver.resolve(subject: "Diana", predicate: .owesMe,
                                            chat: groupChat(), myUserId: 1, directory: dir)
         XCTAssertEqual(r.personId, 200)
-        XCTAssertEqual(r.displayName, "Deeksha Rungta")
+        XCTAssertEqual(r.displayName, "Diana Rungta")
     }
 
     func test_resolve_ambiguousFirstName_staysNameOnly() {
-        // Two Rahuls globally → first name is ambiguous → must NOT guess.
+        // Two Morgans globally → first name is ambiguous → must NOT guess.
         let dir = FactContactDirectory.build(
-            rows: [(id: 1, name: "Rahul Raj", count: 5), (id: 2, name: "Rahul Singh", count: 5)],
+            rows: [(id: 1, name: "Morgan Raj", count: 5), (id: 2, name: "Morgan Singh", count: 5)],
             dmContacts: []
         )
-        let r = FactEntityResolver.resolve(subject: "Rahul", predicate: .iOwe,
+        let r = FactEntityResolver.resolve(subject: "Morgan", predicate: .iOwe,
                                            chat: groupChat(), myUserId: 1, directory: dir)
         XCTAssertNil(r.personId)
     }
@@ -164,7 +164,7 @@ final class ContextLayerTests: XCTestCase {
 
     // MARK: - Extraction parser
 
-    private func snippet(id: Int64, sender: String = "Rahul", text: String, at seconds: TimeInterval = 100) -> MessageSnippet {
+    private func snippet(id: Int64, sender: String = "Morgan", text: String, at seconds: TimeInterval = 100) -> MessageSnippet {
         MessageSnippet(messageId: id, senderFirstName: sender, text: text,
                        relativeTimestamp: "now", chatId: 7, chatName: "Chat",
                        date: Date(timeIntervalSince1970: seconds))
@@ -215,14 +215,14 @@ final class ContextLayerTests: XCTestCase {
     }
 
     func test_parse_buildsDraftFromFact_withPerFactProvenance() throws {
-        let json = #"{"facts":[{"subject":"Rahul","predicate":"owes_me","object":"the invoice","sourceMsg":1,"confidence":0.8,"evidence":"send the invoice"}],"resolvedLoops":[]}"#
+        let json = #"{"facts":[{"subject":"Morgan","predicate":"owes_me","object":"the invoice","sourceMsg":1,"confidence":0.8,"evidence":"send the invoice"}],"resolvedLoops":[]}"#
         let messages = [snippet(id: 42, text: "send the invoice", at: 50)]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: [],
                                                     validFrom: Date(timeIntervalSince1970: 100),
                                                     messages: messages)
         XCTAssertEqual(result.drafts.count, 1)
         let d = try XCTUnwrap(result.drafts.first)
-        XCTAssertEqual(d.subjectEntity, "Rahul")
+        XCTAssertEqual(d.subjectEntity, "Morgan")
         XCTAssertEqual(d.predicate, .owesMe)
         XCTAssertEqual(d.objectText, "the invoice")
         XCTAssertEqual(d.sourceChatId, 7)
@@ -234,7 +234,7 @@ final class ContextLayerTests: XCTestCase {
     /// A fact with no valid [N] and no evidence matching a real message must be
     /// DROPPED — every surfaced loop has verifiable provenance.
     func test_parse_dropsFact_withUnverifiableProvenance() throws {
-        let json = #"{"facts":[{"subject":"Rahul","predicate":"owes_me","object":"the invoice","evidence":"Previous context"}],"resolvedLoops":[]}"#
+        let json = #"{"facts":[{"subject":"Morgan","predicate":"owes_me","object":"the invoice","evidence":"Previous context"}],"resolvedLoops":[]}"#
         let messages = [snippet(id: 42, text: "totally unrelated message here")]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: [],
                                                     validFrom: Date(timeIntervalSince1970: 0),
@@ -245,8 +245,8 @@ final class ContextLayerTests: XCTestCase {
     /// Review round 2, finding 1: a loop already open in the chat is a
     /// re-emission → dropped (keeps the original anchor)…
     func test_parse_dropsReEmissionOfOpenLoop() throws {
-        let loops = [openLoop(fingerprint: "fp-A", subject: "Rahul", object: "the invoice")]
-        let json = #"{"facts":[{"subject":"Rahul","predicate":"i_owe","object":"the invoice","sourceMsg":1,"evidence":"otp 123456"}],"resolvedLoops":[]}"#
+        let loops = [openLoop(fingerprint: "fp-A", subject: "Morgan", object: "the invoice")]
+        let json = #"{"facts":[{"subject":"Morgan","predicate":"i_owe","object":"the invoice","sourceMsg":1,"evidence":"otp 123456"}],"resolvedLoops":[]}"#
         let messages = [snippet(id: 9, text: "otp 123456")]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: loops,
                                                     validFrom: Date(timeIntervalSince1970: 0),
@@ -256,8 +256,8 @@ final class ContextLayerTests: XCTestCase {
 
     /// …but a loop the SAME response closes is a legitimate re-ask and survives.
     func test_parse_keepsReAsk_whenSameResponseClosesTheLoop() throws {
-        let loops = [openLoop(fingerprint: "fp-A", subject: "Rahul", object: "the invoice")]
-        let json = #"{"facts":[{"subject":"Rahul","predicate":"i_owe","object":"the invoice","sourceMsg":2,"evidence":"now the April invoice please"}],"resolvedLoops":[1]}"#
+        let loops = [openLoop(fingerprint: "fp-A", subject: "Morgan", object: "the invoice")]
+        let json = #"{"facts":[{"subject":"Morgan","predicate":"i_owe","object":"the invoice","sourceMsg":2,"evidence":"now the April invoice please"}],"resolvedLoops":[1]}"#
         let messages = [snippet(id: 1, sender: "[ME]", text: "paid the March invoice"),
                         snippet(id: 2, text: "now the April invoice please")]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: loops,
@@ -281,7 +281,7 @@ final class ContextLayerTests: XCTestCase {
 
     /// Subject drift me↔counterparty on the same loop IS a re-emission, dropped.
     func test_parse_dropsReEmission_withSubjectDriftedToMe() throws {
-        let loops = [openLoop(fingerprint: "fp-A", subject: "Rahul", object: "the invoice")]
+        let loops = [openLoop(fingerprint: "fp-A", subject: "Morgan", object: "the invoice")]
         let json = #"{"facts":[{"subject":"me","predicate":"i_owe","object":"the invoice","sourceMsg":1,"evidence":"anything"}],"resolvedLoops":[]}"#
         let messages = [snippet(id: 9, text: "anything")]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: loops,
@@ -293,7 +293,7 @@ final class ContextLayerTests: XCTestCase {
     /// Review round 2, finding 5a: a cited [N] whose message is clearly unrelated
     /// to the quoted evidence is a mis-cite → re-resolved from the evidence text.
     func test_parse_reanchorsMiscitedSourceMsg_toEvidenceMatch() throws {
-        let json = #"{"facts":[{"subject":"Rahul","predicate":"owes_me","object":"the deck","sourceMsg":1,"evidence":"can you send the deck tomorrow?"}],"resolvedLoops":[]}"#
+        let json = #"{"facts":[{"subject":"Morgan","predicate":"owes_me","object":"the deck","sourceMsg":1,"evidence":"can you send the deck tomorrow?"}],"resolvedLoops":[]}"#
         let messages = [snippet(id: 10, text: "520370", at: 10),
                         snippet(id: 20, text: "can you send the deck tomorrow?", at: 20)]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: [],
@@ -307,9 +307,9 @@ final class ContextLayerTests: XCTestCase {
     /// A follow-up ping on an open loop reports as chasedLoops: mapped to the
     /// loop's fingerprint + anchored on the CHASE message (id + text + date).
     func test_parse_chasedLoop_mapsToFingerprintAndChaseMessage() throws {
-        let loops = [openLoop(fingerprint: "fp-A", subject: "Akhil", object: "the logic help")]
+        let loops = [openLoop(fingerprint: "fp-A", subject: "Alex", object: "the logic help")]
         let json = #"{"facts":[],"resolvedLoops":[],"chasedLoops":[{"loop":1,"sourceMsg":1}]}"#
-        let messages = [snippet(id: 99, sender: "Akhil", text: "wen free tonight", at: 500)]
+        let messages = [snippet(id: 99, sender: "Alex", text: "wen free tonight", at: 500)]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: loops,
                                                     validFrom: Date(timeIntervalSince1970: 0),
                                                     messages: messages)
@@ -325,7 +325,7 @@ final class ContextLayerTests: XCTestCase {
         let loops = [openLoop(fingerprint: "fp-A"), openLoop(fingerprint: "fp-B", object: "p")]
         let json = #"{"facts":[],"resolvedLoops":[2],"chasedLoops":[{"loop":1,"sourceMsg":1},{"loop":2,"sourceMsg":2}]}"#
         let messages = [snippet(id: 1, sender: "[ME]", text: "chasing my own thing"),
-                        snippet(id: 2, sender: "Akhil", text: "any update on p?")]
+                        snippet(id: 2, sender: "Alex", text: "any update on p?")]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: loops,
                                                     validFrom: Date(timeIntervalSince1970: 0),
                                                     messages: messages)
@@ -339,7 +339,7 @@ final class ContextLayerTests: XCTestCase {
     func test_parse_chasedLoop_rejectsOwesMeTarget() throws {
         let loops = [openLoop(fingerprint: "fp-owes", predicate: .owesMe)]
         let json = #"{"facts":[],"resolvedLoops":[],"chasedLoops":[{"loop":1,"sourceMsg":1}]}"#
-        let messages = [snippet(id: 5, sender: "Akhil", text: "wen free tonight")]
+        let messages = [snippet(id: 5, sender: "Alex", text: "wen free tonight")]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: loops,
                                                     validFrom: Date(timeIntervalSince1970: 0),
                                                     messages: messages)
@@ -349,7 +349,7 @@ final class ContextLayerTests: XCTestCase {
     /// Review round 2, finding 5b: a short filler message must never win the
     /// substring fallback ("ok" is inside "book the hotel").
     func test_parse_fillerMessage_neverAnchorsViaSubstring() throws {
-        let json = #"{"facts":[{"subject":"Rahul","predicate":"owes_me","object":"the hotel","evidence":"Can you book the hotel"}],"resolvedLoops":[]}"#
+        let json = #"{"facts":[{"subject":"Morgan","predicate":"owes_me","object":"the hotel","evidence":"Can you book the hotel"}],"resolvedLoops":[]}"#
         let messages = [snippet(id: 10, text: "ok", at: 10),
                         snippet(id: 20, text: "Can you book the hotel?", at: 20)]
         let result = try FactExtractionParser.parse(json, chatId: 7, openLoops: [],

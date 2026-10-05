@@ -2,10 +2,10 @@
   "name": "product_prompt_oracle_v1",
   "notes": "Main-thread GPT-5.4 benchmark sheet for product-style user inputs across all current routing families.",
   "entries": [
-    {"id": "exact_01", "query": "Where did I share my wallet address with Rahul?", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Exact artifact recovery with recipient context."},
+    {"id": "exact_01", "query": "Where did I share my wallet address with Morgan?", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Exact artifact recovery with recipient context."},
     {"id": "exact_02", "query": "Find the link I sent for the deck last week", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Recover a specific shared link/message artifact."},
     {"id": "exact_03", "query": "Which chat did I drop firstdollar.com in?", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Domain-level exact artifact lookup."},
-    {"id": "exact_04", "query": "Where did I paste the @akhil_bvs handle?", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Handle recovery should stay literal."},
+    {"id": "exact_04", "query": "Where did I paste the @alex_bvs handle?", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Handle recovery should stay literal."},
     {"id": "exact_05", "query": "Locate the contract address I shared with the builder group", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Contract address plus recipient/group context."},
     {"id": "exact_06", "query": "Find the tx hash I sent to the team", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Transaction hash recovery is literal lookup."},
     {"id": "exact_07", "query": "Where did I send that 0x wallet for onboarding?", "family": "exact_lookup", "preferredEngine": "message_lookup", "runtimeMode": "message_search", "why": "Address-like token with send/share intent."},
@@ -35,13 +35,13 @@
     {"id": "reply_09", "query": "Who did I promise to get back to?", "family": "reply_queue", "preferredEngine": "reply_triage", "runtimeMode": "agentic_search", "why": "Promise/follow-up ownership question."},
     {"id": "reply_10", "query": "What is still sitting unread and waiting on my reply?", "family": "reply_queue", "preferredEngine": "reply_triage", "runtimeMode": "agentic_search", "why": "Unread + obligation phrasing should still route correctly."},
 
-    {"id": "summary_01", "query": "Can you recap what I missed in the Rahul chat?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Bounded recap request."},
-    {"id": "summary_02", "query": "What did we decide with Maaz?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Decision recap question."},
-    {"id": "summary_03", "query": "Catch me up on the First Dollar thread.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Thread-level synthesis request."},
-    {"id": "summary_04", "query": "Summarize the latest context from the Deeksha conversation.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Person/chat summary."},
-    {"id": "summary_05", "query": "Give me a quick recap of my chats with Akhil.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Cross-message synthesis for one person."},
-    {"id": "summary_06", "query": "What are the key takeaways from the last week with Piyush?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Time-bounded synthesis."},
-    {"id": "summary_07", "query": "Summarize my chats with Rahul from yesterday.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Time-bounded person summary."},
+    {"id": "summary_01", "query": "Can you recap what I missed in the Morgan chat?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Bounded recap request."},
+    {"id": "summary_02", "query": "What did we decide with Taylor?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Decision recap question."},
+    {"id": "summary_03", "query": "Catch me up on the Project Cedar thread.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Thread-level synthesis request."},
+    {"id": "summary_04", "query": "Summarize the latest context from the Sophie conversation.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Person/chat summary."},
+    {"id": "summary_05", "query": "Give me a quick recap of my chats with Alex.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Cross-message synthesis for one person."},
+    {"id": "summary_06", "query": "What are the key takeaways from the last week with Casey?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Time-bounded synthesis."},
+    {"id": "summary_07", "query": "Summarize my chats with Morgan from yesterday.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Time-bounded person summary."},
     {"id": "summary_08", "query": "Give me the latest context on the launch planning thread.", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Summarize current state of a thread/topic."},
     {"id": "summary_09", "query": "What did we decide in the partnership chat last Friday?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Decision recap with explicit time reference."},
     {"id": "summary_10", "query": "What’s the latest context on the onboarding project?", "family": "summary", "preferredEngine": "summarize", "runtimeMode": "summary_search", "why": "Project-oriented synthesis, not just topic retrieval."},
@@ -55,6 +55,6 @@
     {"id": "relationship_07", "query": "Which contacts haven’t replied in a while?", "family": "relationship", "preferredEngine": "graph_crm", "runtimeMode": "unsupported", "why": "Relationship stale-ness, not immediate reply queue."},
     {"id": "relationship_08", "query": "Who are the best leads in my network right now?", "family": "relationship", "preferredEngine": "graph_crm", "runtimeMode": "unsupported", "why": "Lead quality/CRM state question."},
     {"id": "relationship_09", "query": "Which relationships are currently warm but not active?", "family": "relationship", "preferredEngine": "graph_crm", "runtimeMode": "unsupported", "why": "Relationship state rollup."},
-    {"id": "relationship_10", "query": "What is the current state of my relationship with Rahul?", "family": "relationship", "preferredEngine": "graph_crm", "runtimeMode": "unsupported", "why": "Direct relationship-state question."}
+    {"id": "relationship_10", "query": "What is the current state of my relationship with Morgan?", "family": "relationship", "preferredEngine": "graph_crm", "runtimeMode": "unsupported", "why": "Direct relationship-state question."}
   ]
 }

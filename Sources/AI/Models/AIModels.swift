@@ -293,12 +293,14 @@ struct AIProviderConfig {
     enum ProviderType: String, CaseIterable, Sendable {
         case claude = "Claude"
         case openai = "OpenAI"
+        case chatgpt = "ChatGPT"
         case none = "None"
 
         var defaultModel: String {
             switch self {
             case .claude: return AppConstants.AI.defaultClaudeModel
             case .openai: return AppConstants.AI.defaultOpenAIModel
+            case .chatgpt: return ""
             case .none: return ""
             }
         }

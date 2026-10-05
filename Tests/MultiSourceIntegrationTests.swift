@@ -79,8 +79,8 @@ final class MultiSourceIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(
             GmailPresentation.preview(
-                subject: "Security alert for pratyush@pidgy.chat",
-                messageText: "Security alert for pratyush@pidgy.chat\n\nThis is a copy of a security alert."
+                subject: "Security alert for sam@pidgy.chat",
+                messageText: "Security alert for sam@pidgy.chat\n\nThis is a copy of a security alert."
             ),
             "This is a copy of a security alert."
         )
@@ -215,14 +215,14 @@ final class MultiSourceIntegrationTests: XCTestCase {
 
     func testWhatsAppParserHandlesMultilineAndOutgoingIdentity() throws {
         let export = """
-        8/3/2026, 9:14 PM - Pratyush: First line
+        8/3/2026, 9:14 PM - Sam: First line
         continuation
         8/3/2026, 9:15 PM - Maya: Reply
         """
         let parsed = try WhatsAppExportParser.parse(
             export,
             fileName: "WhatsApp Chat with Maya.txt",
-            ownerName: "Pratyush"
+            ownerName: "Sam"
         )
         XCTAssertEqual(parsed.conversation.title, "Maya")
         XCTAssertEqual(parsed.messages.count, 2)

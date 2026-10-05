@@ -14,8 +14,12 @@ enum KeychainManager {
         case aiProviderType = "com.pidgy.aiProviderType"
         case aiApiKeyOpenAI = "com.pidgy.aiApiKey.openai"
         case aiApiKeyClaude = "com.pidgy.aiApiKey.claude"
+        case aiApiKeyTypeSafe = "com.pidgy.aiApiKey.typesafe"
         case aiModelOpenAI = "com.pidgy.aiModel.openai"
         case aiModelClaude = "com.pidgy.aiModel.claude"
+        case aiModelChatGPT = "com.pidgy.aiModel.chatgpt"
+        case chatGPTAccounts = "com.pidgy.chatgpt.accounts.v1"
+        case chatGPTHostID = "com.pidgy.chatgpt.hostID"
         // BYOK custom base URL for the OpenAI-compatible client (Gemini, xAI,
         // Groq, OpenRouter, custom). Empty/absent → api.openai.com.
         case aiBaseURLOpenAI = "com.pidgy.aiBaseURL.openai"
@@ -76,6 +80,8 @@ enum KeychainManager {
         .aiApiKey,
         .aiApiKeyOpenAI,
         .aiApiKeyClaude,
+        .aiApiKeyTypeSafe,
+        .chatGPTAccounts,
         .gmailAccessToken,
         .gmailRefreshToken,
         .gmailAccounts,

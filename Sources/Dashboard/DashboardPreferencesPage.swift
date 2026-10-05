@@ -43,6 +43,10 @@ struct DashboardPreferencesPage: View {
     @State private var aiStatus: DashboardPreferenceStatus?
     @State private var isTestingConnection = false
     @State private var testConnectionStatus: DashboardPreferenceStatus?
+    @State private var typeSafeKey = ""
+    @State private var typeSafeStatus: DashboardPreferenceStatus?
+    @State private var isTestingTypeSafe = false
+    @State private var typeSafeBenchmarkReport: String?
     @State private var usageOverview: AIUsageOverview = .empty
     /// Live counts for the Memory page headline (facts / open loops / chats
     /// read). Loaded when the page opens; nil until then so tiles render 0
@@ -520,7 +524,17 @@ struct DashboardPreferencesPage: View {
 
     private var accountPage: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PrefSection(topPadding: 0, bottomBorder: false) {
+            if AccountService.isConfigured {
+                PrefSection(topPadding: 0) {
+                    PrefSectionHead(
+                        title: "Account",
+                        subtitle: "Who you are across Macs — invites, referrals, and your plan follow this. Never your messages."
+                    )
+                    PidgyAccountRow()
+                }
+            }
+
+            PrefSection(topPadding: AccountService.isConfigured ? 24 : 0, bottomBorder: false) {
                 PrefSectionHead(
                     title: "Connections",
                     subtitle: "Read-only sources. Pidgy keeps replies and tasks together."
@@ -955,6 +969,8 @@ struct DashboardPreferencesPage: View {
 
     private var aiPage: some View {
         VStack(alignment: .leading, spacing: 0) {
+            ChatGPTConnectionView()
+                .padding(.bottom, 18)
             if BillingGate.showBillingUI {
                 planSection
                 // The provider/key block only matters on BYOK; on the
@@ -970,8 +986,90 @@ struct DashboardPreferencesPage: View {
                 // configures it right here — exactly the 1.0.14 behaviour.
                 aiProviderSection
             }
+            typeSafeSection.disabled(aiService.providerType == .chatgpt)
             usageSection
         }
+    }
+
+    private var typeSafeSection: some View {
+        PrefSection {
+            PrefSectionHead(
+                title: "TypeSafe · experimental",
+                subtitle: aiService.providerType == .chatgpt
+                    ? "Disabled while using your ChatGPT plan. TypeSafe is billed separately."
+                    : "Fast decisions with Jev. Your current model still writes summaries and replies."
+            )
+            PrefField(
+                label: aiService.isTypeSafeEnabled ? "Connected · jev-1.13.0" : "API key",
+                hint: "Uses TypeSafe for quick search matches, summary evidence, to-dos and image-text classification. Search text, candidate chat names and matching message snippets go to TypeSafe while typing. Your current model handles full search planning and writes summaries."
+            ) {
+                PrefMinInput(text: $typeSafeKey, placeholder: aiService.isTypeSafeEnabled ? "Replace TypeSafe key" : "TypeSafe API key", isSecure: true, monospaced: true)
+            }
+            PrefField(
+                label: "$0.042 / million input tokens",
+                hint: "Output is free. At 1,000 input tokens each, 10,000 decisions cost $0.42. Fallback calls cost extra.",
+                right: {
+                    HStack(spacing: 10) {
+                        if isTestingTypeSafe { ProgressView().controlSize(.small) }
+                        PrefGhostButton(title: "Test & enable", systemImage: "bolt") {
+                            Task { await connectTypeSafe() }
+                        }
+                        .disabled(isTestingTypeSafe || typeSafeKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if aiService.isTypeSafeEnabled {
+                            PrefGhostButton(title: "Disconnect", systemImage: "xmark", tone: .danger) {
+                                do {
+                                    try aiService.disableTypeSafe()
+                                    typeSafeStatus = .success("Disconnected")
+                                    typeSafeBenchmarkReport = nil
+                                    typeSafeKey = ""
+                                } catch { typeSafeStatus = .error(error.localizedDescription) }
+                            }
+                            .disabled(isTestingTypeSafe)
+                        }
+                    }
+                }
+            )
+            if let typeSafeStatus {
+                DashboardPreferenceInlineStatus(status: typeSafeStatus)
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+            }
+            PrefField(
+                label: "Compare with current model",
+                hint: "Runs 6 synthetic to-dos through both models, 3 times. Shows latency, accuracy and Jev cost. Uses both API balances.",
+                right: {
+                    PrefGhostButton(title: "Run comparison", systemImage: "speedometer") {
+                        Task { await compareTypeSafe() }
+                    }
+                    .disabled(isTestingTypeSafe || !aiService.isTypeSafeEnabled || !aiService.isConfigured)
+                }
+            )
+            if let typeSafeBenchmarkReport {
+                Text(typeSafeBenchmarkReport)
+                    .font(.system(size: 12)).foregroundStyle(Color.Pidgy.fg2)
+                    .textSelection(.enabled).padding(16)
+            }
+        }
+    }
+
+    private func connectTypeSafe() async {
+        isTestingTypeSafe = true
+        typeSafeStatus = nil
+        typeSafeBenchmarkReport = nil
+        defer { isTestingTypeSafe = false }
+        do {
+            let result = try await aiService.enableTypeSafe(apiKey: typeSafeKey)
+            typeSafeKey = ""
+            typeSafeStatus = .success("Connected · \(Int(result.milliseconds)) ms")
+        } catch { typeSafeStatus = .error(error.localizedDescription) }
+    }
+
+    private func compareTypeSafe() async {
+        isTestingTypeSafe = true
+        typeSafeBenchmarkReport = nil
+        typeSafeStatus = nil
+        defer { isTestingTypeSafe = false }
+        do { typeSafeBenchmarkReport = try await aiService.benchmarkTypeSafe() }
+        catch { typeSafeStatus = .error(error.localizedDescription) }
     }
 
     private var managedAINote: some View {
@@ -991,7 +1089,7 @@ struct DashboardPreferencesPage: View {
         VStack(alignment: .leading, spacing: 0) {
             PrefSection {
                 PrefSectionHead(
-                    title: "Provider",
+                    title: aiService.providerType == .chatgpt ? "Use an API key instead" : "Provider",
                     subtitle: "Your key, used for reply queue, tasks, summaries, and semantic search"
                 ) {
                     Picker("", selection: $selectedBYOKProvider) {
@@ -2673,4 +2771,94 @@ struct DashboardPreferencesPage: View {
         return "\(Int((seconds / 3_600).rounded()))h"
     }
 
+}
+
+
+// MARK: - Account row (Clerk)
+
+/// Signed-in identity with sign-out, or the two provider buttons when
+/// signed out. Mirrors the onboarding account turn in Preferences clothing.
+struct PidgyAccountRow: View {
+    @ObservedObject private var account = AccountService.shared
+    @State private var errorMessage: String?
+    @State private var activeProvider: AccountService.Provider?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                if let profile = account.profile {
+                    AccountAvatar(profile: profile, size: 36)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(profile.label)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        if let email = profile.email, email != profile.label {
+                            Text(email)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Color.Pidgy.fg3)
+                        }
+                    }
+                    Spacer()
+                    if account.isBusy {
+                        ProgressView().controlSize(.small)
+                    }
+                    PrefGhostButton(title: "Sign out", systemImage: "rectangle.portrait.and.arrow.right") {
+                        Task { await account.signOut() }
+                    }
+                    .disabled(account.isBusy)
+                } else {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(Color.Pidgy.fg3)
+                        .frame(width: 36, height: 36)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Not signed in")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.Pidgy.fg1)
+                        Text("Sign in to keep your invites and plan when you switch Macs.")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Color.Pidgy.fg3)
+                    }
+                    Spacer()
+                    ForEach(AccountService.Provider.allCases) { provider in
+                        PrefGhostButton(
+                            title: provider == .google ? "Google" : "Apple",
+                            systemImage: provider == .apple ? "apple.logo" : "g.circle"
+                        ) {
+                            Task { await signIn(with: provider) }
+                        }
+                        .disabled(activeProvider != nil)
+                    }
+                }
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.Pidgy.bg1)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.Pidgy.border1)
+                    )
+            )
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color.Pidgy.danger)
+            }
+        }
+    }
+
+    private func signIn(with provider: AccountService.Provider) async {
+        errorMessage = nil
+        activeProvider = provider
+        defer { activeProvider = nil }
+        do {
+            try await account.signIn(with: provider)
+        } catch let error as AccountService.SignInError {
+            if error != .cancelled { errorMessage = error.errorDescription }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 }

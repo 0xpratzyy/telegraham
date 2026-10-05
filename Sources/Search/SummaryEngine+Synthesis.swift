@@ -70,7 +70,7 @@ extension SummaryEngine {
                 MessageSnippet(
                     messageId: 0,
                     senderFirstName: "extract",
-                    text: extract.text,
+                    text: PromptSafety.fence(extract.text),
                     relativeTimestamp: "summary",
                     chatId: extract.chat.id,
                     chatName: extract.chat.title
@@ -79,7 +79,7 @@ extension SummaryEngine {
             let synthesisPrompt = QuerySummaryPrompt.systemPrompt(
                 query: query,
                 scopeDescription: scopeDescription
-            )
+            ) + PromptSafety.untrustedContentClause
             do {
                 let synthesized = try await aiService.summarizeSnippets(
                     synthesisInput,
@@ -123,12 +123,21 @@ extension SummaryEngine {
     private func runPerChatExtraction(
         query: String,
         perChatDigest: [PerChatDigest],
-        aiService: AIService
+        aiService: AIService,
+        allowTypeSafe: Bool = true
     ) async -> [(chat: TGChat, text: String)] {
         // Entitlement is gated ONCE here — the task group below captures the
         // provider directly (Sendable snapshot for parallel map calls), which
         // would otherwise bypass AIService's paid-usage choke point.
         guard (try? aiService.requireAIEntitlement()) != nil else { return [] }
+        // Replace the per-chat writing step with typed relevance decisions for
+        // short complete windows. The final writer still sees all relevant text.
+        let evidenceGroups = perChatDigest.map { digest in
+            TypeSafeEvidenceGroup(id: digest.candidate.chat.id, title: digest.candidate.chat.title,
+                                  messages: MessageSnippet.fromMessages(digest.messages, chatTitle: digest.candidate.chat.title))
+        }
+        let evidence = allowTypeSafe ? await aiService.selectSummaryEvidence(query: query, groups: evidenceGroups) : [:]
+        guard !Task.isCancelled else { return [] }
         let provider = aiService.provider
         let indexedResults: [(Int, TGChat, String?)] =
             await withTaskGroup(of: (Int, TGChat, String?).self) { group in
@@ -140,6 +149,15 @@ extension SummaryEngine {
                     )
                     guard !snippets.isEmpty else {
                         group.addTask { (index, chat, nil) }
+                        continue
+                    }
+                    if let decision = evidence[chat.id] {
+                        switch decision {
+                        case .verbatim(let transcript):
+                            group.addTask { (index, chat, transcript) }
+                        case .unrelated:
+                            group.addTask { (index, chat, nil) }
+                        }
                         continue
                     }
                     let prompt = PerChatExtractionPrompt.systemPrompt(
@@ -170,12 +188,25 @@ extension SummaryEngine {
                 }
                 return collected
             }
-        return indexedResults
+        let results = indexedResults
             .sorted { $0.0 < $1.0 }
             .compactMap { entry in
                 guard let text = entry.2 else { return nil }
                 return (entry.1, text)
+            } as [(TGChat, String)]
+        // Never let the final provider's character budget silently trim a
+        // chat because verbatim evidence is larger than a generated extract.
+        if !evidence.isEmpty {
+            let payload = results.map { chat, text in
+                MessageSnippet(messageId: 0, senderFirstName: "extract", text: PromptSafety.fence(text),
+                               relativeTimestamp: "summary", chatId: chat.id, chatName: chat.title)
             }
+            if MessageSnippet.truncateToTokenBudget(payload).count != payload.count {
+                return await runPerChatExtraction(query: query, perChatDigest: perChatDigest,
+                                                 aiService: aiService, allowTypeSafe: false)
+            }
+        }
+        return results
     }
 
     /// Old single-pass fallback used when AI isn't configured. Pulls

@@ -174,8 +174,12 @@ enum PreferencesResetPlan {
         .aiProviderType,
         .aiApiKeyOpenAI,
         .aiApiKeyClaude,
+        .aiApiKeyTypeSafe,
         .aiModelOpenAI,
         .aiModelClaude,
+        .aiModelChatGPT,
+        .chatGPTAccounts,
+        .chatGPTHostID,
         .aiApiKey,
         .aiModel,
         .gmailAccessToken,
@@ -192,6 +196,7 @@ enum PreferencesResetPlan {
     ]
 
     static let userDefaultsKeysToDelete: [String] = [
+        "pidgy.chatgpt.backgroundAI",
         AppConstants.Preferences.includeBotsInAISearchKey,
         AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
         AppConstants.Preferences.didCompleteOnboardingKey,
@@ -235,6 +240,7 @@ struct PreferencesResetService {
         aiService: AIService
     ) async {
         // Synchronous, fast: keychain + UserDefaults clears.
+        ChatGPTService.shared.resetLocalState()
         for key in PreferencesResetPlan.credentialKeysToDelete {
             try? KeychainManager.delete(for: key)
         }

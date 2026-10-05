@@ -11,6 +11,7 @@ struct LauncherView: View {
     @EnvironmentObject var registry: SourceRegistry
     @ObservedObject var photoManager = ChatPhotoManager.shared
     @StateObject private var searchCoordinator = SearchCoordinator()
+    @StateObject private var predictiveSearch = PredictiveSearch()
     @StateObject private var attentionStore = AttentionStore.shared
     @StateObject private var taskIndex = TaskIndexCoordinator.shared
     @AppStorage(AppConstants.Preferences.includeBotsInAISearchKey) private var includeBotsInAISearch = false
@@ -65,8 +66,12 @@ struct LauncherView: View {
 
     private var searchResultChatIds: Set<Int64> { searchCoordinator.searchResultChatIds }
     private var isSearching: Bool { searchCoordinator.isSearching }
-    private var aiResults: [AISearchResult] { searchCoordinator.aiResults }
-    private var aiSearchMode: QueryIntent? { searchCoordinator.aiSearchMode }
+    private var showsQuickMatches: Bool {
+        searchCoordinator.aiResults.isEmpty && searchCoordinator.summaryOutput == nil
+            && searchCoordinator.aiSearchError == nil && !predictiveSearch.results.isEmpty
+    }
+    private var aiResults: [AISearchResult] { showsQuickMatches ? predictiveSearch.results : searchCoordinator.aiResults }
+    private var aiSearchMode: QueryIntent? { showsQuickMatches ? .semanticSearch : searchCoordinator.aiSearchMode }
     private var isAISearching: Bool { searchCoordinator.isAISearching }
     private var aiSearchError: String? { searchCoordinator.aiSearchError }
     private var currentQuerySpec: QuerySpec? { searchCoordinator.currentQuerySpec }
@@ -227,7 +232,7 @@ struct LauncherView: View {
 
     // MARK: - Body
 
-    var body: some View {
+    private var launcherContent: some View {
         VStack(spacing: 0) {
             if telegramService.authState == .ready {
                 if chatMode {
@@ -268,6 +273,10 @@ struct LauncherView: View {
         .animation(PidgyMotion.easeOut, value: chatMode)
         .background(Color.Pidgy.bg1)
         .ignoresSafeArea()
+    }
+
+    private var launcherSearchLifecycle: some View {
+        launcherContent
         .onAppear {
             isSearchFocused = true
             selectedIndex = 0
@@ -427,6 +436,22 @@ struct LauncherView: View {
                 }
             }
         }
+    }
+
+    var body: some View {
+        launcherSearchLifecycle
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if aiService.providerType == .chatgpt {
+                HStack(spacing: 8) {
+                    Text("Using ChatGPT plan")
+                    Link("Manage usage", destination: URL(string: "https://chatgpt.com/settings/usage")!)
+                }
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .padding(.horizontal, 18).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.Pidgy.bg1)
+            }
+        }
         .onChange(of: activeFilter) {
             selectedIndex = 0
             refreshChatPreviews()
@@ -434,7 +459,15 @@ struct LauncherView: View {
             searchCoordinator.cancelSearch()
             searchCoordinator.clearAIState()
             pipelineSubFilter = nil
+            triggerSearch()
         }
+        .onChange(of: activeSource) {
+            selectedIndex = 0
+            triggerSearch()
+        }
+        .onChange(of: aiService.isTypeSafeEnabled) { triggerSearch() }
+        .onChange(of: chatMode) { if chatMode { predictiveSearch.clear() } }
+        .onDisappear { predictiveSearch.clear() }
         .onChange(of: includeBotsInAISearch) {
             telegramService.scheduleBotMetadataWarm(
                 for: telegramService.visibleChats,
@@ -445,14 +478,17 @@ struct LauncherView: View {
         }
         .onChange(of: pipelineSubFilter) {
             refreshChatPreviews()
+            triggerSearch()
         }
         // Keyboard navigation from FloatingPanel
         .onReceive(NotificationCenter.default.publisher(for: .launcherArrowDown)) { _ in
+            freezeQuickMatchOrder()
             if !chatMode, selectedIndex < navigableCount - 1 {
                 selectedIndex += 1
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .launcherArrowUp)) { _ in
+            freezeQuickMatchOrder()
             if !chatMode, selectedIndex > 0 {
                 selectedIndex -= 1
             }
@@ -887,7 +923,9 @@ struct LauncherView: View {
     // The AI/chat results.
     @ViewBuilder
     private var searchResultsBody: some View {
-        if isAISearching {
+        if showsQuickMatches {
+            aiResultsList
+        } else if isAISearching {
             VStack(spacing: 0) {
                 if !aiResults.isEmpty {
                     aiResultsList
@@ -1015,7 +1053,7 @@ struct LauncherView: View {
                 LazyVStack(spacing: 2) {
                     let totalCount = aiResults.count
 
-                    Text("\(totalCount) result\(totalCount == 1 ? "" : "s")")
+                    Text(showsQuickMatches ? quickMatchLabel : "\(totalCount) result\(totalCount == 1 ? "" : "s")")
                         .font(Font.Pidgy.monoSm)
                         .foregroundStyle(Color.Pidgy.fg3)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1181,6 +1219,7 @@ struct LauncherView: View {
     /// .onSubmit (field focused) and the panel's keyDown notification
     /// (field not focused). Deduped in case a Return ever reaches both.
     private func handleEnter() {
+        freezeQuickMatchOrder()
         let now = Date()
         guard now.timeIntervalSince(lastEnterAt) > 0.15 else { return }
         lastEnterAt = now
@@ -1543,6 +1582,23 @@ struct LauncherView: View {
     /// Debounced search: waits 300ms, then classifies via QueryRouter.
     /// If AI intent detected → runs AI pipeline. Otherwise → local FTS first, TDLib fallback for unindexed chats only.
     private func triggerSearch() {
+        guard !chatMode else { return }
+        let pipelineIDs = pipelineSubFilter.map { category in Set(followUpItems.filter { $0.category == category }.map(\.chat.id)) }
+        let candidates = scopedAISearchSourceChats.filter { pipelineIDs?.contains($0.id) ?? true }
+        let spec = QueryInterpreter().parse(query: searchText, now: Date(), timezone: .current, activeFilter: queryScope(for: activeFilter))
+        let permitted = aiService.isConfigured && (try? aiService.requireAIEntitlement()) != nil
+        predictiveSearch.update(query: searchText, chats: candidates, timeRange: spec.timeRange, scope: spec.scope,
+                                client: permitted ? aiService.typeSafeClient : nil, archive: { query, ids, range in
+            let expression = PredictiveSearch.archiveQuery(query)
+            guard !expression.isEmpty, !ids.isEmpty else { return [] }
+            let hits = await DatabaseManager.shared.localSearchFTSRaw(rawFTSQuery: expression, chatIds: ids, limit: 100, timeRange: range)
+            return hits.map { hit in
+                let m = hit.message
+                return TGMessage(id: m.id, chatId: m.chatId, senderId: m.senderUserId.map { .user($0) } ?? .chat(m.chatId),
+                    date: m.date, textContent: m.textContent, mediaType: m.mediaTypeRaw.flatMap(TGMessage.MediaType.init(rawValue:)),
+                    isOutgoing: m.isOutgoing, chatTitle: nil, senderName: m.senderName, source: m.source, threadRootId: m.threadRootId)
+            }.filter { range?.contains($0.date) ?? true }
+        })
         searchCoordinator.triggerSearch(
             query: searchText,
             activeScope: queryScope(for: activeFilter),
@@ -1552,6 +1608,20 @@ struct LauncherView: View {
             telegramService: telegramService,
             aiService: aiService
         )
+    }
+
+    private var quickMatchLabel: String {
+        if let milliseconds = predictiveSearch.milliseconds {
+            return "Quick matches · \(Int(milliseconds)) ms"
+        }
+        return "Quick matches"
+    }
+
+    private func freezeQuickMatchOrder() {
+        guard !chatMode, showsQuickMatches else { return }
+        predictiveSearch.freeze()
+        searchCoordinator.cancelSearch()
+        searchCoordinator.isAISearching = false
     }
 
 }

@@ -26,7 +26,9 @@ final class WhatsAppConnectionManager: ObservableObject {
     private let importer = WhatsAppLiveImportPipeline()
     private let pairedSessionKey = "pidgy.whatsapp.hasPairedSession"
 
-    private init() {}
+    init() {}
+
+    var isBridgeRunning: Bool { process?.isRunning == true }
 
     var isConnected: Bool {
         if case .connected = state { return true }
@@ -56,6 +58,7 @@ final class WhatsAppConnectionManager: ObservableObject {
 
     func connect() {
         guard ensureBridgeProcess() else { return }
+        qrCode = nil
         state = hasPairedSession ? .connecting : .pairing
         send(command: "connect")
     }
@@ -76,16 +79,22 @@ final class WhatsAppConnectionManager: ObservableObject {
 
     func stop() {
         guard let process else { return }
-        send(command: "shutdown")
-        process.standardOutput = nil
-        process.standardError = nil
+        if process.isRunning { send(command: "shutdown") }
+        // Process stream configuration is immutable after launch. Assigning
+        // standardOutput/standardError here raises NSInvalidArgumentException
+        // and AppKit cancels Quit before the shutdown callback is installed.
+        (process.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (process.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        process.terminationHandler = nil
+        try? input?.close()
+        self.process = nil
+        input = nil
         if process.isRunning {
             process.terminate()
         }
-        self.process = nil
-        input = nil
         outputBuffer.removeAll(keepingCapacity: false)
-        if isConnected || state == .connecting {
+        qrCode = nil
+        if isConnected || state == .connecting || state == .pairing {
             state = .disconnected
         }
     }
@@ -113,43 +122,53 @@ final class WhatsAppConnectionManager: ObservableObject {
             )
             try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sessionDirectoryURL.path)
 
-            let inputPipe = Pipe()
-            let outputPipe = Pipe()
-            let errorPipe = Pipe()
-            let process = Process()
-            process.executableURL = bridgeURL
-            process.arguments = ["--store", sessionDatabaseURL.path]
-            process.standardInput = inputPipe
-            process.standardOutput = outputPipe
-            process.standardError = errorPipe
-            process.terminationHandler = { [weak self] _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.process = nil
-                    self.input = nil
-                    if self.isConnected || self.state == .connecting {
-                        self.state = .disconnected
-                    }
-                }
-            }
-            outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                Task { @MainActor in self?.consume(data) }
-            }
-            errorPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty, let message = String(data: data, encoding: .utf8) else { return }
-                NSLog("WhatsApp bridge: %@", message.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
-            try process.run()
-            self.process = process
-            input = inputPipe.fileHandleForWriting
+            try launchBridge(at: bridgeURL, arguments: ["--store", sessionDatabaseURL.path])
             return true
         } catch {
             state = .failed("Could not start WhatsApp: \(error.localizedDescription)")
             return false
         }
+    }
+
+    /// Kept separate from session storage so process lifecycle can be exercised
+    /// with a local helper without connecting or changing a WhatsApp account.
+    func launchBridge(at executableURL: URL, arguments: [String]) throws {
+        guard !isBridgeRunning else { return }
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        process.terminationHandler = { [weak self] terminatedProcess in
+            Task { @MainActor in
+                guard let self, self.process === terminatedProcess else { return }
+                self.process = nil
+                self.input = nil
+                if self.isConnected || self.state == .connecting {
+                    self.state = .disconnected
+                }
+            }
+        }
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            Task { @MainActor in
+                guard let self, let process, self.process === process else { return }
+                self.consume(data)
+            }
+        }
+        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let message = String(data: data, encoding: .utf8) else { return }
+            NSLog("WhatsApp bridge: %@", message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        try process.run()
+        self.process = process
+        input = inputPipe.fileHandleForWriting
     }
 
     private func send(command: String) {

@@ -1,0 +1,10 @@
+# Private historical notes and corpus fixtures must not enter source archives.
+/docs/archive export-ignore
+/docs/superpowers export-ignore
+/docs/task-tracker.md export-ignore
+/docs/dev-workflow-notes.md export-ignore
+/evals export-ignore
+/output export-ignore
+/.codex export-ignore
+/.claude export-ignore
+/.private-evals export-ignore

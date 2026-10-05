@@ -736,7 +736,7 @@ private struct PigeonBirdView: View {
 
 // MARK: - Pigeon SVG-equivalent shape
 
-private struct PigeonMascotShape: View {
+struct PigeonMascotShape: View {
     let showFeet: Bool
     /// 0 = wings folded, ±0.5 = wings flapped. Set by the parent
     /// during arrival/leaving via withAnimation; the wing rotation

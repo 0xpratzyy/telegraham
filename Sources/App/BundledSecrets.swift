@@ -11,6 +11,10 @@
 import Foundation
 
 enum BundledSecrets {
+    /// This public-client flow is enabled only in locally hosted OSS builds.
+    static var chatGPTLocalOSS: Bool {
+        stringValue(forKey: "PidgyChatGPTLocalOSS")?.uppercased() == "YES"
+    }
     /// Telegram api_id from `PIDGY_TG_API_ID` (numeric).
     static let telegramApiId: Int32? = {
         guard let raw = stringValue(forKey: "PidgyBundledTelegramApiId"),
@@ -31,6 +35,9 @@ enum BundledSecrets {
     static let slackClientId: String? = stringValue(forKey: "PidgyBundledSlackClientId")
     static let googleClientId: String? = stringValue(forKey: "PidgyBundledGoogleClientId")
     static let googleClientSecret: String? = stringValue(forKey: "PidgyBundledGoogleClientSecret")
+    /// Clerk publishable key — public by design. Nil disables the account
+    /// layer (no sign-in step, install-id identity only).
+    static let clerkPublishableKey: String? = stringValue(forKey: "PidgyBundledClerkPublishableKey")
 
     /// AI proxy endpoint (`PIDGY_AI_PROXY_URL`) — the deployed
     /// infra/ai-proxy Worker's chat-completions URL. When present together

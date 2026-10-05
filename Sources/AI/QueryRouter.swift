@@ -4,6 +4,8 @@ import Foundation
 @MainActor
 final class QueryRouter: ObservableObject {
     private var aiProvider: AIProvider
+    private var typeSafeClient: TypeSafeClient?
+    private(set) var lastPlannerSource = "local"
     private let queryInterpreter: QueryInterpreting
     /// Planner results memoized per normalized query — retyping or re-running
     /// the same search within the TTL costs zero AI calls. Small and
@@ -22,12 +24,18 @@ final class QueryRouter: ObservableObject {
         planCache.removeAll()
     }
 
+    func updateTypeSafe(_ client: TypeSafeClient?) {
+        typeSafeClient = client
+        planCache.removeAll()
+    }
+
     func resolveQuerySpec(
         query: String,
         activeFilter: QueryScope = .all,
         timezone: TimeZone = .current,
         now: Date = Date()
     ) async -> QuerySpec {
+        lastPlannerSource = "local"
         let baseSpec = queryInterpreter.parse(
             query: query,
             now: now,
@@ -41,15 +49,27 @@ final class QueryRouter: ObservableObject {
 
         let cacheKey = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() + "|\(activeFilter.rawValue)"
         if let hit = planCache[cacheKey], Date().timeIntervalSince(hit.at) < planCacheTTL {
+            lastPlannerSource = "cache"
             return merge(baseSpec: baseSpec, plan: hit.plan, timezone: timezone, now: now)
         }
 
         do {
-            let plan = try await aiProvider.planQuery(
-                query: query,
-                activeFilter: activeFilter,
-                deterministicSpec: baseSpec
-            )
+            let plan: QueryPlannerResultDTO
+            var fastPlan: QueryPlannerResultDTO?
+            if let typeSafeClient {
+                do { fastPlan = try await typeSafeClient.planQuery(query: query, activeFilter: activeFilter, base: baseSpec) }
+                catch is CancellationError { return baseSpec }
+                catch let error as URLError where error.code == .cancelled { return baseSpec }
+                catch { /* Preserve the existing planner on provider failure. */ }
+            }
+            try Task.checkCancellation()
+            if let fastPlan {
+                plan = fastPlan
+                lastPlannerSource = "typesafe"
+            } else {
+                lastPlannerSource = typeSafeClient == nil ? "text" : "fallback"
+                plan = try await aiProvider.planQuery(query: query, activeFilter: activeFilter, deterministicSpec: baseSpec)
+            }
             planCache[cacheKey] = (plan, Date())
             if planCache.count > 60 {
                 let cutoff = Date().addingTimeInterval(-planCacheTTL)

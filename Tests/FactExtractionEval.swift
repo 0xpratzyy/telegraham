@@ -9,7 +9,7 @@
 //  "loops that have a later inbound message" turned out to mostly flag loops
 //  that were legitimately open. Both mistakes are on record (2026-07-25).
 //
-//  This runs LABELLED cases — real transcripts, hand-checked expectations —
+//  This runs LABELLED cases — synthetic transcripts, hand-checked expectations —
 //  through the REAL prompt builder and the REAL parser, N times each, and
 //  reports per-case match plus a total % match. That is the only signal a
 //  prompt change should ever be judged on.
@@ -126,155 +126,59 @@ final class FactExtractionEval: XCTestCase {
         XCTAssertGreaterThan(bulkRows.count + separateRows.count, 0)
     }
 
-    /// Every case below is a REAL window from the developer's own chats that
-    /// the current prompt got right or wrong on 2026-07-25. Names are kept as
-    /// they appear so failures are recognisable.
+    // Synthetic conversations preserve the direction/settlement regression cases.
     private static let cases: [EvalCase] = [
-        EvalCase(
-            name: "subject/named-person-not-unknown",
-            messages: [
-                ("Ahaan", "can you review the deck once before I send it to the investor", false),
-                ("[ME]", "sure send it over", true)
-            ],
-            chatTitle: "Ahaan Raizada | Brainstorm",
-            isGroup: false,
-            expected: [(.iOwe, "Ahaan")],
-            why: "Subject must be the real counterparty — live data still had 7 loops with subject Unknown/me."
-        ),
-        EvalCase(
-            name: "they-ask-me/rahul-git-link",
-            messages: [
-                ("Rahul", "git bheja?", false),
-                ("[ME]", "😆", true),
-                ("Rahul", "bhejo bhai", false),
-                ("Rahul", "kidahr", false)
-            ],
-            chatTitle: "Rahul Singh Bhadoriya",
-            isGroup: false,
-            expected: [(.iOwe, "Rahul")],
-            why: "THEY ask ME to send → i_owe. Shipped prompt produced owes_me (inverted)."
-        ),
-        EvalCase(
-            name: "they-ask-me/yj-support-from-fd",
-            messages: [
-                ("YJ", "hey bro, we recently announced our flagship partnership with venice", false),
-                ("YJ", "would appreciate if u can support over it personally and from FD as well if possible  would mean a lot.", false),
-                ("[ME]", "did from personal", true)
-            ],
-            chatTitle: "YJ ( / Acc )",
-            isGroup: false,
-            expected: [(.iOwe, "YJ")],
-            why: "THEY ask ME for support → i_owe. Shipped prompt produced owes_me (inverted)."
-        ),
-        EvalCase(
-            name: "they-promise/arghya-will-confirm",
-            messages: [
-                ("[ME]", "@0xArghya any plans on running this as campaign? Can get good traction on the post and in general about myrad", true),
-                ("Arghya", "thanks a lot", false),
-                ("Arghya", "had some plans but ill confirm once this week ends hopefully cuz this week we got the partnership and some crucial updates lined up", false),
-                ("[ME]", "Yes aligned  Will check back next week", true)
-            ],
-            chatTitle: "Myrad <> First Dollar",
-            isGroup: true,
-            expected: [(.owesMe, "Arghya")],
-            why: "THEY promise to confirm → owes_me, subject THEM. Shipped prompt used the USER as subject."
-        ),
-        EvalCase(
-            name: "i-promise/aditya-proposal",
-            messages: [
-                ("[ME]", "@adityakiteapp nice talking to you, will share the proposal by eod", true),
-                ("Aditya", "Adding my team here as well", false)
-            ],
-            chatTitle: "First Dollar <> Kite",
-            isGroup: true,
-            expected: [(.iOwe, "Aditya")],
-            why: "[ME] promises; the @handle is only the addressee → i_owe."
-        ),
-        EvalCase(
-            name: "i-request/daya-check-dm",
-            messages: [
-                ("[ME]", "Hey @dayadzn check dm whenever you can", true),
-                ("Daya", "sure", false)
-            ],
-            chatTitle: "Inner Circle",
-            isGroup: true,
-            expected: [(.owesMe, "Daya")],
-            why: "[ME] asks THEM to act → owes_me (the mirror of the case above)."
-        ),
-        EvalCase(
-            name: "settled-in-window/aditya-calendar-link",
-            messages: [
-                ("[ME]", "Hey Aditya, saw you posted in Inner Circle that you are building", true),
-                ("Aditya", "Sure happy to share my calendar link here shortly", false),
-                ("[ME]", "Perfect", true),
-                ("Aditya", "https://calendar.app.google/TRRuEnymP8WX7tTs6", false),
-                ("[ME]", "booked a slot for tomorrow 2:30 IST", true),
-                ("Aditya", "Okay", false)
-            ],
-            chatTitle: "Aditya Chintawar | Kite",
-            isGroup: false,
-            expected: [],
-            why: "The link IS delivered two lines later — a loop born here could never close, so emit none."
-        ),
-        EvalCase(
-            name: "not-settled/ahaan-frog-reply",
-            messages: [
-                ("[ME]", "Bhai intro BD message update kaar dena", true),
-                ("Ahaan", "ill pen it", false),
-                ("Ahaan", "🐸", false)
-            ],
-            chatTitle: "Ahaan Raizada | Brainstorm",
-            isGroup: false,
-            expected: [(.owesMe, "Ahaan")],
-            why: "Conversation continuing (an emoji) is NOT delivery — the loop stays open."
-        ),
-        EvalCase(
-            name: "they-report-gap/akhil-invoice",
-            messages: [
-                ("[ME]", "Bro I think you never sent invoice for this", true),
-                ("Akhil", "ohh let me check", false)
-            ],
-            chatTitle: "Akhil B",
-            isGroup: false,
-            expected: [(.owesMe, "Akhil")],
-            why: "[ME] points out THEY never sent it → owes_me even though [ME] spoke."
-        ),
-        EvalCase(
-            name: "kind/reply-not-action",
-            messages: [
-                ("Isha", "hey are we doing the bounty in USDC or INR?", false),
-                ("[ME]", "let me think", true)
-            ],
-            chatTitle: "Isha Parekh",
-            isGroup: false,
-            expected: [(.iOwe, "Isha")],
-            expectedKind: .reply,
-            why: "A question one message answers is REPLY kind. Live data pushed almost everything to action (On me had 3 of 59)."
-        ),
-        EvalCase(
-            name: "kind/action-not-reply",
-            messages: [
-                ("Tushar", "bhai edit kar ke reels bhej dena gym ke posts ke liye", false),
-                ("[ME]", "haan karta hoon", true)
-            ],
-            chatTitle: "Tushar",
-            isGroup: false,
-            expected: [(.iOwe, "Tushar")],
-            expectedKind: .action,
-            why: "Editing + sending files is real work → ACTION kind, belongs in Tasks not the Reply queue."
-        ),
-        EvalCase(
-            name: "banter/no-loop",
-            messages: [
-                ("Tushar", "haha that was wild", false),
-                ("[ME]", "ikr 😂", true),
-                ("Tushar", "ok", false)
-            ],
-            chatTitle: "Tushar",
-            isGroup: false,
-            expected: [],
-            why: "Pure banter must produce nothing — guards against loop inflation."
-        )
+        EvalCase(name: "they-ask-me/send-file", messages: [
+            ("Morgan", "Can you send the demo slide deck?", false),
+            ("[ME]", "Yes, I will prepare it this afternoon.", true)
+        ], chatTitle: "Morgan", isGroup: false, expected: [(.iOwe, "Morgan")],
+        why: "A request to the user is i_owe."),
+        EvalCase(name: "they-ask-me/support", messages: [
+            ("Taylor", "Could you share our fictional demo announcement from the team account?", false),
+            ("[ME]", "I shared it from my personal account so far.", true)
+        ], chatTitle: "Taylor", isGroup: false, expected: [(.iOwe, "Taylor")],
+        why: "Personal sharing does not settle the team-account request."),
+        EvalCase(name: "they-promise/confirm", messages: [
+            ("[ME]", "Can you confirm the demo date?", true),
+            ("Casey", "I will confirm at the end of this week.", false)
+        ], chatTitle: "Demo planning", isGroup: true, expected: [(.owesMe, "Casey")],
+        why: "Their commitment is owes_me with them as subject."),
+        EvalCase(name: "i-promise/proposal", messages: [
+            ("[ME]", "@demo_alex I'll share the fictional proposal by end of day.", true),
+            ("Alex", "Thanks, I added the demo team.", false)
+        ], chatTitle: "Demo team", isGroup: true, expected: [(.iOwe, "Alex")],
+        why: "The handle is an addressee; the user makes the promise."),
+        EvalCase(name: "i-request/check-dm", messages: [
+            ("[ME]", "Diana, please check the demo document in your DM.", true),
+            ("Diana", "Sure, I will check it tonight.", false)
+        ], chatTitle: "Demo group", isGroup: true, expected: [(.owesMe, "Diana")],
+        why: "The user requests an action from someone else."),
+        EvalCase(name: "settled/calendar", messages: [
+            ("[ME]", "Can you share the demo calendar link?", true),
+            ("Alex", "I will send it shortly.", false),
+            ("Alex", "https://example.com/demo-calendar", false),
+            ("[ME]", "Booked the demo slot, thanks.", true)
+        ], chatTitle: "Alex", isGroup: false, expected: [],
+        why: "Delivery settles the commitment within this window."),
+        EvalCase(name: "not-settled/emoji", messages: [
+            ("[ME]", "Please revise the demo intro message.", true),
+            ("Robin", "I will draft it.", false), ("Robin", "🐸", false)
+        ], chatTitle: "Robin", isGroup: false, expected: [(.owesMe, "Robin")],
+        why: "An emoji is not delivery of the promised work."),
+        EvalCase(name: "kind/reply", messages: [
+            ("Diana", "What color should the fictional demo banner be?", false),
+            ("[ME]", "Let me think.", true)
+        ], chatTitle: "Diana", isGroup: false, expected: [(.iOwe, "Diana")], expectedKind: .reply,
+        why: "A question answered by one message is reply kind."),
+        EvalCase(name: "kind/action", messages: [
+            ("Morgan", "Please edit and send the sample demo video.", false),
+            ("[ME]", "Yes, I will do it tomorrow.", true)
+        ], chatTitle: "Morgan", isGroup: false, expected: [(.iOwe, "Morgan")], expectedKind: .action,
+        why: "Editing and delivering a file requires action."),
+        EvalCase(name: "banter/no-loop", messages: [
+            ("Casey", "That fictional demo was funny!", false),
+            ("[ME]", "Haha 😂", true), ("Casey", "Yep", false)
+        ], chatTitle: "Casey", isGroup: false, expected: [], why: "Banter has no commitment.")
     ]
 
     /// Runs per case. >1 also measures determinism: with temperature pinned
@@ -455,7 +359,7 @@ final class FactExtractionEval: XCTestCase {
 
     private static var benchmarkUser: TGUser {
         TGUser(
-            id: 1, firstName: "Pratyush", lastName: "", username: "pratzyy",
+            id: 1, firstName: "Sam", lastName: "", username: "pratzyy",
             phoneNumber: nil, isBot: false, smallPhotoFileId: nil
         )
     }

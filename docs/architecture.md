@@ -176,8 +176,31 @@ dashboard entry), `LauncherSupport` (preview resolver, onboarding handoff),
 `SearchCoordinator` (orchestration boundary — engine heuristics live in
 engines, not the view).
 
-Onboarding: `Sources/Onboarding/` — flow container + `WelcomeTour`,
-`InviteStep`, `AuthSteps`, `ConnectSteps`, `PlanSteps`.
+Onboarding: `Sources/Onboarding/` — the existing product introduction leads
+into a quiet setup column with a compact Pidgy mark and three-stage progress.
+`OnboardingModel` holds the tested step graph and resumable window session.
+`OnboardingCardView` presents sources, optional AI, then shortcut/login setup.
+All four source types remain discoverable; unavailable connections explain
+that state. A source connection never advances or closes setup on its own.
+Sources and AI can be deferred explicitly; returning to API-key setup clears
+sensitive input. ChatGPT authorization restores the same setup stage.
+The shortcut is taught by pressing ⌘⇧T. Launch at login is opt-in. The final
+screen distinguishes connected sources, background sync, and deferred AI.
+Completed setup does not require Telegram credentials to open the dashboard,
+so Slack/Gmail/WhatsApp-only users are not sent back through onboarding.
+The introduction remains skippable, and Finish later retains session progress.
+
+
+**Accounts (Clerk)**: `Sources/Account/AccountService` wraps ClerkKit —
+Continue with Google / Apple through the hosted OAuth redirect
+(`com.pidgy.app://callback`, registered in Info.plist). The account is the
+cross-machine identity for invites, referrals, and the Dodo license; it
+stores only email + name and never sees messages. Optional at every
+level: no bundled `PIDGY_CLERK_PUBLISHABLE_KEY` ⇒ no sign-in step, and
+"Skip for now" keeps the install-id identity. Signed-in requests to the
+proxy carry the session JWT in `X-Pidgy-Account`; the Worker verifies it
+against `CLERK_JWKS_URL` and links `account:<userId>` → install ids so a
+fresh machine inherits its registration instead of burning an invite.
 
 **Invite gate + referrals**: beta builds hard-gate onboarding on an
 invite code (`InviteService` → the AI proxy's `/v1/invite/*` routes,
@@ -199,7 +222,8 @@ issue #61.)
 
 - All managed-plan calls go through the Cloudflare AI proxy
   (`infra/ai-proxy/`, Vertex path for Gemini). BYOK users hit their own
-  provider directly.
+  provider directly. The optional local OSS ChatGPT provider uses public
+  Responses requests and records plan usage without assigning an API dollar price.
 - Every call is tagged with an `AIRequestKind` (fact extraction, answer
   engine, planner, semantic search, summaries…) for per-stage metering and
   per-stage model routing (`AppConstants.AI.managedModelOverride`).
@@ -209,11 +233,12 @@ issue #61.)
 
 ## 8. Testing
 
-`Tests/PidgyCoreTests.swift` — 198 tests, offline (mock providers, temp
-databases). The remaining skips are documented SummaryEngine scoring
-regressions gated on eval-validated fixes (issue #59). Injection defenses
-are code-level gates, tested (destructive AI routes never act on
-uncorroborated model output).
+`./scripts/test.sh` runs the offline Python and routing checks, Node invite
+smoke tests, Go bridge tests/vet, and the complete XCTest suite. Tests use mock
+providers and temporary stores; live benchmarks are opt-in. The ChatGPT plan
+provider additionally tests PKCE/state, signed identity verification, token
+rotation, revocation, and streamed completion/failure handling. See
+[ChatGPT sign-in](chatgpt-sign-in.md). Source builds use no bundled credentials.
 
 ## 9. Current Direction
 

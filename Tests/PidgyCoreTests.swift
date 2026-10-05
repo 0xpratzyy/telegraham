@@ -1,6 +1,45 @@
 import XCTest
+import AppKit
+import SwiftUI
 import GRDB
 @testable import Pidgy
+
+@MainActor
+final class WhatsAppProcessLifecycleTests: XCTestCase {
+    func testStopRunningHelperIsSafeAndIdempotent() async throws {
+        let manager = WhatsAppConnectionManager()
+        try manager.launchBridge(at: URL(fileURLWithPath: "/bin/cat"), arguments: [])
+        XCTAssertTrue(manager.isBridgeRunning)
+        manager.stop() // Previously threw NSInvalidArgumentException here.
+        manager.stop()
+        XCTAssertFalse(manager.isBridgeRunning)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(manager.isBridgeRunning)
+    }
+
+    func testOldTerminationCallbackCannotClearReplacementHelper() async throws {
+        let manager = WhatsAppConnectionManager()
+        defer { manager.stop() }
+        try manager.launchBridge(at: URL(fileURLWithPath: "/bin/cat"), arguments: [])
+        manager.stop()
+        try manager.launchBridge(at: URL(fileURLWithPath: "/bin/cat"), arguments: [])
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertTrue(manager.isBridgeRunning)
+        manager.stop()
+        XCTAssertFalse(manager.isBridgeRunning)
+    }
+
+    func testStopAfterHelperExitedIsSafe() async throws {
+        let manager = WhatsAppConnectionManager()
+        try manager.launchBridge(at: URL(fileURLWithPath: "/usr/bin/true"), arguments: [])
+        for _ in 0..<50 where manager.isBridgeRunning {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(manager.isBridgeRunning)
+        manager.stop()
+        XCTAssertFalse(manager.isBridgeRunning)
+    }
+}
 
 final class PidgyCoreTests: XCTestCase {
     private var tempCredentialDirectory: URL?
@@ -501,9 +540,9 @@ final class PidgyCoreTests: XCTestCase {
                 title: "Review grant ask",
                 status: .open,
                 topicId: 10,
-                topicName: "First Dollar",
+                topicName: "Project Cedar",
                 chatId: 100,
-                personName: "Akhil"
+                personName: "Alex"
             ),
             DashboardTask.mock(
                 id: 2,
@@ -521,7 +560,7 @@ final class PidgyCoreTests: XCTestCase {
             status: .open,
             topicId: 10,
             chatId: 100,
-            personQuery: "akh"
+            personQuery: "ale"
         )
 
         XCTAssertEqual(filtered.map(\.id), [1])
@@ -530,7 +569,7 @@ final class PidgyCoreTests: XCTestCase {
     func testDashboardTaskFilterBuildsOwnerChipsAndFiltersAssignedWork() {
         let currentUser = TGUser(
             id: 99,
-            firstName: "Pratyush",
+            firstName: "Sam",
             lastName: "",
             username: "pratzyy",
             phoneNumber: nil,
@@ -542,9 +581,9 @@ final class PidgyCoreTests: XCTestCase {
                 title: "Send pitch deck",
                 status: .open,
                 topicId: 10,
-                topicName: "First Dollar",
+                topicName: "Project Cedar",
                 chatId: 100,
-                personName: "Rahul",
+                personName: "Morgan",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -554,8 +593,8 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: 10,
                 topicName: "Based Games",
                 chatId: 101,
-                personName: "Rajanshee",
-                ownerName: "Rajanshee"
+                personName: "Robin",
+                ownerName: "Robin"
             ),
             DashboardTask.mock(
                 id: 3,
@@ -564,8 +603,8 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: 10,
                 topicName: "Based Games",
                 chatId: 102,
-                personName: "Rajanshee",
-                ownerName: "Rajanshee"
+                personName: "Robin",
+                ownerName: "Robin"
             )
         ]
 
@@ -577,26 +616,26 @@ final class PidgyCoreTests: XCTestCase {
         )
         XCTAssertEqual(mine.map(\.id), [1])
 
-        let rajanshee = DashboardTaskFilter.apply(
+        let robin = DashboardTaskFilter.apply(
             tasks,
             status: .open,
-            ownerFilter: .owner("Rajanshee"),
+            ownerFilter: .owner("Robin"),
             currentUser: currentUser
         )
-        XCTAssertEqual(rajanshee.map(\.id), [3, 2])
+        XCTAssertEqual(robin.map(\.id), [3, 2])
 
         let options = DashboardTaskOwnership.ownerOptions(
             for: tasks,
             currentUser: currentUser
         )
-        XCTAssertEqual(options.map(\.label), ["Mine", "Rajanshee", "All"])
+        XCTAssertEqual(options.map(\.label), ["Mine", "Robin", "All"])
         XCTAssertEqual(options.map(\.count), [1, 2, 3])
     }
 
     func testDashboardTaskListFiltersUseOwnerNameForChipsAndCounts() {
         let currentUser = TGUser(
             id: 99,
-            firstName: "Pratyush",
+            firstName: "Sam",
             lastName: "",
             username: "pratzyy",
             phoneNumber: nil,
@@ -610,7 +649,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 100,
-                personName: "Rajanshee",
+                personName: "Robin",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -620,8 +659,8 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 101,
-                personName: "Rajanshee",
-                ownerName: "Rajanshee"
+                personName: "Robin",
+                ownerName: "Robin"
             ),
             DashboardTask.mock(
                 id: 3,
@@ -630,8 +669,8 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 102,
-                personName: "Pratyush",
-                ownerName: "Rajanshee"
+                personName: "Sam",
+                ownerName: "Robin"
             ),
             DashboardTask.mock(
                 id: 4,
@@ -640,7 +679,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 103,
-                personName: "Rajanshee",
+                personName: "Robin",
                 ownerName: "Me"
             )
         ]
@@ -653,22 +692,22 @@ final class PidgyCoreTests: XCTestCase {
         )
         XCTAssertEqual(forMeOpen.map(\.id), [1])
 
-        let rajansheeOpen = DashboardTaskListFilters.filteredTasks(
+        let robinOpen = DashboardTaskListFilters.filteredTasks(
             tasks,
             status: .open,
-            ownerFilter: .owner("Rajanshee"),
+            ownerFilter: .owner("Robin"),
             currentUser: currentUser
         )
         // Owner chips filter strictly by ownerName — task 1 (owner=Me,
-        // person=Rajanshee) must NOT leak into the Rajanshee chip just
-        // because Rajanshee is the conversational person.
-        XCTAssertEqual(rajansheeOpen.map(\.id), [3, 2])
+        // person=Robin) must NOT leak into the Robin chip just
+        // because Robin is the conversational person.
+        XCTAssertEqual(robinOpen.map(\.id), [3, 2])
 
         let chips = DashboardTaskListFilters.ownerChips(
             for: tasks.filter { $0.status == .open },
             currentUser: currentUser
         )
-        XCTAssertEqual(chips.map(\.label), ["For me", "Rajanshee"])
+        XCTAssertEqual(chips.map(\.label), ["For me", "Robin"])
         XCTAssertEqual(chips.map(\.count), [1, 2])
     }
 
@@ -762,7 +801,7 @@ final class PidgyCoreTests: XCTestCase {
             baseSpec: spec(family: .topicSearch, confidence: 0.9)
         ))
         XCTAssertTrue(router.shouldUseAIPlanner(
-            query: "what did we discuss with akhil",
+            query: "what did we discuss with alex",
             baseSpec: spec(family: .summary, confidence: 0.9)
         ))
 
@@ -1063,7 +1102,7 @@ final class PidgyCoreTests: XCTestCase {
     func testGmailDeepLinkUsesStableAccountSelector() throws {
         let url = try XCTUnwrap(
             DeepLinkGenerator.gmailThreadURL(
-                account: "pratyush+work@gmail.com",
+                account: "sam+work@example.com",
                 threadID: "19fdd698fb959cfa"
             )
         )
@@ -1072,10 +1111,10 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(url.host, "mail.google.com")
         XCTAssertEqual(url.path, "/mail/u")
         XCTAssertEqual(components.queryItems?.first?.name, "authuser")
-        XCTAssertEqual(components.queryItems?.first?.value, "pratyush+work@gmail.com")
+        XCTAssertEqual(components.queryItems?.first?.value, "sam+work@example.com")
         XCTAssertEqual(components.fragment, "all/19fdd698fb959cfa")
         XCTAssertFalse(
-            url.absoluteString.contains("/u/pratyush"),
+            url.absoluteString.contains("/u/sam"),
             "an email address in Gmail's account-slot path can produce a 404"
         )
     }
@@ -1184,17 +1223,17 @@ final class PidgyCoreTests: XCTestCase {
     func testDashboardTaskAllFilterExcludesIgnoredArchiveRows() {
         let currentUser = TGUser(
             id: 99,
-            firstName: "Pratyush",
+            firstName: "Sam",
             lastName: "",
             username: "pratzyy",
             phoneNumber: nil,
             isBot: false
         )
         let tasks = [
-            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Pratyush", ownerName: "Me"),
-            DashboardTask.mock(id: 2, title: "Done me", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Pratyush", ownerName: "Me"),
-            DashboardTask.mock(id: 3, title: "Ignored me", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Pratyush", ownerName: "Me"),
-            DashboardTask.mock(id: 4, title: "Open Rajanshee", status: .open, topicId: nil, topicName: nil, chatId: 4, personName: "Rajanshee", ownerName: "Rajanshee")
+            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Sam", ownerName: "Me"),
+            DashboardTask.mock(id: 2, title: "Done me", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Sam", ownerName: "Me"),
+            DashboardTask.mock(id: 3, title: "Ignored me", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Sam", ownerName: "Me"),
+            DashboardTask.mock(id: 4, title: "Open Robin", status: .open, topicId: nil, topicName: nil, chatId: 4, personName: "Robin", ownerName: "Robin")
         ]
 
         let visibleAll = DashboardTaskListFilters.tasksForStatusFilter(tasks, statusFilter: .all)
@@ -1212,24 +1251,24 @@ final class PidgyCoreTests: XCTestCase {
             for: visibleAll,
             currentUser: currentUser
         )
-        XCTAssertEqual(chips.map(\.label), ["For me", "Rajanshee"])
+        XCTAssertEqual(chips.map(\.label), ["For me", "Robin"])
         XCTAssertEqual(chips.map(\.count), [2, 1])
     }
 
     func testDashboardTaskOwnerAddOptionsIncludeKnownHiddenOwners() {
         let currentUser = TGUser(
             id: 99,
-            firstName: "Pratyush",
+            firstName: "Sam",
             lastName: "",
             username: "pratzyy",
             phoneNumber: nil,
             isBot: false
         )
         let tasks = [
-            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Pratyush", ownerName: "Me"),
-            DashboardTask.mock(id: 2, title: "Done me", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Pratyush", ownerName: "Me"),
-            DashboardTask.mock(id: 3, title: "Archived Rajanshee", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Rajanshee", ownerName: "Rajanshee Singh"),
-            DashboardTask.mock(id: 4, title: "Archived Rajanshee 2", status: .ignored, topicId: nil, topicName: nil, chatId: 4, personName: "Rajanshee", ownerName: "Rajanshee Singh"),
+            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Sam", ownerName: "Me"),
+            DashboardTask.mock(id: 2, title: "Done me", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Sam", ownerName: "Me"),
+            DashboardTask.mock(id: 3, title: "Archived Robin", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Robin", ownerName: "Robin Singh"),
+            DashboardTask.mock(id: 4, title: "Archived Robin 2", status: .ignored, topicId: nil, topicName: nil, chatId: 4, personName: "Robin", ownerName: "Robin Singh"),
             DashboardTask.mock(id: 5, title: "Archived Mayur", status: .ignored, topicId: nil, topicName: nil, chatId: 5, personName: "Mayur", ownerName: "Mayur")
         ]
 
@@ -1244,28 +1283,28 @@ final class PidgyCoreTests: XCTestCase {
             allTasks: tasks,
             currentUser: currentUser
         )
-        XCTAssertEqual(addOptions.map(\.label), ["Rajanshee Singh", "Mayur"])
+        XCTAssertEqual(addOptions.map(\.label), ["Robin Singh", "Mayur"])
         XCTAssertEqual(addOptions.map(\.count), [2, 1])
     }
 
     func testDashboardTaskOwnerSearchOptionsIncludePeopleDirectoryMatches() {
         let currentUser = TGUser(
             id: 99,
-            firstName: "Pratyush",
+            firstName: "Sam",
             lastName: "",
             username: "pratzyy",
             phoneNumber: nil,
             isBot: false
         )
         let tasks = [
-            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Pratyush", ownerName: "Me"),
-            DashboardTask.mock(id: 2, title: "Archived Rajanshee", status: .ignored, topicId: nil, topicName: nil, chatId: 2, personName: "Rajanshee", ownerName: "Rajanshee Singh"),
-            DashboardTask.mock(id: 3, title: "Archived Rajanshee 2", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Rajanshee", ownerName: "Rajanshee Singh")
+            DashboardTask.mock(id: 1, title: "Open me", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Sam", ownerName: "Me"),
+            DashboardTask.mock(id: 2, title: "Archived Robin", status: .ignored, topicId: nil, topicName: nil, chatId: 2, personName: "Robin", ownerName: "Robin Singh"),
+            DashboardTask.mock(id: 3, title: "Archived Robin 2", status: .ignored, topicId: nil, topicName: nil, chatId: 3, personName: "Robin", ownerName: "Robin Singh")
         ]
         let people = [
-            RelationGraph.Node.mock(entityId: 10, displayName: "Deeeeeksha", interactionScore: 600, lastInteractionAt: nil),
-            RelationGraph.Node.mock(entityId: 11, displayName: "Akhil", interactionScore: 500, lastInteractionAt: nil),
-            RelationGraph.Node.mock(entityId: 12, displayName: "Rajanshee Singh", interactionScore: 100, lastInteractionAt: nil)
+            RelationGraph.Node.mock(entityId: 10, displayName: "Diaaaana", interactionScore: 600, lastInteractionAt: nil),
+            RelationGraph.Node.mock(entityId: 11, displayName: "Alex", interactionScore: 500, lastInteractionAt: nil),
+            RelationGraph.Node.mock(entityId: 12, displayName: "Robin Singh", interactionScore: 100, lastInteractionAt: nil)
         ]
         let visibleOptions = DashboardTaskListFilters.ownerChips(
             for: tasks.filter { $0.status == .open },
@@ -1279,19 +1318,19 @@ final class PidgyCoreTests: XCTestCase {
             currentUser: currentUser,
             query: ""
         )
-        XCTAssertEqual(Array(allOptions.map(\.label).prefix(3)), ["Rajanshee Singh", "Deeeeeksha", "Akhil"])
+        XCTAssertEqual(Array(allOptions.map(\.label).prefix(3)), ["Robin Singh", "Diaaaana", "Alex"])
 
         let searchedOptions = DashboardTaskListFilters.ownerSearchOptions(
             visibleOptions: visibleOptions,
             allTasks: tasks,
             people: people,
             currentUser: currentUser,
-            query: "dee"
+            query: "dia"
         )
-        XCTAssertEqual(searchedOptions.map(\.label), ["Deeeeeksha"])
+        XCTAssertEqual(searchedOptions.map(\.label), ["Diaaaana"])
     }
 
-    func testDashboardReplyQueueCountIncludesEveryPipelineCategory() {
+    func testDashboardReplyQueueCountExcludesQuietPipelineCategory() {
         let chats = [
             makeChat(id: 51_001, title: "On me", chatType: .privateChat(userId: 51_101), unreadCount: 1, lastMessageDate: Date()),
             makeChat(id: 51_002, title: "On them", chatType: .privateChat(userId: 51_102), unreadCount: 1, lastMessageDate: Date().addingTimeInterval(-60)),
@@ -1309,13 +1348,13 @@ final class PidgyCoreTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(DashboardReplyQueueMetrics.sidebarCount(for: items), 3)
+        XCTAssertEqual(DashboardReplyQueueMetrics.sidebarCount(for: items), 2)
     }
 
     func testDashboardTaskProfileFilterMatchesPersonAliasesFromPeopleSearch() {
         let currentUser = TGUser(
             id: 99,
-            firstName: "Pratyush",
+            firstName: "Sam",
             lastName: "",
             username: "pratzyy",
             phoneNumber: nil,
@@ -1324,15 +1363,15 @@ final class PidgyCoreTests: XCTestCase {
         // Owner filtering matches ownerName only (personName matching was
         // removed — it leaked subject-but-not-owner tasks into owner chips),
         // so the alias-match case under test needs a task actually OWNED
-        // under the short name "Rajanshee".
+        // under the short name "Robin".
         let tasks = [
-            DashboardTask.mock(id: 1, title: "Follow up with Rajanshee", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Rajanshee", ownerName: "Rajanshee"),
-            DashboardTask.mock(id: 2, title: "Closed Rajanshee work", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Rajanshee", ownerName: "Me"),
-            DashboardTask.mock(id: 3, title: "Ask Deeeeeksha", status: .open, topicId: nil, topicName: nil, chatId: 3, personName: "Deeeeeksha", ownerName: "Me")
+            DashboardTask.mock(id: 1, title: "Follow up with Robin", status: .open, topicId: nil, topicName: nil, chatId: 1, personName: "Robin", ownerName: "Robin"),
+            DashboardTask.mock(id: 2, title: "Closed Robin work", status: .done, topicId: nil, topicName: nil, chatId: 2, personName: "Robin", ownerName: "Me"),
+            DashboardTask.mock(id: 3, title: "Ask Diaaaana", status: .open, topicId: nil, topicName: nil, chatId: 3, personName: "Diaaaana", ownerName: "Me")
         ]
         let people = [
-            RelationGraph.Node.mock(entityId: 10, displayName: "Rajanshee Singh", interactionScore: 700, lastInteractionAt: nil),
-            RelationGraph.Node.mock(entityId: 11, displayName: "Deeeeeksha", interactionScore: 600, lastInteractionAt: nil)
+            RelationGraph.Node.mock(entityId: 10, displayName: "Robin Singh", interactionScore: 700, lastInteractionAt: nil),
+            RelationGraph.Node.mock(entityId: 11, displayName: "Diaaaana", interactionScore: 600, lastInteractionAt: nil)
         ]
         let visibleOptions = DashboardTaskListFilters.ownerChips(
             for: tasks.filter { $0.status == .open },
@@ -1344,18 +1383,18 @@ final class PidgyCoreTests: XCTestCase {
             allTasks: tasks,
             people: people,
             currentUser: currentUser,
-            query: "rajan"
+            query: "rob"
         )
-        XCTAssertEqual(searchOptions.first?.label, "Rajanshee Singh")
+        XCTAssertEqual(searchOptions.first?.label, "Robin Singh")
         XCTAssertEqual(searchOptions.first?.count, 1)
 
-        let rajansheeOpen = DashboardTaskListFilters.filteredTasks(
+        let robinOpen = DashboardTaskListFilters.filteredTasks(
             tasks.filter { $0.status == .open },
             status: nil,
-            ownerFilter: .owner("Rajanshee Singh"),
+            ownerFilter: .owner("Robin Singh"),
             currentUser: currentUser
         )
-        XCTAssertEqual(rajansheeOpen.map(\.id), [1])
+        XCTAssertEqual(robinOpen.map(\.id), [1])
     }
 
     func testDashboardTaskPeopleOptionsShowTwoTaskPeopleSortedByCount() {
@@ -1367,7 +1406,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 101,
-                personName: "Rajanshee",
+                personName: "Robin",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -1377,7 +1416,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 102,
-                personName: "Deeeeeksha",
+                personName: "Diaaaana",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -1387,7 +1426,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 103,
-                personName: "Rajanshee",
+                personName: "Robin",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -1397,7 +1436,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 104,
-                personName: "Akhil",
+                personName: "Alex",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -1407,7 +1446,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 105,
-                personName: "Deeeeeksha",
+                personName: "Diaaaana",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -1417,7 +1456,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 106,
-                personName: "Akhil",
+                personName: "Alex",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -1427,7 +1466,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: nil,
                 topicName: nil,
                 chatId: 107,
-                personName: "Akhil",
+                personName: "Alex",
                 ownerName: "Me"
             ),
             DashboardTask.mock(
@@ -1444,7 +1483,7 @@ final class PidgyCoreTests: XCTestCase {
 
         let options = DashboardTaskPeople.personOptions(for: tasks)
 
-        XCTAssertEqual(options.map { $0.name }, ["Akhil", "Deeeeeksha", "Rajanshee"])
+        XCTAssertEqual(options.map { $0.name }, ["Alex", "Diaaaana", "Robin"])
         XCTAssertEqual(options.map { $0.count }, [3, 2, 2])
     }
 
@@ -1458,7 +1497,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: 10,
                 topicName: "Ops",
                 chatId: 100,
-                personName: "Akhil",
+                personName: "Alex",
                 priority: .high,
                 latestSourceDate: base.addingTimeInterval(-3_600)
             ),
@@ -1469,7 +1508,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: 10,
                 topicName: "Ops",
                 chatId: 101,
-                personName: "Rahul",
+                personName: "Morgan",
                 priority: .medium,
                 latestSourceDate: base
             )
@@ -1482,15 +1521,15 @@ final class PidgyCoreTests: XCTestCase {
 
     func testDashboardPeopleDirectoryBuildsOperatorLenses() {
         let now = Date(timeIntervalSince1970: 1_777_400_000)
-        let akhil = RelationGraph.Node.mock(
+        let alex = RelationGraph.Node.mock(
             entityId: 1,
-            displayName: "Akhil",
+            displayName: "Alex",
             interactionScore: 95,
             lastInteractionAt: now.addingTimeInterval(-3_600)
         )
         let rahul = RelationGraph.Node.mock(
             entityId: 2,
-            displayName: "Rahul",
+            displayName: "Morgan",
             interactionScore: 80,
             lastInteractionAt: now.addingTimeInterval(-2 * 86_400)
         )
@@ -1502,7 +1541,7 @@ final class PidgyCoreTests: XCTestCase {
         )
 
         let signals = DashboardPeopleDirectory.buildSignals(
-            contacts: [stale, rahul, akhil],
+            contacts: [stale, rahul, alex],
             replyCountsByPersonId: [2: 1],
             taskCountsByPersonId: [1: 2],
             staleContactIds: [3],
@@ -1525,15 +1564,15 @@ final class PidgyCoreTests: XCTestCase {
 
     func testDashboardPeopleDirectoryBuildsSignalsFromTasksAndReplyQueueWork() {
         let now = Date(timeIntervalSince1970: 1_777_400_000)
-        let akhil = RelationGraph.Node.mock(
+        let alex = RelationGraph.Node.mock(
             entityId: 1,
-            displayName: "Akhil",
+            displayName: "Alex",
             interactionScore: 95,
             lastInteractionAt: now.addingTimeInterval(-3_600)
         )
         let rahul = RelationGraph.Node.mock(
             entityId: 2,
-            displayName: "Rahul",
+            displayName: "Morgan",
             interactionScore: 80,
             lastInteractionAt: now.addingTimeInterval(-2 * 86_400)
         )
@@ -1545,7 +1584,7 @@ final class PidgyCoreTests: XCTestCase {
         )
 
         let signals = DashboardPeopleDirectory.buildSignals(
-            contacts: [akhil, rahul, priya],
+            contacts: [alex, rahul, priya],
             tasks: [
                 DashboardTask.mock(
                     id: 1,
@@ -1554,7 +1593,7 @@ final class PidgyCoreTests: XCTestCase {
                     topicId: nil,
                     topicName: nil,
                     chatId: 10,
-                    personName: "Akhil"
+                    personName: "Alex"
                 ),
                 DashboardTask.mock(
                     id: 2,
@@ -1570,9 +1609,9 @@ final class PidgyCoreTests: XCTestCase {
                 .mockPrivate(
                     chatId: 20,
                     userId: 2,
-                    title: "Rahul",
+                    title: "Morgan",
                     category: .onMe,
-                    senderName: "Rahul",
+                    senderName: "Morgan",
                     text: "Can you send the pitch deck?"
                 ),
                 .mockPrivate(
@@ -1638,7 +1677,7 @@ final class PidgyCoreTests: XCTestCase {
         )
         let popular = DashboardTopic(
             id: 2,
-            name: "First Dollar",
+            name: "Project Cedar",
             rationale: "Company workspace",
             score: 80,
             rank: 1,
@@ -1657,7 +1696,7 @@ final class PidgyCoreTests: XCTestCase {
         let chats = (0..<12).map { index in
             DashboardTopicMatcher.ChatSnapshot(
                 id: Int64(index),
-                title: "First Dollar chat \(index)",
+                title: "Project Cedar chat \(index)",
                 preview: index == 0 ? "also discussed inner circle" : nil
             )
         } + [
@@ -1754,7 +1793,7 @@ final class PidgyCoreTests: XCTestCase {
             DashboardTopicMatcher.ChatSnapshot(id: 3, title: "Accounts", preview: "Refund and billing issue"),
             DashboardTopicMatcher.ChatSnapshot(id: 4, title: "First Dollar Alpha", preview: "Customer needs help with profile verification"),
             DashboardTopicMatcher.ChatSnapshot(id: 5, title: "FD support", preview: "FirstDollar onboarding account error"),
-            DashboardTopicMatcher.ChatSnapshot(id: 6, title: "120363423799511145", preview: "Unrelated casual conversation")
+            DashboardTopicMatcher.ChatSnapshot(id: 6, title: "120363000000000001", preview: "Unrelated casual conversation")
         ]
 
         let suggestions = DashboardTopicSuggestionEngine.rankedSuggestions(
@@ -1766,7 +1805,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(suggestions.first?.name, "Billing problems")
         XCTAssertEqual(suggestions.first?.chatCount, 3)
         XCTAssertTrue(suggestions.contains { $0.name == "First Dollar support" && $0.chatCount == 2 })
-        XCTAssertFalse(suggestions.contains { $0.name == "120363423799511145" })
+        XCTAssertFalse(suggestions.contains { $0.name == "120363000000000001" })
     }
 
     func testDashboardTopicSemanticSearchKeepsChatScopedMessageMatches() {
@@ -1779,8 +1818,8 @@ final class PidgyCoreTests: XCTestCase {
             textContent: "Send the pitch deck to Dacoit",
             mediaType: nil,
             isOutgoing: false,
-            chatTitle: "Rahul",
-            senderName: "Rahul"
+            chatTitle: "Morgan",
+            senderName: "Morgan"
         )
         let second = TGMessage(
             id: 77,
@@ -1790,15 +1829,15 @@ final class PidgyCoreTests: XCTestCase {
             textContent: "Deck asks from the investor group",
             mediaType: nil,
             isOutgoing: false,
-            chatTitle: "First Dollar",
-            senderName: "Akhil"
+            chatTitle: "Project Cedar",
+            senderName: "Alex"
         )
 
         let results = DashboardTopicSemanticSearchEngine.results(
             query: "pitch deck",
             mode: .search,
-            topicName: "First Dollar",
-            chatTitles: [10: "Rahul", 20: "First Dollar"],
+            topicName: "Project Cedar",
+            chatTitles: [10: "Morgan", 20: "Project Cedar"],
             ftsHits: [.init(message: first, score: 4)],
             vectorHits: [.init(message: second, score: 0.82)],
             recentMessages: [],
@@ -1815,9 +1854,9 @@ final class PidgyCoreTests: XCTestCase {
         let reply = FollowUpItem.mockPrivate(
             chatId: 30,
             userId: 3,
-            title: "Rahul",
+            title: "Morgan",
             category: .onMe,
-            senderName: "Rahul",
+            senderName: "Morgan",
             text: "Can you send the deck?"
         )
         let task = DashboardTask.mock(
@@ -1825,16 +1864,16 @@ final class PidgyCoreTests: XCTestCase {
             title: "Send Dacoit pitch deck",
             status: .open,
             topicId: 5,
-            topicName: "First Dollar",
+            topicName: "Project Cedar",
             chatId: 30,
-            personName: "Rahul",
+            personName: "Morgan",
             updatedAt: now,
             latestSourceDate: now
         )
         let recent = DashboardPersonRecentMessage(
             chatId: 40,
-            chatTitle: "First Dollar",
-            senderName: "Akhil",
+            chatTitle: "Project Cedar",
+            senderName: "Alex",
             text: "We need better deck positioning before the call.",
             date: now.addingTimeInterval(-600),
             isOutgoing: false
@@ -1843,8 +1882,8 @@ final class PidgyCoreTests: XCTestCase {
         let results = DashboardTopicSemanticSearchEngine.results(
             query: "",
             mode: .catchUp,
-            topicName: "First Dollar",
-            chatTitles: [30: "Rahul", 40: "First Dollar"],
+            topicName: "Project Cedar",
+            chatTitles: [30: "Morgan", 40: "Project Cedar"],
             ftsHits: [],
             vectorHits: [],
             recentMessages: [recent],
@@ -1862,7 +1901,7 @@ final class PidgyCoreTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_777_400_000)
         let contact = RelationGraph.Node.mock(
             entityId: 42,
-            displayName: "Rahul",
+            displayName: "Morgan",
             interactionScore: 80,
             lastInteractionAt: now.addingTimeInterval(-3_600)
         )
@@ -1874,16 +1913,16 @@ final class PidgyCoreTests: XCTestCase {
             messages: [
                 DashboardPersonRecentMessage(
                     chatId: 10,
-                    chatTitle: "Rahul Singh",
-                    senderName: "Rahul",
+                    chatTitle: "Morgan Singh",
+                    senderName: "Morgan",
                     text: "Can you send me the pitch deck?",
                     date: now.addingTimeInterval(-600),
                     isOutgoing: false
                 ),
                 DashboardPersonRecentMessage(
                     chatId: 20,
-                    chatTitle: "First Dollar",
-                    senderName: "Rahul",
+                    chatTitle: "Project Cedar",
+                    senderName: "Morgan",
                     text: "We should follow up on the listing.",
                     date: now.addingTimeInterval(-3_600),
                     isOutgoing: false
@@ -1896,7 +1935,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertTrue(summary.headline.contains("1 task"))
         XCTAssertEqual(summary.recentChatCount, 2)
         XCTAssertTrue(summary.detail.contains("pitch deck"))
-        XCTAssertEqual(summary.snippets.first?.chatTitle, "Rahul Singh")
+        XCTAssertEqual(summary.snippets.first?.chatTitle, "Morgan Singh")
     }
 
 
@@ -1935,7 +1974,7 @@ final class PidgyCoreTests: XCTestCase {
                 topicId: 11,
                 topicName: "Partnerships",
                 chatId: 101,
-                personName: "Akhil"
+                personName: "Alex"
             )
         ]
 
@@ -4104,8 +4143,12 @@ final class PidgyCoreTests: XCTestCase {
                 .aiProviderType,
                 .aiApiKeyOpenAI,
                 .aiApiKeyClaude,
+                .aiApiKeyTypeSafe,
                 .aiModelOpenAI,
                 .aiModelClaude,
+                .aiModelChatGPT,
+                .chatGPTAccounts,
+                .chatGPTHostID,
                 .aiApiKey,
                 .aiModel,
                 .gmailAccessToken,
@@ -4124,6 +4167,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(
             Set(PreferencesResetPlan.userDefaultsKeysToDelete),
             Set([
+                "pidgy.chatgpt.backgroundAI",
                 AppConstants.Preferences.includeBotsInAISearchKey,
                 AppConstants.Preferences.dashboardTaskPinnedOwnersKey,
                 AppConstants.Preferences.didCompleteOnboardingKey,
@@ -4271,7 +4315,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(exact.preferredEngine, .messageLookup)
 
         let artifactWithRecipient = interpreter.parse(
-            query: "wallet I sent to Rahul",
+            query: "wallet I sent to Morgan",
             now: now,
             timezone: TimeZone(secondsFromGMT: 0)!,
             activeFilter: .all
@@ -4289,7 +4333,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(replyQueue.scope, .groups)
 
         let summary = interpreter.parse(
-            query: "summarize my chats with Akhil from last week",
+            query: "summarize my chats with Alex from last week",
             now: now,
             timezone: TimeZone(secondsFromGMT: 0)!,
             activeFilter: .all
@@ -4308,7 +4352,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(replyExpanded.preferredEngine, .semanticRetrieval)
 
         let summaryExpanded = interpreter.parse(
-            query: "What are the key takeaways from the last week with Piyush?",
+            query: "What are the key takeaways from the last week with Casey?",
             now: now,
             timezone: TimeZone(secondsFromGMT: 0)!,
             activeFilter: .all
@@ -4326,24 +4370,24 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(builderProgramSummary.family, .summary)
         XCTAssertEqual(builderProgramSummary.preferredEngine, .summarize)
 
-        let latestWithAkhil = interpreter.parse(
-            query: "What's the latest with Akhil?",
+        let latestWithAlex = interpreter.parse(
+            query: "What's the latest with Alex?",
             now: now,
             timezone: TimeZone(secondsFromGMT: 0)!,
             activeFilter: .all
         )
-        XCTAssertEqual(latestWithAkhil.family, .summary)
-        XCTAssertEqual(latestWithAkhil.preferredEngine, .summarize)
+        XCTAssertEqual(latestWithAlex.family, .summary)
+        XCTAssertEqual(latestWithAlex.preferredEngine, .summarize)
 
-        let akhilDiscussion = interpreter.parse(
-            query: "What did Akhil and I discuss last week?",
+        let alexDiscussion = interpreter.parse(
+            query: "What did Alex and I discuss last week?",
             now: now,
             timezone: TimeZone(secondsFromGMT: 0)!,
             activeFilter: .all
         )
-        XCTAssertEqual(akhilDiscussion.family, .summary)
-        XCTAssertEqual(akhilDiscussion.preferredEngine, .summarize)
-        XCTAssertNotNil(akhilDiscussion.timeRange)
+        XCTAssertEqual(alexDiscussion.family, .summary)
+        XCTAssertEqual(alexDiscussion.preferredEngine, .summarize)
+        XCTAssertNotNil(alexDiscussion.timeRange)
 
         let worthCheckingGroups = interpreter.parse(
             query: "anything worth checking in groups?",
@@ -4356,7 +4400,7 @@ final class PidgyCoreTests: XCTestCase {
         XCTAssertEqual(worthCheckingGroups.scope, .groups)
 
         let relationship = interpreter.parse(
-            query: "What is the current state of my relationship with Rahul?",
+            query: "What is the current state of my relationship with Morgan?",
             now: now,
             timezone: TimeZone(secondsFromGMT: 0)!,
             activeFilter: .all
@@ -4381,7 +4425,7 @@ final class PidgyCoreTests: XCTestCase {
         let telegramService = TestTelegramService(scoredHits: [], vectorHits: [])
 
         coordinator.triggerSearch(
-            query: "What are the key takeaways from chat with Akhil?",
+            query: "What are the key takeaways from chat with Alex?",
             activeScope: .all,
             aiSearchSourceChats: [],
             scopedAISearchSourceChats: [],
@@ -4588,20 +4632,20 @@ final class PidgyCoreTests: XCTestCase {
     @MainActor
     func testSummaryEngineBuildsFocusedRetrievalQueryForPersonScopedRecap() {
         let prompts = [
-            "What are the key takeaways from the last week with Akhil?",
-            "what are the key takeaways from chat with Akhil?",
-            "Catch me up on Akhil from last week.",
-            "What did Akhil and I discuss last week?",
-            "Summarize my recent Akhil chats.",
-            "What's the recent context from my Akhil chats?",
-            "Give me the last-week recap for Akhil.",
-            "Catch me up on the latest Akhil thread.",
-            "What's the latest with Akhil?"
+            "What are the key takeaways from the last week with Alex?",
+            "what are the key takeaways from chat with Alex?",
+            "Catch me up on Alex from last week.",
+            "What did Alex and I discuss last week?",
+            "Summarize my recent Alex chats.",
+            "What's the recent context from my Alex chats?",
+            "Give me the last-week recap for Alex.",
+            "Catch me up on the latest Alex thread.",
+            "What's the latest with Alex?"
         ]
 
         for prompt in prompts {
             let retrieval = SummaryEngine.shared.retrievalQueryForTesting(prompt)
-            XCTAssertEqual(retrieval, "akhil", prompt)
+            XCTAssertEqual(retrieval, "alex", prompt)
         }
     }
 
@@ -4633,7 +4677,7 @@ final class PidgyCoreTests: XCTestCase {
         // KNOWN REGRESSION from the 0ff6586 summary-engine redesign:
         // person-anchored injection (SummaryEngine.search, the
         // `querySpec.plannerHints?.people` read) only engages when the AI
-        // planner ran — with AI off (this test), "with Akhil" queries get
+        // planner ran — with AI off (this test), "with Alex" queries get
         // no person anchoring and the engine returns no output. Restoring
         // queryContext.scopedTerms there fixes this test but reshuffles
         // other query families' winners, so the fix must be validated
@@ -4670,7 +4714,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let chat = TGChat(
                 id: chatId,
-                title: "Akhil",
+                title: "Alex",
                 chatType: .privateChat(userId: 99),
                 unreadCount: 0,
                 lastMessage: latestMessage,
@@ -4687,7 +4731,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "what did we decide with Akhil",
+                rawQuery: "what did we decide with Alex",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -4731,7 +4775,7 @@ final class PidgyCoreTests: XCTestCase {
             let decisionRecord = makeRecord(
                 id: 511,
                 chatId: chatId,
-                text: "Decision: ship the founder deck after Rahul review.",
+                text: "Decision: ship the founder deck after Morgan review.",
                 date: olderDate
             )
             let indexedRecentRecord = makeRecord(
@@ -4769,7 +4813,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let chat = TGChat(
                 id: chatId,
-                title: "Rahul",
+                title: "Morgan",
                 chatType: .privateChat(userId: 991),
                 unreadCount: 1,
                 lastMessage: liveRecentMessage,
@@ -4780,7 +4824,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "what did we decide with Rahul",
+                rawQuery: "what did we decide with Morgan",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -4809,7 +4853,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let output = try XCTUnwrap(execution.output)
             XCTAssertTrue(output.supportingMessageIds.contains(511))
-            XCTAssertTrue(output.summaryText.contains("Decision: ship the founder deck after Rahul review."))
+            XCTAssertTrue(output.summaryText.contains("Decision: ship the founder deck after Morgan review."))
         }
     }
 
@@ -4834,7 +4878,7 @@ final class PidgyCoreTests: XCTestCase {
             let olderRecord = makeRecord(
                 id: 552,
                 chatId: chatId,
-                text: "Much older Akhil context that should stay outside the requested week.",
+                text: "Much older Alex context that should stay outside the requested week.",
                 date: olderDate
             )
 
@@ -4855,7 +4899,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let chat = TGChat(
                 id: chatId,
-                title: "Akhil B",
+                title: "Alex B",
                 chatType: .privateChat(userId: 301),
                 unreadCount: 0,
                 lastMessage: recentMessage,
@@ -4872,7 +4916,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "What are the key takeaways from the last week with Akhil?",
+                rawQuery: "What are the key takeaways from the last week with Alex?",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -4902,7 +4946,7 @@ final class PidgyCoreTests: XCTestCase {
             let output = try XCTUnwrap(execution.output)
             XCTAssertEqual(output.supportingChatId, chatId)
             XCTAssertTrue(output.summaryText.lowercased().contains("sponsorship budget"))
-            XCTAssertFalse(output.summaryText.lowercased().contains("older akhil context"))
+            XCTAssertFalse(output.summaryText.lowercased().contains("older alex context"))
         }
     }
 
@@ -4916,9 +4960,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 651,
                 chatId: chatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: withinRange,
-                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                textContent: "The builders will showcase their demo at the event, and our team will speak about the demo project.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -4926,9 +4970,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 652,
                 chatId: chatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: withinRange.addingTimeInterval(600),
-                textContent: "lifi will confirm their 5k in a bit.",
+                textContent: "The fictional sponsor will confirm their 5k demo budget shortly.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -4949,13 +4993,13 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: secondRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "Akhil B",
-                senderName: "Akhil B"
+                chatTitle: "Alex B",
+                senderName: "Alex B"
             )
 
             let chat = TGChat(
                 id: chatId,
-                title: "Akhil B",
+                title: "Alex B",
                 chatType: .privateChat(userId: 42),
                 unreadCount: 0,
                 lastMessage: lastMessage,
@@ -4972,7 +5016,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "What are the key takeaways from the last week with Akhil?",
+                rawQuery: "What are the key takeaways from the last week with Alex?",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -5014,7 +5058,7 @@ final class PidgyCoreTests: XCTestCase {
                 id: 701,
                 chatId: directChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: withinRange,
                 textContent: nil,
                 mediaTypeRaw: TGMessage.MediaType.other.rawValue,
@@ -5024,9 +5068,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 702,
                 chatId: groupChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: withinRange.addingTimeInterval(-2 * 86_400),
-                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                textContent: "The builders will showcase their demo at the event, and our team will speak about the demo project.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5034,9 +5078,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 703,
                 chatId: groupChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: withinRange.addingTimeInterval(-1 * 86_400),
-                textContent: "lifi will confirm their 5k in a bit.",
+                textContent: "The fictional sponsor will confirm their 5k demo budget shortly.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5057,7 +5101,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let directChat = TGChat(
                 id: directChatId,
-                title: "Akhil B",
+                title: "Alex B",
                 chatType: .privateChat(userId: 42),
                 unreadCount: 0,
                 lastMessage: TGMessage(
@@ -5068,8 +5112,8 @@ final class PidgyCoreTests: XCTestCase {
                     textContent: nil,
                     mediaType: .other,
                     isOutgoing: false,
-                    chatTitle: "Akhil B",
-                    senderName: "Akhil B"
+                    chatTitle: "Alex B",
+                    senderName: "Alex B"
                 ),
                 memberCount: nil,
                 order: 1,
@@ -5078,7 +5122,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let groupChat = TGChat(
                 id: groupChatId,
-                title: "AI Weekends <> Inner Circle",
+                title: "Demo Showcase",
                 chatType: .supergroup(supergroupId: 88, isChannel: false),
                 unreadCount: 0,
                 lastMessage: TGMessage(
@@ -5089,8 +5133,8 @@ final class PidgyCoreTests: XCTestCase {
                     textContent: groupSecondRecord.textContent,
                     mediaType: nil,
                     isOutgoing: false,
-                    chatTitle: "AI Weekends <> Inner Circle",
-                    senderName: "Akhil B"
+                    chatTitle: "Demo Showcase",
+                    senderName: "Alex B"
                 ),
                 memberCount: nil,
                 order: 2,
@@ -5104,7 +5148,7 @@ final class PidgyCoreTests: XCTestCase {
                 label: "Last week"
             )
             let querySpec = QuerySpec(
-                rawQuery: "What are the key takeaways from the last week with Akhil?",
+                rawQuery: "What are the key takeaways from the last week with Alex?",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -5136,7 +5180,7 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     @MainActor
-    func testSummaryEnginePrefersFocusedAkhilContextAcrossPromptVariants() async throws {
+    func testSummaryEnginePrefersFocusedAlexContextAcrossPromptVariants() async throws {
         try await withTempDatabase { _ in
             let genericChatId: Int64 = 7803
             let focusedChatId: Int64 = 7804
@@ -5148,7 +5192,7 @@ final class PidgyCoreTests: XCTestCase {
                 senderUserId: 91,
                 senderName: "Core Member",
                 date: withinRange,
-                textContent: "Akhil join emergent",
+                textContent: "Alex join the demo group",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5156,9 +5200,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 802,
                 chatId: focusedChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: withinRange.addingTimeInterval(-2 * 86_400),
-                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                textContent: "The builders will showcase their demo at the event, and our team will speak about the demo project.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5166,9 +5210,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 803,
                 chatId: focusedChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: withinRange.addingTimeInterval(-1 * 86_400),
-                textContent: "lifi will confirm their 5k in a bit.",
+                textContent: "The fictional sponsor will confirm their 5k demo budget shortly.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5195,7 +5239,7 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: genericRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "Core(EANSG)",
+                chatTitle: "Project Commons",
                 senderName: genericRecord.senderName
             )
             let focusedFirstMessage = TGMessage(
@@ -5206,7 +5250,7 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: focusedFirstRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
+                chatTitle: "Demo Showcase",
                 senderName: focusedFirstRecord.senderName
             )
             let focusedSecondMessage = TGMessage(
@@ -5217,13 +5261,13 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: focusedSecondRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
+                chatTitle: "Demo Showcase",
                 senderName: focusedSecondRecord.senderName
             )
 
             let genericChat = TGChat(
                 id: genericChatId,
-                title: "Core(EANSG)",
+                title: "Project Commons",
                 chatType: .supergroup(supergroupId: 89, isChannel: false),
                 unreadCount: 0,
                 lastMessage: genericMessage,
@@ -5234,7 +5278,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let focusedChat = TGChat(
                 id: focusedChatId,
-                title: "AI Weekends <> Inner Circle",
+                title: "Demo Showcase",
                 chatType: .supergroup(supergroupId: 90, isChannel: false),
                 unreadCount: 0,
                 lastMessage: focusedSecondMessage,
@@ -5245,9 +5289,9 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let prompts = [
-                "What are the key takeaways from the last week with Akhil?",
-                "what are the key takeaways from chat with Akhil?",
-                "Catch me up on Akhil from last week."
+                "What are the key takeaways from the last week with Alex?",
+                "what are the key takeaways from chat with Alex?",
+                "Catch me up on Alex from last week."
             ]
 
             for prompt in prompts {
@@ -5310,9 +5354,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 811,
                 chatId: oldChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: oldDate,
-                textContent: "Old Akhil planning thread about media articles and SEO that should not win a recent recap by default.",
+                textContent: "Old Alex planning thread about media articles and SEO that should not win a recent recap by default.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5320,9 +5364,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 812,
                 chatId: recentChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: recentDate,
-                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                textContent: "The builders will showcase their demo at the event, and our team will speak about the demo project.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5330,9 +5374,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 813,
                 chatId: recentChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: recentDate.addingTimeInterval(300),
-                textContent: "lifi will confirm their 5k in a bit.",
+                textContent: "The fictional sponsor will confirm their 5k demo budget shortly.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5359,8 +5403,8 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: oldRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "Akhil B",
-                senderName: "Akhil B"
+                chatTitle: "Alex B",
+                senderName: "Alex B"
             )
             let recentFirstMessage = TGMessage(
                 id: recentFirstRecord.id,
@@ -5370,8 +5414,8 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: recentFirstRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
-                senderName: "Akhil B"
+                chatTitle: "Demo Showcase",
+                senderName: "Alex B"
             )
             let recentSecondMessage = TGMessage(
                 id: recentSecondRecord.id,
@@ -5381,13 +5425,13 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: recentSecondRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
-                senderName: "Akhil B"
+                chatTitle: "Demo Showcase",
+                senderName: "Alex B"
             )
 
             let oldChat = TGChat(
                 id: oldChatId,
-                title: "Akhil B",
+                title: "Alex B",
                 chatType: .privateChat(userId: 42),
                 unreadCount: 0,
                 lastMessage: oldMessage,
@@ -5398,7 +5442,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let recentChat = TGChat(
                 id: recentChatId,
-                title: "AI Weekends <> Inner Circle",
+                title: "Demo Showcase",
                 chatType: .supergroup(supergroupId: 91, isChannel: false),
                 unreadCount: 0,
                 lastMessage: recentSecondMessage,
@@ -5409,7 +5453,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "Give me a quick recap of my chats with Akhil.",
+                rawQuery: "Give me a quick recap of my chats with Alex.",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -5472,7 +5516,7 @@ final class PidgyCoreTests: XCTestCase {
                 id: 821,
                 chatId: strategyChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: strategyDate,
                 textContent: "i need to setup a media team and travel budgets to execute.",
                 mediaTypeRaw: nil,
@@ -5482,7 +5526,7 @@ final class PidgyCoreTests: XCTestCase {
                 id: 822,
                 chatId: strategyChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: strategyDate.addingTimeInterval(240),
                 textContent: "need to crack sponsorship for this.",
                 mediaTypeRaw: nil,
@@ -5492,9 +5536,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 823,
                 chatId: eventsChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: eventsDate,
-                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                textContent: "The builders will showcase their demo at the event, and our team will speak about the demo project.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5502,9 +5546,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 824,
                 chatId: eventsChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: eventsDate.addingTimeInterval(300),
-                textContent: "lifi will confirm their 5k in a bit.",
+                textContent: "The fictional sponsor will confirm their 5k demo budget shortly.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5531,8 +5575,8 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: strategyFirstRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "Core(EANSG)",
-                senderName: "Akhil B"
+                chatTitle: "Project Commons",
+                senderName: "Alex B"
             )
             let strategySecondMessage = TGMessage(
                 id: strategySecondRecord.id,
@@ -5542,8 +5586,8 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: strategySecondRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "Core(EANSG)",
-                senderName: "Akhil B"
+                chatTitle: "Project Commons",
+                senderName: "Alex B"
             )
             let eventsFirstMessage = TGMessage(
                 id: eventsFirstRecord.id,
@@ -5553,8 +5597,8 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: eventsFirstRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
-                senderName: "Akhil B"
+                chatTitle: "Demo Showcase",
+                senderName: "Alex B"
             )
             let eventsSecondMessage = TGMessage(
                 id: eventsSecondRecord.id,
@@ -5564,13 +5608,13 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: eventsSecondRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
-                senderName: "Akhil B"
+                chatTitle: "Demo Showcase",
+                senderName: "Alex B"
             )
 
             let strategyChat = TGChat(
                 id: strategyChatId,
-                title: "Core(EANSG)",
+                title: "Project Commons",
                 chatType: .supergroup(supergroupId: 92, isChannel: false),
                 unreadCount: 0,
                 lastMessage: strategySecondMessage,
@@ -5581,7 +5625,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let eventsChat = TGChat(
                 id: eventsChatId,
-                title: "AI Weekends <> Inner Circle",
+                title: "Demo Showcase",
                 chatType: .supergroup(supergroupId: 93, isChannel: false),
                 unreadCount: 0,
                 lastMessage: eventsSecondMessage,
@@ -5592,7 +5636,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "Give me a quick recap of my chats with Akhil.",
+                rawQuery: "Give me a quick recap of my chats with Alex.",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -5626,7 +5670,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let output = try XCTUnwrap(execution.output)
             XCTAssertEqual(output.supportingChatId, strategyChatId)
-            XCTAssertTrue(output.title.contains("Recent Akhil Context"))
+            XCTAssertTrue(output.title.contains("Recent Alex Context"))
             XCTAssertTrue(output.summaryText.lowercased().contains("media team"))
             XCTAssertTrue(output.summaryText.lowercased().contains("builders"))
             XCTAssertTrue(output.summaryText.lowercased().contains("5k"))
@@ -5658,7 +5702,7 @@ final class PidgyCoreTests: XCTestCase {
                     id: Int64(830 + index),
                     chatId: noisyDirectChatId,
                     senderUserId: 42,
-                    senderName: "Akhil B",
+                    senderName: "Alex B",
                     date: now.addingTimeInterval(-secondsAgo),
                     textContent: directTexts[index],
                     mediaTypeRaw: nil,
@@ -5670,9 +5714,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 850,
                 chatId: focusedGroupChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: now.addingTimeInterval(-2 * 86_400),
-                textContent: "few things: have our builders to showcase at their event and us as speakers representing agentic summer",
+                textContent: "The builders will showcase their demo at the event, and our team will speak about the demo project.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5680,9 +5724,9 @@ final class PidgyCoreTests: XCTestCase {
                 id: 851,
                 chatId: focusedGroupChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: now.addingTimeInterval(-2 * 86_400 + 300),
-                textContent: "lifi will confirm their 5k in a bit.",
+                textContent: "The fictional sponsor will confirm their 5k demo budget shortly.",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -5710,8 +5754,8 @@ final class PidgyCoreTests: XCTestCase {
                     textContent: record.textContent,
                     mediaType: nil,
                     isOutgoing: false,
-                    chatTitle: "Akhil B",
-                    senderName: "Akhil B"
+                    chatTitle: "Alex B",
+                    senderName: "Alex B"
                 )
             }
             let focusedFirstMessage = TGMessage(
@@ -5722,8 +5766,8 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: focusedFirstRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
-                senderName: "Akhil B"
+                chatTitle: "Demo Showcase",
+                senderName: "Alex B"
             )
             let focusedSecondMessage = TGMessage(
                 id: focusedSecondRecord.id,
@@ -5733,13 +5777,13 @@ final class PidgyCoreTests: XCTestCase {
                 textContent: focusedSecondRecord.textContent,
                 mediaType: nil,
                 isOutgoing: false,
-                chatTitle: "AI Weekends <> Inner Circle",
-                senderName: "Akhil B"
+                chatTitle: "Demo Showcase",
+                senderName: "Alex B"
             )
 
             let noisyDirectChat = TGChat(
                 id: noisyDirectChatId,
-                title: "Akhil B",
+                title: "Alex B",
                 chatType: .privateChat(userId: 42),
                 unreadCount: 0,
                 lastMessage: directMessages.first,
@@ -5750,7 +5794,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let focusedGroupChat = TGChat(
                 id: focusedGroupChatId,
-                title: "AI Weekends <> Inner Circle",
+                title: "Demo Showcase",
                 chatType: .supergroup(supergroupId: 94, isChannel: false),
                 unreadCount: 0,
                 lastMessage: focusedSecondMessage,
@@ -5761,7 +5805,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "What are the key takeaways from chat with Akhil?",
+                rawQuery: "What are the key takeaways from chat with Alex?",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -5817,7 +5861,7 @@ final class PidgyCoreTests: XCTestCase {
             let focusedMessage = makeRecord(
                 id: 602,
                 chatId: focusedChatId,
-                text: "First Dollar is a base native talent network. You can run UGC campaigns, dev/design bounties, and Radar Room helps founders get users and feedback.",
+                text: "Project Cedar is a base native talent network. You can run UGC campaigns, dev/design bounties, and Radar Room helps founders get users and feedback.",
                 date: baseDate.addingTimeInterval(-60)
             )
 
@@ -5847,7 +5891,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let focusedChat = TGChat(
                 id: focusedChatId,
-                title: "First Dollar Overview",
+                title: "Project Cedar Overview",
                 chatType: .privateChat(userId: 202),
                 unreadCount: 0,
                 lastMessage: nil,
@@ -5861,7 +5905,7 @@ final class PidgyCoreTests: XCTestCase {
             let focusedTG = makeTGMessage(id: focusedMessage.id, chatId: focusedChatId, text: focusedMessage.textContent ?? "", date: focusedMessage.date)
 
             let querySpec = QuerySpec(
-                rawQuery: "Give me a quick summary of First Dollar.",
+                rawQuery: "Give me a quick summary of Project Cedar.",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -6002,7 +6046,7 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     @MainActor
-    func testSummaryEnginePlannerHintsPreferSenderAnchoredAkhilChatOverIncidentalMention() async throws {
+    func testSummaryEnginePlannerHintsPreferSenderAnchoredAlexChatOverIncidentalMention() async throws {
         try await withTempDatabase { _ in
             let genericChatId: Int64 = 8891
             let focusedChatId: Int64 = 8892
@@ -6014,7 +6058,7 @@ final class PidgyCoreTests: XCTestCase {
                 senderUserId: 10,
                 senderName: "Core Member",
                 date: baseDate,
-                textContent: "Send location once Akhil",
+                textContent: "Send location once Alex",
                 mediaTypeRaw: nil,
                 isOutgoing: false
             )
@@ -6022,7 +6066,7 @@ final class PidgyCoreTests: XCTestCase {
                 id: 992,
                 chatId: focusedChatId,
                 senderUserId: 42,
-                senderName: "Akhil B",
+                senderName: "Alex B",
                 date: baseDate.addingTimeInterval(-300),
                 textContent: "I'll get him added to our Claude plan to use.",
                 mediaTypeRaw: nil,
@@ -6044,7 +6088,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let genericChat = TGChat(
                 id: genericChatId,
-                title: "Core(EANSG)",
+                title: "Project Commons",
                 chatType: .basicGroup(groupId: genericChatId),
                 unreadCount: 0,
                 lastMessage: nil,
@@ -6055,7 +6099,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let focusedChat = TGChat(
                 id: focusedChatId,
-                title: "Akhil B",
+                title: "Alex B",
                 chatType: .privateChat(userId: 42),
                 unreadCount: 0,
                 lastMessage: nil,
@@ -6089,7 +6133,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "What's the latest with Akhil?",
+                rawQuery: "What's the latest with Alex?",
                 mode: .summarySearch,
                 family: .summary,
                 preferredEngine: .summarize,
@@ -6100,7 +6144,7 @@ final class PidgyCoreTests: XCTestCase {
                 parseConfidence: 0.65,
                 unsupportedFragments: [],
                 plannerHints: QueryPlannerHints(
-                    people: ["akhil"],
+                    people: ["alex"],
                     topicTerms: []
                 )
             )
@@ -6136,7 +6180,7 @@ final class PidgyCoreTests: XCTestCase {
 
         let genericChat = TGChat(
             id: genericChatId,
-            title: "Generic First Dollar chatter",
+            title: "Generic Project Cedar chatter",
             chatType: .privateChat(userId: 210),
             unreadCount: 0,
             lastMessage: nil,
@@ -6147,7 +6191,7 @@ final class PidgyCoreTests: XCTestCase {
         )
         let focusedChat = TGChat(
             id: focusedChatId,
-            title: "First Dollar Website",
+            title: "Project Cedar Website",
             chatType: .privateChat(userId: 211),
             unreadCount: 0,
             lastMessage: nil,
@@ -6160,13 +6204,13 @@ final class PidgyCoreTests: XCTestCase {
         let genericMessage = makeTGMessage(
             id: 621,
             chatId: genericChatId,
-            text: "First Dollar is moving fast and First Dollar keeps coming up in founder chats.",
+            text: "Project Cedar is moving fast and Project Cedar keeps coming up in founder chats.",
             date: baseDate.addingTimeInterval(-120)
         )
         let focusedMessage = makeTGMessage(
             id: 622,
             chatId: focusedChatId,
-            text: "We should add stronger First Dollar case studies to the study website before launch.",
+            text: "We should add stronger Project Cedar case studies to the study website before launch.",
             date: baseDate.addingTimeInterval(-60)
         )
 
@@ -6182,7 +6226,7 @@ final class PidgyCoreTests: XCTestCase {
 
         let coordinator = SearchCoordinator()
         let results = await coordinator.semanticResultsForTesting(
-            query: "What's latest with First Dollar case studies?",
+            query: "What's latest with Project Cedar case studies?",
             scope: .all,
             scopedChats: [genericChat, focusedChat],
             telegramService: telegramService,
@@ -6401,6 +6445,26 @@ final class PidgyCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testPredictiveArchiveFTSFiltersDatesBeforeLimitAndChatScope() async throws {
+        try await withTempDatabase { _ in
+            let now = Date(timeIntervalSince1970: 1_789_640_000)
+            let old = makeRecord(id: 700, chatId: 9004, text: "invoice.pdf unpaid", date: now.addingTimeInterval(-86400), isOutgoing: false)
+            let recent = makeRecord(id: 701, chatId: 9004, text: "invoice.pdf unpaid", date: now, isOutgoing: false)
+            await DatabaseManager.shared.upsertIndexedMessages(chatId: 9004, messages: [old, recent], preferredOldestMessageId: old.id, isSearchReady: true)
+            let range = TimeRangeConstraint(startDate: old.date.addingTimeInterval(-1), endDate: old.date.addingTimeInterval(1), label: "Old")
+            let expression = PredictiveSearch.archiveQuery("find unpaid invoice")
+            let scoped = await DatabaseManager.shared.localSearchFTSRaw(rawFTSQuery: expression, chatIds: [9004], limit: 1, timeRange: range)
+            XCTAssertEqual(scoped.map { $0.message.id }, [700])
+            let all = await DatabaseManager.shared.localSearchFTSRaw(rawFTSQuery: expression, limit: 1, timeRange: range)
+            XCTAssertEqual(all.map { $0.message.id }, [700])
+            let excluded = await DatabaseManager.shared.localSearchFTSRaw(rawFTSQuery: expression, chatIds: [9005], limit: 1, timeRange: range)
+            XCTAssertTrue(excluded.isEmpty)
+            let long = String(repeating: "irrelevant ", count: 100) + "invoice.pdf unpaid"
+            XCTAssertTrue(PredictiveSearch.evidenceSnippet(long, query: "invoice").contains("invoice.pdf"))
+        }
+    }
+
+    @MainActor
     func testPatternSearchEngineAppliesParsedTimeRange() async throws {
         try await withTempDatabase { _ in
             let chatId: Int64 = 9004
@@ -6547,7 +6611,7 @@ final class PidgyCoreTests: XCTestCase {
 
             let rahulChat = TGChat(
                 id: rahulChatId,
-                title: "Rahul Singh Bhadoriya",
+                title: "Morgan Singh Bhadoriya",
                 chatType: .privateChat(userId: 201),
                 unreadCount: 0,
                 lastMessage: nil,
@@ -6558,7 +6622,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let groupChat = TGChat(
                 id: groupChatId,
-                title: "Towow Official <> First Dollar",
+                title: "Towow Official <> Project Cedar",
                 chatType: .supergroup(supergroupId: groupChatId, isChannel: false),
                 unreadCount: 0,
                 lastMessage: nil,
@@ -6569,7 +6633,7 @@ final class PidgyCoreTests: XCTestCase {
             )
             let otherWalletChat = TGChat(
                 id: otherWalletChatId,
-                title: "Akhil B",
+                title: "Alex B",
                 chatType: .privateChat(userId: 202),
                 unreadCount: 0,
                 lastMessage: nil,
@@ -6589,7 +6653,7 @@ final class PidgyCoreTests: XCTestCase {
             let rahulMentionOnly = makeRecord(
                 id: 902,
                 chatId: groupChatId,
-                text: "I am talking to Rahul about it",
+                text: "I am talking to Morgan about it",
                 date: Date().addingTimeInterval(-120),
                 isOutgoing: true
             )
@@ -6621,7 +6685,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             let querySpec = QuerySpec(
-                rawQuery: "wallet I sent to Rahul",
+                rawQuery: "wallet I sent to Morgan",
                 mode: .messageSearch,
                 family: .exactLookup,
                 preferredEngine: .messageLookup,
@@ -6642,7 +6706,7 @@ final class PidgyCoreTests: XCTestCase {
             )
 
             XCTAssertEqual(results.map(\.message.id), [901])
-            XCTAssertEqual(results.first?.chatTitle, "Rahul Singh Bhadoriya")
+            XCTAssertEqual(results.first?.chatTitle, "Morgan Singh Bhadoriya")
         }
     }
 
@@ -6952,12 +7016,13 @@ final class PidgyCoreTests: XCTestCase {
             )
             await DatabaseManager.shared.upsertLiveMessages(chatId: chatId, messages: [photo])
             await DatabaseManager.shared.applyPhotoOCR(
-                messageId: 1, chatId: chatId, text: "invoice #442 due friday"
+                messageId: 1, chatId: chatId, text: "invoice #442 due friday",
+                summary: "Invoice 442 is due Friday."
             )
 
             // Re-sync re-delivers the SAME message, now with the sender resolved.
             let enriched = DatabaseManager.MessageRecord(
-                id: 1, chatId: chatId, senderUserId: 7, senderName: "Akhil",
+                id: 1, chatId: chatId, senderUserId: 7, senderName: "Alex",
                 date: sentAt, textContent: "check this", mediaTypeRaw: "Photo",
                 isOutgoing: false
             )
@@ -6975,7 +7040,8 @@ final class PidgyCoreTests: XCTestCase {
                 text?.contains("[photo text: invoice #442 due friday]") == true,
                 "OCR append must survive sender enrichment; got: \(text ?? "nil")"
             )
-            XCTAssertEqual(row?["sender_name"] as String?, "Akhil", "the enrichment itself must still land")
+            XCTAssertTrue(text?.contains("[image text summary: Invoice 442 is due Friday.]") == true)
+            XCTAssertEqual(row?["sender_name"] as String?, "Alex", "the enrichment itself must still land")
             XCTAssertEqual(row?["ocr_state"] as Int?, 1, "ocr_state must not reset to pending")
         }
     }
@@ -6985,12 +7051,12 @@ final class PidgyCoreTests: XCTestCase {
     func testFactTaskPriorityUsesUrgencyInsteadOfExtractionConfidence() {
         func fact(confidence: Double = 0.95, action: String, source: String = "") -> Fact {
             Fact(
-                id: 1, subjectEntity: "Akhil", predicate: .iOwe,
+                id: 1, subjectEntity: "Alex", predicate: .iOwe,
                 objectText: action, action: action, loopKind: .action,
                 objectEntity: nil, confidence: confidence,
                 validFrom: Date(), invalidAt: nil,
-                sourceChatId: 42, sourceChatTitle: "Akhil",
-                sourceMessageId: 7, sourceText: source, senderName: "Akhil",
+                sourceChatId: 42, sourceChatTitle: "Alex",
+                sourceMessageId: 7, sourceText: source, senderName: "Alex",
                 fingerprint: "f", createdAt: Date(), updatedAt: Date()
             )
         }
@@ -7020,12 +7086,12 @@ final class PidgyCoreTests: XCTestCase {
     func testAnswerPromptCarriesLoopKindForReplyParity() {
         func loop(_ kind: LoopKind?, predicate: FactPredicate, what: String) -> Fact {
             Fact(
-                id: 1, subjectEntity: "Akhil", predicate: predicate,
+                id: 1, subjectEntity: "Alex", predicate: predicate,
                 objectText: what, action: "", loopKind: kind,
                 objectEntity: nil, confidence: 0.9,
                 validFrom: Date(), invalidAt: nil,
-                sourceChatId: 42, sourceChatTitle: "Akhil",
-                sourceMessageId: 7, sourceText: what, senderName: "Akhil",
+                sourceChatId: 42, sourceChatTitle: "Alex",
+                sourceMessageId: 7, sourceText: what, senderName: "Alex",
                 fingerprint: "f", createdAt: Date(), updatedAt: Date()
             )
         }
@@ -7063,11 +7129,11 @@ final class PidgyCoreTests: XCTestCase {
     func testApplyExtractionWindowCommitsFactsAndCursorTogether() async throws {
         try await withTempDatabase { _ in
             let original = FactDraft(
-                subjectEntity: "Akhil B", predicate: .iOwe, objectText: "the beta invite",
-                action: "Send Akhil the beta invite", loopKind: .reply, objectEntity: nil,
+                subjectEntity: "Alex B", predicate: .iOwe, objectText: "the beta invite",
+                action: "Send Alex the beta invite", loopKind: .reply, objectEntity: nil,
                 confidence: 0.9, validFrom: Date(timeIntervalSince1970: 1_000),
-                sourceChatId: 7, sourceChatTitle: "Akhil B",
-                sourceMessageId: 100, sourceText: "beta invite bhejo", senderName: "Akhil B"
+                sourceChatId: 7, sourceChatTitle: "Alex B",
+                sourceMessageId: 100, sourceText: "beta invite bhejo", senderName: "Alex B"
             )
             await DatabaseManager.shared.upsertFacts([original])
 
@@ -7077,11 +7143,11 @@ final class PidgyCoreTests: XCTestCase {
             reAsk.sourceMessageId = 210
             reAsk.sourceText = "beta invite? phir se puch raha hoon"
             let fresh = FactDraft(
-                subjectEntity: "Akhil B", predicate: .owesMe, objectText: "the figma link",
-                action: "Akhil owes the figma link", objectEntity: nil, confidence: 0.8,
+                subjectEntity: "Alex B", predicate: .owesMe, objectText: "the figma link",
+                action: "Alex owes the figma link", objectEntity: nil, confidence: 0.8,
                 validFrom: Date(timeIntervalSince1970: 2_000), sourceChatId: 7,
-                sourceChatTitle: "Akhil B", sourceMessageId: 220,
-                sourceText: "figma link bhejta hoon", senderName: "Akhil B"
+                sourceChatTitle: "Alex B", sourceMessageId: 220,
+                sourceText: "figma link bhejta hoon", senderName: "Alex B"
             )
             try await DatabaseManager.shared.applyExtractionWindow(
                 chatId: 7,
@@ -7114,7 +7180,7 @@ final class PidgyCoreTests: XCTestCase {
             MessageSnippet(
                 messageId: 900, senderFirstName: "Pratzyy",
                 text: "@adityakiteapp nice talking to you, will share the proposal by eod",
-                relativeTimestamp: "1h", chatId: 5, chatName: "First Dollar <> Kite"
+                relativeTimestamp: "1h", chatId: 5, chatName: "Project Cedar <> Kite"
             )
         ]
         let response = """
@@ -7176,7 +7242,7 @@ final class PidgyCoreTests: XCTestCase {
 
     func testExtractionPromptTreatsGmailAsEmailInsteadOfSupergroup() {
         let prompt = FactExtractionPrompt.contextBlock(
-            myName: "Pratyush",
+            myName: "Sam",
             myUsername: "pratzyy",
             chatTitle: "Renewal reminder",
             chatType: FactExtractionPrompt.chatTypeLabel(
@@ -7296,7 +7362,7 @@ final class PidgyCoreTests: XCTestCase {
                 id: 11,
                 chatId: 4,
                 senderUserId: 1,
-                senderName: "Pratyush",
+                senderName: "Sam",
                 date: sourceDate.addingTimeInterval(-60),
                 textContent: "Which version?",
                 mediaTypeRaw: nil,
@@ -7656,14 +7722,14 @@ final class PidgyCoreTests: XCTestCase {
     func testSlackTriageMovesAnswerableCheckQuestionToReplyLane() {
         let chat = makeChat(
             id: -5,
-            title: "Rajanshee",
+            title: "Robin",
             chatType: .privateChat(userId: 44),
             unreadCount: 1,
             lastMessageDate: Date(),
             source: SourceID(kind: .slack, account: "T_TEST")
         )
         let draft = FactDraft(
-            subjectEntity: "Rajanshee",
+            subjectEntity: "Robin",
             predicate: .iOwe,
             objectText: "whether the right corner is blank",
             action: "Check if the right corner is blank",
@@ -7675,7 +7741,7 @@ final class PidgyCoreTests: XCTestCase {
             sourceChatTitle: chat.title,
             sourceMessageId: -50,
             sourceText: "also isme right corner wala blank h kya?",
-            senderName: "Rajanshee"
+            senderName: "Robin"
         )
 
         let enhanced = SlackTriagePolicy.enhancedDrafts([draft], messages: [], chat: chat)
@@ -7690,7 +7756,7 @@ final class PidgyCoreTests: XCTestCase {
         )
 
         XCTAssertTrue(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
-            sourceText: "@Piyush Jain whats the update on newspaper designs?",
+            sourceText: "@Casey Jain whats the update on newspaper designs?",
             currentUserAliases: ExplicitAssigneePolicy.aliases(for: me)
         ))
         XCTAssertTrue(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
@@ -7707,11 +7773,11 @@ final class PidgyCoreTests: XCTestCase {
         let aliases = ExplicitAssigneePolicy.aliases(for: me)
 
         XCTAssertFalse(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
-            sourceText: "@Piyush @pratzyy please review this",
+            sourceText: "@Casey @pratzyy please review this",
             currentUserAliases: aliases
         ))
         XCTAssertFalse(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
-            sourceText: "Please send this to @Piyush",
+            sourceText: "Please send this to @Casey",
             currentUserAliases: aliases
         ))
         XCTAssertFalse(ExplicitAssigneePolicy.isExplicitlyAssignedElsewhere(
@@ -7755,7 +7821,7 @@ final class PidgyCoreTests: XCTestCase {
         let source = SourceID(kind: .slack, account: "T_TEST")
         let chat = makeChat(
             id: -6,
-            title: "Rajanshee",
+            title: "Robin",
             chatType: .privateChat(userId: 45),
             unreadCount: 1,
             lastMessageDate: Date(),
@@ -7765,7 +7831,7 @@ final class PidgyCoreTests: XCTestCase {
         let request = TGMessage(
             id: -60, chatId: chat.id, senderId: .user(45), date: now,
             textContent: "can add here", mediaType: nil, isOutgoing: false,
-            chatTitle: chat.title, senderName: "Rajanshee", source: source
+            chatTitle: chat.title, senderName: "Robin", source: source
         )
         let commitment = TGMessage(
             id: -61, chatId: chat.id, senderId: .user(1), date: now.addingTimeInterval(1),
@@ -7775,7 +7841,7 @@ final class PidgyCoreTests: XCTestCase {
         let detail = TGMessage(
             id: -62, chatId: chat.id, senderId: .user(45), date: now.addingTimeInterval(2),
             textContent: "• Recap: Clip together all the highlight moments", mediaType: nil, isOutgoing: false,
-            chatTitle: chat.title, senderName: "Rajanshee", source: source
+            chatTitle: chat.title, senderName: "Robin", source: source
         )
 
         let enhanced = SlackTriagePolicy.enhancedDrafts(
@@ -8030,7 +8096,7 @@ final class PidgyCoreTests: XCTestCase {
     func testPinnedOwnerChipsHideRedundantAnyoneAndShowItForTeamTasks() {
         let currentUser = TGUser(
             id: 99,
-            firstName: "Pratyush",
+            firstName: "Sam",
             lastName: "",
             username: "pratzyy",
             phoneNumber: nil,
@@ -8053,8 +8119,8 @@ final class PidgyCoreTests: XCTestCase {
             topicId: nil,
             topicName: nil,
             chatId: 2,
-            personName: "Rajanshee",
-            ownerName: "Rajanshee"
+            personName: "Robin",
+            ownerName: "Robin"
         )
 
         let onlyMine = DashboardTaskListFilters.pinnedOwnerChips(
@@ -8171,16 +8237,16 @@ final class PidgyCoreTests: XCTestCase {
 
     /// A conversational query that NAMES someone must return only that
     /// person's facts — filler tokens (kya/chal/rha) matching another fact's
-    /// raw source_text must not surface it (the "Gaurang on an Akhil query"
+    /// raw source_text must not surface it (the "Gaurang on an Alex query"
     /// launcher bug).
     func testSearchFactsAnchorsOnNamedPerson() async throws {
         try await withTempDatabase { _ in
             await DatabaseManager.shared.upsertFacts([
                 FactDraft(
-                    subjectEntity: "Akhil B", predicate: .owesMe, objectText: "the credit code",
-                    action: "Remind Akhil for the credit code", objectEntity: nil, confidence: 0.9,
-                    validFrom: Date(), sourceChatId: 1, sourceChatTitle: "Akhil B",
-                    sourceMessageId: 11, sourceText: "code bhejna yaar", senderName: "Akhil B"
+                    subjectEntity: "Alex B", predicate: .owesMe, objectText: "the credit code",
+                    action: "Remind Alex for the credit code", objectEntity: nil, confidence: 0.9,
+                    validFrom: Date(), sourceChatId: 1, sourceChatTitle: "Alex B",
+                    sourceMessageId: 11, sourceText: "code bhejna yaar", senderName: "Alex B"
                 ),
                 FactDraft(
                     subjectEntity: "Gaurang Desai", predicate: .iOwe, objectText: "pidgy updates",
@@ -8190,14 +8256,14 @@ final class PidgyCoreTests: XCTestCase {
                 )
             ])
 
-            let hits = await DatabaseManager.shared.searchFacts(query: "akhil ke saath kya chal rha")
+            let hits = await DatabaseManager.shared.searchFacts(query: "alex ke saath kya chal rha")
             XCTAssertFalse(hits.isEmpty)
-            XCTAssertTrue(hits.allSatisfy { $0.subjectEntity == "Akhil B" },
+            XCTAssertTrue(hits.allSatisfy { $0.subjectEntity == "Alex B" },
                           "filler-token matches must not surface other people's facts")
 
             // Planner-refined identity terms behave the same way.
-            let refined = await DatabaseManager.shared.searchFacts(query: "क्या चल रहा", identityTerms: ["Akhil"])
-            XCTAssertTrue(refined.allSatisfy { $0.subjectEntity == "Akhil B" })
+            let refined = await DatabaseManager.shared.searchFacts(query: "क्या चल रहा", identityTerms: ["Alex"])
+            XCTAssertTrue(refined.allSatisfy { $0.subjectEntity == "Alex B" })
 
             // Content query with no named person falls back to full-text
             // (recall preserved).
@@ -8518,7 +8584,7 @@ final class PidgyCoreTests: XCTestCase {
             var question = makeRecord(
                 id: -801, chatId: -80,
                 text: "also isme right corner wala blank h kya?", date: base,
-                senderName: "Rajanshee"
+                senderName: "Robin"
             )
             question.source = source
             var deferral = makeRecord(
@@ -8540,12 +8606,12 @@ final class PidgyCoreTests: XCTestCase {
             )
             await DatabaseManager.shared.upsertFacts([
                 FactDraft(
-                    subjectEntity: "Rajanshee", predicate: .iOwe,
+                    subjectEntity: "Robin", predicate: .iOwe,
                     objectText: "whether the right corner is blank",
                     action: "Check if the right corner is blank", loopKind: .action,
                     objectEntity: nil, confidence: 0.9, validFrom: base,
-                    sourceChatId: -80, sourceChatTitle: "Rajanshee", sourceMessageId: -801,
-                    sourceText: "also isme right corner wala blank h kya?", senderName: "Rajanshee"
+                    sourceChatId: -80, sourceChatTitle: "Robin", sourceMessageId: -801,
+                    sourceText: "also isme right corner wala blank h kya?", senderName: "Robin"
                 )
             ])
 
@@ -9061,4 +9127,301 @@ private actor CountingFactExtractionProvider: AIProvider {
     func testConnection() async throws -> Bool {
         true
     }
+}
+
+// MARK: - Onboarding routing
+
+final class OnboardingRoutingTests: XCTestCase {
+    func testWelcomeGoesToSignInOnlyWhenAccountsConfiguredAndSignedOut() {
+        XCTAssertEqual(
+            OnboardingRouting.afterWelcome(accountConfigured: true, signedIn: false, inviteGateRequired: false, inviteRegistered: false),
+            .signIn
+        )
+        XCTAssertEqual(
+            OnboardingRouting.afterWelcome(accountConfigured: true, signedIn: true, inviteGateRequired: false, inviteRegistered: false),
+            .sources
+        )
+        XCTAssertEqual(
+            OnboardingRouting.afterWelcome(accountConfigured: false, signedIn: false, inviteGateRequired: false, inviteRegistered: false),
+            .sources
+        )
+    }
+
+    func testInviteGateAppliesAfterSignIn() {
+        XCTAssertEqual(OnboardingRouting.afterSignIn(inviteGateRequired: true, inviteRegistered: false), .invite)
+        XCTAssertEqual(OnboardingRouting.afterSignIn(inviteGateRequired: true, inviteRegistered: true), .sources)
+        XCTAssertEqual(OnboardingRouting.afterSignIn(inviteGateRequired: false, inviteRegistered: false), .sources)
+        XCTAssertEqual(
+            OnboardingRouting.afterWelcome(accountConfigured: true, signedIn: true, inviteGateRequired: true, inviteRegistered: false),
+            .invite
+        )
+    }
+
+    func testLaunchAtLoginRoutesToPlanOnlyWhenBillingUIShown() {
+        XCTAssertEqual(OnboardingRouting.afterLaunchAtLogin(showBillingUI: true), .plan)
+        XCTAssertEqual(OnboardingRouting.afterLaunchAtLogin(showBillingUI: false), .done)
+    }
+
+    func testBackNavigationSkipsGatesThatDoNotApply() {
+        XCTAssertEqual(OnboardingRouting.back(from: .sources, accountConfigured: true, inviteGateRequired: true, inviteRegistered: false), .invite)
+        XCTAssertEqual(OnboardingRouting.back(from: .sources, accountConfigured: true, inviteGateRequired: true, inviteRegistered: true), .signIn)
+        XCTAssertEqual(OnboardingRouting.back(from: .sources, accountConfigured: false, inviteGateRequired: false, inviteRegistered: false), .welcome)
+        XCTAssertEqual(OnboardingRouting.back(from: .telegramCode, accountConfigured: false, inviteGateRequired: false, inviteRegistered: false), .sources)
+        XCTAssertNil(OnboardingRouting.back(from: .done, accountConfigured: true, inviteGateRequired: true, inviteRegistered: true))
+        XCTAssertNil(OnboardingRouting.back(from: .welcome, accountConfigured: true, inviteGateRequired: true, inviteRegistered: true))
+        XCTAssertTrue(OnboardingStep.telegramPassword.isTelegramAuth)
+        XCTAssertFalse(OnboardingStep.shortcut.isTelegramAuth)
+    }
+}
+
+// MARK: - Onboarding interaction regressions and rendered previews
+
+@MainActor
+final class OnboardingInteractionTests: XCTestCase {
+    func testBrowserSourceReturnsToSetupWithoutCompletingIt() async {
+        for source in [OnboardingConversationModel.SourceKind.slack, .gmail] {
+            for result in [OnboardingConversationModel.SourceState.connected("Test workspace"), .failed("Sign-in cancelled")] {
+                let pending = PendingOnboardingBrowserConnection()
+                var completions = 0
+                var resumptions = 0
+                let model = OnboardingConversationModel(
+                    telegramService: TelegramService(),
+                    aiService: AIService(testingProvider: NoAIProvider(), isConfigured: false),
+                    pigeon: PigeonActor(), observeServices: false,
+                    browserConnector: { _ in await pending.connect() },
+                    onFinished: { completions += 1 }
+                )
+                model.configurePreview(step: .sources, sources: [.telegram: .connected("Test account"), source: .available])
+                model.browserConnectionFinished = { resumptions += 1 }
+                model.pick(source)
+                for _ in 0..<50 where pending.requests == 0 { try? await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(pending.requests, 1)
+                XCTAssertEqual(resumptions, 0)
+                model.configurePreview(step: .sources, sources: [.telegram: .connected("Test account"), source: result])
+                pending.complete()
+                for _ in 0..<50 where resumptions == 0 { try? await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(resumptions, 1)
+                XCTAssertEqual(completions, 0)
+                XCTAssertEqual(model.step, .sources)
+                XCTAssertEqual(model.sourceState(source), result)
+                model.finishSources()
+                XCTAssertEqual(model.step, .intelligence)
+            }
+        }
+    }
+
+    func testLateSlackCallbackDoesNotReopenClosedSetup() async {
+        let pending = PendingOnboardingBrowserConnection()
+        var resumptions = 0
+        let model = OnboardingConversationModel(
+            telegramService: TelegramService(),
+            aiService: AIService(testingProvider: NoAIProvider(), isConfigured: false),
+            pigeon: PigeonActor(), observeServices: false,
+            browserConnector: { _ in await pending.connect() }, onFinished: {}
+        )
+        model.configurePreview(step: .sources)
+        model.browserConnectionFinished = { resumptions += 1 }
+        model.pick(.slack)
+        for _ in 0..<50 where pending.requests == 0 { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(pending.requests, 1)
+        model.cancelPendingOperations()
+        pending.complete()
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(resumptions, 0)
+    }
+
+    func testHiddenSetupResumesAndClosedSetupDoesNot() {
+        let telegram = TelegramService()
+        let ai = AIService(testingProvider: NoAIProvider(), isConfigured: false)
+        var completions = 0
+        let controller = OnboardingWindowController(telegramService: telegram, aiService: ai, onComplete: { completions += 1 })
+        XCTAssertFalse(controller.resumeIfNeeded())
+        controller.show()
+        defer { controller.close(markCompleted: false) }
+        controller.hide()
+        XCTAssertFalse(controller.isActive)
+        XCTAssertTrue(controller.hasSession)
+        XCTAssertTrue(controller.resumeIfNeeded())
+        XCTAssertTrue(controller.isActive)
+        XCTAssertEqual(completions, 0)
+        controller.close(markCompleted: false)
+        XCTAssertFalse(controller.resumeIfNeeded())
+    }
+
+    private func model(telegram: TelegramService? = nil, observeServices: Bool = false) -> OnboardingConversationModel {
+        OnboardingConversationModel(
+            telegramService: telegram ?? TelegramService(),
+            aiService: AIService(testingProvider: NoAIProvider(), isConfigured: false),
+            pigeon: PigeonActor(),
+            observeServices: observeServices,
+            onFinished: {}
+        )
+    }
+
+    func testSourcesCannotContinueWithoutAConnection() {
+        let model = model()
+        model.configurePreview(step: .sources)
+        model.finishSources()
+        XCTAssertEqual(model.step, .sources)
+        model.primaryAction()
+        XCTAssertEqual(model.step, .sources)
+        model.configurePreview(step: .sources, sources: [.telegram: .connected("Test account")])
+        model.finishSources()
+        XCTAssertEqual(model.step, .intelligence)
+    }
+
+    func testConnectedSourceDoesNotStartAnotherConnection() {
+        let model = model()
+        model.configurePreview(step: .sources, sources: [.slack: .connected("Test workspace")])
+        model.pick(.slack)
+        XCTAssertTrue(model.picked.isEmpty)
+        XCTAssertNil(model.sourceDetail)
+    }
+
+    func testBackRestoresTheCorrectHeadingAndClearsSecrets() {
+        let model = model()
+        model.configurePreview(step: .telegramPassword)
+        model.inputText = "private-password"
+        model.back()
+        XCTAssertEqual(model.step, .sources)
+        XCTAssertEqual(model.heading, "Where do people reach you?")
+        XCTAssertTrue(model.inputText.isEmpty)
+        model.configurePreview(step: .byokKey)
+        model.inputText = "private-api-key"
+        model.back()
+        XCTAssertEqual(model.step, .plan)
+        XCTAssertTrue(model.canGoBack)
+        XCTAssertTrue(model.inputText.isEmpty)
+    }
+
+    func testInputRejectsWhitespaceAndChangingProvidersClearsKey() {
+        let model = model()
+        model.configurePreview(step: .byokKey)
+        model.inputText = " \n\t "
+        XCTAssertFalse(model.canSubmitInput)
+        model.inputText = "test-only-key"
+        XCTAssertTrue(model.canSubmitInput)
+        model.setByokProvider(.claude)
+        XCTAssertTrue(model.inputText.isEmpty)
+        XCTAssertEqual(model.byokProvider, .claude)
+    }
+
+    func testQRHasSourceSpecificHeadingAndBackRestoresSourceList() {
+        let model = model()
+        model.configurePreview(step: .sources, detail: .telegramQR(link: nil), error: "Test failure")
+        XCTAssertEqual(model.heading, "Connect Telegram")
+        model.closeSourceDetail()
+        XCTAssertNil(model.sourceDetail)
+        XCTAssertNil(model.errorText)
+        XCTAssertEqual(model.heading, "Where do people reach you?")
+    }
+
+    func testDuplicateSubmitAndBackAreBlockedWhilePhoneRequestIsPending() async {
+        let telegram = PendingOnboardingTelegramService()
+        telegram.authState = .waitingForPhoneNumber
+        let model = model(telegram: telegram)
+        model.configurePreview(step: .telegramPhone)
+        model.inputText = "+15551234567"
+        model.primaryAction()
+        model.primaryAction()
+        for _ in 0..<50 where telegram.requests == 0 {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(telegram.requests, 1)
+        XCTAssertTrue(model.isBusy)
+        XCTAssertFalse(model.canGoBack)
+        model.back()
+        XCTAssertEqual(model.step, .telegramPhone)
+        telegram.complete()
+        for _ in 0..<50 where model.isBusy {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.isBusy)
+    }
+
+    func testAbandonedTelegramAuthDoesNotInterruptWhatsAppPairing() async {
+        let telegram = TelegramService()
+        telegram.authState = .waitingForQrCode(link: "test-only-qr")
+        let model = model(telegram: telegram, observeServices: true)
+        model.configurePreview(step: .sources)
+        model.pick(.telegram)
+        try? await Task.sleep(for: .milliseconds(50))
+        model.configurePreview(step: .sources, detail: .whatsAppQR)
+        telegram.authState = .waitingForCode(codeInfo: nil)
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(model.step, .sources)
+        XCTAssertEqual(model.sourceDetail, .whatsAppQR)
+        telegram.authState = .ready
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(model.sourceDetail, .whatsAppQR)
+    }
+
+    func testReturnAndEscapeWorkWithoutClickingTheCard() async throws {
+        let model = model()
+        model.configurePreview(step: .sources, sources: [.telegram: .connected("Test account")])
+        let size = CGSize(width: 1000, height: 760)
+        let hosting = NSHostingView(rootView: OnboardingCardView(model: model, layout: OnboardingLayout(size: size))
+            .frame(width: size.width, height: size.height).preferredColorScheme(.dark))
+        let window = NSWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        try await Task.sleep(for: .milliseconds(250))
+        let enter = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        window.sendEvent(enter)
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(model.step, .intelligence)
+        let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 1,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        window.sendEvent(escape)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(model.step, .sources)
+    }
+
+    func testClosingSetupCancelsDelayedCompletion() async {
+        var completions = 0
+        let model = OnboardingConversationModel(
+            telegramService: TelegramService(),
+            aiService: AIService(testingProvider: NoAIProvider(), isConfigured: false),
+            pigeon: PigeonActor(), observeServices: false, onFinished: { completions += 1 }
+        )
+        model.configurePreview(step: .done)
+        model.finish()
+        model.cancelPendingOperations()
+        try? await Task.sleep(for: .milliseconds(1500))
+        XCTAssertEqual(completions, 0)
+    }
+
+    func testLayoutKeepsFooterInsideSmallAndLargeScreens() {
+        for size in [CGSize(width: 800, height: 600), CGSize(width: 1440, height: 900), CGSize(width: 2560, height: 1440)] {
+            let layout = OnboardingLayout(size: size)
+            XCTAssertLessThanOrEqual(layout.columnWidth, size.width - 64)
+            XCTAssertLessThanOrEqual(layout.columnTop + layout.columnHeight, size.height - 40)
+            XCTAssertGreaterThanOrEqual(layout.qrSide, 160)
+        }
+    }
+}
+
+@MainActor
+private final class PendingOnboardingTelegramService: TelegramService {
+    var requests = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+    override func setPhoneNumber(_ phone: String) async throws {
+        requests += 1
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func complete() { continuation?.resume(); continuation = nil }
+}
+
+@MainActor
+private final class PendingOnboardingBrowserConnection {
+    var requests = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+    func connect() async {
+        requests += 1
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func complete() { continuation?.resume(); continuation = nil }
 }

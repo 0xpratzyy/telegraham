@@ -18,6 +18,19 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>com.pidgy.app.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.pidgy.app</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>PidgyBuildCommitSHA</key>
@@ -26,6 +39,8 @@
 	<string>$(PIDGY_AI_PROXY_TOKEN)</string>
 	<key>PidgyBundledAIProxyURL</key>
 	<string>$(PIDGY_AI_PROXY_URL)</string>
+	<key>PidgyBundledClerkPublishableKey</key>
+	<string>$(PIDGY_CLERK_PUBLISHABLE_KEY)</string>
 	<key>PidgyBundledDodoBaseURL</key>
 	<string>$(PIDGY_DODO_BASE_URL)</string>
 	<key>PidgyBundledDodoCheckoutBYOK</key>
@@ -48,10 +63,12 @@
 	<string>$(PIDGY_TG_API_HASH)</string>
 	<key>PidgyBundledTelegramApiId</key>
 	<string>$(PIDGY_TG_API_ID)</string>
+	<key>PidgyChatGPTLocalOSS</key>
+	<string>$(PIDGY_CHATGPT_OSS_ENABLED)</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/0xpratzyy/pidgy-releases/main/appcast.xml</string>
+	<string>$(PIDGY_UPDATE_FEED_URL)</string>
 	<key>SUPublicEDKey</key>
 	<string>ZvPujxTMtOfaewSOF2uoCycxcjO/X5/BeqdEPVRMTn4=</string>
 	<key>SUScheduledCheckInterval</key>

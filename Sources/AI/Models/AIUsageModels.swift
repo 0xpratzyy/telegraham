@@ -13,6 +13,10 @@ enum AIRequestKind: String, Codable, CaseIterable {
     case personProfile
     case summary
     case factExtraction
+    case loopClassification
+    case summaryEvidence
+    case imageTextSummary
+    case predictiveSearch
     case answerEngine
 
     var label: String {
@@ -37,6 +41,14 @@ enum AIRequestKind: String, Codable, CaseIterable {
             return "Dashboard Tasks"
         case .personProfile:
             return "Person Profile"
+        case .loopClassification:
+            return "Reply / Task Decisions"
+        case .summaryEvidence:
+            return "Summary Evidence"
+        case .imageTextSummary:
+            return "Image Text Summary"
+        case .predictiveSearch:
+            return "Predictive Search"
         case .factExtraction:
             return "Fact Extraction"
         case .answerEngine:
@@ -50,6 +62,8 @@ enum AIRequestKind: String, Codable, CaseIterable {
 enum AIUsageProvider: String, Codable, CaseIterable {
     case openAI = "OpenAI"
     case claude = "Claude"
+    case typeSafe = "TypeSafe"
+    case chatGPT = "ChatGPT plan"
 
     var label: String { rawValue }
 }
@@ -175,6 +189,8 @@ enum AIUsagePricingCatalog {
         guard let family = canonicalFamily(for: provider, model: model) else { return nil }
 
         switch (provider, family) {
+        case (.typeSafe, "jev-1.13.0"):
+            return AIModelPricing(family: family, inputUSDPerMillionTokens: 0.042, outputUSDPerMillionTokens: 0)
         case (.openAI, "gpt-4o-mini"):
             return AIModelPricing(
                 family: family,
@@ -236,7 +252,7 @@ enum AIUsagePricingCatalog {
                 inputUSDPerMillionTokens: 1.50,
                 outputUSDPerMillionTokens: 9.00
             )
-        case (.openAI, "gemini-3.7-flash"):
+        case (.openAI, "gemini-3.7-flash"), (.openAI, "gemini-3.8-flash"):
             // Google launch pricing is 50% off through 2026-12-31. The cost
             // meter switches automatically when standard pricing starts so a
             // 2027 build does not silently understate managed-plan spend.
@@ -266,10 +282,17 @@ enum AIUsagePricingCatalog {
         guard !normalized.isEmpty else { return nil }
 
         switch provider {
+        case .chatGPT:
+            // Plan allowances/credits aren't API token prices. Never estimate
+            // a cash bill from the API-key catalog for this authentication path.
+            return nil
+        case .typeSafe:
+            return normalized == "jev-1.13.0" ? normalized : nil
         case .openAI:
             // Managed plan: Gemini via the OpenAI-compat proxy path is recorded
             // under .openAI with a `google/gemini-*` model id. Check the more
             // specific variants first (3.1-flash-lite before 3-flash, etc).
+            if normalized.contains("gemini-3.8-flash") { return "gemini-3.8-flash" }
             if normalized.contains("gemini-3.7-flash") { return "gemini-3.7-flash" }
             if normalized.contains("gemini-3.1-flash-lite") { return "gemini-3.1-flash-lite" }
             if normalized.contains("gemini-3.5-flash-lite") { return "gemini-3.5-flash-lite" }

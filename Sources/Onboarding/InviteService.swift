@@ -150,6 +150,11 @@ final class InviteService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Signed-in users carry their Clerk session so a fresh machine can
+        // inherit the account's registration instead of needing a new code.
+        if let accountToken = await AccountService.shared.sessionToken() {
+            request.setValue(accountToken, forHTTPHeaderField: "X-Pidgy-Account")
+        }
         request.httpBody = try JSONEncoder().encode(payload)
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

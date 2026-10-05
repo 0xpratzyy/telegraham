@@ -106,6 +106,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hosted tests must not restore accounts, sync messages, or start telemetry.
+        if isRunningTests {
+            PidgyFontRegistrar.registerBundledFonts()
+            return
+        }
+        #if DEBUG
+        // Isolated quit regression probe: synthetic OCR, no accounts or DB.
+        if let path = ProcessInfo.processInfo.environment["PIDGY_OCR_QUIT_PROBE_IMAGE"] {
+            Task.detached {
+                _ = PhotoOCRIndexer.recognizeText(at: URL(fileURLWithPath: path))
+            }
+            Task { @MainActor in
+                for _ in 0..<100 {
+                    if OCRWorkTracker.shared.hasActiveWork {
+                        try? "active".write(toFile: path + ".started", atomically: true, encoding: .utf8)
+                        try? await Task.sleep(for: .milliseconds(100))
+                        NSApp.terminate(nil)
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        #endif
+        // Accounts (Clerk) — no-op without a bundled publishable key. Goes
+        // first so the cached session is restored before onboarding or
+        // Preferences ask who's signed in.
+        AccountService.shared.configureIfNeeded()
+
         // Bring up telemetry first so any crash/error in subsequent
         // startup (font registration, TDLib bring-up, panel manager,
         // etc.) gets captured. Skipped automatically when no Sentry DSN
@@ -130,7 +161,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         //
         // Skipped under XCTest so the test runner isn't fighting
         // the updater for network or UI focus.
-        if !isRunningTests {
+        if !isRunningTests,
+           let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+           !feed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             updaterController = SPUStandardUpdaterController(
                 startingUpdater: true,
                 updaterDelegate: nil,
@@ -214,10 +247,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 UserDefaults.standard.removeObject(
                     forKey: AppConstants.Preferences.didCompleteOnboardingKey
                 )
+                UserDefaults.standard.removeObject(
+                    forKey: AppConstants.Preferences.didShowDashboardCoachMarksKey
+                )
                 // Drop the dashboard window so the user really lands on a
                 // "first run" surface — otherwise the empty dashboard sits
                 // behind the modal and looks broken.
                 self.dashboardWindow?.orderOut(nil)
+                self.onboardingController?.close(markCompleted: false)
+                self.onboardingController = nil
                 self.presentOnboardingIfNeeded(force: true)
             }
         }
@@ -254,7 +292,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         )
 
         hotkeyManager = HotkeyManager { [weak self] in
-            self?.panelManager?.toggle()
+            guard let self else { return }
+            // While onboarding is up, ⌘⇧T is part of the tour ("try it now")
+            // instead of opening the launcher over it.
+            if self.onboardingController?.isActive == true {
+                NotificationCenter.default.post(name: .pidgyOnboardingHotkey, object: nil)
+            } else {
+                self.panelManager?.toggle()
+            }
         }
         hotkeyManager?.register()
 
@@ -287,37 +332,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             panelManager?.showForDebugTesting()
         }
 
-        // Only open the dashboard at launch when the user has completed
-        // onboarding before AND usable Telegram credentials still exist.
-        // Without the credential check, a leftover `didCompleteOnboarding`
-        // flag from a prior session silently opens the dashboard with
-        // stale local cache (followups, tasks, people) while
-        // Settings → Account reads "Not initialized / Visible chats = 0"
-        // — the user has no signal that the keychain entries vanished
-        // (dev rebuild, manual wipe) or that bundled creds were dropped
-        // from this build. After onboarding completes, the `onComplete`
-        // callback on OnboardingWindowController opens the dashboard, so
-        // first-time users still land there immediately after finishing
-        // the flow.
+        // Setup can use any source, and connections may be added later.
+        // Losing Telegram credentials must not restart a completed setup.
         let didCompleteOnboarding = UserDefaults.standard.bool(
             forKey: AppConstants.Preferences.didCompleteOnboardingKey
         )
-        let hasTelegramCredentials = telegramCredentialsAvailable()
-        if opensDashboardOnLaunch && didCompleteOnboarding && hasTelegramCredentials {
+        if opensDashboardOnLaunch && didCompleteOnboarding {
             openDashboard()
         }
-
-        // First-launch onboarding modal. We show it whenever the user hasn't
-        // completed the flow yet AND Telegram isn't already authenticated. If
-        // they're already signed in (e.g. dev rebuilds, Keychain still holds
-        // the session) we just mark onboarding done so the modal never pops.
-        //
-        // Special case: flag is set but credentials are gone — force the
-        // onboarding window so the user can re-enter them. Otherwise
-        // `presentOnboardingIfNeeded(force: false)` would early-return on
-        // the stale flag and leave the user staring at nothing.
-        let stalled = didCompleteOnboarding && !hasTelegramCredentials
-        presentOnboardingIfNeeded(force: stalled)
+        presentOnboardingIfNeeded(force: false)
 
         graphBuildTask = Task { [weak self] in
             guard let self else { return }
@@ -487,6 +510,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         )
 
         if !force && didComplete { return }
+        if let onboardingController, onboardingController.hasSession {
+            onboardingController.show()
+            return
+        }
 
         // If TDLib is already authenticated (existing user reopening the app),
         // there's nothing to onboard — just mark the flag so we never bother
@@ -505,8 +532,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let controller = OnboardingWindowController(
             telegramService: telegramService,
             aiService: aiService,
+            menuBarAnchor: { [weak self] in self?.menuBarManager?.statusItemScreenFrame },
             onComplete: { [weak self] in
                 guard let self else { return }
+                self.onboardingController = nil
                 // After onboarding completes successfully, surface the
                 // dashboard so the user lands somewhere useful.
                 self.openDashboard()
@@ -631,6 +660,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if onboardingController?.resumeIfNeeded() == true { return true }
         if !flag {
             openDashboard()
         }
@@ -658,22 +688,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func beginTerminationCleanup(onComplete: (() -> Void)? = nil) {
         terminationCleanupStarted = true
-        if let backgroundActivityToken {
-            ProcessInfo.processInfo.endActivity(backgroundActivityToken)
-            self.backgroundActivityToken = nil
-        }
-        hotkeyManager?.unregister()
-        graphBuildTask?.cancel()
-        graphBuildLoopTask?.cancel()
-        TaskIndexCoordinator.shared.stop()
-        telegramService.stop()
-        WhatsAppConnectionManager.shared.stop()
-
         // Reply exactly once — whichever fires first, the async stops or
         // the watchdog below.
         let finish = { [weak self] in
             guard let self, !self.terminationCleanupCompleted else { return }
             self.terminationCleanupCompleted = true
+            // A native Vision request can outlive cancellation and the quit
+            // deadline. exit()/AppKit's C++ finalizers then destroy MPS globals
+            // under its worker threads (the 2026-09-17 quit crash). When native
+            // work survives bounded cleanup, bypass finalizers.
+            if onComplete != nil && OCRWorkTracker.shared.hasActiveWork {
+                _exit(0)
+            }
             onComplete?()
         }
 
@@ -683,10 +709,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // .terminateLater and the reply never came). Reply after a short
         // grace period regardless, so the app always quits.
         if onComplete != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: finish)
+            // terminate() can enter AppKit's nested event loop while the main
+            // dispatch queue is occupied. A main-queue watchdog then never
+            // executes; a common-mode run-loop timer still gets serviced.
+            let watchdog = Timer(timeInterval: 3, repeats: false) { _ in
+                MainActor.assumeIsolated { finish() }
+            }
+            RunLoop.main.add(watchdog, forMode: .common)
         }
 
+        // Arm the deadline before any synchronous service teardown runs.
+        if let backgroundActivityToken {
+            ProcessInfo.processInfo.endActivity(backgroundActivityToken)
+            self.backgroundActivityToken = nil
+        }
+        hotkeyManager?.unregister()
+        graphBuildTask?.cancel()
+        graphBuildLoopTask?.cancel()
+        PhotoOCRIndexer.shared.stopForTermination()
+        TaskIndexCoordinator.shared.stop()
+        telegramService.stop()
+        WhatsAppConnectionManager.shared.stop()
+
         Task { @MainActor in
+            _ = await OCRWorkTracker.shared.waitUntilIdle(timeout: 2)
             // Fact extraction is a DB writer — stop() awaits its in-flight
             // pass draining out (bounded) before the close below.
             await FactExtractionCoordinator.shared.stop()
@@ -708,18 +754,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func openDashboard(page: DashboardPage = .dashboard) {
-        // Hard gate: never reveal the dashboard when Telegram credentials
-        // aren't available, regardless of which path called us. The
-        // launch-time gate above only covers `applicationDidFinishLaunching`;
-        // menu bar items, the dock-icon reopen handler, the search panel's
-        // "Open dashboard" action, and the Settings opener all funnel
-        // through here, and without this guard a single dismiss of the
-        // onboarding modal lets every one of those reveal the cached
-        // dashboard ("Investigate DMG installer issue" over an empty
-        // Telegram session etc.). Funnel everyone to onboarding instead
-        // — credentials get entered there, and once entered, every path
-        // works normally again.
-        guard telegramCredentialsAvailable() else {
+        // Browser sign-in hides the setup window when it takes focus. A Dock
+        // or menu action must resume that session, even after Telegram connects.
+        if onboardingController?.resumeIfNeeded() == true { return }
+        guard OnboardingRouting.canOpenDashboard(
+            didComplete: UserDefaults.standard.bool(forKey: AppConstants.Preferences.didCompleteOnboardingKey),
+            hasTelegramCredentials: telegramCredentialsAvailable()
+        ) else {
             presentOnboardingIfNeeded(force: true)
             return
         }

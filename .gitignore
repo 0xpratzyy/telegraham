@@ -83,3 +83,23 @@ yc-coding-agent-session-*.md
 # wrangler local state (account cache, dev logs)
 .wrangler/
 SourcePccages/
+# Generated/private experiment media and corpus-derived evaluation reports.
+output/
+docs/astra-extraction-audit-partial.md
+docs/jev-fact-extraction-experiment.md
+docs/jev-hybrid-evaluation.md
+docs/jev-prompt-tuning.md
+docs/jev-vs-gemini-full-corpus.md
+docs/laya-local-evaluation.md
+docs/laya-prompt-research.md
+docs/luna-extraction-evaluation.md
+docs/typesafe-experiment.md
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.xcresult/

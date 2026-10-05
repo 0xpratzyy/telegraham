@@ -7,7 +7,7 @@ from typing import Any
 from query_routing_probe import ROUTING_VARIANTS, probe
 
 
-DEFAULT_ORACLE = Path("/Users/pratyushrungta/telegraham/evals/product_prompt_oracle_v1.json")
+DEFAULT_ORACLE = Path(__file__).resolve().parents[1] / "evals/product_prompt_oracle_v1.json"
 
 
 def load_oracle(path: Path) -> dict[str, Any]:
@@ -91,6 +91,7 @@ def score_variant(variant: str, entries: list[dict[str, Any]]) -> dict[str, Any]
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare routing variants against the GPT-5.4 product prompt oracle.")
     parser.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE)
+    parser.add_argument("--require-perfect", action="store_true", help="Fail if any selected variant misses a routing field.")
     parser.add_argument("--variants", nargs="*", default=sorted(ROUTING_VARIANTS.keys()))
     args = parser.parse_args()
 
@@ -109,6 +110,11 @@ def main() -> int:
         "oracle": str(args.oracle),
         "leaderboard": leaderboard,
     }, indent=2, sort_keys=True))
+    if args.require_perfect and (not entries or not leaderboard or any(
+        row["summary"][field] != 1.0 for row in leaderboard
+        for field in ("familyCoverage", "engineCoverage", "modeCoverage")
+    )):
+        return 1
     return 0
 
 
